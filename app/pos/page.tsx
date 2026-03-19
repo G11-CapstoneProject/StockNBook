@@ -4,11 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react"; // ✅ ADDED
 
 export default function POSPage() {
-  const orders = [
-    { id: "#0003", customer: "yuka", items: "aaa x3", total: 69, date: "18/03/2026" },
-    { id: "#0002", customer: "yuka", items: "aaa x2", total: 46, date: "18/03/2026" },
-    { id: "#0001", customer: "yuka", items: "aaa x1", total: 23, date: "18/03/2026" },
-  ];
+  const [orders, setOrders] = useState<any[]>([]);
 
   // ✅ ADDED STATES
   const [showModal, setShowModal] = useState(false);
@@ -20,6 +16,11 @@ export default function POSPage() {
   useEffect(() => {
     const stored = JSON.parse(localStorage.getItem("partypro_inventory_products") || "[]");
     setProducts(stored);
+  }, []);
+
+  useEffect(() => {
+  const storedOrders = JSON.parse(localStorage.getItem("partypro_orders") || "[]");
+  setOrders(storedOrders);
   }, []);
 
   // ✅ HANDLE QUANTITY
@@ -37,25 +38,63 @@ export default function POSPage() {
     return sum + (p ? p.salesPrice * qty : 0);
   }, 0);
 
-  // ✅ SAVE ORDER
   const handleSubmit = () => {
-    if (!customer) return alert("Enter customer name");
+  if (!customer) return alert("Enter customer name");
 
-    const orders = JSON.parse(localStorage.getItem("partypro_orders") || "[]");
+  // ✅ STOCK VALIDATION
+  for (const [id, qty] of Object.entries(cart)) {
+    const p = products.find((x) => x.id === Number(id));
+    if (p && qty > p.stock) {
+      alert(`Not enough stock for ${p.name}`);
+      return;
+    }
+  }
 
-    const newOrder = {
-      id: `#${Date.now().toString().slice(-4)}`,
-      customer,
-      total,
-      date: new Date().toLocaleDateString(),
-    };
+  const existingOrders = JSON.parse(localStorage.getItem("partypro_orders") || "[]");
 
-    localStorage.setItem("partypro_orders", JSON.stringify([newOrder, ...orders]));
+  // ✅ ITEMS
+  const items = Object.entries(cart)
+    .map(([id, qty]) => {
+      const p = products.find((x) => x.id === Number(id));
+      return p ? `${p.name} x${qty}` : null;
+    })
+    .filter(Boolean)
+    .join(", ");
 
-    setShowModal(false);
-    setCart({});
-    setCustomer("");
+  // ✅ NEW ORDER
+  const newOrder = {
+    id: `#${Date.now().toString().slice(-4)}`,
+    customer,
+    items,
+    total,
+    date: new Date().toLocaleDateString(),
   };
+
+  const updatedOrders = [newOrder, ...existingOrders];
+  localStorage.setItem("partypro_orders", JSON.stringify(updatedOrders));
+  setOrders(updatedOrders);
+
+  // ✅ UPDATE INVENTORY
+  const updatedProducts = products.map((p) => {
+    const qty = cart[p.id] || 0;
+    return {
+      ...p,
+      stock: p.stock - qty,
+    };
+  });
+
+  localStorage.setItem(
+    "partypro_inventory_products",
+    JSON.stringify(updatedProducts)
+  );
+
+  setProducts(updatedProducts);
+
+  // ✅ RESET
+  setShowModal(false);
+  setCart({});
+  setCustomer("");
+};
 
   return (
     <div className="min-h-screen flex bg-[#f5f6f8]">
@@ -116,17 +155,26 @@ export default function POSPage() {
         <div className="grid gap-4 md:grid-cols-3 mb-6">
           <div className="rounded-2xl bg-white p-5 shadow-sm">
             <p className="text-sm text-gray-500">Today's Sales</p>
-            <h2 className="text-2xl font-bold mt-2 text-[#1f2a44]">₱138.00</h2>
+            <h2 className="text-2xl font-bold mt-2 text-[#1f2a44]">
+              ₱{orders.reduce((sum, o) => sum + o.total, 0).toFixed(2)}
+            </h2>
           </div>
 
           <div className="rounded-2xl bg-white p-5 shadow-sm">
             <p className="text-sm text-gray-500">Orders Today</p>
-            <h2 className="text-2xl font-bold mt-2 text-[#1f2a44]">3</h2>
+            <h2 className="text-2xl font-bold mt-2 text-[#1f2a44]">
+              {orders.length}
+            </h2>
           </div>
 
           <div className="rounded-2xl bg-white p-5 shadow-sm">
             <p className="text-sm text-gray-500">Average Order Value</p>
-            <h2 className="text-2xl font-bold mt-2 text-[#1f2a44]">₱46.00</h2>
+            <h2 className="text-2xl font-bold mt-2 text-[#1f2a44]">
+              ₱
+              {orders.length > 0
+                ? (orders.reduce((sum, o) => sum + o.total, 0) / orders.length).toFixed(2)
+                : "0.00"}
+            </h2>
           </div>
         </div>
 
@@ -164,12 +212,13 @@ export default function POSPage() {
         </div>
 
         {/* ✅ ADDED MODAL */}
+        {/* MODAL */}
         {showModal && (
-            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
             <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
 
               <div className="flex justify-between mb-4">
-                <h2 className="font-semibold">New Order</h2>
+                <h2 className="font-semibold text-[#1f2a44]">New Order</h2>
                 <button onClick={() => setShowModal(false)}>✕</button>
               </div>
 
@@ -177,29 +226,54 @@ export default function POSPage() {
                 placeholder="Customer Name"
                 value={customer}
                 onChange={(e) => setCustomer(e.target.value)}
-                className="border w-full p-2 mb-4 rounded"
+                className="border border-gray-300 w-full p-2 mb-4 rounded text-black placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-300"
               />
 
               <div className="max-h-40 overflow-y-auto space-y-2">
                 {products.map((p) => (
                   <div key={p.id} className="flex justify-between items-center">
                     <div>
-                      <p>{p.name}</p>
-                      <p className="text-xs text-gray-400">
-                        ₱{p.salesPrice} • Stock {p.stock}
+                      <p className="text-black font-medium">{p.name}</p>
+                      <p className="text-xs">
+                        {p.stock <= 0 ? (
+                          <span className="text-red-500 font-medium">Out of Stock</span>
+                        ) : (
+                          <span className="text-gray-500">
+                            ₱{p.salesPrice} • Stock {p.stock}
+                          </span>
+                        )}
                       </p>
                     </div>
 
                     <div className="flex items-center gap-2">
-                      <button onClick={() => handleQty(p.id, -1)}>-</button>
-                      <span>{cart[p.id] || 0}</span>
-                      <button onClick={() => handleQty(p.id, 1)}>+</button>
+                      <button
+                        className="px-2 py-1 border border-gray-300 rounded hover:bg-gray-100"
+                        onClick={() => handleQty(p.id, -1)}
+                      >
+                        -
+                      </button>
+
+                      <span className="text-black font-medium">
+                        {cart[p.id] || 0}
+                      </span>
+
+                      <button
+                        disabled={(cart[p.id] || 0) >= p.stock}
+                        className={`px-2 py-1 border rounded ${
+                          (cart[p.id] || 0) >= p.stock
+                            ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                            : "border-gray-300 hover:bg-gray-100"
+                        }`}
+                        onClick={() => handleQty(p.id, 1)}
+                      >
+                        +
+                      </button>
                     </div>
                   </div>
                 ))}
               </div>
 
-              <div className="mt-4 flex justify-between font-medium">
+              <div className="mt-4 flex justify-between font-medium text-black">
                 <span>Order Total:</span>
                 <span>₱{total.toFixed(2)}</span>
               </div>

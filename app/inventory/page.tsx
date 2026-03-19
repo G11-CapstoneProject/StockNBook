@@ -179,7 +179,7 @@ export default function InventoryPage() {
             <h1 className="text-3xl font-bold text-[#1f2a44]">
               Inventory Management
             </h1>
-            <p className="text-gray-500">
+            <p className="text-black/70">
               Manage your party supplies and products
             </p>
           </div>
@@ -191,7 +191,7 @@ export default function InventoryPage() {
                 setFormMode("category");
                 setShowForm(true);
               }}
-              className="rounded-xl border bg-white px-5 py-3"
+              className="rounded-xl border bg-white text-[#1f2a44] px-5 py-3"
             >
               Manage Categories
             </button>
@@ -237,7 +237,7 @@ export default function InventoryPage() {
               placeholder="Search products..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="border px-3 py-2 rounded-lg text-sm"
+              className="border border-gray-300 px-3 py-2 rounded-lg text-sm text-black placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-300"
             />
           </div>
 
@@ -298,7 +298,7 @@ export default function InventoryPage() {
             <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
 
               <div className="flex justify-between mb-4">
-                <h2 className="font-semibold">
+                <h2 className="font-semibold text-black">
                   {formMode === "category"
                     ? "Manage Categories"
                     : editingId
@@ -324,7 +324,7 @@ export default function InventoryPage() {
                         value={category}
                         onChange={(e) => setCategory(e.target.value)}
                         placeholder="New category"
-                        className="border p-2 rounded w-full"
+                        className="border border-gray-300 p-2 rounded w-full text-black placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-300"
                       />
                       <button
                         type="button"
@@ -341,13 +341,20 @@ export default function InventoryPage() {
 
                     <div className="space-y-2 max-h-40 overflow-auto">
                       {categories.map((c) => (
-                        <div key={c} className="flex justify-between bg-gray-300 p-2 rounded">
-                          {c}
-                          <button onClick={() =>
-                            setManualCategories((p) =>
-                              p.filter((x) => x !== c)
-                            )
-                          }>
+                        <div
+                          key={c}
+                          className="flex justify-between items-center bg-gray-300 text-black p-2 rounded-lg"
+                        >
+                          <span className="font-medium">{c}</span>
+
+                          <button
+                            className="text-red-500 hover:text-red-700"
+                            onClick={() =>
+                              setManualCategories((p) =>
+                                p.filter((x) => x !== c)
+                              )
+                            }
+                          >
                             🗑
                           </button>
                         </div>
@@ -358,9 +365,18 @@ export default function InventoryPage() {
 
                 {formMode === "product" && (
                   <>
-                    <input placeholder="Product Name" value={name} onChange={(e) => setName(e.target.value)} className="border p-2 rounded w-full" />
+                    <input
+                      placeholder="Product Name"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      className="border border-gray-300 p-2 rounded w-full text-black placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-300"
+                    />
 
-                    <select value={category} onChange={(e) => setCategory(e.target.value)} className="border p-2 rounded w-full">
+                    <select
+                      value={category}
+                      onChange={(e) => setCategory(e.target.value)}
+                      className="border border-gray-300 p-2 rounded w-full text-black placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-300"
+                    >
                       <option value="">Select category</option>
                       {categories.map((c) => (
                         <option key={c}>{c}</option>
@@ -368,20 +384,46 @@ export default function InventoryPage() {
                     </select>
 
                     <div className="grid grid-cols-2 gap-2">
-                      <input type="number" placeholder="Stock" value={stock} onChange={(e) => setStock(e.target.value)} className="border p-2 rounded" />
-                      <input type="number" placeholder="Alert" value={alertLevel} onChange={(e) => setAlertLevel(e.target.value)} className="border p-2 rounded" />
+                      <input
+                        type="number"
+                        placeholder="Stock"
+                        value={stock}
+                        onChange={(e) => setStock(e.target.value)}
+                        className="border border-gray-300 p-2 rounded w-full text-black placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-300"
+                      />
+                      <input
+                        type="number"
+                        placeholder="Alert"
+                        value={alertLevel}
+                        onChange={(e) => setAlertLevel(e.target.value)}
+                        className="border border-gray-300 p-2 rounded w-full text-black placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-300"
+                      />
                     </div>
 
                     <div className="grid grid-cols-2 gap-2">
-                      <input type="number" placeholder="Original Price" value={originalPrice} onChange={(e) => setOriginalPrice(e.target.value)} className="border p-2 rounded" />
-                      <input type="number" placeholder="Sales Price" value={salesPrice} onChange={(e) => setSalesPrice(e.target.value)} className="border p-2 rounded" />
+                      <input
+                        type="number"
+                        placeholder="Original Price"
+                        value={originalPrice}
+                        onChange={(e) => setOriginalPrice(e.target.value)}
+                        className="border border-gray-300 p-2 rounded w-full text-black placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-300"
+                      />
+                      <input
+                        type="number"
+                        placeholder="Sales Price"
+                        value={salesPrice}
+                        onChange={(e) => setSalesPrice(e.target.value)}
+                        className="border border-gray-300 p-2 rounded w-full text-black placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-300"
+                      />
                     </div>
+                    <button
+                      type="submit"
+                      className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-2 rounded-lg hover:opacity-90 transition"
+                    >
+                      Save Product
+                    </button>
                   </>
                 )}
-
-                <button className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-2 rounded">
-                  {formMode === "product" ? "Save Product" : "Done"}
-                </button>
               </form>
             </div>
           </div>

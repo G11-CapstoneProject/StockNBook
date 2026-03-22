@@ -56,10 +56,14 @@ export default function POSPage() {
   const items = Object.entries(cart)
     .map(([id, qty]) => {
       const p = products.find((x) => x.id === Number(id));
-      return p ? `${p.name} x${qty}` : null;
+      return p
+        ? {
+            name: p.name,
+            quantity: qty,
+          }
+        : null;
     })
-    .filter(Boolean)
-    .join(", ");
+    .filter(Boolean);
 
   // ✅ NEW ORDER
   const newOrder = {
@@ -67,7 +71,7 @@ export default function POSPage() {
     customer,
     items,
     total,
-    date: new Date().toLocaleDateString(),
+    date: new Date().toISOString().split("T")[0],
   };
 
   const updatedOrders = [newOrder, ...existingOrders];
@@ -200,7 +204,11 @@ export default function POSPage() {
                 <tr key={o.id} className="border-t">
                 <td className="px-6 py-4 text-gray-600">{o.id}</td>
                 <td className="px-6 py-4 text-gray-600">{o.customer}</td>
-                <td className="px-6 py-4 text-gray-600">{o.items}</td>
+                <td className="px-6 py-4 text-gray-600">
+                {Array.isArray(o.items)
+                  ? o.items.map((item: any) => `${item.name} x${item.quantity}`).join(", ")
+                  : o.items}
+              </td>
                 <td className="px-6 py-4 text-gray-600 font-medium">
                     ₱{o.total.toFixed(2)}
                 </td>

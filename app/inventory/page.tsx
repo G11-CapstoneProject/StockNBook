@@ -30,6 +30,8 @@ export default function InventoryPage() {
   const [alertLevel, setAlertLevel] = useState("");
   const [originalPrice, setOriginalPrice] = useState("");
   const [salesPrice, setSalesPrice] = useState("");
+  const [showModal, setShowModal] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);

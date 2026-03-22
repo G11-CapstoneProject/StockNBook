@@ -16,20 +16,29 @@ type Product = {
 const STORAGE_KEY = "partypro_inventory_products";
 
 export default function AdminDashboard() {
+  const [orders, setOrders] = useState<any[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
-
-  // ✅ ADDED bookings state
   const [bookings, setBookings] = useState<any[]>([]);
-
+  const [showModal, setShowModal] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [restockQty, setRestockQty] = useState<number | "">("");
+  
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) setProducts(JSON.parse(saved));
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) setProducts(JSON.parse(saved));
 
-    // ✅ LOAD BOOKINGS
-    const storedBookings =
-      JSON.parse(localStorage.getItem("partypro_bookings") || "[]");
-    setBookings(storedBookings);
-  }, []);
+  const storedBookings =
+    JSON.parse(localStorage.getItem("partypro_bookings") || "[]");
+  setBookings(storedBookings);
+
+  const storedOrders =
+    JSON.parse(localStorage.getItem("partypro_orders") || "[]");
+
+  console.log("ORDERS:", storedOrders); // 👈 HERE
+
+  setOrders(storedOrders);
+}, []);
+
 
   const totalProducts = products.length;
 
@@ -39,6 +48,71 @@ export default function AdminDashboard() {
 
   // ✅ ADDED total bookings
   const totalBookings = bookings.length;
+
+  const totalSales = orders.reduce((sum, o) => sum + o.total, 0);
+  
+  // ==========================
+// 📊 SALES TRENDS (SAFE VERSION)
+// ==========================
+const today = new Date();
+
+const last7Days = Array.from({ length: 7 }, (_, i) => {
+  const d = new Date(today); // ✅ clone today
+
+  d.setDate(today.getDate() - (6 - i)); // always relative to today
+
+  return {
+    label: d.toLocaleDateString("en-US", { weekday: "short" }),
+    dateStr: d.toISOString().split("T")[0],
+  };
+});
+
+const salesData = last7Days.map((day) => {
+  const total = orders
+    .filter((o) => {
+      if (!o?.date) return false;
+
+      // 🔥 convert "19/03/2026" → "2026-03-19"
+      return o.date === day.dateStr;
+    })
+    .reduce((sum, o) => sum + (o?.total || 0), 0);
+
+  return {
+    label: day.label,
+    total,
+  };
+});
+
+const maxSales = Math.max(...salesData.map((d) => d.total), 1);
+
+const salesHeights = salesData.map((d) =>
+  Math.round((d.total / maxSales) * 100)
+);
+
+
+// ==========================
+// ⭐ POPULAR ITEMS (SAFE VERSION)
+// ==========================
+const productCounts: Record<string, number> = {};
+
+orders.forEach((order) => {
+  if (!Array.isArray(order.items)) return;
+
+  order.items.forEach((item: any) => {
+    if (!item?.name) return;
+
+    if (!productCounts[item.name]) {
+      productCounts[item.name] = 0;
+    }
+
+    productCounts[item.name] += item.quantity || 0;
+  });
+});
+
+const popularItems = Object.entries(productCounts)
+  .map(([name, qty]) => ({ name, qty }))
+  .sort((a, b) => b.qty - a.qty)
+  .slice(0, 5);
   
   return (
     <div className="min-h-screen flex bg-[#f5f6f8]">
@@ -141,7 +215,9 @@ export default function AdminDashboard() {
               <div className="text-sm text-gray-500">Total Sales</div>
               <div className="bg-green-100 text-green-600 p-2 rounded-lg">💰</div>
             </div>
-            <h2 className="mt-2 text-3xl font-bold text-[#172554]">₱0</h2>
+            <h2 className="mt-2 text-3xl font-bold text-[#172554]">
+              ₱{totalSales.toFixed(2)}
+            </h2>
           </div>
         </div>
 
@@ -153,15 +229,21 @@ export default function AdminDashboard() {
               Sales Trends (Last 7 Days)
             </h3>
 
-            <div className="flex items-end justify-between h-32 px-2">
-              {[20, 35, 25, 40, 30, 50, 45].map((h, i) => (
-                <div key={i} className="flex flex-col items-center gap-2">
+            <div className="flex items-end justify-between h-40 px-2 border-b">
+              {salesHeights.map((h, i) => (
+                <div key={i} className="flex flex-col items-center justify-end h-full">
+                  
+                  {/* BAR */}
                   <div
-                    className="w-4 rounded bg-purple-500"
+                    className={`w-6 rounded ${
+                      i === 6 ? "bg-purple-700" : "bg-purple-400"
+                    }`}
                     style={{ height: `${h}%` }}
                   ></div>
-                  <span className="text-xs text-gray-400">
-                    {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i]}
+
+                  {/* LABEL */}
+                  <span className="text-xs text-gray-400 mt-2">
+                    {salesData[i].label}
                   </span>
                 </div>
               ))}
@@ -171,7 +253,22 @@ export default function AdminDashboard() {
           {/* POPULAR ITEMS */}
           <div className="rounded-2xl bg-white p-6 shadow-sm">
             <h3 className="font-semibold text-[#1f2a44]">Popular Items</h3>
-            <p className="mt-3 text-gray-500">No sales data yet</p>
+            {popularItems.length === 0 ? (
+              <p className="mt-3 text-gray-500">No sales data yet</p>
+            ) : (
+              <div className="mt-3 space-y-2">
+                {popularItems.map((item, i) => (
+                  <div key={i} className="flex justify-between text-sm">
+                    <span className="text-[#1f2a44] font-medium">
+                      {item.name}
+                    </span>
+                    <span className="text-gray-500">
+                      {item.qty} sold
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -231,7 +328,13 @@ export default function AdminDashboard() {
                         </div>
                       </div>
 
-                      <button className="rounded-lg bg-red-500 px-3 py-1 text-xs text-white hover:bg-red-600">
+                      <button
+                        onClick={() => {
+                          setSelectedProduct(p);
+                          setShowModal(true);
+                        }}
+                        className="rounded-lg bg-red-500 px-3 py-1 text-xs text-white hover:bg-red-600"
+                      >
                         Restock
                       </button>
                     </div>
@@ -240,6 +343,65 @@ export default function AdminDashboard() {
             )}
           </div>
         </div>
+        {showModal && selectedProduct && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+
+              {/* HEADER */}
+              <div className="flex justify-between mb-4">
+                <h2 className="font-semibold text-[#1f2a44]">
+                  Restock Product
+                </h2>
+                <button onClick={() => setShowModal(false)}>✕</button>
+              </div>
+
+              {/* PRODUCT INFO */}
+              <p className="text-sm text-gray-500 mb-2">Product</p>
+              <p className="font-medium text-black mb-4">
+                {selectedProduct.name}
+              </p>
+
+              {/* STOCK INPUT */}
+              <input
+                type="number"
+                placeholder="Add stock"
+                value={restockQty}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setRestockQty(val === "" ? "" : Number(val));
+                }}
+                className="w-full p-2 rounded mb-4 text-black border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent"
+              />
+
+              {/* BUTTON */}
+              <button
+                onClick={() => {
+                  if (!selectedProduct || Number(restockQty) <= 0) return;
+
+                  const updated = products.map((prod) =>
+                    prod.id === selectedProduct.id
+                      ? { ...prod, stock: prod.stock + Number(restockQty) }
+                      : prod
+                  );
+
+                  // ✅ update UI
+                  setProducts(updated);
+
+                  // ✅ update localStorage
+                  localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+
+                  // ✅ reset everything
+                  setRestockQty(0);
+                  setSelectedProduct(null);
+                  setShowModal(false);
+                }}
+                className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-2 rounded"
+              >
+                Save Restock
+              </button>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

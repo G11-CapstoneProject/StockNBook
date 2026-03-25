@@ -3,267 +3,471 @@
 import Link from "next/link";
 import { useRef, useState } from "react";
 
-export default function customerportal() {
+const STORE_MESSENGER = "your.page.username";
+
+const packages = [
+  {
+    name: "Basic",
+    price: 1500,
+    downpayment: 1500,
+    downpaymentLabel: "Full payment upfront",
+    emoji: "🎈",
+    badge: "",
+    inclusions: [
+      "50 balloon decorations",
+      "Basic party backdrop",
+      "3 table centerpieces",
+      "Party supplies for 20",
+    ],
+  },
+  {
+    name: "Premium",
+    price: 3500,
+    downpayment: 1750,
+    downpaymentLabel: "50% down payment",
+    emoji: "🎉",
+    badge: "Most Popular",
+    inclusions: [
+      "100 balloon arch",
+      "Premium photo backdrop",
+      "5-table setup",
+      "Party favors for 40",
+      "LED lighting setup",
+    ],
+  },
+  {
+    name: "Deluxe",
+    price: 6000,
+    downpayment: 3000,
+    downpaymentLabel: "50% down payment",
+    emoji: "👑",
+    badge: "",
+    inclusions: [
+      "200 balloon installation",
+      "Custom photo wall",
+      "Complete venue setup",
+      "Premium favors for 60",
+      "Professional styling",
+      "Setup and teardown",
+    ],
+  },
+];
+
+export default function CustomerPortal() {
   const packageRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLDivElement>(null);
 
+  const [bookingType, setBookingType] = useState<"package" | "custom">("package");
   const [selectedPackage, setSelectedPackage] = useState("");
-
-  // ✅ ADDED STATES
+  const [customOrder, setCustomOrder] = useState("");
   const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
   const [date, setDate] = useState("");
   const [eventType, setEventType] = useState("");
   const [notes, setNotes] = useState("");
+  const [showSuccess, setShowSuccess] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
-  // ✅ ADDED FUNCTION
-  const handleSubmit = () => {
-    if (!name || !email || !phone || !date || !eventType || !selectedPackage) {
-      alert("Please fill all required fields");
+  const selectedPkgData = packages.find((p) => selectedPackage.startsWith(p.name));
+
+  const handleSelectPackage = (pkg: string, price: number) => {
+    setBookingType("package");
+    setSelectedPackage(`${pkg} - ₱${price.toLocaleString()}`);
+    formRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const resetForm = () => {
+    setBookingType("package");
+    setSelectedPackage("");
+    setCustomOrder("");
+    setName("");
+    setPhone("");
+    setEmail("");
+    setDate("");
+    setEventType("");
+    setNotes("");
+  };
+
+  const handleSubmit = async () => {
+    const hasPackageSelection =
+        bookingType === "package" ? !!selectedPackage : !!customOrder.trim();
+
+    if (!name || !phone || !date || !eventType || !hasPackageSelection) {
+      alert("Please fill in all required fields.");
       return;
     }
 
     const newBooking = {
-      id: Date.now(),
+      bookingType,
       name,
-      email,
       phone,
+      email,
       date,
       eventType,
-      package: selectedPackage,
+      package: bookingType === "package" ? selectedPackage : "",
+      customOrder: bookingType === "custom" ? customOrder : "",
       notes,
       status: "Pending",
     };
 
-    const existing =
-      JSON.parse(localStorage.getItem("partypro_bookings") || "[]");
+    try {
+      setSubmitting(true);
 
-    const updated = [...existing, newBooking];
+      const response = await fetch("/api/bookings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "create_booking",
+          storeId: 3,
+          ...newBooking,
+        }),
+      });
 
-    localStorage.setItem("partypro_bookings", JSON.stringify(updated));
+      const text = await response.text();
+      console.log("Booking submit response:", response.status, text);
 
-    alert("Booking submitted!");
+      if (!response.ok) {
+        alert(`Submit failed: ${text}`);
+        return;
+      }
 
-    // reset
-    setName("");
-    setEmail("");
-    setPhone("");
-    setDate("");
-    setEventType("");
-    setSelectedPackage("");
-    setNotes("");
+      setShowSuccess(true);
+      resetForm();
+    } catch (error) {
+      console.error("Booking submit error:", error);
+      alert("Failed to submit booking. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-[#f5f6f8]">
-
-      {/* HERO */}
-      <div className="bg-gradient-to-r from-[#5f6ee7] to-[#d786e8] text-white px-6 py-16 text-center relative">
-        <Link href="/" className="absolute top-6 right-6 bg-white/20 px-4 py-2 rounded-lg text-sm">
-          ← Back
-        </Link>
-
-        <h1 className="text-4xl md:text-5xl font-bold">
-          Make Your Event Unforgettable
-        </h1>
-
-        <p className="mt-3 text-white/90">
-          Your Complete Party & Event Management Solution
-        </p>
-
-        <button
-          onClick={() =>
-            packageRef.current?.scrollIntoView({ behavior: "smooth" })
-          }
-          className="mt-6 bg-white text-purple-600 px-6 py-3 rounded-full font-semibold shadow"
-        >
-          View Packages ↓
-        </button>
-      </div>
-
-      {/* PACKAGES */}
-      <div ref={packageRef} className="px-6 py-12 max-w-6xl mx-auto text-center">
-        <h2 className="text-2xl font-bold text-[#1f2a44]">
-          Our Event Packages
-        </h2>
-        <p className="text-gray-500 mt-2">
-          Choose the perfect package for your celebration
-        </p>
-
-        <div className="mt-10 grid gap-6 md:grid-cols-3">
-
-          {/* BASIC */}
-          <div className="bg-white rounded-2xl p-6 shadow-sm">
-            <div className="text-3xl mb-3">🎈</div>
-            <h3 className="font-semibold text-lg text-black">Basic Party</h3>
-            <p className="text-purple-600 font-bold text-xl mt-2">₱199</p>
-
-            <ul className="mt-4 text-sm text-gray-500 space-y-1">
-              <li>✔ 50 Balloon decorations</li>
-              <li>✔ Basic party backdrop</li>
-              <li>✔ Table centerpieces (3)</li>
-              <li>✔ Party supplies for 20</li>
-            </ul>
-
-            <button
-              onClick={() => {
-                setSelectedPackage("Basic - ₱199");
-                formRef.current?.scrollIntoView({ behavior: "smooth" });
-              }}
-              className="mt-6 w-full border border-purple-500 text-purple-600 py-2 rounded-lg"
+      <div className="min-h-screen bg-[#f5f6f8]">
+        <section className="relative overflow-hidden bg-linear-to-r from-[#5f6ee7] to-[#d786e8] px-6 py-16 text-white">
+          <div className="mx-auto max-w-6xl">
+            <Link
+                href="/"
+                className="absolute right-6 top-6 rounded-lg bg-white/20 px-4 py-2 text-sm font-medium backdrop-blur hover:bg-white/30"
             >
-              Select Package
-            </button>
+              ← Back
+            </Link>
+
+            <div className="mx-auto max-w-3xl text-center">
+              <div className="mb-4 text-5xl">🎊</div>
+              <h1 className="text-4xl font-bold md:text-5xl">
+                Make Your Event Unforgettable
+              </h1>
+              <p className="mt-4 text-base text-white/90 md:text-lg">
+                Choose a package or send a customized request based on what you need.
+              </p>
+              <button
+                  onClick={() => packageRef.current?.scrollIntoView({ behavior: "smooth" })}
+                  className="mt-8 rounded-full bg-white px-6 py-3 font-semibold text-purple-600 shadow hover:opacity-90"
+              >
+                View Packages ↓
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section ref={packageRef} className="mx-auto max-w-6xl px-6 py-14">
+          <div className="text-center">
+            <h2 className="text-3xl font-bold text-[#1f2a44]">Choose Your Event Package</h2>
+            <p className="mt-2 text-gray-500">Pick a package or send a personalized request.</p>
           </div>
 
-          {/* PREMIUM */}
-          <div className="bg-white rounded-2xl p-6 shadow-md border-2 border-purple-500 relative">
-            <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-purple-500 text-white text-xs px-3 py-1 rounded-full">
-              Most Popular
-            </span>
+          <div className="mt-10 grid gap-6 md:grid-cols-3">
+            {packages.map((pkg) => (
+                <div
+                    key={pkg.name}
+                    className={`relative rounded-2xl bg-white p-6 shadow-sm ${
+                        pkg.badge ? "border-2 border-purple-500 shadow-md" : ""
+                    }`}
+                >
+                  {pkg.badge && (
+                      <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-purple-500 px-3 py-1 text-xs font-medium text-white">
+                  {pkg.badge}
+                </span>
+                  )}
 
-            <div className="text-3xl mb-3">🎉</div>
-            <h3 className="font-semibold text-lg text-black">Premium Party</h3>
-            <p className="text-purple-600 font-bold text-xl mt-2">₱399</p>
+                  <div className="mb-3 text-4xl">{pkg.emoji}</div>
+                  <h3 className="text-lg font-semibold text-[#1f2a44]">{pkg.name} Package</h3>
+                  <p className="mt-2 text-2xl font-bold text-purple-600">
+                    ₱{pkg.price.toLocaleString()}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-400">
+                    {pkg.name === "Basic"
+                        ? "Full payment required to confirm"
+                        : `₱${pkg.downpayment.toLocaleString()} down payment to confirm`}
+                  </p>
 
-            <ul className="mt-4 text-sm text-gray-500 space-y-1">
-              <li>✔ 100 Balloon arch</li>
-              <li>✔ Premium photo backdrop</li>
-              <li>✔ Table setup (5 tables)</li>
-              <li>✔ Party favors for 40</li>
-              <li>✔ LED lighting setup</li>
-            </ul>
+                  <ul className="mt-5 space-y-2 text-sm text-gray-500">
+                    {pkg.inclusions.map((item) => (
+                        <li key={item}>✔ {item}</li>
+                    ))}
+                  </ul>
 
-            <button
-              onClick={() => {
-                setSelectedPackage("Premium - ₱399");
-                formRef.current?.scrollIntoView({ behavior: "smooth" });
-              }}
-              className="mt-6 w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-2 rounded-lg"
-            >
-              Select Package
-            </button>
+                  <button
+                      onClick={() => handleSelectPackage(pkg.name, pkg.price)}
+                      className={`mt-6 w-full rounded-xl py-2.5 font-medium ${
+                          pkg.badge
+                              ? "bg-linear-to-r from-purple-500 to-pink-500 text-white"
+                              : "border border-purple-500 text-purple-600 hover:bg-purple-50"
+                      }`}
+                  >
+                    Select Package
+                  </button>
+                </div>
+            ))}
           </div>
+        </section>
 
-          {/* DELUXE */}
-          <div className="bg-white rounded-2xl p-6 shadow-sm">
-            <div className="text-3xl mb-3">👑</div>
-            <h3 className="font-semibold text-lg text-black">Deluxe Party</h3>
-            <p className="text-purple-600 font-bold text-xl mt-2">₱699</p>
+        <section className="px-6 pb-16">
+          <div
+              ref={formRef}
+              className="mx-auto max-w-4xl rounded-2xl bg-white p-8 shadow-md md:p-10"
+          >
+            {showSuccess ? (
+                <div className="py-10 text-center">
+                  <div className="mb-4 text-6xl">🎉</div>
+                  <h2 className="text-2xl font-bold text-[#1f2a44]">Booking Received!</h2>
+                  <p className="mt-3 text-gray-500">
+                    Your booking has been submitted and is now under review. We&apos;ll get back to you shortly to confirm.
+                  </p>
 
-            <ul className="mt-4 text-sm text-gray-500 space-y-1">
-              <li>✔ 200 Balloon installation</li>
-              <li>✔ Custom photo wall</li>
-              <li>✔ Complete venue setup</li>
-              <li>✔ Premium favors for 60</li>
-              <li>✔ Professional styling</li>
-              <li>✔ Setup & teardown</li>
-            </ul>
+                  <div className="mt-8 rounded-2xl border border-blue-100 bg-blue-50 px-6 py-5 text-left">
+                    <p className="text-sm font-medium text-blue-800">Have questions about your booking?</p>
+                    <p className="mt-1 text-sm text-blue-600">
+                      Feel free to message us on Messenger and we&apos;ll be happy to help.
+                    </p>
+                    <a
+                        href={`https://m.me/${STORE_MESSENGER}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-4 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+                    >
+                      💬 Message Us on Messenger
+                    </a>
+                  </div>
 
-            <button
-              onClick={() => {
-                setSelectedPackage("Deluxe - ₱699");
-                formRef.current?.scrollIntoView({ behavior: "smooth" });
-              }}
-              className="mt-6 w-full border border-purple-500 text-purple-600 py-2 rounded-lg"
-            >
-              Select Package
-            </button>
+                  <button
+                      onClick={() => setShowSuccess(false)}
+                      className="mt-6 text-sm text-gray-400 underline hover:text-gray-600"
+                  >
+                    Submit another booking
+                  </button>
+                </div>
+            ) : (
+                <>
+                  <div className="mb-8 text-center">
+                    <div className="mb-2 text-3xl">📅</div>
+                    <h2 className="text-3xl font-bold text-[#1f2a44]">Book Your Event</h2>
+                    <p className="mt-2 text-sm text-gray-500">
+                      Fill out the details below and we&apos;ll review your request.
+                    </p>
+                  </div>
+
+                  <div className="mb-6">
+                    <label className="mb-2 block text-sm font-medium text-gray-600">
+                      Booking Type *
+                    </label>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <button
+                          type="button"
+                          onClick={() => setBookingType("package")}
+                          className={`rounded-xl border px-4 py-3 text-left ${
+                              bookingType === "package"
+                                  ? "border-purple-500 bg-purple-50 text-purple-700"
+                                  : "border-gray-300 bg-white text-gray-700"
+                          }`}
+                      >
+                        Package Booking
+                      </button>
+
+                      <button
+                          type="button"
+                          onClick={() => setBookingType("custom")}
+                          className={`rounded-xl border px-4 py-3 text-left ${
+                              bookingType === "custom"
+                                  ? "border-purple-500 bg-purple-50 text-purple-700"
+                                  : "border-gray-300 bg-white text-gray-700"
+                          }`}
+                      >
+                        Customized Booking
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-5 md:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-sm font-medium text-gray-600">
+                        Your Name *
+                      </label>
+                      <input
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          placeholder="John Doe"
+                          className="w-full rounded-xl border border-gray-300 bg-gray-50 p-3 text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-sm font-medium text-gray-600">
+                        Contact Number *
+                      </label>
+                      <input
+                          value={phone}
+                          onChange={(e) => setPhone(e.target.value)}
+                          placeholder="+63 912 345 6789"
+                          className="w-full rounded-xl border border-gray-300 bg-gray-50 p-3 text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-sm font-medium text-gray-600">
+                        Email Address
+                      </label>
+                      <input
+                          type="email"
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          placeholder="johndoe@email.com"
+                          className="w-full rounded-xl border border-gray-300 bg-gray-50 p-3 text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-sm font-medium text-gray-600">
+                        Event Date *
+                      </label>
+                      <input
+                          type="date"
+                          value={date}
+                          onChange={(e) => setDate(e.target.value)}
+                          className="w-full rounded-xl border border-gray-300 bg-gray-50 p-3 text-black focus:outline-none focus:ring-2 focus:ring-purple-400"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="mb-1 block text-sm font-medium text-gray-600">
+                        Event Type *
+                      </label>
+                      <select
+                          value={eventType}
+                          onChange={(e) => setEventType(e.target.value)}
+                          className="w-full rounded-xl border border-gray-300 bg-gray-50 p-3 text-black focus:outline-none focus:ring-2 focus:ring-purple-400"
+                      >
+                        <option value="">Select event type</option>
+                        <option>Birthday</option>
+                        <option>Wedding</option>
+                        <option>Corporate</option>
+                        <option>Christening</option>
+                        <option>Anniversary</option>
+                        <option>Other</option>
+                      </select>
+                    </div>
+
+                    {bookingType === "package" && (
+                        <div className="md:col-span-2">
+                          <label className="mb-1 block text-sm font-medium text-gray-600">
+                            Selected Package *
+                          </label>
+                          <select
+                              value={selectedPackage}
+                              onChange={(e) => setSelectedPackage(e.target.value)}
+                              className="w-full rounded-xl border border-gray-300 bg-gray-50 p-3 text-black focus:outline-none focus:ring-2 focus:ring-purple-400"
+                          >
+                            <option value="">Select package</option>
+                            <option>Basic - ₱1,500</option>
+                            <option>Premium - ₱3,500</option>
+                            <option>Deluxe - ₱6,000</option>
+                          </select>
+                        </div>
+                    )}
+
+                    {bookingType === "custom" && (
+                        <div className="md:col-span-2">
+                          <label className="mb-1 block text-sm font-medium text-gray-600">
+                            Customized Order Details *
+                          </label>
+                          <textarea
+                              value={customOrder}
+                              onChange={(e) => setCustomOrder(e.target.value)}
+                              placeholder="Describe the setup, theme, colors, add-ons, guest count, or anything you specifically want for your event..."
+                              rows={5}
+                              className="w-full rounded-xl border border-gray-300 bg-gray-50 p-3 text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400"
+                          />
+                        </div>
+                    )}
+                  </div>
+
+                  <div className="mt-5">
+                    <label className="mb-1 block text-sm font-medium text-gray-600">
+                      Additional Notes
+                    </label>
+                    <textarea
+                        value={notes}
+                        onChange={(e) => setNotes(e.target.value)}
+                        placeholder="Other requests or details..."
+                        rows={4}
+                        className="w-full rounded-xl border border-gray-300 bg-gray-50 p-3 text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400"
+                    />
+                  </div>
+
+                  <div className="mt-6 rounded-2xl border border-purple-100 bg-purple-50 p-5">
+                    <h3 className="mb-3 font-semibold text-[#1f2a44]">Booking Summary</h3>
+                    <div className="space-y-2 text-sm text-gray-700">
+                      <p>
+                        <span className="font-medium">Booking Type:</span>{" "}
+                        {bookingType === "package" ? "Package Booking" : "Customized Booking"}
+                      </p>
+                      <p>
+                        <span className="font-medium">Package / Order:</span>{" "}
+                        {bookingType === "package"
+                            ? selectedPackage || "Not selected"
+                            : customOrder || "Not provided"}
+                      </p>
+                      <p>
+                        <span className="font-medium">Event Type:</span>{" "}
+                        {eventType || "Not selected"}
+                      </p>
+                      <p>
+                        <span className="font-medium">Event Date:</span>{" "}
+                        {date || "Not selected"}
+                      </p>
+                      {bookingType === "package" && selectedPkgData && (
+                          <p className="rounded-lg bg-yellow-50 px-3 py-2 font-medium text-yellow-800">
+                            💳 {selectedPkgData.downpaymentLabel}: ₱
+                            {selectedPkgData.downpayment.toLocaleString()}
+                            {selectedPkgData.name !== "Basic" && (
+                                <span className="ml-1 font-normal text-yellow-700">
+                          (Balance: ₱
+                                  {(selectedPkgData.price - selectedPkgData.downpayment).toLocaleString()} on
+                          event day)
+                        </span>
+                            )}
+                          </p>
+                      )}
+                      <p>
+                        <span className="font-medium">Status:</span> Pending Review
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                      onClick={handleSubmit}
+                      disabled={submitting}
+                      className="mt-6 w-full rounded-xl bg-linear-to-r from-purple-500 to-pink-500 py-3 font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-70"
+                  >
+                    {submitting ? "Submitting..." : "Submit Booking Request"}
+                  </button>
+                </>
+            )}
           </div>
-
-        </div>
+        </section>
       </div>
-
-      {/* BOOKING FORM */}
-      <div className="px-6 pb-16">
-        <div
-          ref={formRef}
-          className="max-w-3xl mx-auto bg-white rounded-2xl shadow-md p-10"
-        >
-
-          {/* HEADER */}
-          <div className="text-center mb-8">
-            <div className="text-3xl mb-2">📅</div>
-            <h2 className="text-2xl font-semibold text-[#1f2a44]">
-              Book Your Event
-            </h2>
-            <p className="text-gray-400 text-sm">
-              Fill out the form below and we’ll get back to you
-            </p>
-          </div>
-
-          {/* FORM GRID */}
-          <div className="grid gap-5 md:grid-cols-2">
-
-            <div>
-              <label className="text-sm text-gray-600 mb-1 block">Your Name *</label>
-              <input value={name} onChange={(e)=>setName(e.target.value)}
-                placeholder="John Doe"
-                className="w-full bg-gray-50 border border-gray-200 text-gray-800 p-3 rounded-xl"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm text-gray-600 mb-1 block">Email *</label>
-              <input value={email} onChange={(e)=>setEmail(e.target.value)}
-                placeholder="john@example.com"
-                className="w-full bg-gray-50 border border-gray-200 text-gray-800 p-3 rounded-xl"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm text-gray-600 mb-1 block">Phone *</label>
-              <input value={phone} onChange={(e)=>setPhone(e.target.value)}
-                placeholder="+63 912..."
-                className="w-full bg-gray-50 border border-gray-200 text-gray-800 p-3 rounded-xl"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm text-gray-600 mb-1 block">Date *</label>
-              <input type="date" value={date} onChange={(e)=>setDate(e.target.value)}
-                className="w-full bg-gray-50 border border-gray-200 text-gray-800 p-3 rounded-xl"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm text-gray-600 mb-1 block">Event *</label>
-              <select value={eventType} onChange={(e)=>setEventType(e.target.value)}
-                className="w-full bg-gray-50 border border-gray-200 text-gray-800 p-3 rounded-xl">
-                <option value="">Select event</option>
-                <option>Birthday</option>
-                <option>Wedding</option>
-                <option>Corporate</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="text-sm text-gray-600 mb-1 block">Package *</label>
-              <select value={selectedPackage} onChange={(e)=>setSelectedPackage(e.target.value)}
-                className="w-full bg-gray-50 border border-gray-200 text-gray-800 p-3 rounded-xl">
-                <option value="">Select</option>
-                <option>Basic - ₱199</option>
-                <option>Premium - ₱399</option>
-                <option>Deluxe - ₱699</option>
-              </select>
-            </div>
-
-          </div>
-
-          <textarea value={notes} onChange={(e)=>setNotes(e.target.value)}
-            placeholder="Notes..."
-            className="w-full mt-5 bg-gray-50 border border-gray-200 p-3 rounded-xl"
-          />
-
-          <button onClick={handleSubmit}
-            className="mt-6 w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-xl">
-            Submit Booking Request
-          </button>
-
-        </div>
-      </div>
-
-    </div>
   );
 }

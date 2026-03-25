@@ -188,15 +188,56 @@ function AuthModal({
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [storeName, setStoreName] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const API_URL = "";
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLoading(true);
 
-    if (email === "admin@demo.com" && password === "123456") {
-      localStorage.setItem("isLoggedIn", "true");
-      router.push("/admin");
-    } else {
-      alert("Invalid credentials");
+    try {
+      if (mode === "login") {
+        const res = await fetch(`/api/auth`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "login", email, password }),
+        });
+        const data = await res.json();
+        if (data.token) {
+          localStorage.clear(); // ← clears all old data
+          localStorage.setItem("token", data.token);
+          localStorage.setItem("store_id", String(data.store_id));
+          localStorage.setItem("store_name", data.store_name);
+          localStorage.setItem("isLoggedIn", "true");
+          router.push("/admin");
+        } else {
+          alert(data.error || "Login failed");
+        }
+      } else {
+        if (!storeName) return alert("Please enter your store name");
+        const res = await fetch(`/api/auth`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "signup", store_name: storeName, email, password }),
+        });
+        const data = await res.json();
+        if (data.token) {
+          localStorage.clear(); 
+          localStorage.setItem("token", data.token);
+          localStorage.setItem("store_id", String(data.store_id));
+          localStorage.setItem("store_name", data.store_name);
+          localStorage.setItem("isLoggedIn", "true");
+          router.push("/admin");
+        } else {
+          alert(data.error || "Signup failed");
+        }
+      }
+    } catch (err) {
+      alert("Something went wrong. Please try again.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -221,10 +262,7 @@ function AuthModal({
           {mode === "login" ? "Login" : "Create Account"}
         </h2>
 
-        <form
-          className="mt-8 space-y-5"
-          onSubmit={mode === "login" ? handleLogin : undefined}
-        >
+        <form className="mt-8 space-y-5" onSubmit={handleSubmit}>
           {mode === "signup" && (
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
@@ -234,6 +272,8 @@ function AuthModal({
                 <Package className="h-5 w-5 text-gray-400" />
                 <input
                   type="text"
+                  value={storeName}
+                  onChange={(e) => setStoreName(e.target.value)}
                   placeholder="Enter your store name"
                   className="w-full bg-transparent outline-none"
                 />
@@ -248,12 +288,13 @@ function AuthModal({
             <div className="flex items-center gap-3 rounded-2xl border border-gray-200 px-4 py-3 focus-within:border-purple-500">
               <Mail className="h-5 w-5 text-gray-400" />
               <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="Enter your email"
-              className="w-full bg-transparent outline-none"
-            />
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Enter your email"
+                className="w-full bg-transparent outline-none"
+                required
+              />
             </div>
           </div>
 
@@ -271,6 +312,7 @@ function AuthModal({
                   mode === "login" ? "Enter your password" : "Create a password"
                 }
                 className="w-full bg-transparent outline-none"
+                required
               />
             </div>
           </div>
@@ -306,14 +348,19 @@ function AuthModal({
 
           <button
             type="submit"
-            className="w-full rounded-2xl bg-purple-600 px-5 py-3 font-semibold text-white transition hover:bg-purple-700"
+            disabled={loading}
+            className="w-full rounded-2xl bg-purple-600 px-5 py-3 font-semibold text-white transition hover:bg-purple-700 disabled:opacity-60"
           >
-            {mode === "login" ? "Login" : "Create Account"}
+            {loading
+              ? "Please wait..."
+              : mode === "login"
+              ? "Login"
+              : "Create Account"}
           </button>
         </form>
 
         <p className="mt-6 text-center text-sm text-gray-600">
-          {mode === "login" ? "Don’t have an account?" : "Already have an account?"}{" "}
+          {mode === "login" ? "Don't have an account?" : "Already have an account?"}{" "}
           <button
             type="button"
             onClick={() => onSwitch(mode === "login" ? "signup" : "login")}

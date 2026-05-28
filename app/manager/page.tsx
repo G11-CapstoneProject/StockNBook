@@ -1,6 +1,4 @@
 "use client";
-
-import RoleSidebar from "@/components/RoleSidebar";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
@@ -161,7 +159,7 @@ export default function ManagerPage() {
 
     return (
         <div className="flex min-h-screen bg-[#FDFAF4] text-[#1A1220]">
-            <RoleSidebar />
+
 
             <main className="flex-1 overflow-y-auto">
                 <section className="mx-auto max-w-6xl px-6 py-8 lg:px-8">

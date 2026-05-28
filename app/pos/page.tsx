@@ -1,6 +1,5 @@
 "use client";
 
-import RoleSidebar from "@/components/RoleSidebar";
 import RequirePermission from "@/components/RequirePermission";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -797,8 +796,6 @@ export default function POSPage() {
               fontFamily: "Georgia, 'Times New Roman', serif",
             }}
         >
-          <RoleSidebar />
-
           <main className="min-w-0 flex-1 overflow-x-hidden">
             <div className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
               <div className="flex items-center justify-between px-5 py-3">

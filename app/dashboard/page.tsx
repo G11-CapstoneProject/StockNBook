@@ -1,6 +1,5 @@
 "use client";
 
-import RoleSidebar from "@/components/RoleSidebar";
 import RequirePermission from "@/components/RequirePermission";
 import OwnerDashboard from "@/components/dashboard/OwnerDashboard";
 import ManagerDashboard from "@/components/dashboard/ManagerDashboard";
@@ -31,8 +30,6 @@ export default function DashboardPage() {
                 }}
                 className="flex min-h-screen overflow-x-hidden text-[#1A1220]"
             >
-                <RoleSidebar />
-
                 <div className="min-w-0 flex-1 overflow-x-hidden">
                     {user.role === "owner" && <OwnerDashboard />}
                     {user.role === "manager" && <ManagerDashboard />}

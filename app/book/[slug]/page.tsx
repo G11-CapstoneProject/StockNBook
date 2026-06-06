@@ -17,6 +17,9 @@ import {
     MapPin,
     Palette,
     RefreshCw,
+    AlertCircle,
+    Trash2,
+    CheckCircle,
 } from "lucide-react";
 
 const STORE_MESSENGER = "your.page.username";
@@ -52,7 +55,6 @@ type Store = {
     store_name: string;
     slug: string;
 };
-
 
 type Booking = {
     bookingReference: string;
@@ -133,6 +135,63 @@ function StatusTimeline({ status }: { status: string }) {
     );
 }
 
+// ─── Cancellation Modal ────────────────────────────────────────────────────────
+
+function CancellationConfirmModal({
+    isOpen,
+    bookingReference,
+    onConfirm,
+    onCancel,
+    isLoading,
+}: {
+    isOpen: boolean;
+    bookingReference: string;
+    onConfirm: () => void;
+    onCancel: () => void;
+    isLoading: boolean;
+}) {
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 px-4">
+            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+                <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-red-100">
+                        <AlertCircle size={20} className="text-red-600" />
+                    </div>
+                    <div className="flex-1">
+                        <h3 className="text-lg font-bold text-[#1f2a44]">
+                            Cancel Booking?
+                        </h3>
+                        <p className="mt-2 text-sm text-gray-600">
+                            Are you sure you want to cancel this booking? This action cannot be undone.
+                        </p>
+                        <p className="mt-3 rounded-lg bg-gray-50 p-2 text-xs font-mono text-gray-700">
+                            Ref: {bookingReference}
+                        </p>
+                    </div>
+                </div>
+
+                <div className="mt-6 flex gap-3">
+                    <button
+                        onClick={onCancel}
+                        disabled={isLoading}
+                        className="flex-1 rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+                    >
+                        Keep Booking
+                    </button>
+                    <button
+                        onClick={onConfirm}
+                        disabled={isLoading}
+                        className="flex-1 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-700 disabled:opacity-50"
+                    >
+                        {isLoading ? "Cancelling..." : "Cancel Booking"}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
 
 // ─── Inline Status Drawer ─────────────────────────────────────────────────────
 
@@ -157,6 +216,11 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
     const [error, setError] = useState("");
 
+    // Cancellation state
+    const [showCancelModal, setShowCancelModal] = useState(false);
+    const [cancelLoading, setCancelLoading] = useState(false);
+    const [cancelSuccess, setCancelSuccess] = useState(false);
+
     // Save ref to URL so it survives reload
     function saveRefToUrl(ref: string) {
         const url = new URL(window.location.href);
@@ -178,6 +242,8 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
         setRefInput(""); setPhoneInput(""); setDateInput("");
         setBooking(null); setPhoneBookings([]); setSelectedBooking(null);
         setError(""); setLastUpdated(null);
+        setShowCancelModal(false);
+        setCancelSuccess(false);
         clearUrl();
     }
 
@@ -256,7 +322,6 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
                 if (matched.length === 0) { setError("No booking found matching that phone number and event date."); return; }
                 if (matched.length === 1) {
                     setSelectedBooking(matched[0]);
-                    // Switch to ref polling for the found booking
                     if (matched[0].bookingReference) saveRefToUrl(matched[0].bookingReference);
                 } else {
                     setPhoneBookings(matched);
@@ -276,7 +341,60 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
         if (b.bookingReference) saveRefToUrl(b.bookingReference);
     }
 
+    // Handle cancellation
+    async function handleConfirmCancellation() {
+        if (!displayBooking?.bookingReference) return;
+
+        setCancelLoading(true);
+        try {
+            const res = await fetch("/api/bookings", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    action: "cancel_booking",
+                    bookingReference: displayBooking.bookingReference,
+                }),
+            });
+
+            const data = await res.json();
+
+            if (!res.ok) {
+                setError(data.error || "Failed to cancel booking.");
+                setShowCancelModal(false);
+                setCancelLoading(false);
+                return;
+            }
+
+            // Success: Update local booking status and show success message
+            setBooking((prev) =>
+                prev
+                    ? { ...prev, status: "Cancelled" }
+                    : null
+            );
+            setSelectedBooking((prev) =>
+                prev
+                    ? { ...prev, status: "Cancelled" }
+                    : null
+            );
+
+            setCancelSuccess(true);
+            setShowCancelModal(false);
+        } catch (err) {
+            setError("Error cancelling booking. Please try again.");
+            setShowCancelModal(false);
+        } finally {
+            setCancelLoading(false);
+        }
+    }
+
     const displayBooking = booking ?? selectedBooking;
+
+    // Check booking status for cancellation eligibility
+    const canCancel = displayBooking?.status === "Pending Review" && !cancelSuccess;
+    const isCompleted = displayBooking?.status === "Completed";
+    const isConfirmedOrPreparing = 
+        (displayBooking?.status === "Confirmed" || displayBooking?.status === "Preparing") && 
+        !cancelSuccess;
 
     return (
         <div className="border-b border-purple-100 bg-purple-50/60 px-6 py-5">
@@ -431,11 +549,80 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
                             {displayBooking.bookingType === "custom" && displayBooking.customOrder && <DetailItem label="Custom Request" value={displayBooking.customOrder} />}
                         </div>
 
+                        {/* Status-based Message Section */}
+                        {isCompleted ? (
+                            // Booking Completed Message
+                            <div className="mt-4 rounded-xl border border-green-200 bg-green-50 p-4">
+                                <div className="flex items-start gap-3">
+                                    <CheckCircle size={20} className="shrink-0 text-green-600 mt-0.5" />
+                                    <div className="flex-1">
+                                        <p className="font-semibold text-green-700">
+                                            Booking Completed
+                                        </p>
+                                        <p className="mt-1 text-sm text-green-600">
+                                            Thank you for using our service. This booking has been marked as completed.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : isConfirmedOrPreparing ? (
+                            // Booking Cannot Be Cancelled Message
+                            <div className="mt-4 rounded-xl border border-orange-200 bg-orange-50 p-4">
+                                <div className="flex items-start gap-3">
+                                    <AlertCircle size={20} className="shrink-0 text-orange-600 mt-0.5" />
+                                    <div className="flex-1">
+                                        <p className="font-semibold text-orange-700">
+                                            Booking Cannot Be Cancelled
+                                        </p>
+                                        <p className="mt-1 text-sm text-orange-600">
+                                            This booking can no longer be cancelled because it has already been confirmed or is being prepared. If you need assistance, please contact the business directly.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : canCancel ? (
+                            // Cancellation Available Message
+                            <div className="mt-4 rounded-xl border border-yellow-200 bg-yellow-50 p-4">
+                                <p className="text-sm font-semibold text-yellow-800 mb-2">
+                                    Want to cancel this booking?
+                                </p>
+                                <p className="text-xs text-yellow-700 mb-3">
+                                    Since your booking is still pending, you can cancel it at any time.
+                                </p>
+                                <button
+                                    onClick={() => setShowCancelModal(true)}
+                                    className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-red-700"
+                                >
+                                    <Trash2 size={14} />
+                                    Cancel Booking
+                                </button>
+                            </div>
+                        ) : displayBooking.status === "Cancelled" ? (
+                            // Already Cancelled Message
+                            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4">
+                                <p className="text-sm font-semibold text-red-600">
+                                    ✓ Booking Cancelled
+                                </p>
+                                <p className="mt-1 text-xs text-red-500">
+                                    Your booking has been cancelled. If you need further assistance, please contact the store.
+                                </p>
+                            </div>
+                        ) : null}
+
                         <p className="mt-3 text-xs text-gray-400">
                             For follow-ups, contact the store with your booking reference number.
                         </p>
                     </div>
                 )}
+
+                {/* Cancellation Confirmation Modal */}
+                <CancellationConfirmModal
+                    isOpen={showCancelModal}
+                    bookingReference={displayBooking?.bookingReference || ""}
+                    onConfirm={handleConfirmCancellation}
+                    onCancel={() => setShowCancelModal(false)}
+                    isLoading={cancelLoading}
+                />
             </div>
         </div>
     );
@@ -577,7 +764,6 @@ export default function BookStorePage() {
                 });
 
                 const data = await res.json();
-
 
                 setPackages(
                     (data.packages || []).filter(
@@ -1229,5 +1415,3 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
         </div>
     );
 }
-
-

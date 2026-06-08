@@ -706,3 +706,4 @@ function EmptyText({ text }: { text: string }) {
         </div>
     );
 }
+

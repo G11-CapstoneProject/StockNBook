@@ -1,6 +1,6 @@
 "use client";
 
-import RoleSidebar from "@/components/RoleSidebar";
+import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -985,3 +985,4 @@ function formatAccess(value: AccessMode | ReportsAccessMode) {
     if (value === "view") return "View only";
     return "Full access";
 }
+

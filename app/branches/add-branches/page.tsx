@@ -1,6 +1,6 @@
 "use client";
 
-import RoleSidebar from "@/components/RoleSidebar";
+import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Mail, Package } from "lucide-react";
@@ -13,7 +13,6 @@ const defaultPermissions = {
     pos: true,
     reports: false,
     staff_management: false,
-    staff_roles: false,
     branch_settings: false,
 };
 
@@ -245,12 +244,6 @@ export default function AddBranchPage() {
                                 />
 
                                 <AccessToggle
-                                    label="Staff Roles & Permissions"
-                                    checked={permissions.staff_roles}
-                                    onChange={(checked) => updatePermission("staff_roles", checked)}
-                                />
-
-                                <AccessToggle
                                     label="Branch Settings"
                                     checked={permissions.branch_settings}
                                     onChange={(checked) =>
@@ -397,3 +390,4 @@ function AccessToggle({
         </label>
     );
 }
+

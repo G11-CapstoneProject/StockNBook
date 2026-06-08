@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 export type CurrentUser = {
     role: "owner" | "manager" | "staff";
@@ -15,6 +15,8 @@ export type CurrentUser = {
     staff_name?: string;
     permissions?: Record<string, boolean | string>;
 };
+
+const REFRESH_INTERVAL = 15000;
 
 function getToken() {
     if (typeof window === "undefined") return "";
@@ -72,72 +74,95 @@ function syncUserToSession(user: CurrentUser) {
     sessionStorage.setItem("permissions", JSON.stringify(user.permissions || {}));
 }
 
+function hasUserChanged(oldUser: CurrentUser | null, newUser: CurrentUser) {
+    if (!oldUser) return true;
+
+    return JSON.stringify(oldUser) !== JSON.stringify(newUser);
+}
+
 export function useCurrentUser() {
     const [user, setUser] = useState<CurrentUser | null>(() => getSessionUser());
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
 
-    useEffect(() => {
-        const loadUser = async () => {
-            const cachedUser = getSessionUser();
+    const loadUser = useCallback(async (silent = false) => {
+        const cachedUser = getSessionUser();
 
-            if (cachedUser) {
-                setUser(cachedUser);
-                setLoading(false);
-            } else {
-                setLoading(true);
-            }
+        if (cachedUser) {
+            setUser(cachedUser);
+            if (!silent) setLoading(false);
+        } else if (!silent) {
+            setLoading(true);
+        }
 
-            const token = getToken();
+        const token = getToken();
 
-            if (!token) {
+        if (!token) {
+            setUser(null);
+            setError("Missing token");
+            if (!silent) setLoading(false);
+            return;
+        }
+
+        try {
+            const res = await fetch("/api/current-user", {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+                cache: "no-store",
+            });
+
+            const data = await res.json();
+
+            if (!res.ok) {
                 setUser(null);
-                setError("Missing token");
-                setLoading(false);
+                setError(data.error || "Failed to load user");
+                if (!silent) setLoading(false);
                 return;
             }
 
-            try {
-                const res = await fetch("/api/current-user", {
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                });
+            syncUserToSession(data);
 
-                const data = await res.json();
-
-                if (!res.ok) {
-                    setUser(null);
-                    setError(data.error || "Failed to load user");
-                    setLoading(false);
-                    return;
+            setUser((previousUser) => {
+                if (hasUserChanged(previousUser, data)) {
+                    window.dispatchEvent(new Event("stocknbook-current-user-refreshed"));
+                    return data;
                 }
 
-                syncUserToSession(data);
-                setUser(data);
-                setError("");
-            } catch (err) {
-                console.error("current-user fetch failed:", err);
+                return previousUser;
+            });
 
-                if (!cachedUser) {
-                    setUser(null);
-                    setError("Failed to load user");
-                }
-            } finally {
-                setLoading(false);
+            setError("");
+        } catch (err) {
+            console.error("current-user fetch failed:", err);
+
+            if (!cachedUser) {
+                setUser(null);
+                setError("Failed to load user");
             }
-        };
-
-        loadUser();
-
-        window.addEventListener("stocknbook-permissions-updated", loadUser);
-        window.addEventListener("focus", loadUser);
-
-        return () => {
-            window.removeEventListener("stocknbook-permissions-updated", loadUser);
-            window.removeEventListener("focus", loadUser);
-        };
+        } finally {
+            if (!silent) setLoading(false);
+        }
     }, []);
 
-    return { user, loading, error };
+    useEffect(() => {
+        loadUser(false);
+
+        const refreshSilently = () => {
+            loadUser(true);
+        };
+
+        const interval = window.setInterval(refreshSilently, REFRESH_INTERVAL);
+
+        window.addEventListener("stocknbook-permissions-updated", refreshSilently);
+        window.addEventListener("focus", refreshSilently);
+
+        return () => {
+            window.clearInterval(interval);
+            window.removeEventListener("stocknbook-permissions-updated", refreshSilently);
+            window.removeEventListener("focus", refreshSilently);
+        };
+    }, [loadUser]);
+
+    return { user, loading, error, refreshUser: loadUser };
 }

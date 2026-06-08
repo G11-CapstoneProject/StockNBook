@@ -1,6 +1,6 @@
 "use client";
 
-import RoleSidebar from "@/components/RoleSidebar";
+import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -342,3 +342,4 @@ export default function ManagerDirectoryPage() {
         </div>
     );
 }
+

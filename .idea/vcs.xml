@@ -2,5 +2,7 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/StockNBook" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/StockNBook---Copy" vcs="Git" />
   </component>
 </project>

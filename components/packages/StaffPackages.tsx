@@ -1,110 +1,41 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-
-type DiscountType = "amount" | "percentage";
-type PackageAccess = "none" | "view" | "full";
-
-type PackageInclusion = {
-    productId: number;
-    productName: string;
-    quantity: number;
-    unitSalesPrice: number;
-    lineValue: number;
-};
-
-type PackageItem = {
-    id: number;
-    store_id?: number;
-    branch_id?: number;
-    name: string;
-    description: string;
-    original_value: number;
-    discount_type: DiscountType;
-    discount_value: number;
-    package_price: number;
-    duration: string;
-    status: "Active" | "Inactive";
-    inclusions: PackageInclusion[];
-};
-
-type Product = {
-    id: number;
-    name: string;
-    salesPrice: number;
-    stock: number;
-};
-
-function getSavedPermissions() {
-    try {
-        return JSON.parse(
-            sessionStorage.getItem("permissions") ||
-            localStorage.getItem("permissions") ||
-            "{}"
-        );
-    } catch {
-        return {};
-    }
-}
-
-function getSavedPackageAccess(): PackageAccess {
-    const permissions = getSavedPermissions();
-
-    const access =
-        permissions.package_access ||
-        permissions.packages_access ||
-        (permissions.packages === true ? "view" : "none");
-
-    if (access === "full") return "full";
-    if (access === "view") return "view";
-
-    return "none";
-}
+import { useEffect, useMemo, useState } from "react";
+import {
+    getToken, peso, formatText, getSavedPackageAccess,
+    Card, CardHeader, PageHeader, PackageCard, EmptyState,
+    PackageFormModal, usePackageForm,
+    type PackageItem, type Product, type PackageAccess,
+} from "./_shared";
 
 export default function StaffPackages() {
     const [branchName, setBranchName] = useState("Branch");
     const [storeId, setStoreId] = useState<number | null>(null);
     const [branchId, setBranchId] = useState<number | null>(null);
-
     const [packages, setPackages] = useState<PackageItem[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState("");
     const [error, setError] = useState("");
-
     const [packageAccess, setPackageAccess] = useState<PackageAccess>("none");
 
-    const [showForm, setShowForm] = useState(false);
-    const [editingId, setEditingId] = useState<number | null>(null);
-    const [submitting, setSubmitting] = useState(false);
+    const canView = packageAccess === "view" || packageAccess === "full";
+    const canManage = packageAccess === "full";
 
-    const [name, setName] = useState("");
-    const [description, setDescription] = useState("");
-    const [duration, setDuration] = useState("");
-    const [status, setStatus] = useState<"Active" | "Inactive">("Active");
-    const [discountType, setDiscountType] = useState<DiscountType>("amount");
-    const [discountValue, setDiscountValue] = useState("");
-
-    const [inclusions, setInclusions] = useState<PackageInclusion[]>([]);
-    const [selectedProductId, setSelectedProductId] = useState("");
-    const [inclusionQty, setInclusionQty] = useState("");
-
-    const canViewPackages = packageAccess === "view" || packageAccess === "full";
-    const canManagePackages = packageAccess === "full";
+    const form = usePackageForm(storeId, branchId, async () => {
+        if (branchId) await fetchPackages(branchId);
+    });
 
     useEffect(() => {
         const savedBranchName =
             sessionStorage.getItem("branch_name") ||
             sessionStorage.getItem("store_name") ||
             "Branch";
-
         const savedStoreId = sessionStorage.getItem("store_id");
-
         const savedBranchId =
             sessionStorage.getItem("branch_id") ||
             sessionStorage.getItem("staff_branch_id") ||
             sessionStorage.getItem("manager_branch_id");
-
         const savedAccess = getSavedPackageAccess();
 
         setBranchName(savedBranchName);
@@ -113,58 +44,33 @@ export default function StaffPackages() {
         if (savedStoreId) {
             const store = Number(savedStoreId);
             setStoreId(store);
-
-            if (savedAccess === "full") {
-                fetchProducts(store);
-            }
+            if (savedAccess === "full") fetchProducts(store);
         }
 
         if (savedBranchId) {
             const branch = Number(savedBranchId);
             setBranchId(branch);
-
             if (savedAccess === "view" || savedAccess === "full") {
                 fetchPackages(branch);
             } else {
-                setPackages([]);
                 setLoading(false);
-                setError("");
             }
         } else {
-            setPackages([]);
             setLoading(false);
             setError("Missing branch_id. Please refresh or log in again.");
         }
     }, []);
 
-    function getToken() {
-        return sessionStorage.getItem("token") || localStorage.getItem("token") || "";
-    }
-
     async function fetchPackages(branch_id: number) {
         try {
             setLoading(true);
-
             const res = await fetch("/api/packages", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${getToken()}`,
-                },
-                body: JSON.stringify({
-                    action: "get_packages",
-                    branch_id,
-                }),
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+                body: JSON.stringify({ action: "get_packages", branch_id }),
             });
-
             const data = await res.json();
-
-            if (!res.ok) {
-                setError(data.error || "Failed to load packages.");
-                setPackages([]);
-                return;
-            }
-
+            if (!res.ok) { setError(data.error || "Failed to load packages."); setPackages([]); return; }
             setPackages(data.packages || []);
             setError("");
         } catch {
@@ -179,16 +85,9 @@ export default function StaffPackages() {
         try {
             const res = await fetch("/api/products", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${getToken()}`,
-                },
-                body: JSON.stringify({
-                    action: "get_products",
-                    store_id,
-                }),
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+                body: JSON.stringify({ action: "get_products", store_id }),
             });
-
             const data = await res.json();
             setProducts(data.products || []);
         } catch {
@@ -196,24 +95,14 @@ export default function StaffPackages() {
         }
     }
 
-    const originalValue = useMemo(
-        () => inclusions.reduce((sum, item) => sum + item.lineValue, 0),
-        [inclusions]
-    );
-
-    const discountNumber = Number(discountValue || 0);
-
-    const computedDiscountAmount =
-        discountType === "percentage"
-            ? originalValue * (discountNumber / 100)
-            : discountNumber;
-
-    const discountAmount = Math.min(computedDiscountAmount, originalValue);
-    const packagePrice = Math.max(originalValue - discountAmount, 0);
+    async function handleDelete(id: number) {
+        if (!canManage) return;
+        const deletedId = await form.handleDelete(id);
+        if (deletedId) setPackages((prev) => prev.filter((pkg) => pkg.id !== deletedId));
+    }
 
     const filteredPackages = useMemo(() => {
         const q = search.trim().toLowerCase();
-
         return packages.filter(
             (pkg) =>
                 pkg.name.toLowerCase().includes(q) ||
@@ -223,266 +112,9 @@ export default function StaffPackages() {
         );
     }, [packages, search]);
 
-    function peso(n: number) {
-        return `₱${Number(n || 0).toLocaleString("en-PH", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-        })}`;
-    }
-
-    function formatText(value: string) {
-        if (!value) return "";
-
-        return value
-            .toLowerCase()
-            .split(" ")
-            .filter(Boolean)
-            .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-            .join(" ");
-    }
-
-    function resetForm() {
-        setName("");
-        setDescription("");
-        setDuration("");
-        setStatus("Active");
-        setDiscountType("amount");
-        setDiscountValue("");
-        setEditingId(null);
-        setInclusions([]);
-        setSelectedProductId("");
-        setInclusionQty("");
-        setError("");
-    }
-
-    function openAddForm() {
-        if (!canManagePackages) return;
-
-        resetForm();
-        setShowForm(true);
-    }
-
-    function handleEdit(pkg: PackageItem) {
-        if (!canManagePackages) return;
-
-        setEditingId(pkg.id);
-        setName(pkg.name);
-        setDescription(pkg.description || "");
-        setDuration(pkg.duration || "");
-        setStatus(pkg.status);
-        setDiscountType(pkg.discount_type || "amount");
-        setDiscountValue(String(pkg.discount_value || 0));
-        setInclusions(pkg.inclusions || []);
-        setError("");
-        setShowForm(true);
-    }
-
-    async function handleDelete(id: number) {
-        if (!canManagePackages) return;
-
-        const confirmed = confirm("Delete this package? This action cannot be undone.");
-
-        if (!confirmed) return;
-
-        if (!branchId) {
-            alert("Missing branch_id. Please refresh and try again.");
-            return;
-        }
-
-        try {
-            const res = await fetch("/api/packages", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${getToken()}`,
-                },
-                body: JSON.stringify({
-                    action: "delete_package",
-                    id,
-                    branch_id: branchId,
-                }),
-            });
-
-            if (!res.ok) {
-                alert("Failed to delete package.");
-                return;
-            }
-
-            setPackages((prev) => prev.filter((pkg) => pkg.id !== id));
-        } catch {
-            alert("Failed to delete package.");
-        }
-    }
-
-    function addInclusion() {
-        const product = products.find((p) => p.id === Number(selectedProductId));
-        const qty = Number(inclusionQty);
-
-        if (!product || qty <= 0) {
-            setError("Please select a product and enter a valid quantity.");
-            return;
-        }
-
-        const existing = inclusions.find((item) => item.productId === product.id);
-        const currentQty = existing ? existing.quantity : 0;
-        const totalQty = currentQty + qty;
-        const unitSalesPrice = Number(product.salesPrice || 0);
-        const lineValue = unitSalesPrice * totalQty;
-
-        if (existing) {
-            setInclusions((prev) =>
-                prev.map((item) =>
-                    item.productId === product.id
-                        ? {
-                            ...item,
-                            quantity: totalQty,
-                            unitSalesPrice,
-                            lineValue,
-                        }
-                        : item
-                )
-            );
-        } else {
-            setInclusions((prev) => [
-                ...prev,
-                {
-                    productId: product.id,
-                    productName: product.name,
-                    quantity: qty,
-                    unitSalesPrice,
-                    lineValue: unitSalesPrice * qty,
-                },
-            ]);
-        }
-
-        setSelectedProductId("");
-        setInclusionQty("");
-        setError("");
-    }
-
-    function removeInclusion(productId: number) {
-        setInclusions((prev) => prev.filter((item) => item.productId !== productId));
-    }
-
-    async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
-        e.preventDefault();
-
-        if (!canManagePackages) {
-            setError("You only have view access for packages.");
-            return;
-        }
-
-        if (!storeId) {
-            setError("Missing store_id. Please refresh and try again.");
-            return;
-        }
-
-        if (!branchId) {
-            setError("Missing branch_id. Please refresh and try again.");
-            return;
-        }
-
-        if (!name.trim()) {
-            setError("Please enter package name.");
-            return;
-        }
-
-        if (inclusions.length === 0) {
-            setError("Please add at least one product inclusion.");
-            return;
-        }
-
-        if (discountNumber < 0) {
-            setError("Discount cannot be negative.");
-            return;
-        }
-
-        if (discountType === "percentage" && discountNumber > 100) {
-            setError("Percentage discount cannot exceed 100%.");
-            return;
-        }
-
-        if (discountType === "amount" && discountNumber > originalValue) {
-            setError("Discount cannot exceed original value.");
-            return;
-        }
-
-        setSubmitting(true);
-
-        const payload = {
-            action: editingId ? "update_package" : "create_package",
-            ...(editingId && { id: editingId }),
-            store_id: storeId,
-            branch_id: branchId,
-            name: name.trim(),
-            description: description.trim(),
-            original_value: originalValue,
-            discount_type: discountType,
-            discount_value: discountNumber,
-            package_price: packagePrice,
-            duration: duration.trim() || "N/A",
-            status,
-            inclusions,
-        };
-
-        try {
-            const res = await fetch("/api/packages", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${getToken()}`,
-                },
-                body: JSON.stringify(payload),
-            });
-
-            const data = await res.json();
-
-            if (!res.ok) {
-                setError(data.error || "Failed to save package.");
-                return;
-            }
-
-            await fetchPackages(branchId);
-
-            resetForm();
-            setShowForm(false);
-        } catch {
-            setError("Failed to save package. Please try again.");
-        } finally {
-            setSubmitting(false);
-        }
-    }
-
     return (
         <>
-            <div className="flex h-[54px] items-center justify-between border-b border-[#EBE4F0] bg-white px-5">
-                <div className="flex items-center gap-3">
-                    <h1 className="text-[18px] font-medium text-[#1A1220]">
-                        Packages
-                    </h1>
-
-                    <span className="rounded-[6px] bg-[#FFFBF0] px-3 py-1 text-[11px] font-medium text-[#633806]">
-                        {branchName}
-                    </span>
-                </div>
-
-                <div className="flex items-center gap-2">
-                    <span className="rounded-[7px] border border-[#EBE4F0] bg-white px-4 py-1.5 text-[11px] text-[#7A6E88]">
-                        {new Date().toLocaleDateString("en-US", {
-                            month: "long",
-                            year: "numeric",
-                        })}
-                    </span>
-
-                    <button className="flex h-[32px] w-[32px] items-center justify-center rounded-[7px] border border-[#EBE4F0] bg-white text-[12px] text-[#C9951A]">
-                        ●
-                    </button>
-
-                    <div className="flex h-[36px] w-[36px] items-center justify-center rounded-full bg-[#C9951A] text-[12px] font-medium text-white">
-                        YS
-                    </div>
-                </div>
-            </div>
+            <PageHeader title="Packages" badge={branchName} />
 
             <section className="p-5">
                 <div className="space-y-3">
@@ -493,10 +125,9 @@ export default function StaffPackages() {
                             placeholder="Search packages..."
                             className="h-[42px] flex-1 rounded-[10px] border border-[#EBE4F0] bg-white px-4 text-[12px] text-[#1A1220] placeholder:text-[#9B8EA8] outline-none transition focus:border-[#2D1B4E]"
                         />
-
-                        {canManagePackages ? (
+                        {canManage ? (
                             <button
-                                onClick={openAddForm}
+                                onClick={form.openAdd}
                                 className="h-[42px] rounded-[10px] bg-[#2D1B4E] px-5 text-[12px] font-semibold text-white transition hover:bg-[#3D2560]"
                             >
                                 + Add package
@@ -512,10 +143,7 @@ export default function StaffPackages() {
                     </div>
 
                     <Card className="min-h-[340px]">
-                        <CardHeader
-                            title="Branch Package List"
-                            action={`${filteredPackages.length} packages`}
-                        />
+                        <CardHeader title="Branch Package List" action={`${filteredPackages.length} packages`} />
 
                         {error && (
                             <div className="mb-3 rounded-[9px] border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2 text-[11px] font-medium text-[#9B1C1C]">
@@ -523,483 +151,66 @@ export default function StaffPackages() {
                             </div>
                         )}
 
-                        {!canViewPackages ? (
-                            <EmptyState
-                                title="No package access."
-                                detail="Please contact your manager to update your staff package access."
-                            />
+                        {!canView ? (
+                            <EmptyState title="No package access." detail="Please contact your manager to update your staff package access." />
                         ) : loading ? (
-                            <EmptyState
-                                title="Loading packages..."
-                                detail="Please wait while packages are being loaded."
-                            />
+                            <EmptyState title="Loading packages..." detail="Please wait while packages are being loaded." />
                         ) : filteredPackages.length === 0 ? (
                             <EmptyState
-                                title={canManagePackages ? "No packages yet." : "No packages available."}
-                                detail={
-                                    canManagePackages
-                                        ? "Create your first package using inventory items and discounts."
-                                        : "No active package setup is currently available for this branch."
-                                }
+                                title={canManage ? "No packages yet." : "No packages available."}
+                                detail={canManage ? "Create your first package using inventory items and discounts." : "No active package setup is currently available for this branch."}
                             />
                         ) : (
                             <div className="grid grid-cols-[repeat(auto-fill,180px)] gap-2.5">
-                                {filteredPackages.map((pkg, index) => {
-                                    const formattedPackage = {
-                                        ...pkg,
-                                        name: formatText(pkg.name),
-                                        description: formatText(pkg.description || "No description"),
-                                        duration: formatText(pkg.duration || "N/A"),
-                                        inclusions: (pkg.inclusions || []).map((item) => ({
-                                            ...item,
-                                            productName: formatText(item.productName),
-                                        })),
-                                    };
-
-                                    return (
-                                        <PackageCard
-                                            key={pkg.id}
-                                            pkg={formattedPackage}
-                                            peso={peso}
-                                            featured={index === 1}
-                                            canManage={canManagePackages}
-                                            onEdit={() => handleEdit(pkg)}
-                                            onDelete={() => handleDelete(pkg.id)}
-                                        />
-                                    );
-                                })}
+                                {filteredPackages.map((pkg, index) => (
+                                    <PackageCard
+                                        key={pkg.id}
+                                        pkg={{
+                                            ...pkg,
+                                            name: formatText(pkg.name),
+                                            description: formatText(pkg.description || "No description"),
+                                            duration: formatText(pkg.duration || "N/A"),
+                                            inclusions: (pkg.inclusions || []).map((item) => ({
+                                                ...item,
+                                                productName: formatText(item.productName),
+                                            })),
+                                        }}
+                                        featured={index === 1}
+                                        canManage={canManage}
+                                        onEdit={() => canManage && form.openEdit(pkg)}
+                                        onDelete={() => handleDelete(pkg.id)}
+                                    />
+                                ))}
                             </div>
                         )}
                     </Card>
                 </div>
             </section>
 
-            {showForm && canManagePackages && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
-                    <div className="max-h-[90vh] w-full max-w-[760px] overflow-y-auto rounded-[16px] border border-[#EBE4F0] bg-white p-5 shadow-2xl">
-                        <div className="mb-4 flex items-start justify-between gap-4">
-                            <div>
-                                <h2 className="text-[18px] font-medium text-[#1A1220]">
-                                    {editingId ? "Edit package" : "Add package"}
-                                </h2>
-
-                                <p className="mt-1 text-[10.5px] leading-4 text-[#7A6E88]">
-                                    Build a branch package using inventory products, duration, and discount rules.
-                                </p>
-                            </div>
-
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    resetForm();
-                                    setShowForm(false);
-                                }}
-                                className="flex h-[32px] w-[32px] items-center justify-center rounded-[8px] border border-[#EBE4F0] text-[13px] text-[#7A6E88] hover:bg-[#FDFAF4]"
-                            >
-                                ✕
-                            </button>
-                        </div>
-
-                        <form onSubmit={handleSubmit} className="space-y-3">
-                            {error && (
-                                <div className="rounded-[9px] border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2 text-[11px] font-medium text-[#9B1C1C]">
-                                    {error}
-                                </div>
-                            )}
-
-                            <div className="grid grid-cols-2 gap-3">
-                                <Field label="Package Name">
-                                    <input
-                                        value={name}
-                                        onChange={(e) => setName(e.target.value)}
-                                        placeholder="e.g. Birthday Basic Package"
-                                        className={fieldClass}
-                                    />
-                                </Field>
-
-                                <Field label="Duration">
-                                    <input
-                                        value={duration}
-                                        onChange={(e) => setDuration(e.target.value)}
-                                        placeholder="e.g. 3 hours"
-                                        className={fieldClass}
-                                    />
-                                </Field>
-                            </div>
-
-                            <Field label="Description">
-                                <textarea
-                                    value={description}
-                                    onChange={(e) => setDescription(e.target.value)}
-                                    placeholder="Short package details or notes"
-                                    className={`${fieldClass} min-h-[82px] resize-none py-2`}
-                                />
-                            </Field>
-
-                            <Card className="bg-[#FDFAF4]">
-                                <CardHeader title="Package Inclusions" />
-
-                                <div className="grid grid-cols-[1.7fr_0.65fr_0.55fr] gap-2">
-                                    <select
-                                        value={selectedProductId}
-                                        onChange={(e) => {
-                                            setSelectedProductId(e.target.value);
-                                            setError("");
-                                        }}
-                                        className={fieldClass}
-                                    >
-                                        <option value="">Select product</option>
-                                        {products.map((product) => (
-                                            <option key={product.id} value={product.id}>
-                                                {product.name} — {peso(product.salesPrice)} — Stock: {product.stock}
-                                            </option>
-                                        ))}
-                                    </select>
-
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        value={inclusionQty}
-                                        onChange={(e) => {
-                                            setInclusionQty(e.target.value);
-                                            setError("");
-                                        }}
-                                        placeholder="Qty"
-                                        className={fieldClass}
-                                    />
-
-                                    <button
-                                        type="button"
-                                        onClick={addInclusion}
-                                        className="rounded-[8px] bg-[#2D1B4E] px-3 py-2 text-[11px] font-semibold text-white hover:bg-[#3D2560]"
-                                    >
-                                        Add
-                                    </button>
-                                </div>
-
-                                <div className="mt-3 space-y-2">
-                                    {inclusions.length === 0 ? (
-                                        <p className="rounded-[9px] border border-dashed border-[#EBE4F0] bg-white px-3 py-4 text-center text-[10px] text-[#7A6E88]">
-                                            No inclusions added yet.
-                                        </p>
-                                    ) : (
-                                        inclusions.map((item) => (
-                                            <div
-                                                key={item.productId}
-                                                className="flex items-center justify-between rounded-[9px] border border-[#F5EEF6] bg-white px-3 py-2"
-                                            >
-                                                <div>
-                                                    <p className="text-[11px] font-semibold text-[#1A1220]">
-                                                        {item.productName} × {item.quantity}
-                                                    </p>
-
-                                                    <p className="mt-0.5 text-[9.5px] text-[#7A6E88]">
-                                                        {peso(item.unitSalesPrice)} each · {peso(item.lineValue)} total
-                                                    </p>
-                                                </div>
-
-                                                <button
-                                                    type="button"
-                                                    onClick={() => removeInclusion(item.productId)}
-                                                    className="text-[10px] font-semibold text-[#9B1C1C] hover:underline"
-                                                >
-                                                    Remove
-                                                </button>
-                                            </div>
-                                        ))
-                                    )}
-                                </div>
-                            </Card>
-
-                            <div className="grid grid-cols-3 gap-3">
-                                <Field label="Discount Type">
-                                    <select
-                                        value={discountType}
-                                        onChange={(e) => {
-                                            setDiscountType(e.target.value as DiscountType);
-                                            setDiscountValue("");
-                                            setError("");
-                                        }}
-                                        className={fieldClass}
-                                    >
-                                        <option value="amount">Amount</option>
-                                        <option value="percentage">Percentage</option>
-                                    </select>
-                                </Field>
-
-                                <Field label={discountType === "percentage" ? "Discount (%)" : "Discount (₱)"}>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        max={discountType === "percentage" ? 100 : originalValue}
-                                        value={discountValue}
-                                        onChange={(e) => {
-                                            setDiscountValue(e.target.value);
-                                            setError("");
-                                        }}
-                                        placeholder={discountType === "percentage" ? "e.g. 10" : "e.g. 500"}
-                                        className={fieldClass}
-                                    />
-                                </Field>
-
-                                <Field label="Status">
-                                    <select
-                                        value={status}
-                                        onChange={(e) => setStatus(e.target.value as "Active" | "Inactive")}
-                                        className={fieldClass}
-                                    >
-                                        <option value="Active">Active</option>
-                                        <option value="Inactive">Inactive</option>
-                                    </select>
-                                </Field>
-                            </div>
-
-                            <div className="grid grid-cols-3 gap-3 rounded-[12px] border border-[#EBE4F0] bg-[#FDFAF4] p-3 text-center">
-                                <SummaryBox label="Original Value" value={peso(originalValue)} />
-                                <SummaryBox
-                                    label="Discount"
-                                    value={
-                                        discountType === "percentage"
-                                            ? `${discountNumber || 0}%`
-                                            : peso(discountNumber)
-                                    }
-                                />
-                                <SummaryBox label="Final Price" value={peso(packagePrice)} strong />
-                            </div>
-
-                            <button
-                                type="submit"
-                                disabled={submitting}
-                                className="w-full rounded-[10px] bg-[#2D1B4E] py-2.5 text-[12px] font-semibold text-white transition hover:bg-[#3D2560] disabled:opacity-60"
-                            >
-                                {submitting
-                                    ? "Saving..."
-                                    : editingId
-                                        ? "Update package"
-                                        : "Save package"}
-                            </button>
-                        </form>
-                    </div>
-                </div>
+            {canManage && (
+                <PackageFormModal
+                    show={form.showForm}
+                    editingId={form.editingId}
+                    error={form.error}
+                    submitting={form.submitting}
+                    name={form.name} setName={form.setName}
+                    description={form.description} setDescription={form.setDescription}
+                    duration={form.duration} setDuration={form.setDuration}
+                    status={form.status} setStatus={form.setStatus}
+                    discountType={form.discountType} setDiscountType={form.setDiscountType}
+                    discountValue={form.discountValue} setDiscountValue={form.setDiscountValue}
+                    inclusions={form.inclusions}
+                    products={products}
+                    selectedProductId={form.selectedProductId} setSelectedProductId={form.setSelectedProductId}
+                    inclusionQty={form.inclusionQty} setInclusionQty={form.setInclusionQty}
+                    originalValue={form.originalValue}
+                    packagePrice={form.packagePrice}
+                    onAddInclusion={() => form.addInclusion(products)}
+                    onRemoveInclusion={form.removeInclusion}
+                    onSubmit={form.handleSubmit}
+                    onClose={() => { form.reset(); form.setShowForm(false); }}
+                />
             )}
         </>
-    );
-}
-
-const fieldClass =
-    "h-[40px] w-full rounded-[9px] border border-[#EBE4F0] bg-white px-3 text-[11px] text-[#1A1220] placeholder:text-[#9B8EA8] outline-none transition focus:border-[#2D1B4E]";
-
-function Card({
-                  children,
-                  className = "",
-              }: {
-    children: ReactNode;
-    className?: string;
-}) {
-    return (
-        <div className={`rounded-[12px] border border-[#EBE4F0] bg-white p-3.5 ${className}`}>
-            {children}
-        </div>
-    );
-}
-
-function CardHeader({
-                        title,
-                        action,
-                    }: {
-    title: string;
-    action?: string;
-}) {
-    return (
-        <div className="mb-3 flex items-center justify-between gap-4">
-            <h2 className="whitespace-nowrap text-[14px] font-medium leading-none text-[#1A1220]">
-                {title}
-            </h2>
-
-            {action && (
-                <span className="shrink-0 whitespace-nowrap text-[10px] font-semibold leading-none text-[#2D1B4E]">
-                    {action}
-                </span>
-            )}
-        </div>
-    );
-}
-
-function PackageCard({
-                         pkg,
-                         peso,
-                         featured = false,
-                         canManage,
-                         onEdit,
-                         onDelete,
-                     }: {
-    pkg: PackageItem;
-    peso: (n: number) => string;
-    featured?: boolean;
-    canManage: boolean;
-    onEdit: () => void;
-    onDelete: () => void;
-}) {
-    const shownInclusions = (pkg.inclusions || []).slice(0, 2);
-    const moreCount = Math.max((pkg.inclusions || []).length - 2, 0);
-
-    return (
-        <div className="overflow-hidden rounded-[10px] border border-[#EBE4F0] bg-white">
-            <div
-                className={`px-3 py-2.5 ${
-                    featured ? "bg-[#C9951A] text-white" : "bg-[#2D1B4E] text-white"
-                }`}
-            >
-                <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                        <p className="truncate text-[11.5px] font-semibold leading-4">
-                            {pkg.name}
-                        </p>
-
-                        <p className="mt-1 text-[15px] font-medium leading-none">
-                            {peso(pkg.package_price)}
-                        </p>
-                    </div>
-
-                    <StatusBadge status={pkg.status} />
-                </div>
-            </div>
-
-            <div className="px-3 py-2.5">
-                <p className="line-clamp-2 min-h-[28px] text-[9.5px] leading-[14px] text-[#7A6E88]">
-                    {pkg.description || "No description"}
-                </p>
-
-                <div className="mt-2 space-y-0.5">
-                    {shownInclusions.length === 0 ? (
-                        <p className="text-[9.5px] text-[#7A6E88]">
-                            No inclusions listed.
-                        </p>
-                    ) : (
-                        shownInclusions.map((item) => (
-                            <p
-                                key={item.productId}
-                                className="truncate text-[9.5px] leading-[14px] text-[#7A6E88]"
-                            >
-                                {item.productName} × {item.quantity}
-                            </p>
-                        ))
-                    )}
-
-                    {moreCount > 0 && (
-                        <p className="text-[9.5px] font-semibold text-[#2D1B4E]">
-                            +{moreCount} more
-                        </p>
-                    )}
-                </div>
-
-                <div className="mt-2.5 flex items-center justify-between border-t border-[#F5EEF6] pt-2">
-                    <p className="text-[9px] text-[#7A6E88]">
-                        {pkg.duration || "N/A"}
-                    </p>
-
-                    {canManage ? (
-                        <div className="flex gap-2">
-                            <button
-                                onClick={onEdit}
-                                className="text-[9.5px] font-semibold text-[#2D1B4E] hover:underline"
-                            >
-                                Edit
-                            </button>
-
-                            <button
-                                onClick={onDelete}
-                                className="text-[9.5px] font-semibold text-[#9B1C1C] hover:underline"
-                            >
-                                Delete
-                            </button>
-                        </div>
-                    ) : (
-                        <p className="text-[9.5px] font-semibold text-[#2D1B4E]">
-                            View only
-                        </p>
-                    )}
-                </div>
-            </div>
-        </div>
-    );
-}
-
-function StatusBadge({ status }: { status: "Active" | "Inactive" }) {
-    return (
-        <span
-            className={`shrink-0 rounded-[5px] px-1.5 py-0.5 text-[8.5px] font-semibold ${
-                status === "Active"
-                    ? "bg-[#EAF3DE] text-[#27500A]"
-                    : "bg-[#E9E1F3] text-[#2D1B4E]"
-            }`}
-        >
-            {status}
-        </span>
-    );
-}
-
-function EmptyState({
-                        title,
-                        detail,
-                    }: {
-    title: string;
-    detail: string;
-}) {
-    return (
-        <div className="flex min-h-[300px] items-center justify-center rounded-[10px] border border-dashed border-[#EBE4F0] bg-[#FDFAF4] px-4 text-center">
-            <div>
-                <p className="text-[12px] font-semibold text-[#1A1220]">
-                    {title}
-                </p>
-
-                <p className="mt-1 text-[10px] leading-4 text-[#7A6E88]">
-                    {detail}
-                </p>
-            </div>
-        </div>
-    );
-}
-
-function Field({
-                   label,
-                   children,
-               }: {
-    label: string;
-    children: ReactNode;
-}) {
-    return (
-        <label className="block">
-            <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-[#7A6E88]">
-                {label}
-            </span>
-
-            {children}
-        </label>
-    );
-}
-
-function SummaryBox({
-                        label,
-                        value,
-                        strong = false,
-                    }: {
-    label: string;
-    value: string;
-    strong?: boolean;
-}) {
-    return (
-        <div>
-            <p className="text-[9.5px] text-[#7A6E88]">{label}</p>
-            <p
-                className={`mt-0.5 text-[13px] ${
-                    strong
-                        ? "font-semibold text-[#2D1B4E]"
-                        : "font-semibold text-[#1A1220]"
-                }`}
-            >
-                {value}
-            </p>
-        </div>
     );
 }

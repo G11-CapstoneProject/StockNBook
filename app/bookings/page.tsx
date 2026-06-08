@@ -1,5 +1,6 @@
 "use client";
 
+import RoleSidebar from "@/components/RoleSidebar";
 import RequirePermission from "@/components/RequirePermission";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -853,7 +854,7 @@ export default function BookingsPage() {
               fontFamily: "Georgia, 'Times New Roman', serif",
             }}
         >
-
+          <RoleSidebar />
 
           <main className="flex-1 overflow-y-auto">
             <div className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">

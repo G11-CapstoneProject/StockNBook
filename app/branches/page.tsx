@@ -1,9 +1,6 @@
 "use client";
 
-<<<<<<< HEAD
-=======
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
->>>>>>> main
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -182,7 +179,7 @@ export default function BranchesPage() {
             style={{ backgroundColor: "#FDFAF4", fontFamily: "Georgia, 'Times New Roman', serif" }}
             className="flex min-h-screen text-[#1A1220]"
         >
-
+            <RoleSidebar />
 
             <main className="flex-1 overflow-y-auto">
                 <div className="flex h-[64px] items-center justify-between border-b border-[#EBE4F0] bg-white px-[18px]">
@@ -375,4 +372,3 @@ function AccessToggle({ label, checked, onChange }: { label: string; checked: bo
         </label>
     );
 }
-

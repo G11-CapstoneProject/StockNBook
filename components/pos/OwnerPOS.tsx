@@ -131,6 +131,60 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                 profit: 0,
             };
 
+    const orderBranchNames = useMemo(() => {
+        const names = new Map<string, string>();
+
+        pos.orders.forEach((order) => {
+            if (order.branchName?.trim()) {
+                names.set(order.id, order.branchName.trim());
+                return;
+            }
+
+            if (order.branchId) {
+                const branch = pos.branches.find(
+                    (item) => String(item.id) === String(order.branchId)
+                );
+
+                if (branch) {
+                    names.set(order.id, branch.branchName);
+                }
+            }
+        });
+
+        // Fallback for older orders without stored branch information.
+        pos.branches.forEach((branch) => {
+            pos.getBranchSales(branch).orders.forEach((order) => {
+                if (!names.has(order.id)) {
+                    names.set(order.id, branch.branchName);
+                }
+            });
+        });
+
+        return names;
+    }, [pos.branches, pos.getBranchSales, pos.orders]);
+
+    const getOrderBranchName = (order: Order) => {
+        if (order.branchName?.trim()) {
+            return order.branchName.trim();
+        }
+
+        if (order.branchId) {
+            const branch = pos.branches.find(
+                (item) => String(item.id) === String(order.branchId)
+            );
+
+            if (branch) {
+                return branch.branchName;
+            }
+        }
+
+        if (!isAllBranchesView && selectedBranch) {
+            return selectedBranch.branchName;
+        }
+
+        return orderBranchNames.get(order.id) || "—";
+    };
+
     const visibleOrders = useMemo(() => {
         const orderId = orderIdQuery.trim().toLowerCase();
 
@@ -471,6 +525,8 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                         title={tableTitle}
                         subtitle={tableSubtitle}
                         orders={visibleOrders}
+                        showBranch
+                        getBranchName={getOrderBranchName}
                         emptyText={
                             hasActiveFilters
                                 ? "No transactions match the current order ID or date filter."

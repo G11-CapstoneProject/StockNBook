@@ -1,6 +1,6 @@
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
-import { RefreshCw } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { CalendarDays, ChevronDown, RefreshCw } from "lucide-react";
+import type { ReactNode } from "react";
 
 export type CartMap = { [key: string]: number };
 
@@ -140,6 +140,8 @@ export type Order = {
     items: OrderItem[];
     total: number;
     date: string;
+    branchId?: number | null;
+    branchName?: string | null;
 };
 
 export type ApiOrder = {
@@ -149,6 +151,10 @@ export type ApiOrder = {
     total?: number;
     orderDate: string;
     createdAt?: string;
+    branchId?: number | string | null;
+    branch_id?: number | string | null;
+    branchName?: string | null;
+    branch_name?: string | null;
 };
 
 export type CartItem = {
@@ -372,28 +378,11 @@ export function StatCard({
     );
 }
 
-function formatCurrentDateTime(value: Date) {
-    const dateLabel = value.toLocaleDateString("en-US", {
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-    });
-
-    const timeLabel = value
-        .toLocaleTimeString("en-US", {
-            hour: "numeric",
-            minute: "2-digit",
-            hour12: true,
-        })
-        .toLowerCase();
-
-    return `${dateLabel} | ${timeLabel}`;
-}
-
 export function POSLayout({
                               role,
                               isOwner,
                               activeBranchName,
+                              currentMonth,
                               onRefresh,
                               children,
                           }: {
@@ -404,19 +393,6 @@ export function POSLayout({
     onRefresh: () => void | Promise<void>;
     children: ReactNode;
 }) {
-    const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
-
-    useEffect(() => {
-        const updateDateTime = () => setCurrentDateTime(new Date());
-
-        updateDateTime();
-        const timer = window.setInterval(updateDateTime, 30_000);
-
-        return () => {
-            window.clearInterval(timer);
-        };
-    }, []);
-
     return (
         <div
             className="flex min-h-screen font-sans text-[#1A1220]"
@@ -440,20 +416,23 @@ export function POSLayout({
                         </div>
 
                         <div className="flex items-center gap-2.5">
-                            <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-                                {currentDateTime
-                                    ? formatCurrentDateTime(currentDateTime)
-                                    : "Loading date..."}
-                            </span>
+                            <button
+                                type="button"
+                                className="inline-flex items-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-3.5 py-2.5 text-sm font-semibold text-[#2B174C] shadow-sm hover:bg-[#F7F1FF]"
+                            >
+                                <CalendarDays size={14} />
+                                {currentMonth}
+                                <ChevronDown size={13} />
+                            </button>
 
                             <button
                                 onClick={() => void onRefresh()}
-                                className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                                title="Refresh"
+                                className="inline-flex items-center gap-2 rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-[#1B0D31]"
+                                title="Refresh sales"
                                 type="button"
                             >
-                                <RefreshCw size={16} />
-                                Refresh
+                                <RefreshCw size={14} />
+                                Refresh sales
                             </button>
                         </div>
                     </div>
@@ -470,11 +449,15 @@ export function OrdersTable({
                                 subtitle,
                                 orders,
                                 emptyText = "No orders yet.",
+                                showBranch = false,
+                                getBranchName,
                             }: {
     title: string;
     subtitle: string;
     orders: Order[];
     emptyText?: string;
+    showBranch?: boolean;
+    getBranchName?: (order: Order) => string;
 }) {
     return (
         <section className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
@@ -488,8 +471,23 @@ export function OrdersTable({
                 </p>
             </div>
 
-            <div className="w-full min-w-0 overflow-hidden">
-                <table className="w-full table-fixed text-sm">
+            <div className="w-full overflow-x-auto">
+                <table
+                    className={`w-full table-fixed text-sm ${
+                        showBranch ? "min-w-[1080px]" : ""
+                    }`}
+                >
+                    {showBranch && (
+                        <colgroup>
+                            <col className="w-[19%]" />
+                            <col className="w-[13%]" />
+                            <col className="w-[14%]" />
+                            <col className="w-[25%]" />
+                            <col className="w-[14%]" />
+                            <col className="w-[15%]" />
+                        </colgroup>
+                    )}
+
                     <thead>
                     <tr className="border-b border-[#E6DDF0]">
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
@@ -498,6 +496,11 @@ export function OrdersTable({
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Customer
                         </th>
+                        {showBranch && (
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
+                                Branch
+                            </th>
+                        )}
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Items
                         </th>
@@ -514,7 +517,7 @@ export function OrdersTable({
                     {orders.length === 0 ? (
                         <tr>
                             <td
-                                colSpan={5}
+                                colSpan={showBranch ? 6 : 5}
                                 className="px-4 py-10 text-center text-sm text-[#9B8AAA]"
                             >
                                 {emptyText}
@@ -533,6 +536,14 @@ export function OrdersTable({
                                 <td className="truncate px-4 py-3 text-sm font-semibold text-[#1A1220]">
                                     {order.customer || "Customer"}
                                 </td>
+
+                                {showBranch && (
+                                    <td className="truncate px-4 py-3 text-sm text-[#7A6A84]">
+                                        {getBranchName?.(order) ||
+                                            order.branchName ||
+                                            "—"}
+                                    </td>
+                                )}
 
                                 <td className="px-4 py-3 text-sm text-[#7A6A84]">
                                     {Array.isArray(order.items) &&

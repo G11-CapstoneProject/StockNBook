@@ -33,44 +33,6 @@ async function safeJson<T>(res: Response): Promise<T> {
     }
 }
 
-function getLocalDatabaseDate(date = new Date()) {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-
-    return `${year}-${month}-${day}`;
-}
-
-function formatOrderDate(orderDate?: string, createdAt?: string) {
-    const rawDate = String(orderDate || createdAt || "").trim();
-
-    if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
-        const [year, month, day] = rawDate.split("-").map(Number);
-
-        return new Date(year, month - 1, day).toLocaleDateString("en-US", {
-            month: "long",
-            day: "numeric",
-            year: "numeric",
-        });
-    }
-
-    const parsedDate = new Date(rawDate);
-
-    if (Number.isNaN(parsedDate.getTime())) {
-        return new Date().toLocaleDateString("en-US", {
-            month: "long",
-            day: "numeric",
-            year: "numeric",
-        });
-    }
-
-    return parsedDate.toLocaleDateString("en-US", {
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-    });
-}
-
 export function usePOS() {
     const [orders, setOrders] = useState<Order[]>(() => readOrders());
     const [cart, setCart] = useState<CartMap>({});
@@ -185,22 +147,42 @@ export function usePOS() {
             }
 
             if (ordersRes.ok && Array.isArray(ordersData.orders)) {
-                const mapped = ordersData.orders.map((o) => ({
-                    id: o.orderId,
-                    customer: o.customerName,
-                    items: o.item
-                        ? o.item.split(",").map((s: string) => {
-                            const [name, qty] = s.split(" x");
+                const mapped = ordersData.orders.map((o) => {
+                    const safeDate =
+                        o.orderDate && o.orderDate !== "0000-00-00"
+                            ? new Date(o.orderDate)
+                            : o.createdAt
+                                ? new Date(o.createdAt)
+                                : new Date();
 
-                            return {
-                                name: name.trim(),
-                                quantity: Number(qty || 0),
-                            };
-                        })
-                        : [],
-                    total: Number(o.total || 0),
-                    date: formatOrderDate(o.orderDate, o.createdAt),
-                }));
+                    const rawBranchId = o.branchId ?? o.branch_id ?? null;
+                    const rawBranchName = o.branchName ?? o.branch_name ?? null;
+
+                    return {
+                        id: o.orderId,
+                        customer: o.customerName,
+                        items: o.item
+                            ? o.item.split(",").map((s: string) => {
+                                const [name, qty] = s.split(" x");
+
+                                return {
+                                    name: name.trim(),
+                                    quantity: Number(qty || 0),
+                                };
+                            })
+                            : [],
+                        total: Number(o.total || 0),
+                        date: safeDate.toLocaleDateString("en-US", {
+                            month: "long",
+                            day: "numeric",
+                            year: "numeric",
+                        }),
+                        branchId: rawBranchId ? Number(rawBranchId) : null,
+                        branchName: rawBranchName
+                            ? String(rawBranchName)
+                            : null,
+                    };
+                });
 
                 setOrders(mapped);
                 sessionStorage.setItem("stocknbook_orders", JSON.stringify(mapped));
@@ -492,13 +474,15 @@ export function usePOS() {
         });
 
         const now = new Date();
-        const dbDate = getLocalDatabaseDate(now);
-        const datePart = dbDate.replaceAll("-", "");
+
+        const datePart = now.toISOString().slice(0, 10).replaceAll("-", "");
+        const timePart = now.toTimeString().slice(0, 8).replaceAll(":", "");
 
         const todaysCount = existingOrders.filter((o) => o.date === todayKey).length;
 
         const customerName = `Customer ${todaysCount + 1}`;
-        const orderId = `POS-${datePart}-${Date.now()}`;
+        const orderId = `POS-${datePart}-${timePart}`;
+        const dbDate = now.toISOString().slice(0, 10);
 
         const newOrder: Order = {
             id: orderId,
@@ -506,6 +490,8 @@ export function usePOS() {
             items,
             total,
             date: todayKey,
+            branchId: activeBranchId ? Number(activeBranchId) : null,
+            branchName: activeBranchName || null,
         };
 
         const token = sessionStorage.getItem("token");
@@ -649,11 +635,15 @@ export function usePOS() {
             (p) => String(p.branchId || "") === String(branch.id)
         );
 
-        const branchOrders = orders.filter((order) =>
-            order.items.some((item) =>
+        const branchOrders = orders.filter((order) => {
+            if (order.branchId) {
+                return String(order.branchId) === String(branch.id);
+            }
+
+            return order.items.some((item) =>
                 branchBuyableItems.some((product) => product.name === item.name)
-            )
-        );
+            );
+        });
 
         const sales = branchOrders.reduce(
             (sum, order) => sum + Number(order.total || 0),

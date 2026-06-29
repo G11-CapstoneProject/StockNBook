@@ -1,10 +1,24 @@
 "use client";
 
-import { RefreshCw, Store } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+    Building2,
+    CalendarDays,
+    Check,
+    ChevronDown,
+    RefreshCw,
+    Search,
+    X,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import type { UsePOSReturn } from "@/hooks/usePOS";
-import { OrdersTable, StatCard, peso } from "./_shared";
+import {
+    OrdersTable,
+    StatCard,
+    peso,
+    type Branch,
+    type Order,
+} from "./_shared";
 
 function formatCurrentDateTime(value: Date) {
     const dateLabel = value.toLocaleDateString("en-US", {
@@ -24,8 +38,45 @@ function formatCurrentDateTime(value: Date) {
     return `${dateLabel} | ${timeLabel}`;
 }
 
+function toTransactionDateValue(value: string) {
+    const parsed = new Date(value);
+
+    if (Number.isNaN(parsed.getTime())) {
+        return "";
+    }
+
+    const year = parsed.getFullYear();
+    const month = String(parsed.getMonth() + 1).padStart(2, "0");
+    const day = String(parsed.getDate()).padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
+}
+
+function formatTransactionDate(value: string) {
+    if (!value) return "";
+
+    const parsed = new Date(`${value}T00:00:00`);
+
+    if (Number.isNaN(parsed.getTime())) {
+        return value;
+    }
+
+    return parsed.toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+    });
+}
+
 export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
+    const [isAllBranchesView, setIsAllBranchesView] = useState(true);
+    const [branchQuery, setBranchQuery] = useState("All Branches");
+    const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
+    const [orderIdQuery, setOrderIdQuery] = useState("");
+    const [transactionDate, setTransactionDate] = useState("");
+
+    const branchSelectorRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -38,6 +89,118 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
             window.clearInterval(timer);
         };
     }, []);
+
+    const selectedBranch = useMemo(() => {
+        if (isAllBranchesView) return null;
+
+        return (
+            pos.branches.find(
+                (branch) =>
+                    String(branch.id) === String(pos.selectedSalesBranchId)
+            ) ?? null
+        );
+    }, [
+        isAllBranchesView,
+        pos.branches,
+        pos.selectedSalesBranchId,
+    ]);
+
+    const matchingBranches = useMemo(() => {
+        const query = branchQuery.trim().toLowerCase();
+
+        if (!query || query === "all branches") {
+            return pos.branches;
+        }
+
+        return pos.branches.filter((branch) =>
+            branch.branchName.toLowerCase().includes(query)
+        );
+    }, [branchQuery, pos.branches]);
+
+    const scopeSales = isAllBranchesView
+        ? {
+            orders: pos.orders,
+            sales: pos.totalRevenue,
+            profit: pos.totalProfit,
+        }
+        : selectedBranch
+            ? pos.getBranchSales(selectedBranch)
+            : {
+                orders: [] as Order[],
+                sales: 0,
+                profit: 0,
+            };
+
+    const visibleOrders = useMemo(() => {
+        const orderId = orderIdQuery.trim().toLowerCase();
+
+        return scopeSales.orders.filter((order) => {
+            const matchesOrderId =
+                !orderId ||
+                String(order.id || "").toLowerCase().includes(orderId);
+
+            const matchesDate =
+                !transactionDate ||
+                toTransactionDateValue(order.date) === transactionDate;
+
+            return matchesOrderId && matchesDate;
+        });
+    }, [orderIdQuery, scopeSales.orders, transactionDate]);
+
+    useEffect(() => {
+        const handleOutsideClick = (event: MouseEvent) => {
+            if (
+                branchSelectorRef.current &&
+                !branchSelectorRef.current.contains(event.target as Node)
+            ) {
+                setIsBranchMenuOpen(false);
+                setBranchQuery(
+                    isAllBranchesView
+                        ? "All Branches"
+                        : selectedBranch?.branchName || ""
+                );
+            }
+        };
+
+        document.addEventListener("mousedown", handleOutsideClick);
+
+        return () => {
+            document.removeEventListener("mousedown", handleOutsideClick);
+        };
+    }, [isAllBranchesView, selectedBranch]);
+
+    const handleSelectAllBranches = () => {
+        setIsAllBranchesView(true);
+        pos.setSelectedSalesBranchId("");
+        setBranchQuery("All Branches");
+        setIsBranchMenuOpen(false);
+    };
+
+    const handleSelectBranch = (branch: Branch) => {
+        setIsAllBranchesView(false);
+        pos.setSelectedSalesBranchId(String(branch.id));
+        setBranchQuery(branch.branchName);
+        setIsBranchMenuOpen(false);
+    };
+
+    const handleRefresh = async () => {
+        await pos.refreshAll();
+        setCurrentDateTime(new Date());
+    };
+
+    const tableTitle = isAllBranchesView
+        ? "All Branches Orders"
+        : `${selectedBranch?.branchName || "Branch"} Orders`;
+
+    const tableSubtitle = isAllBranchesView
+        ? `${visibleOrders.length} transaction${
+            visibleOrders.length !== 1 ? "s" : ""
+        } shown across all branches.`
+        : `${visibleOrders.length} transaction${
+            visibleOrders.length !== 1 ? "s" : ""
+        } shown for ${selectedBranch?.branchName || "this branch"}.`;
+
+    const hasActiveFilters = Boolean(orderIdQuery.trim() || transactionDate);
 
     return (
         <div
@@ -53,12 +216,6 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                             <h1 className="text-[25px] font-bold text-[#1A1220]">
                                 POS / Sales
                             </h1>
-
-                            <span className="rounded-lg bg-[#EFE8F8] px-3.5 py-1.5 text-sm font-medium text-[#4E2C66]">
-                                {pos.isOwner
-                                    ? "Sales Overview"
-                                    : pos.activeBranchName || "Assigned Branch"}
-                            </span>
                         </div>
 
                         <div className="flex items-center gap-2.5">
@@ -70,7 +227,7 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
 
                             <button
                                 type="button"
-                                onClick={() => void pos.refreshAll()}
+                                onClick={() => void handleRefresh()}
                                 aria-label="Refresh POS details"
                                 title="Refresh"
                                 className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
@@ -82,134 +239,246 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                     </div>
                 </header>
 
-                <div className="px-6 py-4">
-                    <div className="mb-3 grid gap-3 md:grid-cols-3">
-                        <StatCard label="Total Orders" value={pos.orders.length} />
-                        <StatCard label="Total Sales" value={peso(pos.totalRevenue)} />
+                <div className="space-y-3 px-6 py-4">
+                    <div className="grid gap-3 md:grid-cols-3">
+                        <StatCard
+                            label="Total Orders"
+                            value={scopeSales.orders.length}
+                        />
+                        <StatCard
+                            label="Total Sales"
+                            value={peso(scopeSales.sales)}
+                        />
                         <StatCard
                             label="Total Revenue"
-                            value={peso(pos.totalProfit)}
+                            value={peso(scopeSales.profit)}
                         />
                     </div>
 
-                    <div className="space-y-3">
-                        <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-                            <div className="mb-3 flex items-center gap-2">
-                                <Store size={16} className="text-[#5F4E75]" />
+                    <section className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_220px_290px]">
+                        <div className="relative">
+                            <Search
+                                size={15}
+                                className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
+                            />
 
-                                <div>
-                                    <h2 className="text-[16px] font-bold text-[#1A1220]">
-                                        Sales by Branch
-                                    </h2>
-                                    <p className="text-xs text-[#7A6A84]">
-                                        Tap a branch to view its orders.
-                                    </p>
-                                </div>
-                            </div>
+                            <input
+                                value={orderIdQuery}
+                                onChange={(event) =>
+                                    setOrderIdQuery(event.target.value)
+                                }
+                                placeholder="Search order ID..."
+                                aria-label="Search order ID"
+                                className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                            />
+                        </div>
 
-                            {pos.branches.length === 0 ? (
-                                <div className="flex min-h-[140px] items-center justify-center rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFCF7]">
-                                    <p className="text-sm text-[#9B8AAA]">
-                                        No branches found.
-                                    </p>
-                                </div>
-                            ) : (
-                                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                                    {pos.branches.map((branch) => {
-                                        const branchData = pos.getBranchSales(branch);
-                                        const isSelected =
-                                            pos.selectedSalesBranchId ===
-                                            String(branch.id);
+                        <div className="relative">
+                            <CalendarDays
+                                size={15}
+                                className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
+                            />
 
-                                        return (
-                                            <button
-                                                key={branch.id}
-                                                type="button"
-                                                onClick={() =>
-                                                    pos.setSelectedSalesBranchId(
-                                                        String(branch.id)
-                                                    )
-                                                }
-                                                className={`rounded-[14px] border p-3 text-left transition ${
-                                                    isSelected
-                                                        ? "border-[#2B174C] bg-[#F7F1FF] shadow-sm"
-                                                        : "border-[#E6DDF0] bg-[#FFFCF7] hover:border-[#BFAED4]"
-                                                }`}
-                                            >
-                                                <div className="flex items-start justify-between gap-2">
-                                                    <p className="truncate text-sm font-semibold text-[#1A1220]">
+                            <input
+                                type="date"
+                                value={transactionDate}
+                                onChange={(event) =>
+                                    setTransactionDate(event.target.value)
+                                }
+                                aria-label="Filter transactions by date"
+                                className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white px-10 pr-9 text-sm font-medium text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                            />
+
+                            {transactionDate && (
+                                <button
+                                    type="button"
+                                    onClick={() => setTransactionDate("")}
+                                    aria-label="Clear transaction date"
+                                    title="Clear date"
+                                    className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C]"
+                                >
+                                    <X size={15} />
+                                </button>
+                            )}
+                        </div>
+
+                        <div ref={branchSelectorRef} className="relative">
+                            <Building2
+                                size={15}
+                                className="pointer-events-none absolute left-4 top-1/2 z-10 -translate-y-1/2 text-[#9B8AAA]"
+                            />
+
+                            <input
+                                value={branchQuery}
+                                onFocus={() => {
+                                    setIsBranchMenuOpen(true);
+
+                                    if (
+                                        branchQuery === "All Branches" ||
+                                        branchQuery === selectedBranch?.branchName
+                                    ) {
+                                        setBranchQuery("");
+                                    }
+                                }}
+                                onChange={(event) => {
+                                    setBranchQuery(event.target.value);
+                                    setIsBranchMenuOpen(true);
+                                }}
+                                onKeyDown={(event) => {
+                                    if (event.key === "Escape") {
+                                        setIsBranchMenuOpen(false);
+                                        event.currentTarget.blur();
+                                    }
+                                }}
+                                placeholder="Search or select branch..."
+                                aria-label="Search or select sales branch"
+                                role="combobox"
+                                aria-expanded={isBranchMenuOpen}
+                                aria-controls="owner-pos-branch-options"
+                                aria-autocomplete="list"
+                                className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white px-10 pr-10 text-sm font-semibold text-[#1A1220] outline-none shadow-sm placeholder:font-normal placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                            />
+
+                            <button
+                                type="button"
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => {
+                                    setIsBranchMenuOpen((isOpen) => !isOpen);
+                                    setBranchQuery("");
+                                }}
+                                aria-label="Show sales branch choices"
+                                className="absolute right-0 top-0 flex h-full w-10 items-center justify-center text-[#2B174C]"
+                            >
+                                <ChevronDown
+                                    size={14}
+                                    className={`transition ${
+                                        isBranchMenuOpen ? "rotate-180" : ""
+                                    }`}
+                                />
+                            </button>
+
+                            {isBranchMenuOpen && (
+                                <div
+                                    id="owner-pos-branch-options"
+                                    role="listbox"
+                                    className="absolute z-30 mt-1 max-h-60 w-full overflow-y-auto rounded-xl border border-[#D8CBE7] bg-white py-1 shadow-lg"
+                                >
+                                    <button
+                                        type="button"
+                                        role="option"
+                                        aria-selected={isAllBranchesView}
+                                        onMouseDown={(event) =>
+                                            event.preventDefault()
+                                        }
+                                        onClick={handleSelectAllBranches}
+                                        className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition ${
+                                            isAllBranchesView
+                                                ? "bg-[#F1E9FF] font-semibold text-[#2B174C]"
+                                                : "text-[#1A1220] hover:bg-[#F7F1FF]"
+                                        }`}
+                                    >
+                                        <span>All Branches</span>
+
+                                        {isAllBranchesView && (
+                                            <Check
+                                                size={15}
+                                                className="shrink-0"
+                                            />
+                                        )}
+                                    </button>
+
+                                    {matchingBranches.length === 0 ? (
+                                        <p className="px-4 py-3 text-sm text-[#7A6A84]">
+                                            No matching branch found.
+                                        </p>
+                                    ) : (
+                                        matchingBranches.map((branch) => {
+                                            const isSelected =
+                                                !isAllBranchesView &&
+                                                String(branch.id) ===
+                                                String(
+                                                    pos.selectedSalesBranchId
+                                                );
+
+                                            return (
+                                                <button
+                                                    key={branch.id}
+                                                    type="button"
+                                                    role="option"
+                                                    aria-selected={isSelected}
+                                                    onMouseDown={(event) =>
+                                                        event.preventDefault()
+                                                    }
+                                                    onClick={() =>
+                                                        handleSelectBranch(
+                                                            branch
+                                                        )
+                                                    }
+                                                    className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition ${
+                                                        isSelected
+                                                            ? "bg-[#F1E9FF] font-semibold text-[#2B174C]"
+                                                            : "text-[#1A1220] hover:bg-[#F7F1FF]"
+                                                    }`}
+                                                >
+                                                    <span className="truncate">
                                                         {branch.branchName}
-                                                    </p>
+                                                    </span>
 
-                                                    <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-[#6A5D6F]">
-                                                {branchData.orders.length}
-                                            </span>
-                                                </div>
-
-                                                <div className="mt-3">
-                                                    <p className="text-xs font-semibold text-[#806A8C]">
-                                                        Sales
-                                                    </p>
-                                                    <p className="text-[19px] font-bold text-[#1A1220]">
-                                                        {peso(branchData.sales)}
-                                                    </p>
-                                                </div>
-
-                                                <div className="mt-3 grid grid-cols-2 gap-2">
-                                                    <div className="rounded-lg bg-white px-2 py-2">
-                                                        <p className="text-xs text-[#7A6A84]">
-                                                            Orders
-                                                        </p>
-                                                        <p className="text-sm font-semibold text-[#1A1220]">
-                                                            {
-                                                                branchData.orders
-                                                                    .length
-                                                            }
-                                                        </p>
-                                                    </div>
-
-                                                    <div className="rounded-lg bg-white px-2 py-2">
-                                                        <p className="text-xs text-[#7A6A84]">
-                                                            Revenue
-                                                        </p>
-                                                        <p className="text-sm font-semibold text-[#1A1220]">
-                                                            {peso(branchData.profit)}
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                            </button>
-                                        );
-                                    })}
+                                                    {isSelected && (
+                                                        <Check
+                                                            size={15}
+                                                            className="shrink-0"
+                                                        />
+                                                    )}
+                                                </button>
+                                            );
+                                        })
+                                    )}
                                 </div>
                             )}
-                        </section>
+                        </div>
+                    </section>
 
-                        {!pos.selectedBranch || !pos.selectedBranchData ? (
-                            <section className="overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm">
-                                <div className="border-b border-[#E6DDF0] bg-white px-3 py-3">
-                                    <h3 className="text-[16px] font-bold text-[#1A1220]">
-                                        Branch Orders
-                                    </h3>
-                                    <p className="text-xs text-[#7A6A84]">
-                                        Select a branch above to view its order list.
-                                    </p>
-                                </div>
+                    {hasActiveFilters && (
+                        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-2.5">
+                            <p className="text-xs text-[#7A6A84]">
+                                Showing filtered transactions
+                                {transactionDate
+                                    ? ` for ${formatTransactionDate(
+                                        transactionDate
+                                    )}`
+                                    : ""}
+                                {orderIdQuery.trim()
+                                    ? ` matching “${orderIdQuery.trim()}”`
+                                    : ""}
+                                .
+                            </p>
 
-                                <div className="flex min-h-[160px] items-center justify-center bg-white">
-                                    <p className="text-sm text-[#9B8AAA]">
-                                        No branch selected yet.
-                                    </p>
-                                </div>
-                            </section>
-                        ) : (
-                            <OrdersTable
-                                title={`${pos.selectedBranch.branchName} Orders`}
-                                subtitle={`${pos.selectedBranchData.orders.length} orders for this branch.`}
-                                orders={pos.selectedBranchData.orders}
-                                emptyText="No orders found for this branch."
-                            />
-                        )}
-                    </div>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setOrderIdQuery("");
+                                    setTransactionDate("");
+                                }}
+                                className="text-xs font-semibold text-[#2B174C] transition hover:text-[#5B2FC6]"
+                            >
+                                Clear filters
+                            </button>
+                        </div>
+                    )}
+
+                    <OrdersTable
+                        title={tableTitle}
+                        subtitle={tableSubtitle}
+                        orders={visibleOrders}
+                        emptyText={
+                            hasActiveFilters
+                                ? "No transactions match the current order ID or date filter."
+                                : isAllBranchesView
+                                    ? "No orders found across all branches."
+                                    : "No orders found for this branch."
+                        }
+                    />
                 </div>
             </main>
         </div>

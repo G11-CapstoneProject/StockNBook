@@ -87,21 +87,49 @@ function formatCurrentDateTime(value: Date) {
     return `${dateLabel} | ${timeLabel}`;
 }
 
+
+function PackageSummaryCard({
+                                title,
+                                value,
+                                detail,
+                            }: {
+    title: string;
+    value: number;
+    detail: string;
+}) {
+    return (
+        <div className="min-h-[112px] rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
+            <p className="text-sm font-semibold text-[#1A1220]">
+                {title}
+            </p>
+
+            <p className="mt-2 text-[25px] font-bold leading-none text-[#1A1220]">
+                {value}
+            </p>
+
+            <p className="mt-2 text-xs text-[#7A6A84]">
+                {detail}
+            </p>
+        </div>
+    );
+}
+
 export default function OwnerPackages() {
     const [branches, setBranches] = useState<Branch[]>([]);
     const [selectedBranchId, setSelectedBranchId] = useState<number | null>(
         null
     );
+    const [isAllBranchesView, setIsAllBranchesView] = useState(true);
     const [packages, setPackages] = useState<PackageItem[]>([]);
-    const [loadedPackageBranchId, setLoadedPackageBranchId] = useState<
-        number | null
+    const [loadedPackageScope, setLoadedPackageScope] = useState<
+        number | "all" | null
     >(null);
 
     const [search, setSearch] = useState("");
     const [selectedCategory, setSelectedCategory] =
         useState<PackageCategory>("All");
 
-    const [branchQuery, setBranchQuery] = useState("");
+    const [branchQuery, setBranchQuery] = useState("All Branches");
     const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
 
     const [loadingBranches, setLoadingBranches] = useState(true);
@@ -115,6 +143,10 @@ export default function OwnerPackages() {
     const selectedBranch =
         branches.find((branch) => branch.id === selectedBranchId) ?? null;
 
+    const selectedScopeLabel = isAllBranchesView
+        ? "All Branches"
+        : selectedBranch?.name || "All Branches";
+
     const matchingBranches = useMemo(() => {
         const query = branchQuery.trim().toLowerCase();
 
@@ -125,58 +157,102 @@ export default function OwnerPackages() {
         );
     }, [branches, branchQuery]);
 
-    const loadBranches = useCallback(async (signal?: AbortSignal) => {
-        setLoadingBranches(true);
-        setError("");
+    const loadBranches = useCallback(
+        async (signal?: AbortSignal): Promise<Branch[]> => {
+            setLoadingBranches(true);
+            setError("");
 
-        try {
+            try {
+                const token = getToken();
+
+                const response = await fetch("/api/branches", {
+                    method: "GET",
+                    headers: token ? { Authorization: `Bearer ${token}` } : {},
+                    signal,
+                });
+
+                if (!response.ok) {
+                    throw new Error("Unable to load branches.");
+                }
+
+                const data = (await response.json()) as BranchesResponse;
+                const loadedBranches = Array.isArray(data.branches)
+                    ? data.branches
+                        .map(normalizeBranch)
+                        .filter((branch): branch is Branch => branch !== null)
+                    : [];
+
+                if (signal?.aborted) return [];
+
+                setBranches(loadedBranches);
+
+                setSelectedBranchId((currentBranchId) => {
+                    if (currentBranchId === null) return null;
+
+                    const isStillAvailable = loadedBranches.some(
+                        (branch) => branch.id === currentBranchId
+                    );
+
+                    if (!isStillAvailable) {
+                        setIsAllBranchesView(true);
+                        setBranchQuery("All Branches");
+                        return null;
+                    }
+
+                    return currentBranchId;
+                });
+
+                return loadedBranches;
+            } catch (requestError) {
+                if (signal?.aborted) return [];
+
+                console.error("OWNER PACKAGES BRANCH ERROR:", requestError);
+                setBranches([]);
+                setSelectedBranchId(null);
+                setIsAllBranchesView(true);
+                setPackages([]);
+                setLoadedPackageScope(null);
+                setBranchQuery("All Branches");
+                setError("Unable to load branches. Please refresh and try again.");
+                return [];
+            } finally {
+                if (!signal?.aborted) {
+                    setLoadingBranches(false);
+                }
+            }
+        },
+        []
+    );
+
+    const requestPackagesForBranch = useCallback(
+        async (branchId: number, signal?: AbortSignal): Promise<PackageItem[]> => {
             const token = getToken();
 
-            const response = await fetch("/api/branches", {
-                method: "GET",
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
+            const response = await fetch("/api/packages", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify({
+                    action: "get_packages",
+                    branch_id: branchId,
+                }),
                 signal,
             });
 
             if (!response.ok) {
-                throw new Error("Unable to load branches.");
+                throw new Error("Unable to load packages.");
             }
 
-            const data = (await response.json()) as BranchesResponse;
-            const loadedBranches = Array.isArray(data.branches)
-                ? data.branches
-                    .map(normalizeBranch)
-                    .filter((branch): branch is Branch => branch !== null)
-                : [];
+            const data = (await response.json()) as PackagesResponse;
 
-            if (signal?.aborted) return;
+            if (signal?.aborted) return [];
 
-            setBranches(loadedBranches);
-
-            // Do not assign a default branch. The owner must choose one.
-            setSelectedBranchId((currentBranchId) => {
-                const isStillAvailable = loadedBranches.some(
-                    (branch) => branch.id === currentBranchId
-                );
-
-                return isStillAvailable ? currentBranchId : null;
-            });
-        } catch (requestError) {
-            if (signal?.aborted) return;
-
-            console.error("OWNER PACKAGES BRANCH ERROR:", requestError);
-            setBranches([]);
-            setSelectedBranchId(null);
-            setPackages([]);
-            setLoadedPackageBranchId(null);
-            setBranchQuery("");
-            setError("Unable to load branches. Please refresh and try again.");
-        } finally {
-            if (!signal?.aborted) {
-                setLoadingBranches(false);
-            }
-        }
-    }, []);
+            return Array.isArray(data.packages) ? data.packages : [];
+        },
+        []
+    );
 
     const loadPackagesForBranch = useCallback(
         async (branchId: number, signal?: AbortSignal) => {
@@ -184,39 +260,21 @@ export default function OwnerPackages() {
             setError("");
 
             try {
-                const token = getToken();
-
-                const response = await fetch("/api/packages", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                    },
-                    body: JSON.stringify({
-                        action: "get_packages",
-                        branch_id: branchId,
-                    }),
-                    signal,
-                });
-
-                if (!response.ok) {
-                    throw new Error("Unable to load packages.");
-                }
-
-                const data = (await response.json()) as PackagesResponse;
+                const branchPackages = await requestPackagesForBranch(
+                    branchId,
+                    signal
+                );
 
                 if (signal?.aborted) return;
 
-                setPackages(
-                    Array.isArray(data.packages) ? data.packages : []
-                );
-                setLoadedPackageBranchId(branchId);
+                setPackages(branchPackages);
+                setLoadedPackageScope(branchId);
             } catch (requestError) {
                 if (signal?.aborted) return;
 
                 console.error("OWNER PACKAGES LOAD ERROR:", requestError);
                 setPackages([]);
-                setLoadedPackageBranchId(branchId);
+                setLoadedPackageScope(branchId);
                 setError(
                     "Unable to load packages for this branch. Please try again."
                 );
@@ -226,7 +284,47 @@ export default function OwnerPackages() {
                 }
             }
         },
-        []
+        [requestPackagesForBranch]
+    );
+
+    const loadPackagesForAllBranches = useCallback(
+        async (branchList: Branch[], signal?: AbortSignal) => {
+            setLoadingPackages(true);
+            setError("");
+
+            try {
+                if (branchList.length === 0) {
+                    setPackages([]);
+                    setLoadedPackageScope("all");
+                    return;
+                }
+
+                const packageGroups = await Promise.all(
+                    branchList.map((branch) =>
+                        requestPackagesForBranch(branch.id, signal)
+                    )
+                );
+
+                if (signal?.aborted) return;
+
+                setPackages(packageGroups.flat());
+                setLoadedPackageScope("all");
+            } catch (requestError) {
+                if (signal?.aborted) return;
+
+                console.error("OWNER PACKAGES ALL BRANCHES LOAD ERROR:", requestError);
+                setPackages([]);
+                setLoadedPackageScope("all");
+                setError(
+                    "Unable to load packages for all branches. Please try again."
+                );
+            } finally {
+                if (!signal?.aborted) {
+                    setLoadingPackages(false);
+                }
+            }
+        },
+        [requestPackagesForBranch]
     );
 
     useEffect(() => {
@@ -243,19 +341,33 @@ export default function OwnerPackages() {
     }, [loadBranches]);
 
     useEffect(() => {
-        if (!selectedBranchId) return;
+        if (loadingBranches) return;
 
         const controller = new AbortController();
 
         const frameId = window.requestAnimationFrame(() => {
-            void loadPackagesForBranch(selectedBranchId, controller.signal);
+            if (isAllBranchesView) {
+                void loadPackagesForAllBranches(branches, controller.signal);
+                return;
+            }
+
+            if (selectedBranchId) {
+                void loadPackagesForBranch(selectedBranchId, controller.signal);
+            }
         });
 
         return () => {
             window.cancelAnimationFrame(frameId);
             controller.abort();
         };
-    }, [selectedBranchId, loadPackagesForBranch]);
+    }, [
+        branches,
+        isAllBranchesView,
+        loadPackagesForAllBranches,
+        loadPackagesForBranch,
+        loadingBranches,
+        selectedBranchId,
+    ]);
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -276,11 +388,7 @@ export default function OwnerPackages() {
             ) {
                 setIsBranchMenuOpen(false);
 
-                if (selectedBranch) {
-                    setBranchQuery(selectedBranch.name);
-                } else {
-                    setBranchQuery("");
-                }
+                setBranchQuery(selectedScopeLabel);
             }
         };
 
@@ -292,7 +400,7 @@ export default function OwnerPackages() {
                 closeBranchMenuOnOutsideClick
             );
         };
-    }, [selectedBranch]);
+    }, [selectedScopeLabel]);
 
     const filteredPackages = useMemo(() => {
         const query = search.trim().toLowerCase();
@@ -312,39 +420,60 @@ export default function OwnerPackages() {
         });
     }, [packages, search, selectedCategory]);
 
-    const hasLoadedSelectedBranch =
-        selectedBranchId !== null &&
-        loadedPackageBranchId === selectedBranchId;
+    const hasLoadedSelectedScope = isAllBranchesView
+        ? loadedPackageScope === "all"
+        : selectedBranchId !== null &&
+        loadedPackageScope === selectedBranchId;
+
+    const totalPackages = packages.length;
+    const activePackages = packages.filter(
+        (pkg) => String(pkg.status || "").toLowerCase() === "active"
+    ).length;
+    const inactivePackages = packages.filter(
+        (pkg) => String(pkg.status || "").toLowerCase() === "inactive"
+    ).length;
+
+    const handleSelectAllBranches = () => {
+        setIsAllBranchesView(true);
+        setSelectedBranchId(null);
+        setBranchQuery("All Branches");
+        setIsBranchMenuOpen(false);
+        setSearch("");
+        setSelectedCategory("All");
+        setPackages([]);
+        setLoadedPackageScope(null);
+    };
 
     const handleSelectBranch = (branch: Branch) => {
+        setIsAllBranchesView(false);
         setSelectedBranchId(branch.id);
         setBranchQuery(branch.name);
         setIsBranchMenuOpen(false);
         setSearch("");
         setSelectedCategory("All");
         setPackages([]);
-        setLoadedPackageBranchId(null);
+        setLoadedPackageScope(null);
     };
 
     const handleBranchInputFocus = () => {
         setIsBranchMenuOpen(true);
 
-        if (selectedBranch && branchQuery === selectedBranch.name) {
+        if (branchQuery === selectedScopeLabel) {
             setBranchQuery("");
         }
     };
 
     const handleRefresh = async () => {
-        const branchIdToRefresh = selectedBranchId;
-
         setIsRefreshing(true);
 
         try {
             // Only reloads branch/package data. It does not reload the page.
-            await loadBranches();
+            const latestBranches = await loadBranches();
 
-            if (branchIdToRefresh) {
-                await loadPackagesForBranch(branchIdToRefresh);
+            if (isAllBranchesView) {
+                await loadPackagesForAllBranches(latestBranches);
+            } else if (selectedBranchId) {
+                await loadPackagesForBranch(selectedBranchId);
             }
         } finally {
             setIsRefreshing(false);
@@ -388,6 +517,36 @@ export default function OwnerPackages() {
 
             <section className="px-6 py-4 font-sans">
                 <div className="space-y-3">
+                    <div className="grid gap-3 md:grid-cols-3">
+                        <PackageSummaryCard
+                            title="Total Packages"
+                            value={totalPackages}
+                            detail={
+                                isAllBranchesView
+                                    ? "Packages across all branches"
+                                    : "Packages in the selected branch"
+                            }
+                        />
+                        <PackageSummaryCard
+                            title="Active Packages"
+                            value={activePackages}
+                            detail={
+                                isAllBranchesView
+                                    ? "Available across all branches"
+                                    : "Available for customer booking"
+                            }
+                        />
+                        <PackageSummaryCard
+                            title="Inactive Packages"
+                            value={inactivePackages}
+                            detail={
+                                isAllBranchesView
+                                    ? "Inactive across all branches"
+                                    : "Not currently available"
+                            }
+                        />
+                    </div>
+
                     <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_290px]">
                         <div className="relative">
                             <Search
@@ -399,9 +558,11 @@ export default function OwnerPackages() {
                                 onChange={(event) =>
                                     setSearch(event.target.value)
                                 }
-                                disabled={!selectedBranchId}
+                                disabled={
+                                    !isAllBranchesView && !selectedBranchId
+                                }
                                 placeholder={
-                                    selectedBranchId
+                                    isAllBranchesView || selectedBranchId
                                         ? "Search packages..."
                                         : "Select a branch first"
                                 }
@@ -469,6 +630,30 @@ export default function OwnerPackages() {
                                     className="absolute z-30 mt-1 max-h-60 w-full overflow-y-auto rounded-xl border border-[#D8CBE7] bg-white py-1 shadow-lg"
                                     role="listbox"
                                 >
+                                    <button
+                                        type="button"
+                                        role="option"
+                                        aria-selected={isAllBranchesView}
+                                        onMouseDown={(event) =>
+                                            event.preventDefault()
+                                        }
+                                        onClick={handleSelectAllBranches}
+                                        className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition ${
+                                            isAllBranchesView
+                                                ? "bg-[#F1E9FF] font-semibold text-[#2B174C]"
+                                                : "text-[#1A1220] hover:bg-[#F7F1FF]"
+                                        }`}
+                                    >
+                                        <span>All Branches</span>
+
+                                        {isAllBranchesView && (
+                                            <Check
+                                                size={15}
+                                                className="shrink-0"
+                                            />
+                                        )}
+                                    </button>
+
                                     {matchingBranches.length === 0 ? (
                                         <p className="px-4 py-3 text-sm text-[#7A6A84]">
                                             No matching branch found.
@@ -517,7 +702,7 @@ export default function OwnerPackages() {
                         </div>
                     </div>
 
-                    {selectedBranchId && (
+                    {(isAllBranchesView || selectedBranchId) && (
                         <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
                             <div className="mb-2 flex items-center justify-between gap-3">
                                 <h2 className="text-sm font-bold text-[#1A1220]">
@@ -572,19 +757,23 @@ export default function OwnerPackages() {
                         <div className="mb-3 flex items-center justify-between gap-4">
                             <div>
                                 <h2 className="text-[16px] font-bold text-[#1A1220]">
-                                    {selectedBranch
-                                        ? `${selectedBranch.name} Package List`
-                                        : "Branch Package List"}
+                                    {isAllBranchesView
+                                        ? "All Branches Package List"
+                                        : selectedBranch
+                                            ? `${selectedBranch.name} Package List`
+                                            : "Branch Package List"}
                                 </h2>
 
                                 <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                    {selectedBranch
-                                        ? "Packages available in the selected branch."
-                                        : "Choose a branch using the branch selector above."}
+                                    {isAllBranchesView
+                                        ? "Packages available across all branches."
+                                        : selectedBranch
+                                            ? "Packages available in the selected branch."
+                                            : "Choose a branch using the branch selector above."}
                                 </p>
                             </div>
 
-                            {selectedBranchId && (
+                            {(isAllBranchesView || selectedBranchId) && (
                                 <span className="shrink-0 text-xs font-semibold text-[#806A8C]">
                                     {filteredPackages.length} package
                                     {filteredPackages.length !== 1
@@ -599,12 +788,7 @@ export default function OwnerPackages() {
                                 title="Loading branches..."
                                 detail="Please wait while branch choices are being loaded."
                             />
-                        ) : !selectedBranchId ? (
-                            <EmptyState
-                                title="Select a branch"
-                                detail="Search or choose a branch above to view its packages."
-                            />
-                        ) : loadingPackages || !hasLoadedSelectedBranch ? (
+                        ) : loadingPackages || !hasLoadedSelectedScope ? (
                             <EmptyState
                                 title="Loading branch packages..."
                                 detail="Please wait while packages are being loaded."
@@ -615,7 +799,9 @@ export default function OwnerPackages() {
                                 detail={
                                     search || selectedCategory !== "All"
                                         ? "Try a different search or category."
-                                        : "This branch does not have packages yet."
+                                        : isAllBranchesView
+                                            ? "No packages are available across branches yet."
+                                            : "This branch does not have packages yet."
                                 }
                             />
                         ) : (

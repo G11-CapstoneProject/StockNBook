@@ -4,14 +4,8 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const FORECASTING_LAMBDA_URL =
-    process.env.FORECASTING_LAMBDA_URL ||
-    "https://your-lambda-function-url.lambda-url.region.on.aws";
+    "https://7oxhafersb.execute-api.ap-southeast-1.amazonaws.com/stocknbook-forecasting";
 
-/**
- * Proxy handler for the forecasting Lambda function.
- * The UI uses get_seasonal_analysis; the deployed Lambda uses
- * get_seasonal_forecast, so this route translates only that action.
- */
 export async function POST(request: NextRequest) {
     try {
         const authHeader = request.headers.get("Authorization");
@@ -24,6 +18,7 @@ export async function POST(request: NextRequest) {
         }
 
         let body: { action?: string; [key: string]: unknown };
+
         try {
             body = await request.json();
         } catch {
@@ -47,16 +42,6 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        if (
-            !process.env.FORECASTING_LAMBDA_URL ||
-            FORECASTING_LAMBDA_URL.includes("your-lambda-function-url")
-        ) {
-            return NextResponse.json(
-                { error: "FORECASTING_LAMBDA_URL is not configured." },
-                { status: 500 }
-            );
-        }
-
         const lambdaAction =
             body.action === "get_seasonal_analysis"
                 ? "get_seasonal_forecast"
@@ -68,16 +53,25 @@ export async function POST(request: NextRequest) {
                 "Content-Type": "application/json",
                 Authorization: authHeader,
             },
-            body: JSON.stringify({ ...body, action: lambdaAction }),
+            body: JSON.stringify({
+                ...body,
+                action: lambdaAction,
+            }),
             cache: "no-store",
         });
 
         const rawResponse = await lambdaResponse.text();
+
         let lambdaData: unknown;
+
         try {
             lambdaData = rawResponse ? JSON.parse(rawResponse) : {};
         } catch {
-            lambdaData = { error: rawResponse || "Invalid response from forecasting Lambda." };
+            lambdaData = {
+                error:
+                    rawResponse ||
+                    "Invalid response from Forecasting Lambda.",
+            };
         }
 
         return NextResponse.json(lambdaData, {
@@ -90,7 +84,9 @@ export async function POST(request: NextRequest) {
             {
                 error: "Internal server error",
                 details:
-                    error instanceof Error ? error.message : "Unknown error occurred",
+                    error instanceof Error
+                        ? error.message
+                        : "Unknown error occurred",
             },
             { status: 500 }
         );

@@ -69,12 +69,12 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
                 </div>
 
                 <OrdersTable
-                    title="Recent Orders"
-                    subtitle={`${pos.orders.length} recorded order${
-                        pos.orders.length !== 1 ? "s" : ""
-                    } for this branch`}
-                    orders={pos.orders}
-                    emptyText="No recorded orders for this branch yet."
+                    title="Today's Orders"
+                    subtitle={`${pos.todayOrders.length} recorded order${
+                        pos.todayOrders.length !== 1 ? "s" : ""
+                    } today`}
+                    orders={pos.todayOrders}
+                    emptyText="No orders for today yet."
                 />
             </div>
         </POSLayout>

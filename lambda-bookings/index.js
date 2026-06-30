@@ -191,19 +191,19 @@ async function findPackageSnapshot(connection, options) {
     if (packageId) {
         const [rows] = await connection.execute(
             `
-            SELECT
-                id,
-                name,
-                package_price,
-                down_payment_amount,
-                duration,
-                status,
-                inclusions
-            FROM packages
-            WHERE id = ?
-              AND store_id = ?
-              AND (? IS NULL OR branch_id = ?)
-            LIMIT 1
+                SELECT
+                    id,
+                    name,
+                    package_price,
+                    down_payment_amount,
+                    duration,
+                    status,
+                    inclusions
+                FROM packages
+                WHERE id = ?
+                  AND store_id = ?
+                  AND (? IS NULL OR branch_id = ?)
+                    LIMIT 1
             `,
             [
                 Number(packageId),
@@ -223,18 +223,18 @@ async function findPackageSnapshot(connection, options) {
     if (cleanedName) {
         const [rows] = await connection.execute(
             `
-            SELECT
-                id,
-                name,
-                package_price,
-                down_payment_amount,
-                duration,
-                status,
-                inclusions
-            FROM packages
-            WHERE store_id = ?
-              AND (? IS NULL OR branch_id = ?)
-            ORDER BY created_at DESC
+                SELECT
+                    id,
+                    name,
+                    package_price,
+                    down_payment_amount,
+                    duration,
+                    status,
+                    inclusions
+                FROM packages
+                WHERE store_id = ?
+                  AND (? IS NULL OR branch_id = ?)
+                ORDER BY created_at DESC
             `,
             [
                 Number(storeId),
@@ -253,6 +253,546 @@ async function findPackageSnapshot(connection, options) {
     }
 
     return snapshotFromPackagePayload(packageInput);
+}
+
+function getBookingItemsInput(body) {
+    const rawItems =
+        body.bookingItems ||
+        body.booking_items ||
+        body.selectedCustomItems ||
+        body.customItems ||
+        [];
+
+    const parsed = safeParseJSON(rawItems);
+
+    return Array.isArray(parsed) ? parsed : [];
+}
+
+function normalizeBookingItemsForSave(rawItems, options) {
+    const {
+        bookingId,
+        storeId,
+        branchId,
+        sourceType,
+        packageId = null,
+    } = options;
+
+    if (!Array.isArray(rawItems)) return [];
+
+    return rawItems
+        .map((item) => {
+            const productId = Number(
+                item.productId ||
+                item.product_id ||
+                item.id ||
+                0
+            );
+
+            if (!Number.isInteger(productId) || productId <= 0) {
+                return null;
+            }
+
+            const rawVariantId = item.variantId ?? item.variant_id ?? null;
+            const variantId = rawVariantId ? Number(rawVariantId) : null;
+
+            const displayName = String(
+                item.displayName ||
+                item.productName ||
+                item.product_name ||
+                item.item ||
+                item.name ||
+                ""
+            ).trim();
+
+            const productName = String(
+                item.productName ||
+                item.product_name ||
+                item.item ||
+                item.name ||
+                displayName.split("—")[0] ||
+                displayName
+            ).trim();
+
+            const variantName = String(
+                item.variantName ||
+                item.variant_name ||
+                ""
+            ).trim();
+
+            const category = String(item.category || "").trim();
+
+            const bookedQuantity = Math.max(
+                1,
+                Math.floor(
+                    toNumber(
+                        item.quantity ??
+                        item.qty ??
+                        item.bookedQuantity ??
+                        item.booked_quantity ??
+                        1,
+                        1
+                    )
+                )
+            );
+
+            const unitPrice = toNumber(
+                item.salesPrice ??
+                item.sales_price ??
+                item.unitPrice ??
+                item.unit_price ??
+                item.unitSalesPrice ??
+                item.unit_sales_price ??
+                0,
+                0
+            );
+
+            return {
+                bookingId,
+                storeId,
+                branchId,
+                sourceType,
+                packageId,
+                productId,
+                variantId,
+                productName,
+                variantName,
+                category,
+                bookedQuantity,
+                unitPrice,
+                estimatedSubtotal: unitPrice * bookedQuantity,
+            };
+        })
+        .filter(Boolean);
+}
+
+async function insertBookingItems(connection, items) {
+    if (!Array.isArray(items) || items.length === 0) return;
+
+    const placeholders = items
+        .map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .join(", ");
+
+    const params = items.flatMap((item) => [
+        item.bookingId,
+        item.storeId,
+        item.branchId,
+        item.sourceType,
+        item.packageId,
+
+        item.productId,
+        item.variantId,
+
+        item.productName,
+        item.variantName || null,
+        item.category || null,
+
+        item.bookedQuantity,
+        0,
+        0,
+        0,
+
+        item.unitPrice,
+        item.estimatedSubtotal,
+        0,
+
+        "pending",
+        null,
+    ]);
+
+    await connection.execute(
+        `
+        INSERT INTO booking_items
+            (
+                booking_id,
+                store_id,
+                branch_id,
+                source_type,
+                package_id,
+
+                product_id,
+                variant_id,
+
+                product_name,
+                variant_name,
+                category,
+
+                booked_quantity,
+                reserved_quantity,
+                used_quantity,
+                restored_quantity,
+
+                unit_price,
+                estimated_subtotal,
+                used_subtotal,
+
+                inventory_status,
+                notes
+            )
+        VALUES ${placeholders}
+        `,
+        params
+    );
+}
+
+async function reserveBookingInventory(connection, options) {
+    const { bookingId, storeId, branchId } = options;
+
+    const params = [Number(bookingId), Number(storeId)];
+    let branchFilter = "";
+
+    if (branchId) {
+        branchFilter = " AND branch_id = ?";
+        params.push(Number(branchId));
+    }
+
+    const [items] = await connection.execute(
+        `
+        SELECT
+            id,
+            product_id,
+            variant_id,
+            product_name,
+            variant_name,
+            booked_quantity,
+            reserved_quantity,
+            inventory_status
+        FROM booking_items
+        WHERE booking_id = ?
+          AND store_id = ?
+          ${branchFilter}
+          AND inventory_status = 'pending'
+        FOR UPDATE
+        `,
+        params
+    );
+
+    let reservedCount = 0;
+
+    for (const item of items) {
+        const bookingItemId = Number(item.id);
+        const productId = Number(item.product_id);
+        const variantId = item.variant_id ? Number(item.variant_id) : null;
+        const bookedQty = Number(item.booked_quantity || 0);
+        const alreadyReserved = Number(item.reserved_quantity || 0);
+        const qtyToReserve = bookedQty - alreadyReserved;
+
+        if (!productId || qtyToReserve <= 0) continue;
+
+        const itemLabel = item.variant_name
+            ? `${item.product_name} — ${item.variant_name}`
+            : item.product_name;
+
+        if (variantId) {
+            const [variantRows] = await connection.execute(
+                `
+                SELECT stock
+                FROM product_variants
+                WHERE id = ?
+                  AND product_id = ?
+                FOR UPDATE
+                `,
+                [variantId, productId]
+            );
+
+            if (!variantRows.length) {
+                return {
+                    ok: false,
+                    error: `Variant stock record not found for ${itemLabel}.`,
+                };
+            }
+
+            const currentStock = Number(variantRows[0].stock || 0);
+
+            if (currentStock < qtyToReserve) {
+                return {
+                    ok: false,
+                    error: `Not enough stock for ${itemLabel}. Available: ${currentStock}, needed: ${qtyToReserve}.`,
+                };
+            }
+
+            await connection.execute(
+                `
+                UPDATE product_variants
+                SET stock = stock - ?
+                WHERE id = ?
+                  AND product_id = ?
+                `,
+                [qtyToReserve, variantId, productId]
+            );
+
+            await connection.execute(
+                `
+                UPDATE products
+                SET stock = GREATEST(stock - ?, 0)
+                WHERE id = ?
+                  AND store_id = ?
+                `,
+                [qtyToReserve, productId, storeId]
+            );
+        } else {
+            const productParams = [productId, storeId];
+            let productBranchFilter = "";
+
+            if (branchId) {
+                productBranchFilter = " AND branch_id = ?";
+                productParams.push(Number(branchId));
+            }
+
+            const [productRows] = await connection.execute(
+                `
+                SELECT stock
+                FROM products
+                WHERE id = ?
+                  AND store_id = ?
+                  ${productBranchFilter}
+                FOR UPDATE
+                `,
+                productParams
+            );
+
+            if (!productRows.length) {
+                return {
+                    ok: false,
+                    error: `Product stock record not found for ${itemLabel}.`,
+                };
+            }
+
+            const currentStock = Number(productRows[0].stock || 0);
+
+            if (currentStock < qtyToReserve) {
+                return {
+                    ok: false,
+                    error: `Not enough stock for ${itemLabel}. Available: ${currentStock}, needed: ${qtyToReserve}.`,
+                };
+            }
+
+            const updateParams = [qtyToReserve, productId, storeId];
+
+            let updateBranchFilter = "";
+
+            if (branchId) {
+                updateBranchFilter = " AND branch_id = ?";
+                updateParams.push(Number(branchId));
+            }
+
+            await connection.execute(
+                `
+                UPDATE products
+                SET stock = stock - ?
+                WHERE id = ?
+                  AND store_id = ?
+                  ${updateBranchFilter}
+                `,
+                updateParams
+            );
+        }
+
+        await connection.execute(
+            `
+            UPDATE booking_items
+            SET
+                reserved_quantity = booked_quantity,
+                inventory_status = 'reserved',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            `,
+            [bookingItemId]
+        );
+
+        reservedCount += 1;
+    }
+
+    return {
+        ok: true,
+        reservedCount,
+    };
+}
+
+function getUsedItemsInput(body) {
+    const rawItems =
+        body.usedItems ||
+        body.used_items ||
+        body.cancelItems ||
+        body.cancel_items ||
+        [];
+
+    const parsed = safeParseJSON(rawItems);
+
+    return Array.isArray(parsed) ? parsed : [];
+}
+
+function getUsedQuantityForItem(item, usedItems) {
+    const matched = usedItems.find((usedItem) => {
+        const usedBookingItemId = Number(
+            usedItem.booking_item_id ||
+            usedItem.bookingItemId ||
+            usedItem.id ||
+            0
+        );
+
+        return usedBookingItemId === Number(item.id);
+    });
+
+    if (!matched) return 0;
+
+    return Math.max(
+        0,
+        Math.floor(
+            toNumber(
+                matched.used_quantity ??
+                matched.usedQuantity ??
+                matched.quantityUsed ??
+                matched.qtyUsed ??
+                0,
+                0
+            )
+        )
+    );
+}
+
+async function restoreBookingInventoryOnCancel(connection, options) {
+    const { bookingId, storeId, branchId, usedItems = [] } = options;
+
+    const params = [Number(bookingId), Number(storeId)];
+    let branchFilter = "";
+
+    if (branchId) {
+        branchFilter = " AND branch_id = ?";
+        params.push(Number(branchId));
+    }
+
+    const [items] = await connection.execute(
+        `
+        SELECT
+            id,
+            product_id,
+            variant_id,
+            product_name,
+            variant_name,
+            reserved_quantity,
+            used_quantity,
+            restored_quantity,
+            unit_price,
+            inventory_status
+        FROM booking_items
+        WHERE booking_id = ?
+          AND store_id = ?
+          ${branchFilter}
+          AND inventory_status = 'reserved'
+        FOR UPDATE
+        `,
+        params
+    );
+
+    let restoredCount = 0;
+    let restoredQuantity = 0;
+    let usedQuantity = 0;
+
+    for (const item of items) {
+        const bookingItemId = Number(item.id);
+        const productId = Number(item.product_id);
+        const variantId = item.variant_id ? Number(item.variant_id) : null;
+        const reservedQty = Number(item.reserved_quantity || 0);
+        const unitPrice = toNumber(item.unit_price, 0);
+
+        if (!productId || reservedQty <= 0) continue;
+
+        const usedQty = getUsedQuantityForItem(item, usedItems);
+
+        const itemLabel = item.variant_name
+            ? `${item.product_name} — ${item.variant_name}`
+            : item.product_name;
+
+        if (usedQty > reservedQty) {
+            return {
+                ok: false,
+                error: `Used quantity for ${itemLabel} cannot exceed reserved quantity. Reserved: ${reservedQty}, used: ${usedQty}.`,
+            };
+        }
+
+        const qtyToRestore = reservedQty - usedQty;
+
+        if (qtyToRestore > 0) {
+            if (variantId) {
+                await connection.execute(
+                    `
+                    UPDATE product_variants
+                    SET stock = stock + ?
+                    WHERE id = ?
+                      AND product_id = ?
+                    `,
+                    [qtyToRestore, variantId, productId]
+                );
+
+                await connection.execute(
+                    `
+                    UPDATE products
+                    SET stock = stock + ?
+                    WHERE id = ?
+                      AND store_id = ?
+                    `,
+                    [qtyToRestore, productId, storeId]
+                );
+            } else {
+                const updateParams = [qtyToRestore, productId, storeId];
+                let updateBranchFilter = "";
+
+                if (branchId) {
+                    updateBranchFilter = " AND branch_id = ?";
+                    updateParams.push(Number(branchId));
+                }
+
+                await connection.execute(
+                    `
+                    UPDATE products
+                    SET stock = stock + ?
+                    WHERE id = ?
+                      AND store_id = ?
+                      ${updateBranchFilter}
+                    `,
+                    updateParams
+                );
+            }
+        }
+
+        const nextInventoryStatus =
+            usedQty <= 0
+                ? "cancelled_restored"
+                : qtyToRestore <= 0
+                    ? "cancelled_used"
+                    : "cancelled_partial_used";
+
+        await connection.execute(
+            `
+            UPDATE booking_items
+            SET
+                used_quantity = ?,
+                restored_quantity = ?,
+                used_subtotal = ?,
+                inventory_status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            `,
+            [
+                usedQty,
+                qtyToRestore,
+                unitPrice * usedQty,
+                nextInventoryStatus,
+                bookingItemId,
+            ]
+        );
+
+        restoredCount += 1;
+        restoredQuantity += qtyToRestore;
+        usedQuantity += usedQty;
+    }
+
+    return {
+        ok: true,
+        restoredCount,
+        restoredQuantity,
+        usedQuantity,
+    };
 }
 
 function getAuthHeader(event) {
@@ -429,20 +969,21 @@ exports.handler = async (event) => {
                     packageName: rawPackageName,
                     packageInput,
                 });
-            }
-            if (!packageSnapshot) {
-                return response(400, {
-                    error: "Selected package was not found",
-                });
-            }
 
-            if (packageId && Number(packageSnapshot.id) !== Number(packageId)) {
-                return response(400, {
-                    error: "Package mismatch: selected package ID does not match package snapshot",
-                    selectedPackageId: Number(packageId),
-                    snapshotPackageId: Number(packageSnapshot.id),
-                    snapshotPackageName: packageSnapshot.name,
-                });
+                if (!packageSnapshot) {
+                    return response(400, {
+                        error: "Selected package was not found",
+                    });
+                }
+
+                if (packageId && Number(packageSnapshot.id) !== Number(packageId)) {
+                    return response(400, {
+                        error: "Package mismatch: selected package ID does not match package snapshot",
+                        selectedPackageId: Number(packageId),
+                        snapshotPackageId: Number(packageSnapshot.id),
+                        snapshotPackageName: packageSnapshot.name,
+                    });
+                }
             }
 
             if (
@@ -543,13 +1084,34 @@ exports.handler = async (event) => {
                 ]
             );
 
+            const bookingId = result.insertId;
+
+            const bookingItemsToSave = isCustom
+                ? normalizeBookingItemsForSave(getBookingItemsInput(body), {
+                    bookingId,
+                    storeId: targetStoreId,
+                    branchId: targetBranchId,
+                    sourceType: "custom",
+                    packageId: null,
+                })
+                : normalizeBookingItemsForSave(packageSnapshot?.inclusions || [], {
+                    bookingId,
+                    storeId: targetStoreId,
+                    branchId: targetBranchId,
+                    sourceType: "package",
+                    packageId: packageSnapshot?.id || packageId || null,
+                });
+
+            await insertBookingItems(connection, bookingItemsToSave);
+
             return response(201, {
                 success: true,
-                id: result.insertId,
+                id: bookingId,
                 package_price: packagePrice,
                 required_down_payment: requiredDownPayment,
                 balance,
                 payment_status: paymentStatus,
+                booking_items_saved: bookingItemsToSave.length,
             });
         }
 
@@ -564,14 +1126,14 @@ exports.handler = async (event) => {
 
             const [rows] = await connection.execute(
                 `
-                SELECT
-                    ${bookingSelectFields()}
-                FROM bookings
-                LEFT JOIN branches
-                    ON bookings.branch_id = branches.id
-                    AND bookings.store_id = branches.store_id
-                WHERE bookings.booking_reference = ?
-                LIMIT 1
+                    SELECT
+                        ${bookingSelectFields()}
+                    FROM bookings
+                             LEFT JOIN branches
+                                       ON bookings.branch_id = branches.id
+                                           AND bookings.store_id = branches.store_id
+                    WHERE bookings.booking_reference = ?
+                        LIMIT 1
                 `,
                 [ref]
             );
@@ -594,15 +1156,15 @@ exports.handler = async (event) => {
 
             const [rows] = await connection.execute(
                 `
-                SELECT
-                    ${bookingSelectFields()}
-                FROM bookings
-                LEFT JOIN branches
-                    ON bookings.branch_id = branches.id
-                    AND bookings.store_id = branches.store_id
-                WHERE bookings.phone = ?
-                  AND bookings.store_id = ?
-                ORDER BY bookings.created_at DESC
+                    SELECT
+                        ${bookingSelectFields()}
+                    FROM bookings
+                             LEFT JOIN branches
+                                       ON bookings.branch_id = branches.id
+                                           AND bookings.store_id = branches.store_id
+                    WHERE bookings.phone = ?
+                      AND bookings.store_id = ?
+                    ORDER BY bookings.created_at DESC
                 `,
                 [phone, targetStoreId]
             );
@@ -621,14 +1183,14 @@ exports.handler = async (event) => {
 
             const [rows] = await connection.execute(
                 `
-                SELECT
-                    id,
-                    name,
-                    event_date AS date,
+                    SELECT
+                        id,
+                        name,
+                        event_date AS date,
                     status
-                FROM bookings
-                WHERE store_id = ?
-                ORDER BY created_at DESC
+                    FROM bookings
+                    WHERE store_id = ?
+                    ORDER BY created_at DESC
                 `,
                 [targetStoreId]
             );
@@ -660,9 +1222,9 @@ exports.handler = async (event) => {
                 SELECT
                     ${bookingSelectFields()}
                 FROM bookings
-                LEFT JOIN branches
-                    ON bookings.branch_id = branches.id
-                    AND bookings.store_id = branches.store_id
+                         LEFT JOIN branches
+                                   ON bookings.branch_id = branches.id
+                                       AND bookings.store_id = branches.store_id
                 WHERE bookings.store_id = ?
             `;
 
@@ -680,9 +1242,81 @@ exports.handler = async (event) => {
             return response(200, { bookings: rows });
         }
 
+        // ── PROTECTED: get_booking_items ───────────────────────────────────────
+        if (action === "get_booking_items") {
+            const { booking_id, branch_id, branchId } = body;
+            const requestedBranchId = branch_id || branchId;
+
+            if (!booking_id) {
+                return response(400, { error: "Missing booking_id" });
+            }
+
+            let bookingQuery = `
+        SELECT id, status, store_id, branch_id
+        FROM bookings
+        WHERE id = ?
+          AND store_id = ?
+    `;
+
+            const bookingParams = [Number(booking_id), store_id];
+
+            if (requestedBranchId) {
+                bookingQuery += ` AND branch_id = ?`;
+                bookingParams.push(Number(requestedBranchId));
+            }
+
+            const [bookingRows] = await connection.execute(bookingQuery, bookingParams);
+
+            if (!bookingRows.length) {
+                return response(404, { error: "Booking not found" });
+            }
+
+            let itemQuery = `
+                SELECT
+                    id,
+                    booking_id,
+                    source_type,
+                    package_id,
+                    product_id,
+                    variant_id,
+                    product_name,
+                    variant_name,
+                    category,
+                    booked_quantity,
+                    reserved_quantity,
+                    used_quantity,
+                    restored_quantity,
+                    unit_price,
+                    estimated_subtotal,
+                    used_subtotal,
+                    inventory_status
+                FROM booking_items
+                WHERE booking_id = ?
+                  AND store_id = ?
+            `;
+
+            const itemParams = [Number(booking_id), store_id];
+
+            if (requestedBranchId) {
+                itemQuery += ` AND branch_id = ?`;
+                itemParams.push(Number(requestedBranchId));
+            }
+
+            itemQuery += ` ORDER BY id ASC`;
+
+            const [items] = await connection.execute(itemQuery, itemParams);
+
+            return response(200, {
+                success: true,
+                booking: bookingRows[0],
+                items,
+            });
+        }
+
         // ── PROTECTED: update_status (enhanced) ────────────────────────────────
         if (action === "update_status") {
             const { booking_id, status, agreed_price, branch_id, branchId } = body;
+            const usedItems = getUsedItemsInput(body);
             const requestedBranchId = branch_id || branchId;
 
             if (!booking_id || !status) return response(400, { error: "Missing booking_id or status" });
@@ -691,7 +1325,7 @@ exports.handler = async (event) => {
             if (!allowedStatuses.includes(status)) return response(400, { error: "Invalid booking status" });
 
             let selectQuery = `
-                SELECT id, status, store_id, package_json, packageJSON
+                SELECT id, status, store_id, branch_id, package_json, packageJSON
                 FROM bookings
                 WHERE id = ?
                   AND store_id = ?
@@ -718,6 +1352,14 @@ exports.handler = async (event) => {
                 return response(400, { error: `Cannot move booking from ${currentStatus} to ${status}` });
             }
 
+            let inventoryResult = {
+                ok: true,
+                reservedCount: 0,
+                restoredCount: 0,
+                restoredQuantity: 0,
+                usedQuantity: 0,
+            };
+
             await connection.beginTransaction();
             try {
                 // 1️⃣ Update booking status
@@ -730,37 +1372,37 @@ exports.handler = async (event) => {
                 await connection.execute(query, params);
 
                 // 2️⃣ Deduct stock if Completed
-                if (status === "Completed") {
-                    const packageSnapshot = safeParseJSON(rows[0].package_json || rows[0].packageJSON || "{}");
-                    const inclusions = Array.isArray(packageSnapshot.inclusions) ? packageSnapshot.inclusions : [];
+                // 2️⃣ Reserve/deduct inventory when booking is confirmed
+                if (status === "Confirmed") {
+                    inventoryResult = await reserveBookingInventory(connection, {
+                        bookingId: Number(booking_id),
+                        storeId: rows[0].store_id,
+                        branchId: requestedBranchId || rows[0].branch_id || null,
+                    });
 
-                    for (const item of inclusions) {
-                        const quantity = Number(item.quantity || item.qty || 1);
-                        if (quantity <= 0) continue;
+                    if (!inventoryResult.ok) {
+                        await connection.rollback();
 
-                        if (item.productId || item.product_id || item.id) {
-                            const productId = Number(item.productId || item.product_id || item.id);
-                            await connection.execute(
-                                `UPDATE products SET stock = GREATEST(stock - ?, 0) WHERE id = ? AND store_id = ?`,
-                                [quantity, productId, rows[0].store_id]
-                            );
-                        } else if (item.item) {
-                            // fallback by name if old packages have no productId
-                            const targetName = String(item.item).toLowerCase().trim();
-                            const [products] = await connection.execute(
-                                `SELECT id, stock, name FROM products WHERE store_id = ?`,
-                                [rows[0].store_id]
-                            );
-                            const matched = products.find(p => p.name.toLowerCase().trim() === targetName);
-                            if (matched) {
-                                await connection.execute(
-                                    `UPDATE products SET stock = GREATEST(stock - ?, 0) WHERE id = ? AND store_id = ?`,
-                                    [quantity, matched.id, rows[0].store_id]
-                                );
-                            } else {
-                                console.warn(`Product not found for deduction: "${item.item}"`);
-                            }
-                        }
+                        return response(400, {
+                            error: inventoryResult.error,
+                        });
+                    }
+                }
+
+                if (status === "Cancelled") {
+                    inventoryResult = await restoreBookingInventoryOnCancel(connection, {
+                        bookingId: Number(booking_id),
+                        storeId: rows[0].store_id,
+                        branchId: requestedBranchId || rows[0].branch_id || null,
+                        usedItems,
+                    });
+
+                    if (!inventoryResult.ok) {
+                        await connection.rollback();
+
+                        return response(400, {
+                            error: inventoryResult.error,
+                        });
                     }
                 }
 
@@ -770,7 +1412,14 @@ exports.handler = async (event) => {
                 throw err;
             }
 
-            return response(200, { success: true, status });
+            return response(200, {
+                success: true,
+                status,
+                reserved_items: inventoryResult?.reservedCount || 0,
+                restored_items: inventoryResult?.restoredCount || 0,
+                restored_quantity: inventoryResult?.restoredQuantity || 0,
+                used_quantity: inventoryResult?.usedQuantity || 0,
+            });
         }
 
         // ── PROTECTED: update_price for custom bookings ───────────────────────
@@ -822,11 +1471,11 @@ exports.handler = async (event) => {
                     required_down_payment = ?,
                     balance = GREATEST(? - COALESCE(amount_paid, 0), 0),
                     payment_status = CASE
-                        WHEN COALESCE(amount_paid, 0) >= ? THEN 'Fully Paid'
-                        WHEN COALESCE(amount_paid, 0) >= ? AND ? > 0 THEN 'Down Payment Paid'
-                        WHEN COALESCE(amount_paid, 0) > 0 THEN 'Partial'
-                        ELSE 'Down Payment Required'
-                    END
+                                         WHEN COALESCE(amount_paid, 0) >= ? THEN 'Fully Paid'
+                                         WHEN COALESCE(amount_paid, 0) >= ? AND ? > 0 THEN 'Down Payment Paid'
+                                         WHEN COALESCE(amount_paid, 0) > 0 THEN 'Partial'
+                                         ELSE 'Down Payment Required'
+                        END
                 WHERE id = ?
                   AND store_id = ?
             `;
@@ -884,6 +1533,31 @@ exports.handler = async (event) => {
             const safeBalance =
                 balance !== undefined && balance !== null ? toNumber(balance) : null;
 
+            let selectQuery = `
+                SELECT id, status, store_id, branch_id
+                FROM bookings
+                WHERE id = ?
+                  AND store_id = ?
+            `;
+
+            const selectParams = [Number(booking_id), store_id];
+
+            if (requestedBranchId) {
+                selectQuery += ` AND branch_id = ?`;
+                selectParams.push(Number(requestedBranchId));
+            }
+
+            const [bookingRows] = await connection.execute(selectQuery, selectParams);
+
+            if (!bookingRows.length) {
+                return response(404, { error: "Booking not found" });
+            }
+
+            const currentStatus = bookingRows[0].status || "Pending Review";
+            const willAutoConfirm =
+                ["Down Payment Paid", "Fully Paid"].includes(payment_status) &&
+                ["Pending Review", "Awaiting Down Payment"].includes(currentStatus);
+
             let query = `
                 UPDATE bookings
                 SET
@@ -922,13 +1596,45 @@ exports.handler = async (event) => {
                 params.push(Number(requestedBranchId));
             }
 
-            await connection.execute(query, params);
+            let inventoryResult = {
+                ok: true,
+                reservedCount: 0,
+            };
+
+            await connection.beginTransaction();
+
+            try {
+                await connection.execute(query, params);
+
+                if (willAutoConfirm) {
+                    inventoryResult = await reserveBookingInventory(connection, {
+                        bookingId: Number(booking_id),
+                        storeId: bookingRows[0].store_id,
+                        branchId: requestedBranchId || bookingRows[0].branch_id || null,
+                    });
+
+                    if (!inventoryResult.ok) {
+                        await connection.rollback();
+
+                        return response(400, {
+                            error: inventoryResult.error,
+                        });
+                    }
+                }
+
+                await connection.commit();
+            } catch (err) {
+                await connection.rollback();
+                throw err;
+            }
 
             return response(200, {
                 success: true,
                 amount_paid: paid,
                 balance: safeBalance,
                 payment_status,
+                status: willAutoConfirm ? "Confirmed" : currentStatus,
+                reserved_items: inventoryResult.reservedCount,
             });
         }
 

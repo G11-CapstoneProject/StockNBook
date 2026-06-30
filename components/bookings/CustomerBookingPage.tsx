@@ -47,6 +47,49 @@ type PackageItem = {
     inclusions: PackageInclusion[];
 };
 
+type ProductVariant = {
+    id: number;
+    productId?: number;
+    product_id?: number;
+    variantValues?: Record<string, string> | string;
+    variant_values?: Record<string, string> | string;
+    stock: number;
+    salesPrice?: number;
+    sales_price?: number;
+};
+
+type InventoryProduct = {
+    id: number;
+    branchId?: number | null;
+    branch_id?: number | null;
+    name: string;
+    category?: string;
+    categoryName?: string;
+    category_name?: string;
+    salesPrice?: number;
+    sales_price?: number;
+    stock?: number;
+    hasVariants?: boolean;
+    has_variants?: boolean;
+    variants?: ProductVariant[];
+};
+
+type CustomInventoryItem = {
+    key: string;
+    productId: number;
+    variantId?: number | null;
+    productName: string;
+    variantName?: string;
+    displayName: string;
+    category: string;
+    salesPrice: number;
+    stock: number;
+};
+
+type SelectedCustomItem = CustomInventoryItem & {
+    quantity: number;
+};
+
 type Store = {
     id: number;
     store_name: string;
@@ -122,6 +165,105 @@ function getPackageCoverImage(
         return "https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&w=1200&q=88";
     }
     return "https://images.unsplash.com/photo-1507504031003-b417219a0fde?auto=format&fit=crop&w=1200&q=88";
+}
+
+function parseVariantValues(
+    value: ProductVariant["variantValues"] | ProductVariant["variant_values"]
+) {
+    if (!value) return {};
+
+    if (typeof value === "string") {
+        try {
+            return JSON.parse(value) as Record<string, string>;
+        } catch {
+            return {};
+        }
+    }
+
+    return value;
+}
+
+function getVariantLabel(variant: ProductVariant) {
+    const values = parseVariantValues(
+        variant.variantValues ?? variant.variant_values
+    );
+
+    const label = Object.values(values)
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .join(", ");
+
+    return label || `Variant #${variant.id}`;
+}
+
+function buildCustomInventoryItems(
+    products: InventoryProduct[],
+    selectedBranchId?: number | null
+): CustomInventoryItem[] {
+    return products.flatMap<CustomInventoryItem>(
+        (product): CustomInventoryItem[] => {
+            const productBranchId = Number(product.branchId ?? product.branch_id ?? 0);
+
+            if (
+                selectedBranchId &&
+                productBranchId &&
+                productBranchId !== selectedBranchId
+            ) {
+                return [];
+            }
+
+            const category =
+                product.category ||
+                product.categoryName ||
+                product.category_name ||
+                "Other";
+
+            const variants = Array.isArray(product.variants)
+                ? product.variants
+                : [];
+
+            const hasVariants =
+                Boolean(product.hasVariants ?? product.has_variants) &&
+                variants.length > 0;
+
+            if (hasVariants) {
+                return variants.map((variant) => {
+                    const variantLabel = getVariantLabel(variant);
+                    const price = Number(
+                        variant.salesPrice ??
+                        variant.sales_price ??
+                        product.salesPrice ??
+                        product.sales_price ??
+                        0
+                    );
+
+                    return {
+                        key: `product:${product.id}:variant:${variant.id}`,
+                        productId: product.id,
+                        variantId: Number(variant.id),
+                        productName: product.name,
+                        variantName: variantLabel,
+                        displayName: `${product.name} — ${variantLabel}`,
+                        category,
+                        salesPrice: price,
+                        stock: Number(variant.stock || 0),
+                    };
+                });
+            }
+
+            return [
+                {
+                    key: `product:${product.id}:regular`,
+                    productId: product.id,
+                    variantId: null,
+                    productName: product.name,
+                    displayName: product.name,
+                    category,
+                    salesPrice: Number(product.salesPrice ?? product.sales_price ?? 0),
+                    stock: Number(product.stock || 0),
+                },
+            ];
+        });
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -718,6 +860,13 @@ export default function CustomerBookingPage() {
     const [selectedPackage, setSelectedPackage] = useState("");
     const [customOrder, setCustomOrder] = useState("");
 
+    const [inventoryItems, setInventoryItems] = useState<CustomInventoryItem[]>([]);
+    const [loadingInventory, setLoadingInventory] = useState(false);
+    const [inventorySearch, setInventorySearch] = useState("");
+    const [inventoryCategory, setInventoryCategory] = useState("All");
+    const [selectedCustomItems, setSelectedCustomItems] = useState<SelectedCustomItem[]>([]);
+    const [customItemQty, setCustomItemQty] = useState<Record<string, number>>({});
+
     const [name, setName] = useState("");
     const [facebookName, setFacebookName] = useState("");
     const [phone, setPhone] = useState("");
@@ -740,8 +889,124 @@ export default function CustomerBookingPage() {
         return pkgWithBranch?.branch_id || pkgWithBranch?.branchId || null;
     }, [store, packages]);
 
+    const customInventoryCategories = useMemo(() => {
+        const uniqueCategories = Array.from(
+            new Set(
+                inventoryItems
+                    .map((item) => item.category || "Other")
+                    .filter(Boolean)
+            )
+        );
+
+        return ["All", ...uniqueCategories];
+    }, [inventoryItems]);
+
+    const filteredInventoryItems = useMemo(() => {
+        const query = inventorySearch.trim().toLowerCase();
+
+        return inventoryItems.filter((item) => {
+            const matchesSearch =
+                !query ||
+                item.displayName.toLowerCase().includes(query) ||
+                item.category.toLowerCase().includes(query);
+
+            const matchesCategory =
+                inventoryCategory === "All" ||
+                item.category.toLowerCase() === inventoryCategory.toLowerCase();
+
+            return matchesSearch && matchesCategory;
+        });
+    }, [inventoryItems, inventorySearch, inventoryCategory]);
+
+    const selectedCustomTotal = useMemo(() => {
+        return selectedCustomItems.reduce(
+            (sum, item) => sum + item.salesPrice * item.quantity,
+            0
+        );
+    }, [selectedCustomItems]);
+
+    const customOrderForSubmit = useMemo(() => {
+        const selectedItemsText = selectedCustomItems
+            .map(
+                (item) =>
+                    `${item.displayName} x ${item.quantity} = ${peso(
+                        item.salesPrice * item.quantity
+                    )}`
+            )
+            .join("\n");
+
+        const requestText = customOrder.trim();
+
+        if (selectedItemsText && requestText) {
+            return `Selected inventory items:\n${selectedItemsText}\n\nAdditional request:\n${requestText}`;
+        }
+
+        if (selectedItemsText) {
+            return `Selected inventory items:\n${selectedItemsText}`;
+        }
+
+        return requestText;
+    }, [selectedCustomItems, customOrder]);
+
+
     function clearError(key: string) {
         setFieldErrors((prev) => ({ ...prev, [key]: "" }));
+    }
+
+    function getCustomQty(itemKey: string) {
+        return customItemQty[itemKey] || 1;
+    }
+
+    function setCustomQtyForItem(itemKey: string, quantity: number) {
+        const safeQty = Math.max(1, quantity || 1);
+
+        setCustomItemQty((prev) => ({
+            ...prev,
+            [itemKey]: safeQty,
+        }));
+    }
+
+    function addCustomItem(item: CustomInventoryItem) {
+        const qty = getCustomQty(item.key);
+
+        if (item.stock <= 0) return;
+
+        setSelectedCustomItems((prev) => {
+            const existing = prev.find((selected) => selected.key === item.key);
+            const currentQty = existing?.quantity || 0;
+            const nextQty = Math.min(currentQty + qty, item.stock);
+
+            if (existing) {
+                return prev.map((selected) =>
+                    selected.key === item.key
+                        ? { ...selected, quantity: nextQty }
+                        : selected
+                );
+            }
+
+            return [...prev, { ...item, quantity: nextQty }];
+        });
+
+        clearError("selection");
+    }
+
+    function updateSelectedCustomQty(itemKey: string, quantity: number) {
+        setSelectedCustomItems((prev) =>
+            prev.map((item) =>
+                item.key === itemKey
+                    ? {
+                        ...item,
+                        quantity: Math.min(Math.max(1, quantity), item.stock),
+                    }
+                    : item
+            )
+        );
+    }
+
+    function removeSelectedCustomItem(itemKey: string) {
+        setSelectedCustomItems((prev) =>
+            prev.filter((item) => item.key !== itemKey)
+        );
     }
 
     function validateForm(): Record<string, string> {
@@ -749,8 +1014,18 @@ export default function CustomerBookingPage() {
         const today = new Date(); today.setHours(0, 0, 0, 0);
         const maxDate = new Date(); maxDate.setFullYear(maxDate.getFullYear() + 2);
 
-        const hasSelection = bookingType === "package" ? !!selectedPackage : !!customOrder.trim();
-        if (!hasSelection) errors.selection = bookingType === "package" ? "Please select a package." : "Please describe your custom request.";
+        const hasSelection =
+            bookingType === "package"
+                ? !!selectedPackage
+                : selectedCustomItems.length > 0 || !!customOrder.trim();
+
+        if (!hasSelection) {
+            errors.selection =
+                bookingType === "package"
+                    ? "Please select a package."
+                    : "Please select at least one inventory item or describe your custom request.";
+        }
+
         if (bookingType === "custom" && !eventType.trim()) errors.eventType = "Event type is required.";
 
         if (!name.trim()) errors.name = "Full name is required.";
@@ -843,6 +1118,47 @@ export default function CustomerBookingPage() {
         fetchPackages();
     }, [store, branchIdFromUrl]);
 
+    useEffect(() => {
+        if (!store) return;
+
+        const storeId = store.id;
+
+        async function fetchInventoryItems() {
+            setLoadingInventory(true);
+
+            try {
+                const response = await fetch("/api/products", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        action: "get_public_products",
+                        store_id: storeId,
+                        ...(branchIdFromUrl
+                            ? { branch_id: Number(branchIdFromUrl) }
+                            : {}),
+                    }),
+                });
+
+                const data = await response.json();
+                const products = Array.isArray(data.products) ? data.products : [];
+
+                setInventoryItems(
+                    buildCustomInventoryItems(
+                        products,
+                        branchIdFromUrl ? Number(branchIdFromUrl) : null
+                    )
+                );
+            } catch (err) {
+                console.error("Error loading public inventory:", err);
+                setInventoryItems([]);
+            } finally {
+                setLoadingInventory(false);
+            }
+        }
+
+        void fetchInventoryItems();
+    }, [store, branchIdFromUrl]);
+
     function peso(n: number) {
         return `₱${Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     }
@@ -872,7 +1188,7 @@ export default function CustomerBookingPage() {
 
     function resetForm() {
         setBookingType("package");
-        setSelectedPackage(""); setCustomOrder(""); setName(""); setFacebookName("");
+        setSelectedPackage(""); setCustomOrder(""); setSelectedCustomItems([]); setCustomItemQty({}); setName(""); setFacebookName("");
         setPhone(""); setEmail(""); setDate(""); setEventTime("");
         setEventType(""); setTheme(""); setVenue(""); setNotes("");
     }
@@ -908,7 +1224,7 @@ export default function CustomerBookingPage() {
             theme: theme.trim(),
             venue: venue.trim(),
             package: bookingType === "package" ? selectedPackage : "",
-            customOrder: bookingType === "custom" ? customOrder.trim() : "",
+            customOrder: bookingType === "custom" ? customOrderForSubmit : "",
             notes: notes.trim(),
             status: "Pending Review",
         };
@@ -923,6 +1239,19 @@ export default function CustomerBookingPage() {
                     storeId: store.id,
                     branchId: selectedBranchId,
                     ...newBooking,
+                    bookingItems:
+                        bookingType === "custom"
+                            ? selectedCustomItems.map((item) => ({
+                                productId: item.productId,
+                                variantId: item.variantId ?? null,
+                                productName: item.productName,
+                                variantName: item.variantName || "",
+                                displayName: item.displayName,
+                                category: item.category,
+                                quantity: item.quantity,
+                                salesPrice: item.salesPrice,
+                            }))
+                            : [],
                 }),
             });
             const text = await response.text();
@@ -1336,22 +1665,350 @@ export default function CustomerBookingPage() {
                                         </>
                                     ) : (
                                         <>
-                                            <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
-                                                Custom request
-                                            </label>
-                                            <textarea
-                                                value={customOrder}
-                                                onChange={(e) => { setCustomOrder(e.target.value); clearError("selection"); }}
-                                                placeholder="Describe your custom event setup request..."
-                                                className={`min-h-[132px] w-full resize-none rounded-xl border bg-[#FFFDF8] p-3 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${
-                                                    fieldErrors.selection
-                                                        ? "border-[#F2C4C4] bg-[#FFF0F0]"
-                                                        : "border-[#E6DDF0]"
-                                                }`}
-                                            />
-                                            {fieldErrors.selection && (
-                                                <p className="mt-1.5 text-xs font-medium text-red-500">{fieldErrors.selection}</p>
-                                            )}
+                                            <div className="rounded-[16px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
+                                                <div className="mb-3">
+                                                    <label className="block text-sm font-bold text-[#1A1220]">
+                                                        Choose inventory items
+                                                    </label>
+                                                    <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
+                                                        Search available items and add them to your custom event request.
+                                                    </p>
+                                                </div>
+
+                                                <div className="relative">
+                                                    <Search
+                                                        size={15}
+                                                        className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]"
+                                                    />
+                                                    <input
+                                                        value={inventorySearch}
+                                                        onChange={(event) => setInventorySearch(event.target.value)}
+                                                        placeholder="Search inventory items..."
+                                                        className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 pl-10 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                                    />
+                                                </div>
+
+                                                <div className="mt-3 overflow-x-auto pb-1">
+                                                    <div className="flex min-w-max gap-2">
+                                                        {customInventoryCategories.map((category) => {
+                                                            const active = inventoryCategory === category;
+
+                                                            return (
+                                                                <button
+                                                                    key={category}
+                                                                    type="button"
+                                                                    onClick={() => setInventoryCategory(category)}
+                                                                    className={`rounded-xl px-3.5 py-2 text-xs font-semibold transition ${
+                                                                        active
+                                                                            ? "bg-[#2B174C] text-white shadow-sm"
+                                                                            : "border border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#F7F1FF]"
+                                                                    }`}
+                                                                >
+                                                                    {category}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+
+                                                <div className="mt-3">
+                                                    {loadingInventory ? (
+                                                        <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFDF8] px-4 py-6 text-center text-sm text-[#7A6A84]">
+                                                            Loading inventory items...
+                                                        </div>
+                                                    ) : filteredInventoryItems.length === 0 ? (
+                                                        <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFDF8] px-4 py-6 text-center text-sm text-[#7A6A84]">
+                                                            No inventory items found.
+                                                        </div>
+                                                    ) : (
+                                                        <div className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
+                                                            <div className="hidden grid-cols-[minmax(0,1.5fr)_140px_110px_115px_170px] gap-3 border-b border-[#E6DDF0] bg-[#FBF8FD] px-4 py-3 text-[11px] font-bold uppercase tracking-[0.08em] text-[#806A8C] md:grid">
+                                                                <span>Item</span>
+                                                                <span>Category</span>
+                                                                <span>Price</span>
+                                                                <span>Status</span>
+                                                                <span>Quantity</span>
+                                                            </div>
+
+                                                            <div className="max-h-[420px] overflow-y-auto">
+                                                                {filteredInventoryItems.map((item) => {
+                                                                    const qty = getCustomQty(item.key);
+                                                                    const unavailable = item.stock <= 0;
+
+                                                                    return (
+                                                                        <div
+                                                                            key={item.key}
+                                                                            className="border-b border-[#F1EAF5] px-4 py-4 last:border-b-0"
+                                                                        >
+                                                                            <div className="space-y-3 md:hidden">
+                                                                                <div className="flex items-start justify-between gap-3">
+                                                                                    <div className="min-w-0">
+                                                                                        <p className="text-sm font-bold text-[#1A1220]">
+                                                                                            {item.displayName}
+                                                                                        </p>
+                                                                                        <p className="mt-1 text-xs text-[#806A8C]">
+                                                                                            {item.category}
+                                                                                        </p>
+                                                                                        <p className="mt-1 text-sm font-bold text-[#2B174C]">
+                                                                                            {peso(item.salesPrice)}
+                                                                                        </p>
+                                                                                    </div>
+
+                                                                                    <span
+                                                                                        className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                                                                                            unavailable
+                                                                                                ? "bg-[#FFF0F0] text-[#C32F2F]"
+                                                                                                : item.stock <= 5
+                                                                                                    ? "bg-[#FFF8E8] text-[#A56607]"
+                                                                                                    : "bg-[#EDFBF1] text-[#138342]"
+                                                                                        }`}
+                                                                                    >
+                                {unavailable
+                                    ? "Unavailable"
+                                    : item.stock <= 5
+                                        ? "Low stock"
+                                        : "Available"}
+                            </span>
+                                                                                </div>
+
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className="flex h-[36px] items-center overflow-hidden rounded-lg border border-[#E6DDF0] bg-white">
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            disabled={unavailable}
+                                                                                            onClick={() =>
+                                                                                                setCustomQtyForItem(item.key, qty - 1)
+                                                                                            }
+                                                                                            className="h-full w-10 text-sm font-bold text-[#2B174C] disabled:opacity-40"
+                                                                                        >
+                                                                                            −
+                                                                                        </button>
+
+                                                                                        <span className="flex h-full min-w-10 items-center justify-center border-x border-[#E6DDF0] px-2 text-sm font-semibold">
+                                    {qty}
+                                </span>
+
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            disabled={unavailable || qty >= item.stock}
+                                                                                            onClick={() =>
+                                                                                                setCustomQtyForItem(item.key, qty + 1)
+                                                                                            }
+                                                                                            className="h-full w-10 text-sm font-bold text-[#2B174C] disabled:opacity-40"
+                                                                                        >
+                                                                                            +
+                                                                                        </button>
+                                                                                    </div>
+
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        disabled={unavailable}
+                                                                                        onClick={() => addCustomItem(item)}
+                                                                                        className="h-[36px] flex-1 rounded-lg bg-[#2B174C] px-3 text-sm font-semibold text-white transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-50"
+                                                                                    >
+                                                                                        Add
+                                                                                    </button>
+                                                                                </div>
+                                                                            </div>
+
+                                                                            <div className="hidden md:grid md:grid-cols-[minmax(0,1.5fr)_140px_110px_115px_170px] md:items-center md:gap-3">
+                                                                                <div className="min-w-0">
+                                                                                    <p className="text-sm font-bold leading-5 text-[#1A1220] break-words">
+                                                                                        {item.displayName}
+                                                                                    </p>
+                                                                                </div>
+
+                                                                                <p className="truncate text-sm text-[#806A8C]">
+                                                                                    {item.category}
+                                                                                </p>
+
+                                                                                <p className="text-sm font-bold text-[#2B174C]">
+                                                                                    {peso(item.salesPrice)}
+                                                                                </p>
+
+                                                                                <div>
+                            <span
+                                className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                                    unavailable
+                                        ? "bg-[#FFF0F0] text-[#C32F2F]"
+                                        : item.stock <= 5
+                                            ? "bg-[#FFF8E8] text-[#A56607]"
+                                            : "bg-[#EDFBF1] text-[#138342]"
+                                }`}
+                            >
+                                {unavailable
+                                    ? "Unavailable"
+                                    : item.stock <= 5
+                                        ? "Low stock"
+                                        : "Available"}
+                            </span>
+                                                                                </div>
+
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className="flex h-[36px] items-center overflow-hidden rounded-lg border border-[#E6DDF0] bg-white">
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            disabled={unavailable}
+                                                                                            onClick={() =>
+                                                                                                setCustomQtyForItem(item.key, qty - 1)
+                                                                                            }
+                                                                                            className="h-full w-9 text-sm font-bold text-[#2B174C] disabled:opacity-40"
+                                                                                        >
+                                                                                            −
+                                                                                        </button>
+
+                                                                                        <span className="flex h-full min-w-10 items-center justify-center border-x border-[#E6DDF0] px-2 text-sm font-semibold">
+                                    {qty}
+                                </span>
+
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            disabled={unavailable || qty >= item.stock}
+                                                                                            onClick={() =>
+                                                                                                setCustomQtyForItem(item.key, qty + 1)
+                                                                                            }
+                                                                                            className="h-full w-9 text-sm font-bold text-[#2B174C] disabled:opacity-40"
+                                                                                        >
+                                                                                            +
+                                                                                        </button>
+                                                                                    </div>
+
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        disabled={unavailable}
+                                                                                        onClick={() => addCustomItem(item)}
+                                                                                        className="h-[36px] rounded-lg bg-[#2B174C] px-4 text-sm font-semibold text-white transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-50"
+                                                                                    >
+                                                                                        Add
+                                                                                    </button>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                <div className="mt-4 rounded-xl border border-[#E6DDF0] bg-white">
+                                                    <div className="border-b border-[#E6DDF0] px-3 py-2.5">
+                                                        <p className="text-sm font-bold text-[#1A1220]">
+                                                            Selected items
+                                                        </p>
+                                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                                            You can still adjust quantity after adding.
+                                                        </p>
+                                                    </div>
+
+                                                    {selectedCustomItems.length === 0 ? (
+                                                        <p className="px-3 py-5 text-center text-xs text-[#7A6A84]">
+                                                            No custom items added yet.
+                                                        </p>
+                                                    ) : (
+                                                        <div className="divide-y divide-[#EFE7F4]">
+                                                            {selectedCustomItems.map((item) => (
+                                                                <div
+                                                                    key={item.key}
+                                                                    className="grid gap-3 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_110px_34px] sm:items-center"
+                                                                >
+                                                                    <div className="min-w-0">
+                                                                        <p className="text-sm font-bold text-[#1A1220]">
+                                                                            {item.displayName}
+                                                                        </p>
+                                                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                                                            {item.category} · {peso(item.salesPrice)} each
+                                                                        </p>
+                                                                    </div>
+
+                                                                    <div className="flex h-[34px] w-fit items-center overflow-hidden rounded-lg border border-[#E6DDF0] bg-white">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() =>
+                                                                                updateSelectedCustomQty(
+                                                                                    item.key,
+                                                                                    item.quantity - 1
+                                                                                )
+                                                                            }
+                                                                            className="h-full w-8 text-sm font-bold text-[#2B174C]"
+                                                                        >
+                                                                            −
+                                                                        </button>
+
+                                                                        <span className="flex h-full min-w-9 items-center justify-center border-x border-[#E6DDF0] px-2 text-sm font-semibold">
+                                    {item.quantity}
+                                </span>
+
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={item.quantity >= item.stock}
+                                                                            onClick={() =>
+                                                                                updateSelectedCustomQty(
+                                                                                    item.key,
+                                                                                    item.quantity + 1
+                                                                                )
+                                                                            }
+                                                                            className="h-full w-8 text-sm font-bold text-[#2B174C] disabled:opacity-40"
+                                                                        >
+                                                                            +
+                                                                        </button>
+                                                                    </div>
+
+                                                                    <p className="text-sm font-bold text-[#2B174C]">
+                                                                        {peso(item.salesPrice * item.quantity)}
+                                                                    </p>
+
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => removeSelectedCustomItem(item.key)}
+                                                                        className="flex h-8 w-8 items-center justify-center rounded-lg text-red-500 hover:bg-[#FFF0F0]"
+                                                                    >
+                                                                        <Trash2 size={15} />
+                                                                    </button>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+
+                                                    {selectedCustomItems.length > 0 && (
+                                                        <div className="flex items-center justify-between border-t border-[#E6DDF0] bg-[#FFFDF8] px-3 py-3">
+                                                            <div>
+                                                                <span className="block text-xs font-semibold text-[#806A8C]">
+                                                                    Estimated item subtotal
+                                                                </span>
+                                                                <span className="mt-0.5 block text-[11px] leading-4 text-[#9B8AAA]">
+                                                                    Final amount will be confirmed after discussion.
+                                                                </span>
+                                                            </div>
+
+                                                            <span className="text-sm font-bold text-[#2B174C]">
+                                                                {peso(selectedCustomTotal)}
+                                                            </span>
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {fieldErrors.selection && (
+                                                    <p className="mt-2 text-xs font-medium text-red-500">
+                                                        {fieldErrors.selection}
+                                                    </p>
+                                                )}
+                                            </div>
+
+                                            <div className="mt-5">
+                                                <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
+                                                    Additional custom request
+                                                </label>
+                                                <textarea
+                                                    value={customOrder}
+                                                    onChange={(e) => {
+                                                        setCustomOrder(e.target.value);
+                                                        clearError("selection");
+                                                    }}
+                                                    placeholder="Theme details, colors, setup preferences, or special instructions..."
+                                                    className="min-h-[110px] w-full resize-none rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3 text-sm text-[#1A1220] outline-none transition placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                                />
+                                            </div>
                                         </>
                                     )}
                                 </div>
@@ -1525,13 +2182,67 @@ export default function CustomerBookingPage() {
                                                     value={selectedPackage}
                                                 />
                                             )}
-                                            {customOrder &&
-                                                bookingType === "custom" && (
-                                                    <SummaryItem
-                                                        label="Custom request"
-                                                        value={customOrder}
-                                                    />
-                                                )}
+                                            {bookingType === "custom" && selectedCustomItems.length > 0 && (
+                                                <div className="rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3">
+                                                    <div className="mb-2 flex items-center justify-between gap-3">
+                                                        <p className="text-xs font-bold text-[#1A1220]">
+                                                            Selected items
+                                                        </p>
+                                                        <span className="text-xs font-semibold text-[#806A8C]">
+                {selectedCustomItems.length} item
+                                                            {selectedCustomItems.length === 1 ? "" : "s"}
+            </span>
+                                                    </div>
+
+                                                    <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
+                                                        {selectedCustomItems.map((item) => (
+                                                            <div
+                                                                key={item.key}
+                                                                className="rounded-lg border border-[#EFE7F4] bg-white px-3 py-2"
+                                                            >
+                                                                <div className="flex items-start justify-between gap-3">
+                                                                    <div className="min-w-0">
+                                                                        <p className="text-xs font-bold leading-5 text-[#1A1220] break-words">
+                                                                            {item.displayName}
+                                                                        </p>
+                                                                        <p className="mt-0.5 text-[11px] text-[#806A8C]">
+                                                                            Qty: {item.quantity} · {peso(item.salesPrice)} each
+                                                                        </p>
+                                                                    </div>
+
+                                                                    <p className="shrink-0 text-xs font-bold text-[#2B174C]">
+                                                                        {peso(item.salesPrice * item.quantity)}
+                                                                    </p>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+
+                                                    <div className="mt-3 border-t border-[#E6DDF0] pt-3">
+                                                        <div className="flex items-center justify-between gap-4">
+        <span className="text-xs font-semibold text-[#806A8C]">
+            Estimated item subtotal
+        </span>
+
+                                                            <span className="text-sm font-bold text-[#2B174C]">
+            {peso(selectedCustomTotal)}
+        </span>
+                                                        </div>
+
+                                                        <p className="mt-1 text-[11px] leading-4 text-[#9B8AAA]">
+                                                            Final amount will be confirmed after discussion.
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {customOrder && bookingType === "custom" && (
+                                                <SummaryItem
+                                                    label="Additional request"
+                                                    value={customOrder}
+                                                />
+                                            )}
+
                                             {name && (
                                                 <SummaryItem
                                                     label="Customer"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
     ChevronDown,
     ChevronLeft,
@@ -93,6 +93,21 @@ export type Booking = {
 
     createdAt?: string;
     created_at?: string;
+};
+
+type BookingInventoryItem = {
+    id: number;
+    booking_id?: number;
+    source_type?: string;
+    product_id?: number;
+    variant_id?: number | null;
+    product_name: string;
+    variant_name?: string | null;
+    booked_quantity: number | string;
+    reserved_quantity?: number | string;
+    used_quantity?: number | string;
+    restored_quantity?: number | string;
+    inventory_status?: string;
 };
 
 type CalendarDropdownProps = {
@@ -255,21 +270,14 @@ export function isCustomBooking(booking: Booking) {
 
 export function getBookingItemLabel(booking: Booking) {
     if (isCustomBooking(booking)) {
-        return (
-            booking.customOrder ||
-            booking.custom_order ||
-            booking.package ||
-            booking.packageName ||
-            booking.package_name ||
-            "Custom Booking"
-        );
+        return "Custom Inventory Booking";
     }
 
     return (
         booking.package ||
         booking.packageName ||
         booking.package_name ||
-        "Package"
+        "Package Booking"
     );
 }
 
@@ -759,6 +767,7 @@ export function BookingRow({
                                onSetPrice,
                                onRecordDownPayment,
                                onMarkFullyPaid,
+                               onCancelBooking,
                            }: {
     b: Booking;
     ownerView?: boolean;
@@ -767,7 +776,12 @@ export function BookingRow({
     onSetPrice?: (b: Booking) => void;
     onRecordDownPayment?: (b: Booking) => void;
     onMarkFullyPaid?: (b: Booking) => void;
+    onCancelBooking?: (b: Booking) => void;
 }) {
+    const [bookingItems, setBookingItems] = useState<BookingInventoryItem[]>([]);
+    const [itemsLoading, setItemsLoading] = useState(false);
+    const [itemsLoaded, setItemsLoaded] = useState(false);
+    const [itemsError, setItemsError] = useState("");
     const [open, setOpen] = useState(false);
 
     const isCustom = isCustomBooking(b);
@@ -797,6 +811,84 @@ export function BookingRow({
         statusActionDisabled,
         statusHelper,
     } = getNextStatusConfig(displayStatus, downPaymentPaid);
+
+    useEffect(() => {
+        if (!open || itemsLoaded) return;
+
+        const token = sessionStorage.getItem("token");
+        const branchId =
+            b.branchId ||
+            b.branch_id ||
+            sessionStorage.getItem("branch_id") ||
+            sessionStorage.getItem("stocknbook_branch_id") ||
+            sessionStorage.getItem("manager_branch_id") ||
+            sessionStorage.getItem("staff_branch_id");
+
+        if (!token) return;
+
+        let cancelled = false;
+
+        async function loadBookingItems() {
+            setItemsLoading(true);
+            setItemsError("");
+
+            try {
+                const body: Record<string, unknown> = {
+                    action: "get_booking_items",
+                    booking_id: b.id,
+                };
+
+                if (branchId) body.branch_id = Number(branchId);
+
+                const res = await fetch("/api/bookings", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`,
+                    },
+                    body: JSON.stringify(body),
+                });
+
+                const data = await res.json();
+
+                if (!res.ok || data.success === false) {
+                    throw new Error(data.message || data.error || "Failed to load booking items.");
+                }
+
+                if (!cancelled) {
+                    setBookingItems(
+                        Array.isArray(data.items)
+                            ? (data.items as BookingInventoryItem[])
+                            : []
+                    );
+                    setItemsLoaded(true);
+                }
+            } catch (err) {
+                console.error("Failed to load booking items:", err);
+
+                if (!cancelled) {
+                    setItemsError("Unable to load selected items.");
+                    setItemsLoaded(true);
+                }
+            } finally {
+                if (!cancelled) {
+                    setItemsLoading(false);
+                }
+            }
+        }
+
+        void loadBookingItems();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [
+        open,
+        itemsLoaded,
+        b.id,
+        b.branchId,
+        b.branch_id,
+    ]);
 
     return (
         <>
@@ -972,6 +1064,72 @@ export function BookingRow({
                                     )}
                                 </div>
 
+                                {isCustom && (
+                                    <div className="rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                        <div className="mb-3 flex items-center gap-2">
+                                            <Package
+                                                size={14}
+                                                className="text-[#6C3AD6]"
+                                            />
+
+                                            <p className="text-[16px] font-bold text-[#1A1220]">
+                                                Selected Items
+                                            </p>
+                                        </div>
+
+                                        {itemsLoading ? (
+                                            <p className="text-sm text-[#7A6A84]">
+                                                Loading items...
+                                            </p>
+                                        ) : itemsError ? (
+                                            <p className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-3 py-2 text-xs font-semibold text-[#C32F2F]">
+                                                {itemsError}
+                                            </p>
+                                        ) : bookingItems.length === 0 ? (
+                                            <p className="text-sm text-[#7A6A84]">
+                                                No saved items found for this booking.
+                                            </p>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {bookingItems.map((item) => {
+                                                    const itemLabel = item.variant_name
+                                                        ? `${item.product_name} — ${item.variant_name}`
+                                                        : item.product_name;
+
+                                                    const quantity = Number(
+                                                        item.booked_quantity ||
+                                                        item.reserved_quantity ||
+                                                        0
+                                                    );
+
+                                                    return (
+                                                        <div
+                                                            key={item.id}
+                                                            className="flex items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2"
+                                                        >
+                                                            <div className="min-w-0">
+                                                                <p className="truncate text-sm font-semibold text-[#1A1220]">
+                                                                    {itemLabel}
+                                                                </p>
+
+                                                                {item.inventory_status && (
+                                                                    <p className="mt-0.5 text-[11px] text-[#806A8C]">
+                                                                        Status: {item.inventory_status}
+                                                                    </p>
+                                                                )}
+                                                            </div>
+
+                                                            <span className="shrink-0 rounded-full bg-[#F7F1FF] px-2.5 py-1 text-xs font-bold text-[#4E2C66]">
+                                x{quantity}
+                            </span>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
                                 <div className="min-h-[96px] rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
                                     <div className="mb-2 flex items-center gap-2">
                                         <StickyNote
@@ -1101,6 +1259,12 @@ export function BookingRow({
                                                     type="button"
                                                     onClick={(e) => {
                                                         e.stopPropagation();
+
+                                                        if (onCancelBooking) {
+                                                            onCancelBooking(b);
+                                                            return;
+                                                        }
+
                                                         onUpdateStatus?.(b.id, "Cancelled");
                                                     }}
                                                     className="mt-3 inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#A33E20] px-4 text-sm font-semibold text-white transition hover:bg-[#883117]"

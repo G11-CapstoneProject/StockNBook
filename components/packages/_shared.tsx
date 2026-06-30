@@ -36,11 +36,55 @@ export const PACKAGE_CATEGORY_OPTIONS: PackageCategory[] = [
 ];
 
 export type PackageInclusion = {
+    inventoryKey: string;
     productId: number;
+    variantId?: number | null;
     productName: string;
+    variantName?: string;
     quantity: number;
     unitSalesPrice: number;
     lineValue: number;
+    availableStock?: number;
+};
+
+export type ProductVariant = {
+    id: number;
+    productId?: number;
+    product_id?: number;
+    variantValues?: Record<string, string> | string;
+    variant_values?: Record<string, string> | string;
+    stock: number;
+    alertLevel?: number;
+    alert_level?: number;
+    originalPrice?: number;
+    original_price?: number;
+    salesPrice?: number;
+    sales_price?: number;
+};
+
+export type Product = {
+    id: number;
+    branchId?: number | null;
+    branch_id?: number | null;
+    name: string;
+    salesPrice?: number;
+    sales_price?: number;
+    stock?: number;
+    hasVariants?: boolean;
+    has_variants?: boolean;
+    variants?: ProductVariant[];
+};
+
+export type PackageSelectableItem = {
+    key: string;
+    productId: number;
+    variantId?: number | null;
+    productName: string;
+    variantName?: string;
+    displayName: string;
+    salesPrice: number;
+    stock: number;
+    branchId?: number | null;
 };
 
 export type PackageItem = {
@@ -61,12 +105,6 @@ export type PackageItem = {
     inclusions: PackageInclusion[];
 };
 
-export type Product = {
-    id: number;
-    name: string;
-    salesPrice: number;
-    stock: number;
-};
 
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
@@ -148,6 +186,113 @@ export function getSavedPackageAccess(): PackageAccess {
     } catch {
         return "none";
     }
+}
+function getProductBranchId(product: Product) {
+    const rawBranchId = product.branchId ?? product.branch_id ?? null;
+    const branchId = Number(rawBranchId);
+
+    return Number.isFinite(branchId) && branchId > 0 ? branchId : null;
+}
+
+function parseVariantValues(
+    value: ProductVariant["variantValues"] | ProductVariant["variant_values"]
+) {
+    if (!value) return {};
+
+    if (typeof value === "string") {
+        try {
+            return JSON.parse(value) as Record<string, string>;
+        } catch {
+            return {};
+        }
+    }
+
+    return value;
+}
+
+function getVariantName(variant: ProductVariant) {
+    const values = parseVariantValues(
+        variant.variantValues ?? variant.variant_values
+    );
+
+    const label = Object.values(values)
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .join(", ");
+
+    return label || `Variant #${variant.id}`;
+}
+
+export function getInclusionKey(item: PackageInclusion) {
+    if (item.inventoryKey) return item.inventoryKey;
+
+    return item.variantId
+        ? `product:${item.productId}:variant:${item.variantId}`
+        : `product:${item.productId}:regular`;
+}
+
+export function buildPackageSelectableItems(
+    products: Product[],
+    selectedBranchId?: number | null
+): PackageSelectableItem[] {
+    return products.flatMap<PackageSelectableItem>((product): PackageSelectableItem[] => {
+        const productBranchId = getProductBranchId(product);
+
+        if (
+            selectedBranchId &&
+            productBranchId &&
+            productBranchId !== selectedBranchId
+        ) {
+            return [];
+        }
+
+        const variants = Array.isArray(product.variants)
+            ? product.variants
+            : [];
+
+        const hasVariants =
+            Boolean(product.hasVariants ?? product.has_variants) &&
+            variants.length > 0;
+
+        if (hasVariants) {
+            return variants.map<PackageSelectableItem>((variant) => {
+                const variantName = getVariantName(variant);
+                const salesPrice = Number(
+                    variant.salesPrice ??
+                    variant.sales_price ??
+                    product.salesPrice ??
+                    product.sales_price ??
+                    0
+                );
+
+                return {
+                    key: `product:${product.id}:variant:${variant.id}`,
+                    productId: product.id,
+                    variantId: Number(variant.id),
+                    productName: product.name,
+                    variantName,
+                    displayName: `${product.name} — ${variantName}`,
+                    salesPrice,
+                    stock: Number(variant.stock || 0),
+                    branchId: productBranchId,
+                };
+            });
+        }
+
+        return [
+            {
+                key: `product:${product.id}:regular`,
+                productId: product.id,
+                variantId: null,
+                productName: product.name,
+                variantName: "",
+                displayName: product.name,
+                salesPrice: Number(product.salesPrice ?? product.sales_price ?? 0),
+                stock: Number(product.stock || 0),
+                branchId: productBranchId,
+            },
+        ];
+    });
 }
 
 // ─── Shared fieldClass ────────────────────────────────────────────────────────
@@ -558,7 +703,7 @@ export function PackageCard({
                                     ) : (
                                         (pkg.inclusions || []).map((item) => (
                                             <div
-                                                key={item.productId}
+                                                key={getInclusionKey(item)}
                                                 className="flex items-center justify-between gap-3 rounded-xl border border-[#E6DDF0] bg-[#FFFCF7] px-3 py-2.5"
                                             >
                                                 <div>
@@ -690,7 +835,7 @@ export function PackageFormModal({
     downPaymentAmount: string;
     setDownPaymentAmount: (value: string) => void;
     inclusions: PackageInclusion[];
-    products: Product[];
+    products: PackageSelectableItem[];
     selectedProductId: string;
     setSelectedProductId: (value: string) => void;
     inclusionQty: string;
@@ -698,7 +843,7 @@ export function PackageFormModal({
     originalValue: number;
     packagePrice: number;
     onAddInclusion: () => void;
-    onRemoveInclusion: (id: number) => void;
+    onRemoveInclusion: (key: string) => void;
     onSubmit: (event: FormEvent<HTMLFormElement>) => void;
     onClose: () => void;
 }) {
@@ -870,14 +1015,18 @@ export function PackageFormModal({
                                 }
                                 className={fieldClass}
                             >
-                                <option value="">Select product</option>
+                                <option value="">Select product or variant</option>
+
                                 {products.map((product) => (
                                     <option
-                                        key={product.id}
-                                        value={product.id}
+                                        key={product.key}
+                                        value={product.key}
+                                        disabled={product.stock <= 0}
                                     >
-                                        {product.name} — {peso(product.salesPrice)} — Stock:{" "}
-                                        {product.stock}
+                                        {product.displayName} — {peso(product.salesPrice)} —{" "}
+                                        {product.stock <= 0
+                                            ? "Unavailable"
+                                            : `Stock: ${product.stock}`}
                                     </option>
                                 ))}
                             </select>
@@ -910,7 +1059,7 @@ export function PackageFormModal({
                             ) : (
                                 inclusions.map((item) => (
                                     <div
-                                        key={item.productId}
+                                        key={getInclusionKey(item)}
                                         className="flex items-center justify-between rounded-xl border border-[#E6DDF0] bg-white px-3 py-2.5"
                                     >
                                         <div>
@@ -928,7 +1077,7 @@ export function PackageFormModal({
                                         <button
                                             type="button"
                                             onClick={() =>
-                                                onRemoveInclusion(item.productId)
+                                                onRemoveInclusion(getInclusionKey(item))
                                             }
                                             className="text-xs font-semibold text-red-500 hover:underline"
                                         >
@@ -1210,29 +1359,40 @@ export function usePackageForm(
         setCoverImage("");
     }
 
-    function addInclusion(products: Product[]) {
-        const product = products.find((p) => p.id === Number(selectedProductId));
+    function addInclusion(products: PackageSelectableItem[]) {
+        const product = products.find((p) => p.key === selectedProductId);
         const qty = Number(inclusionQty);
 
         if (!product || qty <= 0) {
-            setError("Please select a product and enter a valid quantity.");
+            setError("Please select a product or variant and enter a valid quantity.");
             return;
         }
 
-        const existing = inclusions.find((item) => item.productId === product.id);
+        const existing = inclusions.find(
+            (item) => getInclusionKey(item) === product.key
+        );
+
         const totalQty = (existing?.quantity ?? 0) + qty;
+
+        if (totalQty > product.stock) {
+            setError(
+                `Only ${product.stock} stock available for ${product.displayName}.`
+            );
+            return;
+        }
+
         const unitSalesPrice = Number(product.salesPrice || 0);
-        const lineValue = unitSalesPrice * totalQty;
 
         if (existing) {
             setInclusions((prev) =>
                 prev.map((item) =>
-                    item.productId === product.id
+                    getInclusionKey(item) === product.key
                         ? {
                             ...item,
                             quantity: totalQty,
                             unitSalesPrice,
-                            lineValue,
+                            lineValue: unitSalesPrice * totalQty,
+                            availableStock: product.stock,
                         }
                         : item
                 )
@@ -1241,11 +1401,15 @@ export function usePackageForm(
             setInclusions((prev) => [
                 ...prev,
                 {
-                    productId: product.id,
-                    productName: product.name,
+                    inventoryKey: product.key,
+                    productId: product.productId,
+                    variantId: product.variantId ?? null,
+                    productName: product.displayName,
+                    variantName: product.variantName,
                     quantity: qty,
                     unitSalesPrice,
                     lineValue: unitSalesPrice * qty,
+                    availableStock: product.stock,
                 },
             ]);
         }
@@ -1255,9 +1419,9 @@ export function usePackageForm(
         setError("");
     }
 
-    function removeInclusion(productId: number) {
+    function removeInclusion(key: string) {
         setInclusions((prev) =>
-            prev.filter((item) => item.productId !== productId)
+            prev.filter((item) => getInclusionKey(item) !== key)
         );
     }
 

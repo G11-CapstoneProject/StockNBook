@@ -22,6 +22,27 @@ import {
     peso,
 } from "./_shared";
 
+type BookingInventoryItem = {
+    id: number;
+    booking_id?: number;
+    source_type?: string;
+    product_id?: number;
+    variant_id?: number | null;
+    product_name: string;
+    variant_name?: string | null;
+    booked_quantity: number | string;
+    reserved_quantity: number | string;
+    used_quantity?: number | string;
+    restored_quantity?: number | string;
+    unit_price?: number | string;
+    inventory_status?: string;
+};
+
+type CancelUsedItem = {
+    booking_item_id: number;
+    used_quantity: number;
+};
+
 function formatCurrentDateTime(value: Date) {
     const dateLabel = value.toLocaleDateString("en-US", {
         month: "long",
@@ -54,6 +75,12 @@ export default function StaffBookings() {
     const [priceModal, setPriceModal] = useState<Booking | null>(null);
     const [calendarMonth, setCalendarMonth] = useState(() => new Date());
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
+    const [cancelModal, setCancelModal] = useState<Booking | null>(null);
+    const [cancelItems, setCancelItems] = useState<BookingInventoryItem[]>([]);
+    const [cancelUsedQty, setCancelUsedQty] = useState<Record<number, number>>({});
+    const [cancelLoading, setCancelLoading] = useState(false);
+    const [cancelSubmitting, setCancelSubmitting] = useState(false);
+    const [cancelError, setCancelError] = useState("");
 
     const canView = access === "view" || access === "full";
     const canManage = access === "full";
@@ -135,8 +162,8 @@ export default function StaffBookings() {
                 return;
             }
 
-            const normalizedBookings = (data.bookings || []).map((b: any) =>
-                normalizeBooking(b, savedBranchName)
+            const normalizedBookings = (data.bookings || []).map(
+                (b: Record<string, unknown>) => normalizeBooking(b, savedBranchName)
             );
 
             setBookings(normalizedBookings);
@@ -173,7 +200,13 @@ export default function StaffBookings() {
         };
     }, []);
 
-    async function updateStatus(id: number, newStatus: string, price?: number) {
+    async function updateStatus(
+        id: number,
+        newStatus: string,
+        price?: number,
+        usedItems?: CancelUsedItem[]
+    ) {
+
         if (!canManage) return;
 
         const token = getToken();
@@ -188,6 +221,7 @@ export default function StaffBookings() {
 
             if (branchId) body.branch_id = Number(branchId);
             if (price !== undefined) body.agreed_price = price;
+            if (usedItems) body.used_items = usedItems;
 
             const res = await fetch("/api/bookings", {
                 method: "POST",
@@ -222,6 +256,94 @@ export default function StaffBookings() {
             );
         } catch (err) {
             console.error("Failed to update booking status:", err);
+            throw err;
+        }
+    }
+
+    async function openCancelModal(booking: Booking) {
+        if (!canManage) return;
+
+        const token = getToken();
+        const branchId = getBranchId();
+
+        setCancelModal(booking);
+        setCancelItems([]);
+        setCancelUsedQty({});
+        setCancelError("");
+        setCancelLoading(true);
+
+        try {
+            const body: Record<string, unknown> = {
+                action: "get_booking_items",
+                booking_id: booking.id,
+            };
+
+            if (branchId) body.branch_id = Number(branchId);
+
+            const res = await fetch("/api/bookings", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify(body),
+            });
+
+            const data = await res.json();
+
+            if (!res.ok || data.success === false) {
+                throw new Error(data.message || data.error || "Failed to load booking items.");
+            }
+
+            const items = Array.isArray(data.items) ? data.items : [];
+
+            setCancelItems(items);
+
+            const initialUsed: Record<number, number> = {};
+            items.forEach((item: BookingInventoryItem) => {
+                initialUsed[Number(item.id)] = 0;
+            });
+
+            setCancelUsedQty(initialUsed);
+        } catch (err) {
+            console.error("Failed to load booking items:", err);
+            setCancelError("Failed to load booking items. Please try again.");
+        } finally {
+            setCancelLoading(false);
+        }
+    }
+
+    async function confirmCancelBooking() {
+        if (!cancelModal || !canManage) return;
+
+        setCancelSubmitting(true);
+        setCancelError("");
+
+        try {
+            const usedItems: CancelUsedItem[] = cancelItems.map((item) => {
+                const itemId = Number(item.id);
+                const reservedQty = Number(item.reserved_quantity || 0);
+                const usedQty = Math.max(
+                    0,
+                    Math.min(Number(cancelUsedQty[itemId] || 0), reservedQty)
+                );
+
+                return {
+                    booking_item_id: itemId,
+                    used_quantity: usedQty,
+                };
+            });
+
+            await updateStatus(cancelModal.id, "Cancelled", undefined, usedItems);
+
+            setCancelModal(null);
+            setCancelItems([]);
+            setCancelUsedQty({});
+        } catch (err) {
+            console.error("Failed to cancel booking:", err);
+            setCancelError("Failed to cancel booking. Please check the used quantities and try again.");
+        } finally {
+            setCancelSubmitting(false);
         }
     }
 
@@ -693,7 +815,7 @@ export default function StaffBookings() {
                                                 Schedule
                                             </th>
                                             <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                                Package
+                                                Booking Selection
                                             </th>
                                             <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
                                                 Payment
@@ -721,6 +843,7 @@ export default function StaffBookings() {
                                                 onMarkFullyPaid={
                                                     canManage ? markFullyPaid : undefined
                                                 }
+                                                onCancelBooking={canManage ? openCancelModal : undefined}
                                             />
                                         ))}
                                         </tbody>
@@ -739,7 +862,187 @@ export default function StaffBookings() {
                     onClose={() => setPriceModal(null)}
                 />
             )}
+
+            {cancelModal && canManage && (
+                <CancelInventoryModal
+                    booking={cancelModal}
+                    items={cancelItems}
+                    usedQty={cancelUsedQty}
+                    loading={cancelLoading}
+                    submitting={cancelSubmitting}
+                    error={cancelError}
+                    onChangeUsedQty={(itemId: number, value: number) =>
+                        setCancelUsedQty((prev) => ({
+                            ...prev,
+                            [itemId]: value,
+                        }))
+                    }
+                    onClose={() => {
+                        if (cancelSubmitting) return;
+                        setCancelModal(null);
+                        setCancelItems([]);
+                        setCancelUsedQty({});
+                        setCancelError("");
+                    }}
+                    onConfirm={confirmCancelBooking}
+                />
+            )}
         </>
+    );
+}
+
+function CancelInventoryModal({
+                                  booking,
+                                  items,
+                                  usedQty,
+                                  loading,
+                                  submitting,
+                                  error,
+                                  onChangeUsedQty,
+                                  onClose,
+                                  onConfirm,
+                              }: {
+    booking: Booking;
+    items: BookingInventoryItem[];
+    usedQty: Record<number, number>;
+    loading: boolean;
+    submitting: boolean;
+    error: string;
+    onChangeUsedQty: (itemId: number, value: number) => void;
+    onClose: () => void;
+    onConfirm: () => void;
+}) {
+    const reservedItems = items.filter(
+        (item) => Number(item.reserved_quantity || 0) > 0
+    );
+
+    const hasReservedItems = reservedItems.length > 0;
+
+    return (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/35 px-4 font-sans">
+            <div className="max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-[22px] border border-[#E6DDF0] bg-white shadow-2xl">
+                <div className="border-b border-[#EFE7F4] px-5 py-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#806A8C]">
+                        Cancel Booking
+                    </p>
+
+                    <h2 className="mt-1 text-xl font-bold text-[#1A1220]">
+                        Record used items before cancelling
+                    </h2>
+
+                    <p className="mt-1 text-sm text-[#7A6A84]">
+                        Booking #{booking.id} · {booking.name}
+                    </p>
+                </div>
+
+                <div className="max-h-[58vh] overflow-y-auto px-5 py-4">
+                    {loading ? (
+                        <div className="rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-8 text-center text-sm text-[#806A8C]">
+                            Loading booking items...
+                        </div>
+                    ) : !hasReservedItems ? (
+                        <div className="rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-4 py-4 text-sm text-[#8A5A00]">
+                            No reserved inventory was found for this booking. Cancelling will only update the booking status.
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            <div className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3 text-sm text-[#4E2C66]">
+                                Enter the quantity that was already used. Anything not used will be returned to inventory.
+                            </div>
+
+                            {reservedItems.map((item) => {
+                                const itemId = Number(item.id);
+                                const reserved = Number(item.reserved_quantity || 0);
+                                const used = Math.max(
+                                    0,
+                                    Math.min(Number(usedQty[itemId] || 0), reserved)
+                                );
+                                const restored = Math.max(reserved - used, 0);
+                                const label = item.variant_name
+                                    ? `${item.product_name} — ${item.variant_name}`
+                                    : item.product_name;
+
+                                return (
+                                    <div
+                                        key={item.id}
+                                        className="rounded-2xl border border-[#E6DDF0] bg-white p-4 shadow-sm"
+                                    >
+                                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                            <div className="min-w-0">
+                                                <p className="text-sm font-bold text-[#1A1220]">
+                                                    {label}
+                                                </p>
+
+                                                <p className="mt-1 text-xs text-[#7A6A84]">
+                                                    Reserved: {reserved}
+                                                </p>
+
+                                                <p className="mt-1 text-xs font-semibold text-[#138342]">
+                                                    Will return to inventory: {restored}
+                                                </p>
+                                            </div>
+
+                                            <div className="w-full md:w-[180px]">
+                                                <label className="text-xs font-semibold text-[#5F4E75]">
+                                                    Used quantity
+                                                </label>
+
+                                                <input
+                                                    type="number"
+                                                    min={0}
+                                                    max={reserved}
+                                                    value={used}
+                                                    disabled={submitting}
+                                                    onChange={(event) => {
+                                                        const nextValue = Math.max(
+                                                            0,
+                                                            Math.min(Number(event.target.value || 0), reserved)
+                                                        );
+
+                                                        onChangeUsedQty(itemId, nextValue);
+                                                    }}
+                                                    className="mt-1 h-11 w-full rounded-xl border border-[#D8CBE7] bg-white px-3 text-sm font-semibold text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:opacity-60"
+                                                />
+
+                                                <p className="mt-1 text-[11px] text-[#806A8C]">
+                                                    Max: {reserved}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    {error && (
+                        <div className="mt-4 rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-sm font-semibold text-[#C32F2F]">
+                            {error}
+                        </div>
+                    )}
+                </div>
+
+                <div className="flex flex-col-reverse gap-2 border-t border-[#EFE7F4] bg-[#FFFDF8] px-5 py-4 sm:flex-row sm:justify-end">
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        disabled={submitting}
+                        className="inline-flex h-11 items-center justify-center rounded-xl border border-[#D8CBE7] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:opacity-60"
+                    >
+                        Back
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={onConfirm}
+                        disabled={loading || submitting}
+                        className="inline-flex h-11 items-center justify-center rounded-xl bg-[#A33E20] px-4 text-sm font-semibold text-white transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                        {submitting ? "Cancelling..." : "Confirm Cancellation"}
+                    </button>
+                </div>
+            </div>
+        </div>
     );
 }
 

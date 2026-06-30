@@ -3,11 +3,20 @@
 import { RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
-    getToken, peso, formatText, getPackageCategory,
+    getToken,
+    formatText,
+    getPackageCategory,
+    buildPackageSelectableItems,
     PACKAGE_CATEGORY_OPTIONS,
-    Card, CardHeader, PackageCard, EmptyState,
-    PackageFormModal, usePackageForm,
-    type PackageCategory, type PackageItem, type Product,
+    Card,
+    CardHeader,
+    PackageCard,
+    EmptyState,
+    PackageFormModal,
+    usePackageForm,
+    type PackageCategory,
+    type PackageItem,
+    type Product,
 } from "./_shared";
 
 function formatCurrentDateTime(value: Date) {
@@ -36,7 +45,8 @@ export default function ManagerPackages() {
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState("");
-    const [selectedCategory, setSelectedCategory] = useState<PackageCategory>("All");
+    const [selectedCategory, setSelectedCategory] =
+        useState<PackageCategory>("All");
     const [error, setError] = useState("");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
     const [isRefreshing, setIsRefreshing] = useState(false);
@@ -44,6 +54,11 @@ export default function ManagerPackages() {
     const form = usePackageForm(storeId, branchId, async () => {
         if (branchId) await fetchPackages(branchId);
     });
+
+    const packageProducts = useMemo(
+        () => buildPackageSelectableItems(products, branchId),
+        [products, branchId]
+    );
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -71,11 +86,14 @@ export default function ManagerPackages() {
         if (savedStoreId) {
             const store = Number(savedStoreId);
             const branch = savedBranchId ? Number(savedBranchId) : null;
+
             setStoreId(store);
             setBranchId(branch);
-            fetchProducts(store);
+
+            void fetchProducts(store, branch);
+
             if (branch) {
-                fetchPackages(branch);
+                void fetchPackages(branch);
             } else {
                 setLoading(false);
                 setError("Missing branch_id. Please check sessionStorage setup.");
@@ -89,11 +107,15 @@ export default function ManagerPackages() {
         try {
             const res = await fetch("/api/packages", {
                 method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${getToken()}`,
+                },
                 body: JSON.stringify({ action: "get_packages", branch_id }),
             });
+
             const data = await res.json();
-            setPackages(data.packages || []);
+            setPackages(Array.isArray(data.packages) ? data.packages : []);
         } catch {
             setPackages([]);
         } finally {
@@ -101,15 +123,23 @@ export default function ManagerPackages() {
         }
     }
 
-    async function fetchProducts(store_id: number) {
+    async function fetchProducts(store_id: number, branch_id?: number | null) {
         try {
             const res = await fetch("/api/products", {
                 method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
-                body: JSON.stringify({ action: "get_products", store_id }),
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${getToken()}`,
+                },
+                body: JSON.stringify({
+                    action: "get_products",
+                    store_id,
+                    ...(branch_id ? { branch_id } : {}),
+                }),
             });
+
             const data = await res.json();
-            setProducts(data.products || []);
+            setProducts(Array.isArray(data.products) ? data.products : []);
         } catch {
             setProducts([]);
         }
@@ -120,7 +150,7 @@ export default function ManagerPackages() {
 
         try {
             if (storeId) {
-                await fetchProducts(storeId);
+                await fetchProducts(storeId, branchId);
             }
 
             if (branchId) {
@@ -133,7 +163,10 @@ export default function ManagerPackages() {
 
     async function handleDelete(id: number) {
         const deletedId = await form.handleDelete(id);
-        if (deletedId) setPackages((prev) => prev.filter((pkg) => pkg.id !== deletedId));
+
+        if (deletedId) {
+            setPackages((prev) => prev.filter((pkg) => pkg.id !== deletedId));
+        }
     }
 
     const filteredPackages = useMemo(() => {
@@ -201,7 +234,11 @@ export default function ManagerPackages() {
                 <div className="space-y-3">
                     <div className="flex gap-3">
                         <div className="relative flex-1">
-                            <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
+                            <Search
+                                size={15}
+                                className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
+                            />
+
                             <input
                                 value={search}
                                 onChange={(e) => setSearch(e.target.value)}
@@ -209,6 +246,7 @@ export default function ManagerPackages() {
                                 className="w-full rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C]"
                             />
                         </div>
+
                         <button
                             onClick={form.openAdd}
                             className="inline-flex items-center rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
@@ -254,7 +292,10 @@ export default function ManagerPackages() {
                     </div>
 
                     <Card className="min-h-[420px]">
-                        <CardHeader title="Branch Package List" action={`${filteredPackages.length} packages`} />
+                        <CardHeader
+                            title="Branch Package List"
+                            action={`${filteredPackages.length} packages`}
+                        />
 
                         {error && (
                             <div className="mb-3 rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2.5 text-xs font-medium text-[#9B1C1C]">
@@ -263,15 +304,27 @@ export default function ManagerPackages() {
                         )}
 
                         {loading ? (
-                            <EmptyState title="Loading packages..." detail="Please wait while packages are being loaded." />
+                            <EmptyState
+                                title="Loading packages..."
+                                detail="Please wait while packages are being loaded."
+                            />
                         ) : filteredPackages.length === 0 ? (
-                            <EmptyState title="No packages yet." detail="Create your first package using inventory items and discounts." />
+                            <EmptyState
+                                title="No packages yet."
+                                detail="Create your first package using inventory items and discounts."
+                            />
                         ) : (
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                                 {filteredPackages.map((pkg, index) => (
                                     <PackageCard
                                         key={pkg.id}
-                                        pkg={{ ...pkg, name: formatText(pkg.name), description: formatText(pkg.description || "No description") }}
+                                        pkg={{
+                                            ...pkg,
+                                            name: formatText(pkg.name),
+                                            description: formatText(
+                                                pkg.description || "No description"
+                                            ),
+                                        }}
                                         featured={index === 1}
                                         canManage
                                         onEdit={() => form.openEdit(pkg)}
@@ -289,28 +342,40 @@ export default function ManagerPackages() {
                 editingId={form.editingId}
                 error={form.error}
                 submitting={form.submitting}
-                name={form.name} setName={form.setName}
-                description={form.description} setDescription={form.setDescription}
-                category={form.category} setCategory={form.setCategory}
+                name={form.name}
+                setName={form.setName}
+                description={form.description}
+                setDescription={form.setDescription}
+                category={form.category}
+                setCategory={form.setCategory}
                 coverImage={form.coverImage}
                 onCoverImageChange={form.handleCoverImageChange}
                 onRemoveCoverImage={form.removeCoverImage}
-                duration={form.duration} setDuration={form.setDuration}
-                status={form.status} setStatus={form.setStatus}
-                discountType={form.discountType} setDiscountType={form.setDiscountType}
-                discountValue={form.discountValue} setDiscountValue={form.setDiscountValue}
+                duration={form.duration}
+                setDuration={form.setDuration}
+                status={form.status}
+                setStatus={form.setStatus}
+                discountType={form.discountType}
+                setDiscountType={form.setDiscountType}
+                discountValue={form.discountValue}
+                setDiscountValue={form.setDiscountValue}
                 downPaymentAmount={form.downPaymentAmount}
                 setDownPaymentAmount={form.setDownPaymentAmount}
                 inclusions={form.inclusions}
-                products={products}
-                selectedProductId={form.selectedProductId} setSelectedProductId={form.setSelectedProductId}
-                inclusionQty={form.inclusionQty} setInclusionQty={form.setInclusionQty}
+                products={packageProducts}
+                selectedProductId={form.selectedProductId}
+                setSelectedProductId={form.setSelectedProductId}
+                inclusionQty={form.inclusionQty}
+                setInclusionQty={form.setInclusionQty}
                 originalValue={form.originalValue}
                 packagePrice={form.packagePrice}
-                onAddInclusion={() => form.addInclusion(products)}
+                onAddInclusion={() => form.addInclusion(packageProducts)}
                 onRemoveInclusion={form.removeInclusion}
                 onSubmit={form.handleSubmit}
-                onClose={() => { form.reset(); form.setShowForm(false); }}
+                onClose={() => {
+                    form.reset();
+                    form.setShowForm(false);
+                }}
             />
         </>
     );

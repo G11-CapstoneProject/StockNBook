@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
     AlertTriangle,
+    CheckCircle2,
     ChevronDown,
     RefreshCw,
     Search,
@@ -1491,7 +1492,171 @@ export function BranchInventoryView({
     );
 }
 
+
+type SuccessToastMessage = {
+    title: string;
+    message: string;
+};
+
+type ProductSuccessAction = "add" | "update";
+
+function SuccessToast({
+                          toast,
+                          onClose,
+                      }: {
+    toast: SuccessToastMessage | null;
+    onClose: () => void;
+}) {
+    const [isFadingOut, setIsFadingOut] = React.useState(false);
+
+    React.useEffect(() => {
+        if (!toast) {
+            setIsFadingOut(false);
+            return;
+        }
+
+        setIsFadingOut(false);
+
+        const fadeTimer = window.setTimeout(() => {
+            setIsFadingOut(true);
+        }, 5000);
+
+        const closeTimer = window.setTimeout(() => {
+            onClose();
+        }, 5600);
+
+        return () => {
+            window.clearTimeout(fadeTimer);
+            window.clearTimeout(closeTimer);
+        };
+    }, [toast, onClose]);
+
+    if (!toast) {
+        return null;
+    }
+
+    return (
+        <div
+            role="status"
+            aria-live="polite"
+            className={[
+                "fixed bottom-5 right-5 z-[140] flex w-[min(360px,calc(100vw-2.5rem))] items-start gap-3 rounded-2xl border border-[#BCE8CA] bg-white p-4 shadow-[0_18px_42px_rgba(43,23,76,0.22)] transition-all duration-700 ease-out",
+                isFadingOut
+                    ? "translate-y-3 opacity-0"
+                    : "translate-y-0 opacity-100",
+            ].join(" ")}
+        >
+            <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#E5F8EC] text-[#23834A]">
+                <CheckCircle2 size={20} strokeWidth={2.4} />
+            </span>
+
+            <div className="min-w-0 flex-1">
+                <p className="text-sm font-bold text-[#1A1220]">{toast.title}</p>
+                <p className="mt-0.5 text-xs leading-5 text-[#6A5D6F]">{toast.message}</p>
+            </div>
+
+            <button
+                type="button"
+                onClick={onClose}
+                aria-label="Dismiss notification"
+                className="shrink-0 text-lg leading-none text-[#9B8AAA] transition hover:text-[#2B174C]"
+            >
+                ×
+            </button>
+        </div>
+    );
+}
+
+
 export function InventoryDialogs({ inv }: { inv: InventoryController }) {
+    const [pendingProductSuccess, setPendingProductSuccess] = React.useState<{
+        action: ProductSuccessAction;
+        name: string;
+    } | null>(null);
+    const [pendingDeletedProductName, setPendingDeletedProductName] =
+        React.useState("");
+    const [productToast, setProductToast] =
+        React.useState<SuccessToastMessage | null>(null);
+
+    const closeProductToast = React.useCallback(() => {
+        setProductToast(null);
+    }, []);
+
+    const closeConfirmProductSaveDialog = React.useCallback(() => {
+        setPendingProductSuccess(null);
+        inv.closeConfirmProductSaveDialog();
+    }, [inv]);
+
+    const confirmSaveProduct = React.useCallback(async () => {
+        const pendingSave = inv.pendingProductSave;
+
+        if (!pendingSave) {
+            return;
+        }
+
+        const productName = (
+            pendingSave.mode === "edit"
+                ? pendingSave.after.name
+                : pendingSave.data.name
+        ).trim();
+
+        setPendingProductSuccess({
+            action: pendingSave.mode === "edit" ? "update" : "add",
+            name: productName,
+        });
+
+        await inv.confirmSaveProduct();
+    }, [inv]);
+
+    const confirmDeleteProduct = React.useCallback(async () => {
+        const productName = inv.productToDelete?.name.trim() || "";
+
+        if (!productName) {
+            return;
+        }
+
+        setPendingDeletedProductName(productName);
+        await inv.confirmDeleteProduct();
+    }, [inv]);
+
+    React.useEffect(() => {
+        if (!pendingProductSuccess || inv.showConfirmProductSaveDialog) {
+            return;
+        }
+
+        const isUpdate = pendingProductSuccess.action === "update";
+
+        setProductToast({
+            title: isUpdate
+                ? "Product updated successfully"
+                : "Product added successfully",
+            message: isUpdate
+                ? `“${pendingProductSuccess.name}” was updated in inventory.`
+                : `“${pendingProductSuccess.name}” was added to inventory.`,
+        });
+        setPendingProductSuccess(null);
+    }, [inv.showConfirmProductSaveDialog, pendingProductSuccess]);
+
+    React.useEffect(() => {
+        if (
+            !pendingDeletedProductName ||
+            inv.showDeleteProductDialog ||
+            inv.productToDelete
+        ) {
+            return;
+        }
+
+        setProductToast({
+            title: "Product deleted successfully",
+            message: `“${pendingDeletedProductName}” was removed from inventory.`,
+        });
+        setPendingDeletedProductName("");
+    }, [
+        inv.productToDelete,
+        inv.showDeleteProductDialog,
+        pendingDeletedProductName,
+    ]);
+
     const productSaveTitle =
         inv.pendingProductSave?.mode === "edit" ? "Update Product" : "Add Product";
     const productSaveButton =
@@ -1499,6 +1664,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
 
     return (
         <>
+            <SuccessToast toast={productToast} onClose={closeProductToast} />
             {inv.showForm && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
                     <div
@@ -1561,7 +1727,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                             </div>
                             <button
                                 type="button"
-                                onClick={inv.closeConfirmProductSaveDialog}
+                                onClick={closeConfirmProductSaveDialog}
                                 className="text-[#9B8AAA] hover:text-[#1A1220]"
                             >
                                 ✕
@@ -1571,14 +1737,14 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                         <div className="mt-4 flex justify-end gap-2">
                             <button
                                 type="button"
-                                onClick={inv.closeConfirmProductSaveDialog}
+                                onClick={closeConfirmProductSaveDialog}
                                 className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]"
                             >
                                 Cancel
                             </button>
                             <button
                                 type="button"
-                                onClick={inv.confirmSaveProduct}
+                                onClick={() => void confirmSaveProduct()}
                                 className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1B0D31]"
                             >
                                 {productSaveButton}
@@ -1849,7 +2015,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                             </button>
                             <button
                                 type="button"
-                                onClick={inv.confirmDeleteProduct}
+                                onClick={() => void confirmDeleteProduct()}
                                 className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
                             >
                                 Delete Product
@@ -1865,6 +2031,34 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
 function CategoryForm({ inv }: { inv: InventoryController }) {
     const [showAddCategoryDialog, setShowAddCategoryDialog] = React.useState(false);
     const [categoryToAdd, setCategoryToAdd] = React.useState("");
+    const [pendingAddedCategoryName, setPendingAddedCategoryName] =
+        React.useState("");
+    const [categoryToast, setCategoryToast] =
+        React.useState<SuccessToastMessage | null>(null);
+
+    const closeCategoryToast = React.useCallback(() => {
+        setCategoryToast(null);
+    }, []);
+
+    React.useEffect(() => {
+        if (!pendingAddedCategoryName) {
+            return;
+        }
+
+        const categoryWasSaved = inv.categories.some(
+            (category) =>
+                normalizeLookupText(category) ===
+                normalizeLookupText(pendingAddedCategoryName)
+        );
+
+        if (categoryWasSaved && !inv.category.trim()) {
+            setCategoryToast({
+                title: "Category added successfully",
+                message: `“${pendingAddedCategoryName}” is now available for inventory products.`,
+            });
+            setPendingAddedCategoryName("");
+        }
+    }, [inv.categories, inv.category, pendingAddedCategoryName]);
 
     const [showEditCategoryDialog, setShowEditCategoryDialog] =
         React.useState(false);
@@ -1937,6 +2131,7 @@ function CategoryForm({ inv }: { inv: InventoryController }) {
     const confirmAddCategory = async () => {
         if (!categoryToAdd) return;
 
+        setPendingAddedCategoryName(categoryToAdd);
         await inv.addCategoryNow(categoryToAdd);
         closeAddCategoryDialog();
     };
@@ -1969,6 +2164,8 @@ function CategoryForm({ inv }: { inv: InventoryController }) {
 
     return (
         <>
+            <SuccessToast toast={categoryToast} onClose={closeCategoryToast} />
+
             {showAddCategoryDialog && (
                 <div className="fixed inset-0 z-80 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
                     <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl">

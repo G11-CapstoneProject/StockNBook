@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
     BarChart3,
@@ -108,6 +108,17 @@ export default function RoleSidebar() {
     const { user, loading } = useCurrentUser();
     const pathname = usePathname();
     const [logoFailed, setLogoFailed] = useState(false);
+    const [mounted, setMounted] = useState(false);
+
+    useEffect(() => {
+        const timer = window.setTimeout(() => {
+            setMounted(true);
+        }, 0);
+
+        return () => {
+            window.clearTimeout(timer);
+        };
+    }, []);
 
     const role = (user?.role || "owner") as Role;
     const permissions = user?.permissions || {};
@@ -161,7 +172,7 @@ export default function RoleSidebar() {
         window.location.href = "/";
     };
 
-    if (loading) {
+    if (!mounted || loading) {
         return (
             <aside className="flex min-h-screen w-[216px] shrink-0 flex-col bg-[#1E1035] font-sans text-white">
                 <div className="border-b border-white/[0.08] px-4 py-4">

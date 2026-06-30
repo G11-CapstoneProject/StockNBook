@@ -3,11 +3,22 @@
 import { RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
-    getToken, formatText, getSavedPackageAccess, getPackageCategory,
+    getToken,
+    formatText,
+    getSavedPackageAccess,
+    getPackageCategory,
+    buildPackageSelectableItems,
     PACKAGE_CATEGORY_OPTIONS,
-    Card, CardHeader, PackageCard, EmptyState,
-    PackageFormModal, usePackageForm,
-    type PackageAccess, type PackageCategory, type PackageItem, type Product,
+    Card,
+    CardHeader,
+    PackageCard,
+    EmptyState,
+    PackageFormModal,
+    usePackageForm,
+    type PackageAccess,
+    type PackageCategory,
+    type PackageItem,
+    type Product,
 } from "./_shared";
 
 function formatCurrentDateTime(value: Date) {
@@ -36,7 +47,8 @@ export default function StaffPackages() {
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState("");
-    const [selectedCategory, setSelectedCategory] = useState<PackageCategory>("All");
+    const [selectedCategory, setSelectedCategory] =
+        useState<PackageCategory>("All");
     const [error, setError] = useState("");
     const [packageAccess, setPackageAccess] = useState<PackageAccess>("none");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
@@ -49,19 +61,33 @@ export default function StaffPackages() {
         if (branchId) await fetchPackages(branchId);
     });
 
-    // ── Shared fetchers ──────────────────────────────────────────────────────
+    const packageProducts = useMemo(
+        () => buildPackageSelectableItems(products, branchId),
+        [products, branchId]
+    );
 
     async function fetchPackages(branch_id: number) {
         try {
             setLoading(true);
+
             const res = await fetch("/api/packages", {
                 method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${getToken()}`,
+                },
                 body: JSON.stringify({ action: "get_packages", branch_id }),
             });
+
             const data = await res.json();
-            if (!res.ok) { setError(data.error || "Failed to load packages."); setPackages([]); return; }
-            setPackages(data.packages || []);
+
+            if (!res.ok) {
+                setError(data.error || "Failed to load packages.");
+                setPackages([]);
+                return;
+            }
+
+            setPackages(Array.isArray(data.packages) ? data.packages : []);
             setError("");
         } catch {
             setPackages([]);
@@ -71,21 +97,27 @@ export default function StaffPackages() {
         }
     }
 
-    async function fetchProducts(store_id: number) {
+    async function fetchProducts(store_id: number, branch_id?: number | null) {
         try {
             const res = await fetch("/api/products", {
                 method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
-                body: JSON.stringify({ action: "get_products", store_id }),
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${getToken()}`,
+                },
+                body: JSON.stringify({
+                    action: "get_products",
+                    store_id,
+                    ...(branch_id ? { branch_id } : {}),
+                }),
             });
+
             const data = await res.json();
-            setProducts(data.products || []);
+            setProducts(Array.isArray(data.products) ? data.products : []);
         } catch {
             setProducts([]);
         }
     }
-
-    // ── Init ─────────────────────────────────────────────────────────────────
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -110,20 +142,26 @@ export default function StaffPackages() {
             sessionStorage.getItem("manager_branch_id");
         const savedAccess = getSavedPackageAccess();
 
+        const branch = savedBranchId ? Number(savedBranchId) : null;
+
         setBranchName(savedBranchName);
         setPackageAccess(savedAccess);
 
         if (savedStoreId) {
             const store = Number(savedStoreId);
+
             setStoreId(store);
-            if (savedAccess === "full") void fetchProducts(store);  // voided
+
+            if (savedAccess === "full") {
+                void fetchProducts(store, branch);
+            }
         }
 
-        if (savedBranchId) {
-            const branch = Number(savedBranchId);
+        if (branch) {
             setBranchId(branch);
+
             if (savedAccess === "view" || savedAccess === "full") {
-                void fetchPackages(branch);  // voided
+                void fetchPackages(branch);
             } else {
                 setLoading(false);
             }
@@ -133,14 +171,12 @@ export default function StaffPackages() {
         }
     }, []);
 
-    // ── Handlers ─────────────────────────────────────────────────────────────
-
     async function handleRefresh() {
         setIsRefreshing(true);
 
         try {
             if (storeId && canManage) {
-                await fetchProducts(storeId);
+                await fetchProducts(storeId, branchId);
             }
 
             if (branchId && canView) {
@@ -153,8 +189,12 @@ export default function StaffPackages() {
 
     async function handleDelete(id: number) {
         if (!canManage) return;
+
         const deletedId = await form.handleDelete(id);
-        if (deletedId) setPackages((prev) => prev.filter((pkg) => pkg.id !== deletedId));
+
+        if (deletedId) {
+            setPackages((prev) => prev.filter((pkg) => pkg.id !== deletedId));
+        }
     }
 
     const filteredPackages = useMemo(() => {
@@ -175,8 +215,6 @@ export default function StaffPackages() {
             return matchesSearch && matchesCategory;
         });
     }, [packages, search, selectedCategory]);
-
-    // ── Render ───────────────────────────────────────────────────────────────
 
     return (
         <>
@@ -224,7 +262,11 @@ export default function StaffPackages() {
                 <div className="space-y-3">
                     <div className="flex gap-3">
                         <div className="relative flex-1">
-                            <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
+                            <Search
+                                size={15}
+                                className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
+                            />
+
                             <input
                                 value={search}
                                 onChange={(e) => setSearch(e.target.value)}
@@ -232,6 +274,7 @@ export default function StaffPackages() {
                                 className="w-full rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C]"
                             />
                         </div>
+
                         {canManage ? (
                             <button
                                 onClick={form.openAdd}
@@ -241,7 +284,9 @@ export default function StaffPackages() {
                             </button>
                         ) : (
                             <button
-                                onClick={() => { if (branchId) void fetchPackages(branchId); }}
+                                onClick={() => {
+                                    if (branchId) void fetchPackages(branchId);
+                                }}
                                 className="inline-flex items-center rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-sm font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]"
                             >
                                 Refresh
@@ -286,7 +331,10 @@ export default function StaffPackages() {
                     </div>
 
                     <Card className="min-h-[420px]">
-                        <CardHeader title="Branch Package List" action={`${filteredPackages.length} packages`} />
+                        <CardHeader
+                            title="Branch Package List"
+                            action={`${filteredPackages.length} packages`}
+                        />
 
                         {error && (
                             <div className="mb-3 rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2.5 text-xs font-medium text-[#9B1C1C]">
@@ -295,28 +343,48 @@ export default function StaffPackages() {
                         )}
 
                         {!canView ? (
-                            <EmptyState title="No package access." detail="Please contact your manager to update your staff package access." />
+                            <EmptyState
+                                title="No package access."
+                                detail="Please contact your manager to update your staff package access."
+                            />
                         ) : loading ? (
-                            <EmptyState title="Loading packages..." detail="Please wait while packages are being loaded." />
+                            <EmptyState
+                                title="Loading packages..."
+                                detail="Please wait while packages are being loaded."
+                            />
                         ) : filteredPackages.length === 0 ? (
                             <EmptyState
-                                title={canManage ? "No packages yet." : "No packages available."}
-                                detail={canManage ? "Create your first package using inventory items and discounts." : "No active package setup is currently available for this branch."}
+                                title={
+                                    canManage
+                                        ? "No packages yet."
+                                        : "No packages available."
+                                }
+                                detail={
+                                    canManage
+                                        ? "Create your first package using inventory items and discounts."
+                                        : "No active package setup is currently available for this branch."
+                                }
                             />
                         ) : (
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                                 {filteredPackages.map((pkg, index) => (
                                     <PackageCard
                                         key={pkg.id}
                                         pkg={{
                                             ...pkg,
                                             name: formatText(pkg.name),
-                                            description: formatText(pkg.description || "No description"),
+                                            description: formatText(
+                                                pkg.description || "No description"
+                                            ),
                                             duration: formatText(pkg.duration || "N/A"),
-                                            inclusions: (pkg.inclusions || []).map((item) => ({
-                                                ...item,
-                                                productName: formatText(item.productName),
-                                            })),
+                                            inclusions: (pkg.inclusions || []).map(
+                                                (item) => ({
+                                                    ...item,
+                                                    productName: formatText(
+                                                        item.productName
+                                                    ),
+                                                })
+                                            ),
                                         }}
                                         featured={index === 1}
                                         canManage={canManage}
@@ -336,28 +404,40 @@ export default function StaffPackages() {
                     editingId={form.editingId}
                     error={form.error}
                     submitting={form.submitting}
-                    name={form.name} setName={form.setName}
-                    description={form.description} setDescription={form.setDescription}
-                    category={form.category} setCategory={form.setCategory}
+                    name={form.name}
+                    setName={form.setName}
+                    description={form.description}
+                    setDescription={form.setDescription}
+                    category={form.category}
+                    setCategory={form.setCategory}
                     coverImage={form.coverImage}
                     onCoverImageChange={form.handleCoverImageChange}
                     onRemoveCoverImage={form.removeCoverImage}
-                    duration={form.duration} setDuration={form.setDuration}
-                    status={form.status} setStatus={form.setStatus}
-                    discountType={form.discountType} setDiscountType={form.setDiscountType}
-                    discountValue={form.discountValue} setDiscountValue={form.setDiscountValue}
+                    duration={form.duration}
+                    setDuration={form.setDuration}
+                    status={form.status}
+                    setStatus={form.setStatus}
+                    discountType={form.discountType}
+                    setDiscountType={form.setDiscountType}
+                    discountValue={form.discountValue}
+                    setDiscountValue={form.setDiscountValue}
                     downPaymentAmount={form.downPaymentAmount}
                     setDownPaymentAmount={form.setDownPaymentAmount}
                     inclusions={form.inclusions}
-                    products={products}
-                    selectedProductId={form.selectedProductId} setSelectedProductId={form.setSelectedProductId}
-                    inclusionQty={form.inclusionQty} setInclusionQty={form.setInclusionQty}
+                    products={packageProducts}
+                    selectedProductId={form.selectedProductId}
+                    setSelectedProductId={form.setSelectedProductId}
+                    inclusionQty={form.inclusionQty}
+                    setInclusionQty={form.setInclusionQty}
                     originalValue={form.originalValue}
                     packagePrice={form.packagePrice}
-                    onAddInclusion={() => form.addInclusion(products)}
+                    onAddInclusion={() => form.addInclusion(packageProducts)}
                     onRemoveInclusion={form.removeInclusion}
                     onSubmit={form.handleSubmit}
-                    onClose={() => { form.reset(); form.setShowForm(false); }}
+                    onClose={() => {
+                        form.reset();
+                        form.setShowForm(false);
+                    }}
                 />
             )}
         </>

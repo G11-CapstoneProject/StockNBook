@@ -479,21 +479,19 @@ exports.handler = async (event) => {
             try {
                 await connection.execute(
                     `INSERT INTO orders
-                        (
-                            order_id,
-                            store_id,
-                            branch_id,
-                            customer_name,
-                            item,
-                            total,
-                            order_date
-                        )
-                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                     (
+                         order_id,
+                         store_id,
+                         branch_id,
+                         item,
+                         total,
+                         order_date
+                     )
+                     VALUES (?, ?, ?, ?, ?, ?)`,
                     [
                         orderId,
                         storeId,
                         tokenBranchId,
-                        customerName,
                         item,
                         total,
                         orderDate,
@@ -517,16 +515,21 @@ exports.handler = async (event) => {
 
                 const [rows] = await connection.execute(
                     `SELECT
-                         order_id AS orderId,
-                         store_id AS storeId,
-                         branch_id AS branchId,
-                         customer_name AS customerName,
-                         item,
-                         total,
-                         order_date AS orderDate,
-                         created_at AS createdAt
-                     FROM orders
-                     WHERE order_id = ?
+                         o.order_id AS orderId,
+                         o.store_id AS storeId,
+                         o.branch_id AS branchId,
+                         COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branchName,
+                         COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branch,
+                       
+                         o.item,
+                         o.total,
+                         o.order_date AS orderDate,
+                         o.created_at AS createdAt
+                     FROM orders o
+                              LEFT JOIN branches b
+                                        ON b.id = o.branch_id
+                                            AND b.store_id = o.store_id
+                     WHERE o.order_id = ?
                          LIMIT 1`,
                     [orderId]
                 );
@@ -582,26 +585,31 @@ exports.handler = async (event) => {
         if (action === "get_orders") {
             let query = `
                 SELECT
-                    order_id AS orderId,
-                    store_id AS storeId,
-                    branch_id AS branchId,
-                    customer_name AS customerName,
-                    item,
-                    total,
-                    order_date AS orderDate,
-                    created_at AS createdAt
-                FROM orders
-                WHERE store_id = ?
+                    o.order_id AS orderId,
+                    o.store_id AS storeId,
+                    o.branch_id AS branchId,
+                    COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branchName,
+                    COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branch,
+                   
+                    o.item,
+                    o.total,
+                    o.order_date AS orderDate,
+                    o.created_at AS createdAt
+                FROM orders o
+                         LEFT JOIN branches b
+                                   ON b.id = o.branch_id
+                                       AND b.store_id = o.store_id
+                WHERE o.store_id = ?
             `;
 
             const params = [storeId];
 
             if (isBranchUser && tokenBranchId) {
-                query += " AND branch_id = ?";
+                query += " AND o.branch_id = ?";
                 params.push(tokenBranchId);
             }
 
-            query += " ORDER BY created_at DESC, order_id DESC";
+            query += " ORDER BY o.created_at DESC, o.order_id DESC";
 
             const [rows] = await connection.execute(query, params);
 
@@ -618,10 +626,6 @@ exports.handler = async (event) => {
                 return badRequest(headers, "Invalid order_id.");
             }
 
-            const customerName =
-                toSafeString(body.customer_name, 120) ||
-                "Customer";
-
             const item = toSafeString(body.item, 255);
             const total = toNumber(body.total) ?? 0;
 
@@ -632,7 +636,6 @@ exports.handler = async (event) => {
             let query = `
                 UPDATE orders
                 SET
-                    customer_name = ?,
                     item = ?,
                     total = ?,
                     order_date = ?
@@ -641,7 +644,6 @@ exports.handler = async (event) => {
             `;
 
             const params = [
-                customerName,
                 item,
                 total,
                 orderDate,

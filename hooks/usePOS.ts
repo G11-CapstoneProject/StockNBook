@@ -232,6 +232,11 @@ export function usePOS() {
                                 ? new Date(o.createdAt)
                                 : new Date();
 
+                    const rawBranchId =
+                        o.branchId ??
+                        o.branch_id ??
+                        null;
+
                     return {
                         id: o.orderId,
                         customer: o.customerName,
@@ -251,6 +256,20 @@ export function usePOS() {
                             day: "numeric",
                             year: "numeric",
                         }),
+
+                        branchId:
+                            rawBranchId === null ||
+                            rawBranchId === undefined ||
+                            rawBranchId === ""
+                                ? null
+                                : Number(rawBranchId),
+
+                        branchName: String(
+                            o.branchName ??
+                            o.branch_name ??
+                            o.branch ??
+                            ""
+                        ).trim() || null,
                     };
                 });
 
@@ -701,10 +720,8 @@ export function usePOS() {
             (p) => String(p.branchId || "") === String(branch.id)
         );
 
-        const branchOrders = orders.filter((order) =>
-            order.items.some((item) =>
-                branchBuyableItems.some((product) => product.name === item.name)
-            )
+        const branchOrders = orders.filter(
+            (order) => String(order.branchId || "") === String(branch.id)
         );
 
         const sales = branchOrders.reduce(

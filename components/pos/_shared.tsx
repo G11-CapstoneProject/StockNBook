@@ -136,7 +136,7 @@ export type OrderItem = {
 
 export type Order = {
     id: string;
-    customer: string;
+    customer?: string;
     items: OrderItem[];
     total: number;
     date: string;
@@ -146,15 +146,18 @@ export type Order = {
 
 export type ApiOrder = {
     orderId: string;
-    customerName: string;
+    customerName?: string;
     item?: string;
     total?: number;
     orderDate: string;
     createdAt?: string;
+
     branchId?: number | string | null;
     branch_id?: number | string | null;
+
     branchName?: string | null;
     branch_name?: string | null;
+    branch?: string | null;
 };
 
 export type CartItem = {
@@ -474,17 +477,16 @@ export function OrdersTable({
             <div className="w-full overflow-x-auto">
                 <table
                     className={`w-full table-fixed text-sm ${
-                        showBranch ? "min-w-[1080px]" : ""
+                        showBranch ? "min-w-[980px]" : ""
                     }`}
                 >
                     {showBranch && (
                         <colgroup>
-                            <col className="w-[19%]" />
-                            <col className="w-[13%]" />
+                            <col className="w-[21%]" />
+                            <col className="w-[16%]" />
+                            <col className="w-[33%]" />
                             <col className="w-[14%]" />
-                            <col className="w-[25%]" />
-                            <col className="w-[14%]" />
-                            <col className="w-[15%]" />
+                            <col className="w-[16%]" />
                         </colgroup>
                     )}
 
@@ -493,20 +495,21 @@ export function OrdersTable({
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Order ID
                         </th>
-                        <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                            Customer
-                        </th>
+
                         {showBranch && (
                             <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                                 Branch
                             </th>
                         )}
+
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Items
                         </th>
+
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Total
                         </th>
+
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Date
                         </th>
@@ -517,7 +520,7 @@ export function OrdersTable({
                     {orders.length === 0 ? (
                         <tr>
                             <td
-                                colSpan={showBranch ? 6 : 5}
+                                colSpan={showBranch ? 5 : 4}
                                 className="px-4 py-10 text-center text-sm text-[#9B8AAA]"
                             >
                                 {emptyText}
@@ -531,10 +534,6 @@ export function OrdersTable({
                             >
                                 <td className="truncate px-4 py-3 text-xs font-semibold text-[#5F4E75]">
                                     {order.id}
-                                </td>
-
-                                <td className="truncate px-4 py-3 text-sm font-semibold text-[#1A1220]">
-                                    {order.customer || "Customer"}
                                 </td>
 
                                 {showBranch && (

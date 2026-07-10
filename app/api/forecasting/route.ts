@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const FORECASTING_LAMBDA_URL =
-    "https://7oxhafersb.execute-api.ap-southeast-1.amazonaws.com/stocknbook-forecasting";
+    "https://307mc6jzt2.execute-api.ap-southeast-1.amazonaws.com/default/stocknbook-forecasting";
 
 export async function POST(request: NextRequest) {
     try {

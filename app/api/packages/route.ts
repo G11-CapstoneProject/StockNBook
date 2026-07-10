@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const LAMBDA_URL =
-    "https://3pwsbsqwvwmuce5fgj6f574lmu0cfeje.lambda-url.ap-southeast-1.on.aws";
+    "https://vn4vtuujbl.execute-api.ap-southeast-1.amazonaws.com/default/stocknbook-packages";
 
 async function readLambdaResponse(response: Response) {
     const text = await response.text();
@@ -66,16 +66,9 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
     try {
         const { searchParams } = new URL(req.url);
-        const store_id = searchParams.get("store_id");
-        const branch_id = searchParams.get("branch_id");
+        const store_id = searchParams.get("store_id") || searchParams.get("storeId");
+        const branch_id = searchParams.get("branch_id") || searchParams.get("branchId");
         const authHeader = req.headers.get("authorization") || "";
-
-        if (!store_id && !branch_id) {
-            return NextResponse.json(
-                { error: "store_id or branch_id is required." },
-                { status: 400 }
-            );
-        }
 
         const body: Record<string, unknown> = {
             action: "get_packages",

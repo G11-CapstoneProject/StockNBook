@@ -14,7 +14,7 @@ function generateSlug(storeName) {
 }
 
 const dbConfig = {
-    host: "stocknbook-db.clyuqe48evd0.ap-southeast-1.rds.amazonaws.com",
+    host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",
     user: "admin",
     password: "2qJivedWDxCQS6TLjjEl",
     database: "stocknbook",
@@ -538,8 +538,8 @@ exports.handler = async (event) => {
 
             await connection.execute(
                 `INSERT INTO staff
-                 (store_id, branch_id, manager_id, staff_name, staff_email, invite_token, permissions)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                 (store_id, branch_id, manager_id, staff_name, staff_email, invite_token, status, permissions)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     storeId,
                     branchId,
@@ -547,6 +547,7 @@ exports.handler = async (event) => {
                     staff_name,
                     staff_email,
                     inviteToken,
+                    "pending",
                     JSON.stringify(permissions || {}),
                 ]
             );

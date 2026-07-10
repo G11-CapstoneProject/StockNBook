@@ -1107,20 +1107,20 @@ async function insertOrders(
             await db.execute(
                 `INSERT INTO orders
                  (
-                    order_id,
-                    store_id,
-                    branch_id,
-                    customer_name,
-                    item,
-                    total,
-                    order_date
+                     order_id,
+                     store_id,
+                     branch_id,
+                     customer_name,
+                     item,
+                     total,
+                     order_date
                  )
                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
                 [
                     orderId,
                     storeId,
                     branch.id,
-                    faker.person.fullName(),
+                    `Customer ${index}`,
                     lines
                         .map(
                             (line) =>

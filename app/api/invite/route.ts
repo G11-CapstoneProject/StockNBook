@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const LAMBDA_URL =
-    "https://7oxhafersb.execute-api.ap-southeast-1.amazonaws.com";
+    "https://qyjajerkuc.execute-api.ap-southeast-1.amazonaws.com/default/stocknbook-auth";
 
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
 
-        const response = await fetch(`${LAMBDA_URL}/onboarding`, {
+        const response = await fetch(LAMBDA_URL, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",

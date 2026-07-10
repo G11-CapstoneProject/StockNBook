@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const POS_API =
-    "https://7oxhafersb.execute-api.ap-southeast-1.amazonaws.com/stocknbook-pos";
+    "https://g2jfu6t0hb.execute-api.ap-southeast-1.amazonaws.com/default/stocknbook-pos";
 
 export async function POST(req: NextRequest) {
     try {

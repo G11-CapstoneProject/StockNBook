@@ -6,7 +6,7 @@ export const revalidate = 0;
 // Same server-side proxy pattern used by app/api/forecasting/route.ts.
 // The browser calls only /api/analytics, so it never calls API Gateway directly.
 const ANALYTICS_LAMBDA_URL =
-    "https://7oxhafersb.execute-api.ap-southeast-1.amazonaws.com/stocknbook-analytics";
+    "https://7q4v8jp9uh.execute-api.ap-southeast-1.amazonaws.com/default/stocknbook-analytics";
 
 type AnalyticsRequestBody = {
     action?: string;

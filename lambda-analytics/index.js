@@ -22,7 +22,7 @@ const {
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 
 const dbConfig = {
-    host: "stocknbook-db.clyuqe48evd0.ap-southeast-1.rds.amazonaws.com",
+    host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",
     user: "admin",
     password: "2qJivedWDxCQS6TLjjEl",
     database: "stocknbook",

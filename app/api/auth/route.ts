@@ -1,20 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const LAMBDA_URL =
-    "https://7oxhafersb.execute-api.ap-southeast-1.amazonaws.com";
+    "https://qyjajerkuc.execute-api.ap-southeast-1.amazonaws.com/default/stocknbook-auth";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    const path = body.action === "login" ? "/login" : "/register";
+    const normalizedBody = {
+      ...body,
+      action: body.action === "register" ? "signup" : body.action,
+    };
 
-    const response = await fetch(`${LAMBDA_URL}${path}`, {
+    const response = await fetch(LAMBDA_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        Authorization: req.headers.get("authorization") || "",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(normalizedBody),
     });
 
     const text = await response.text();
@@ -37,8 +41,3 @@ export async function POST(req: NextRequest) {
     );
   }
 }
-
-
-
-
-

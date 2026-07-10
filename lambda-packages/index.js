@@ -4,7 +4,7 @@ const jwt = require("jsonwebtoken");
 const JWT_SECRET = "stocknbook-secret-key";
 
 const dbConfig = {
-    host: "stocknbook-db.clyuqe48evd0.ap-southeast-1.rds.amazonaws.com",
+    host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",
     user: "admin",
     password: "2qJivedWDxCQS6TLjjEl",
     database: "stocknbook",
@@ -813,6 +813,60 @@ exports.handler = async (event) => {
                 success: true,
                 product,
             });
+        }
+
+        if (action === "get_packages") {
+            let query = `
+        SELECT *
+        FROM packages
+        WHERE store_id = ?
+    `;
+
+            const params = [storeId];
+
+            if (activeBranchId) {
+                query += " AND branch_id = ?";
+                params.push(activeBranchId);
+            }
+
+            query += " ORDER BY id DESC";
+
+            const [rows] = await connection.execute(query, params);
+
+            const packages = rows.map((row) => {
+                let inclusions = [];
+
+                try {
+                    if (Array.isArray(row.inclusions)) {
+                        inclusions = row.inclusions;
+                    } else if (typeof row.inclusions === "string" && row.inclusions.trim()) {
+                        inclusions = JSON.parse(row.inclusions);
+                    }
+                } catch {
+                    inclusions = [];
+                }
+
+                return {
+                    id: Number(row.id),
+                    store_id: Number(row.store_id),
+                    branch_id: Number(row.branch_id),
+                    name: row.name || "",
+                    description: row.description || "",
+                    original_value: Number(row.original_value || 0),
+                    discount_type: row.discount_type || "amount",
+                    discount_value: Number(row.discount_value || 0),
+                    package_price: Number(row.package_price || 0),
+                    down_payment_amount: Number(row.down_payment_amount || 0),
+                    duration: row.duration || "",
+                    status: row.status || "Active",
+                    category: row.category || undefined,
+                    cover_image: row.cover_image || "",
+                    inclusions,
+                    created_at: row.created_at || "",
+                };
+            });
+
+            return jsonResponse(200, headers, { packages });
         }
 
         if (action === "delete_product") {

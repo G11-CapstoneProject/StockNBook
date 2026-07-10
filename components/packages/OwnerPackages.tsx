@@ -228,6 +228,12 @@ export default function OwnerPackages() {
         async (branchId: number, signal?: AbortSignal): Promise<PackageItem[]> => {
             const token = getToken();
 
+            const savedStoreId =
+                sessionStorage.getItem("store_id") ||
+                localStorage.getItem("store_id");
+
+            const storeId = savedStoreId ? Number(savedStoreId) : null;
+
             const response = await fetch("/api/packages", {
                 method: "POST",
                 headers: {
@@ -236,16 +242,17 @@ export default function OwnerPackages() {
                 },
                 body: JSON.stringify({
                     action: "get_packages",
+                    ...(storeId ? { store_id: storeId } : {}),
                     branch_id: branchId,
                 }),
                 signal,
             });
 
-            if (!response.ok) {
-                throw new Error("Unable to load packages.");
-            }
-
             const data = (await response.json()) as PackagesResponse;
+
+            if (!response.ok) {
+                throw new Error(data.error || "Unable to load packages.");
+            }
 
             if (signal?.aborted) return [];
 

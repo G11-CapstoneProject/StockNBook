@@ -522,7 +522,11 @@ export default function OwnerForecast({
             </section>
 
             {activeTab === "inventory" ? (
-                <ProductDemandSummaryCards data={branchData} />
+                <ProductDemandSummaryCards
+                    data={branchData}
+                    seasonalData={displayedSeasonalData}
+                    seasonalLoading={displayedSeasonalLoading}
+                />
             ) : (
                 <OwnerSeasonalSummaryCards
                     activeScopeLabel={activeScopeLabel}

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const CATEGORIES_API =
-    "https://7oxhafersb.execute-api.ap-southeast-1.amazonaws.com/stocknbook-categories";
+    "https://nb9crcrzu2.execute-api.ap-southeast-1.amazonaws.com/default/stocknbook-categories";
 
 export async function POST(req: NextRequest) {
     try {

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+
 const BOOKINGS_API =
     "https://pljhhsstag.execute-api.ap-southeast-1.amazonaws.com/default/stocknbook-bookings";
 
@@ -52,10 +54,12 @@ export async function POST(req: NextRequest) {
             return NextResponse.json(
                 {
                     error:
-                        typeof parsedData === "object" &&
-                        parsedData !== null &&
-                        "error" in parsedData
-                            ? String((parsedData as { error?: unknown }).error)
+                        typeof parsedData === "object" && parsedData !== null
+                            ? "error" in parsedData
+                                ? String((parsedData as { error?: unknown }).error)
+                                : "message" in parsedData
+                                    ? String((parsedData as { message?: unknown }).message)
+                                    : "Bookings API request failed."
                             : "Bookings API request failed.",
                     action: body.action,
                     status: response.status,

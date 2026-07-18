@@ -401,7 +401,7 @@ async function insertBookingItems(connection, items) {
 
     await connection.execute(
         `
-        INSERT INTO booking_items
+            INSERT INTO booking_items
             (
                 booking_id,
                 store_id,
@@ -428,7 +428,7 @@ async function insertBookingItems(connection, items) {
                 inventory_status,
                 notes
             )
-        VALUES ${placeholders}
+            VALUES ${placeholders}
         `,
         params
     );
@@ -447,19 +447,19 @@ async function reserveBookingInventory(connection, options) {
 
     const [items] = await connection.execute(
         `
-        SELECT
-            id,
-            product_id,
-            variant_id,
-            product_name,
-            variant_name,
-            booked_quantity,
-            reserved_quantity,
-            inventory_status
-        FROM booking_items
-        WHERE booking_id = ?
-          AND store_id = ?
-          ${branchFilter}
+            SELECT
+                id,
+                product_id,
+                variant_id,
+                product_name,
+                variant_name,
+                booked_quantity,
+                reserved_quantity,
+                inventory_status
+            FROM booking_items
+            WHERE booking_id = ?
+              AND store_id = ?
+                ${branchFilter}
           AND inventory_status = 'pending'
         FOR UPDATE
         `,
@@ -485,11 +485,11 @@ async function reserveBookingInventory(connection, options) {
         if (variantId) {
             const [variantRows] = await connection.execute(
                 `
-                SELECT stock
-                FROM product_variants
-                WHERE id = ?
-                  AND product_id = ?
-                FOR UPDATE
+                    SELECT stock
+                    FROM product_variants
+                    WHERE id = ?
+                      AND product_id = ?
+                        FOR UPDATE
                 `,
                 [variantId, productId]
             );
@@ -512,20 +512,20 @@ async function reserveBookingInventory(connection, options) {
 
             await connection.execute(
                 `
-                UPDATE product_variants
-                SET stock = stock - ?
-                WHERE id = ?
-                  AND product_id = ?
+                    UPDATE product_variants
+                    SET stock = stock - ?
+                    WHERE id = ?
+                      AND product_id = ?
                 `,
                 [qtyToReserve, variantId, productId]
             );
 
             await connection.execute(
                 `
-                UPDATE products
-                SET stock = GREATEST(stock - ?, 0)
-                WHERE id = ?
-                  AND store_id = ?
+                    UPDATE products
+                    SET stock = GREATEST(stock - ?, 0)
+                    WHERE id = ?
+                      AND store_id = ?
                 `,
                 [qtyToReserve, productId, storeId]
             );
@@ -540,11 +540,11 @@ async function reserveBookingInventory(connection, options) {
 
             const [productRows] = await connection.execute(
                 `
-                SELECT stock
-                FROM products
-                WHERE id = ?
-                  AND store_id = ?
-                  ${productBranchFilter}
+                    SELECT stock
+                    FROM products
+                    WHERE id = ?
+                      AND store_id = ?
+                        ${productBranchFilter}
                 FOR UPDATE
                 `,
                 productParams
@@ -577,11 +577,11 @@ async function reserveBookingInventory(connection, options) {
 
             await connection.execute(
                 `
-                UPDATE products
-                SET stock = stock - ?
-                WHERE id = ?
-                  AND store_id = ?
-                  ${updateBranchFilter}
+                    UPDATE products
+                    SET stock = stock - ?
+                    WHERE id = ?
+                      AND store_id = ?
+                        ${updateBranchFilter}
                 `,
                 updateParams
             );
@@ -589,12 +589,12 @@ async function reserveBookingInventory(connection, options) {
 
         await connection.execute(
             `
-            UPDATE booking_items
-            SET
-                reserved_quantity = booked_quantity,
-                inventory_status = 'reserved',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+                UPDATE booking_items
+                SET
+                    reserved_quantity = booked_quantity,
+                    inventory_status = 'reserved',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
             `,
             [bookingItemId]
         );
@@ -663,21 +663,21 @@ async function restoreBookingInventoryOnCancel(connection, options) {
 
     const [items] = await connection.execute(
         `
-        SELECT
-            id,
-            product_id,
-            variant_id,
-            product_name,
-            variant_name,
-            reserved_quantity,
-            used_quantity,
-            restored_quantity,
-            unit_price,
-            inventory_status
-        FROM booking_items
-        WHERE booking_id = ?
-          AND store_id = ?
-          ${branchFilter}
+            SELECT
+                id,
+                product_id,
+                variant_id,
+                product_name,
+                variant_name,
+                reserved_quantity,
+                used_quantity,
+                restored_quantity,
+                unit_price,
+                inventory_status
+            FROM booking_items
+            WHERE booking_id = ?
+              AND store_id = ?
+                ${branchFilter}
           AND inventory_status = 'reserved'
         FOR UPDATE
         `,
@@ -716,20 +716,20 @@ async function restoreBookingInventoryOnCancel(connection, options) {
             if (variantId) {
                 await connection.execute(
                     `
-                    UPDATE product_variants
-                    SET stock = stock + ?
-                    WHERE id = ?
-                      AND product_id = ?
+                        UPDATE product_variants
+                        SET stock = stock + ?
+                        WHERE id = ?
+                          AND product_id = ?
                     `,
                     [qtyToRestore, variantId, productId]
                 );
 
                 await connection.execute(
                     `
-                    UPDATE products
-                    SET stock = stock + ?
-                    WHERE id = ?
-                      AND store_id = ?
+                        UPDATE products
+                        SET stock = stock + ?
+                        WHERE id = ?
+                          AND store_id = ?
                     `,
                     [qtyToRestore, productId, storeId]
                 );
@@ -744,11 +744,11 @@ async function restoreBookingInventoryOnCancel(connection, options) {
 
                 await connection.execute(
                     `
-                    UPDATE products
-                    SET stock = stock + ?
-                    WHERE id = ?
-                      AND store_id = ?
-                      ${updateBranchFilter}
+                        UPDATE products
+                        SET stock = stock + ?
+                        WHERE id = ?
+                          AND store_id = ?
+                            ${updateBranchFilter}
                     `,
                     updateParams
                 );
@@ -764,14 +764,14 @@ async function restoreBookingInventoryOnCancel(connection, options) {
 
         await connection.execute(
             `
-            UPDATE booking_items
-            SET
-                used_quantity = ?,
-                restored_quantity = ?,
-                used_subtotal = ?,
-                inventory_status = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+                UPDATE booking_items
+                SET
+                    used_quantity = ?,
+                    restored_quantity = ?,
+                    used_subtotal = ?,
+                    inventory_status = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
             `,
             [
                 usedQty,
@@ -887,6 +887,64 @@ function bookingSelectFields() {
         bookings.package_json,
         bookings.packageJSON,
         bookings.created_at             AS createdAt
+    `;
+}
+
+// Lightweight fields used by owner, manager, and staff dashboards.
+// Do not include package JSON/payment calculations here because dashboards
+// only need counts, package names, schedules, statuses, and branch details.
+function dashboardBookingSelectFields() {
+    return `
+        bookings.id,
+        bookings.branch_id         AS branchId,
+        branches.branch_name       AS branchName,
+        bookings.name,
+        bookings.event_date        AS date,
+        bookings.status,
+        bookings.package_name      AS packageName,
+        bookings.event_type        AS eventName,
+        bookings.created_at        AS createdAt
+    `;
+}
+
+// Fields used by the full Bookings screens. This avoids the very large
+// package JSON expressions used by get_bookings while still returning the
+// customer, schedule, branch, package, status, and payment values needed by
+// owner, manager, and staff booking pages.
+function bookingPageSelectFields() {
+    return `
+        bookings.id,
+        bookings.branch_id                      AS branchId,
+        branches.branch_name                    AS branchName,
+        bookings.booking_reference              AS bookingReference,
+        bookings.booking_type                   AS bookingType,
+        bookings.name,
+        bookings.facebook_name                  AS facebookName,
+        bookings.phone,
+        bookings.email,
+        bookings.event_date                     AS date,
+        bookings.event_time                     AS eventTime,
+        bookings.event_type                     AS eventType,
+        bookings.event_type                     AS eventName,
+        bookings.package_name                   AS package,
+        bookings.package_name                   AS packageName,
+        bookings.custom_order                   AS customOrder,
+        bookings.theme,
+        bookings.venue,
+        bookings.notes,
+        bookings.status,
+        COALESCE(bookings.agreed_price, 0)       AS agreed_price,
+        COALESCE(bookings.agreed_price, 0)       AS agreedPrice,
+        COALESCE(bookings.package_price, 0)      AS package_price,
+        COALESCE(bookings.package_price, 0)      AS packagePrice,
+        COALESCE(bookings.required_down_payment, 0) AS required_down_payment,
+        COALESCE(bookings.required_down_payment, 0) AS requiredDownPayment,
+        COALESCE(bookings.amount_paid, 0)        AS amount_paid,
+        COALESCE(bookings.amount_paid, 0)        AS amountPaid,
+        COALESCE(bookings.balance, 0)            AS balance,
+        COALESCE(bookings.payment_status, 'Unpaid') AS payment_status,
+        COALESCE(bookings.payment_status, 'Unpaid') AS paymentStatus,
+        bookings.created_at                     AS createdAt
     `;
 }
 
@@ -1025,7 +1083,7 @@ exports.handler = async (event) => {
 
             const [result] = await connection.execute(
                 `
-                INSERT INTO bookings
+                    INSERT INTO bookings
                     (
                         store_id,
                         branch_id,
@@ -1053,7 +1111,7 @@ exports.handler = async (event) => {
                         balance,
                         payment_status
                     )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `,
                 [
                     targetStoreId,
@@ -1213,6 +1271,76 @@ exports.handler = async (event) => {
             return response(401, { error: "Invalid token store" });
         }
 
+        // ── PROTECTED: get_booking_page_bookings ────────────────────────────────
+        // Use this action on the OwnerBookings, ManagerBookings, and
+        // StaffBookings screens. It returns the fields needed by those pages
+        // without returning package_json/packageJSON for hundreds of records.
+        if (action === "get_booking_page_bookings") {
+            const { branch_id, branchId } = body;
+            const requestedBranchId = branch_id || branchId;
+
+            let query = `
+                SELECT
+                    ${bookingPageSelectFields()}
+                FROM bookings
+                         LEFT JOIN branches
+                                   ON bookings.branch_id = branches.id
+                                       AND bookings.store_id = branches.store_id
+                WHERE bookings.store_id = ?
+            `;
+
+            const params = [store_id];
+
+            if (requestedBranchId) {
+                query += ` AND bookings.branch_id = ?`;
+                params.push(Number(requestedBranchId));
+            }
+
+            query += ` ORDER BY bookings.created_at DESC`;
+
+            const [rows] = await connection.execute(query, params);
+
+            return response(200, {
+                bookings: rows,
+                total: rows.length,
+            });
+        }
+
+        // ── PROTECTED: get_dashboard_bookings ─────────────────────────────────
+        // This endpoint is intentionally lightweight. The previous dashboard
+        // request used get_bookings, which returned large package JSON fields
+        // for every booking and could time out or exceed API response limits.
+        if (action === "get_dashboard_bookings") {
+            const { branch_id, branchId } = body;
+            const requestedBranchId = branch_id || branchId;
+
+            let query = `
+                SELECT
+                    ${dashboardBookingSelectFields()}
+                FROM bookings
+                         LEFT JOIN branches
+                                   ON bookings.branch_id = branches.id
+                                       AND bookings.store_id = branches.store_id
+                WHERE bookings.store_id = ?
+            `;
+
+            const params = [store_id];
+
+            if (requestedBranchId) {
+                query += ` AND bookings.branch_id = ?`;
+                params.push(Number(requestedBranchId));
+            }
+
+            query += ` ORDER BY bookings.created_at DESC`;
+
+            const [rows] = await connection.execute(query, params);
+
+            return response(200, {
+                bookings: rows,
+                total: rows.length,
+            });
+        }
+
         // ── PROTECTED: get_bookings ───────────────────────────────────────────
         if (action === "get_bookings") {
             const { branch_id, branchId } = body;
@@ -1252,11 +1380,11 @@ exports.handler = async (event) => {
             }
 
             let bookingQuery = `
-        SELECT id, status, store_id, branch_id
-        FROM bookings
-        WHERE id = ?
-          AND store_id = ?
-    `;
+                SELECT id, status, store_id, branch_id
+                FROM bookings
+                WHERE id = ?
+                  AND store_id = ?
+            `;
 
             const bookingParams = [Number(booking_id), store_id];
 
@@ -1564,18 +1692,18 @@ exports.handler = async (event) => {
                     amount_paid = ?,
                     payment_status = ?,
                     balance = CASE
-                        WHEN ? IS NULL THEN GREATEST(
-                            COALESCE(NULLIF(package_price, 0), NULLIF(agreed_price, 0), 0) - ?,
-                            0
-                        )
-                        ELSE ?
-                    END,
+                                  WHEN ? IS NULL THEN GREATEST(
+                                          COALESCE(NULLIF(package_price, 0), NULLIF(agreed_price, 0), 0) - ?,
+                                          0
+                                                      )
+                                  ELSE ?
+                        END,
                     status = CASE
-                        WHEN ? IN ('Down Payment Paid', 'Fully Paid')
-                             AND status IN ('Pending Review', 'Awaiting Down Payment')
-                        THEN 'Confirmed'
-                        ELSE status
-                    END
+                                 WHEN ? IN ('Down Payment Paid', 'Fully Paid')
+                                     AND status IN ('Pending Review', 'Awaiting Down Payment')
+                                     THEN 'Confirmed'
+                                 ELSE status
+                        END
                 WHERE id = ?
                   AND store_id = ?
             `;

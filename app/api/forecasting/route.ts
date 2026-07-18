@@ -47,6 +47,8 @@ export async function POST(request: NextRequest) {
                 ? "get_seasonal_forecast"
                 : body.action;
 
+        const startedAt = Date.now();
+
         const lambdaResponse = await fetch(FORECASTING_LAMBDA_URL, {
             method: "POST",
             headers: {
@@ -74,8 +76,43 @@ export async function POST(request: NextRequest) {
             };
         }
 
+        const elapsedMs = Date.now() - startedAt;
+
+        if (!lambdaResponse.ok) {
+            console.error("Forecasting Lambda request failed:", {
+                action: lambdaAction,
+                status: lambdaResponse.status,
+                elapsedMs,
+                response: lambdaData,
+            });
+
+            return NextResponse.json(
+                {
+                    error:
+                        typeof lambdaData === "object" &&
+                        lambdaData !== null &&
+                        "error" in lambdaData
+                            ? String(
+                                (lambdaData as { error?: unknown }).error
+                            )
+                            : "Forecasting Lambda request failed.",
+                    action: lambdaAction,
+                    upstreamStatus: lambdaResponse.status,
+                    elapsedMs,
+                    details: lambdaData,
+                },
+                {
+                    status: lambdaResponse.status,
+                }
+            );
+        }
+
         return NextResponse.json(lambdaData, {
             status: lambdaResponse.status,
+            headers: {
+                "X-Forecasting-Action": lambdaAction,
+                "X-Forecasting-Elapsed-Ms": String(elapsedMs),
+            },
         });
     } catch (error) {
         console.error("Forecasting API error:", error);

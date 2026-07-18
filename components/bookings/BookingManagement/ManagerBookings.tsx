@@ -170,11 +170,12 @@ export default function ManagerBookings() {
                     Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
-                    action: "get_bookings",
+                    action: "get_booking_page_bookings",
                     store_id: Number(storeId),
                     branch_id: Number(branchId),
                     role: "manager",
                 }),
+                cache: "no-store",
             });
 
             const data = await res.json();

@@ -1,8 +1,327 @@
 const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const tls = require("tls");
 
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
+
+const OTP_EXPIRY_SECONDS = 90;
+
+const SMTP_USER = "noreplystocknbook@gmail.com";
+
+const SMTP_PASS =
+    "sftp dapx ffxw qqrt"
+        .replace(/\s/g, "");
+
+const EMAIL_FROM =
+    `"StockNBook" <${SMTP_USER}>`;
+
+const EMAIL_REPLY_TO = SMTP_USER;
+
+const SMTP_HOST = "smtp.gmail.com";
+const SMTP_PORT = 465;
+const SMTP_TIMEOUT_MS = 20000;
+function generateOtp() {
+    return String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+}
+
+function hashOtp(otp) {
+    return crypto
+        .createHash("sha256")
+        .update(String(otp))
+        .digest("hex");
+}
+
+async function ensureSignupOtpsTable(connection) {
+    await connection.execute(`
+        CREATE TABLE IF NOT EXISTS signup_otps (
+                                                   id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                   email VARCHAR(255) NOT NULL,
+            otp_hash CHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            used TINYINT(1) NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_signup_otps_email (email),
+            INDEX idx_signup_otps_lookup (
+                                             email,
+                                             otp_hash,
+                                             used,
+                                             expires_at
+                                         )
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+}
+
+function createSmtpResponseReader(socket) {
+    let buffer = "";
+    const waiting = [];
+
+    const flush = () => {
+        while (waiting.length > 0) {
+            const lines = buffer.split(/\r?\n/);
+            let responseEnd = -1;
+
+            for (let index = 0; index < lines.length; index += 1) {
+                if (/^\d{3} /.test(lines[index])) {
+                    responseEnd = index;
+                    break;
+                }
+            }
+
+            if (responseEnd === -1) {
+                return;
+            }
+
+            const responseLines = lines.slice(0, responseEnd + 1);
+            buffer = lines.slice(responseEnd + 1).join("\r\n");
+
+            const finalLine = responseLines[responseLines.length - 1];
+            const code = Number(finalLine.slice(0, 3));
+            const waiter = waiting.shift();
+
+            waiter.resolve({
+                code,
+                message: responseLines.join("\n"),
+            });
+        }
+    };
+
+    socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        flush();
+    });
+
+    socket.on("error", (error) => {
+        while (waiting.length > 0) {
+            waiting.shift().reject(error);
+        }
+    });
+
+    socket.on("close", () => {
+        while (waiting.length > 0) {
+            waiting.shift().reject(
+                new Error("SMTP connection closed unexpectedly.")
+            );
+        }
+    });
+
+    return () =>
+        new Promise((resolve, reject) => {
+            waiting.push({ resolve, reject });
+            flush();
+        });
+}
+
+async function expectSmtpResponse(readResponse, expectedCodes) {
+    const response = await readResponse();
+
+    if (!expectedCodes.includes(response.code)) {
+        const error = new Error(
+            `Gmail SMTP error ${response.code}: ${response.message}`
+        );
+
+        error.code =
+            response.code === 535
+                ? "GMAIL_AUTH_FAILED"
+                : "GMAIL_SMTP_ERROR";
+
+        throw error;
+    }
+
+    return response;
+}
+
+async function sendSmtpCommand(
+    socket,
+    readResponse,
+    command,
+    expectedCodes
+) {
+    socket.write(`${command}\r\n`);
+    return expectSmtpResponse(readResponse, expectedCodes);
+}
+
+function buildOtpEmail(toEmail, otp) {
+    const html = `
+        <div style="font-family: Arial, sans-serif; background:#FDFAF4; padding:24px;">
+            <div style="max-width:520px; margin:auto; background:#ffffff; border:1px solid #EBE4F0; border-radius:16px; padding:28px;">
+                <h2 style="margin:0; color:#2D1B4E;">StockNBook</h2>
+
+                <p style="margin-top:18px; color:#3F354C;">Hello,</p>
+
+                <p style="color:#3F354C;">
+                    Use the verification code below to continue creating your
+                    StockNBook account.
+                </p>
+
+                <div style="margin:24px 0; padding:18px; text-align:center; background:#F8F5FF; border-radius:12px;">
+                    <div style="font-size:32px; font-weight:bold; letter-spacing:6px; color:#2D1B4E;">
+                        ${otp}
+                    </div>
+                </div>
+
+                <p style="color:#7A6E88;">
+                    This OTP will expire in <strong>1 minute and 30 seconds</strong>.
+                </p>
+
+                <p style="margin-top:24px; color:#7A6E88; font-size:13px;">
+                    If you did not request this code, you can safely ignore this
+                    email.
+                </p>
+
+                <p style="margin-top:24px; color:#2D1B4E; font-weight:bold;">
+                    — StockNBook Team
+                </p>
+            </div>
+        </div>
+    `;
+
+    const message = [
+        `From: ${EMAIL_FROM}`,
+        `To: ${toEmail}`,
+        "Subject: StockNBook Email Verification Code",
+        `Date: ${new Date().toUTCString()}`,
+        "MIME-Version: 1.0",
+        'Content-Type: text/html; charset="UTF-8"',
+        "Content-Transfer-Encoding: 8bit",
+        "",
+        html,
+    ].join("\r\n");
+
+    return message.replace(/^\./gm, "..");
+}
+
+async function sendSignupOtpEmail(toEmail, otp) {
+    if (!SMTP_USER || !SMTP_PASS) {
+        const configError = new Error(
+            "A valid Gmail App Password has not been configured."
+        );
+        configError.code = "SMTP_NOT_CONFIGURED";
+        throw configError;
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) {
+        const emailError = new Error("Invalid OTP recipient email.");
+        emailError.code = "INVALID_RECIPIENT";
+        throw emailError;
+    }
+
+    const socket = tls.connect({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        servername: SMTP_HOST,
+        rejectUnauthorized: true,
+    });
+
+    socket.setTimeout(SMTP_TIMEOUT_MS);
+
+    const readResponse = createSmtpResponseReader(socket);
+
+    try {
+        await new Promise((resolve, reject) => {
+            socket.once("secureConnect", resolve);
+            socket.once("error", reject);
+            socket.once("timeout", () => {
+                const timeoutError = new Error(
+                    "Lambda could not connect to Gmail SMTP."
+                );
+                timeoutError.code = "GMAIL_NETWORK_FAILED";
+                reject(timeoutError);
+            });
+        });
+
+        await expectSmtpResponse(readResponse, [220]);
+
+        await sendSmtpCommand(
+            socket,
+            readResponse,
+            "EHLO stocknbook.local",
+            [250]
+        );
+
+        await sendSmtpCommand(
+            socket,
+            readResponse,
+            "AUTH LOGIN",
+            [334]
+        );
+
+        await sendSmtpCommand(
+            socket,
+            readResponse,
+            Buffer.from(SMTP_USER).toString("base64"),
+            [334]
+        );
+
+        await sendSmtpCommand(
+            socket,
+            readResponse,
+            Buffer.from(SMTP_PASS).toString("base64"),
+            [235]
+        );
+
+        await sendSmtpCommand(
+            socket,
+            readResponse,
+            `MAIL FROM:<${SMTP_USER}>`,
+            [250]
+        );
+
+        await sendSmtpCommand(
+            socket,
+            readResponse,
+            `RCPT TO:<${toEmail}>`,
+            [250, 251]
+        );
+
+        await sendSmtpCommand(
+            socket,
+            readResponse,
+            "DATA",
+            [354]
+        );
+
+        socket.write(`${buildOtpEmail(toEmail, otp)}\r\n.\r\n`);
+
+        const dataResponse = await expectSmtpResponse(
+            readResponse,
+            [250]
+        );
+
+        socket.write("QUIT\r\n");
+
+        console.log("[stocknbook-auth] OTP email accepted:", {
+            to: toEmail,
+            smtpResponse: dataResponse.message,
+        });
+
+        return {
+            accepted: [toEmail],
+            response: dataResponse.message,
+        };
+    } catch (error) {
+        console.error("[stocknbook-auth] Gmail SMTP error:", {
+            code: error?.code,
+            message: error?.message,
+        });
+
+        if (
+            error?.code === "ETIMEDOUT" ||
+            error?.code === "ECONNRESET" ||
+            error?.code === "EHOSTUNREACH" ||
+            error?.code === "ENETUNREACH"
+        ) {
+            error.code = "GMAIL_NETWORK_FAILED";
+        }
+
+        throw error;
+    } finally {
+        if (!socket.destroyed) {
+            socket.end();
+        }
+    }
+}
 
 function generateSlug(storeName) {
     return storeName
@@ -29,7 +348,11 @@ exports.handler = async (event) => {
         "Content-Type": "application/json",
     };
 
-    if (event.httpMethod === "OPTIONS") {
+    const method =
+        event?.requestContext?.http?.method ||
+        event?.httpMethod;
+
+    if (method === "OPTIONS") {
         return { statusCode: 200, headers, body: "" };
     }
 
@@ -52,8 +375,198 @@ exports.handler = async (event) => {
     try {
         connection = await mysql.createConnection(dbConfig);
 
-        // SIGNUP
-        if (action === "signup") {
+        // SEND SIGNUP OTP
+        if (action === "send_signup_otp") {
+            await ensureSignupOtpsTable(connection);
+
+            const ownerName = String(
+                body.owner_name ?? body.ownerName ?? ""
+            ).trim();
+
+            const storeName = String(
+                body.store_name ?? body.storeName ?? ""
+            ).trim();
+
+            const phoneNumber = String(
+                body.phone_number ?? body.phoneNumber ?? body.phone ?? ""
+            ).trim();
+
+            const emailAddress = String(body.email ?? "").trim().toLowerCase();
+            const accountPassword = String(body.password ?? "");
+
+            if (!ownerName || !storeName || !phoneNumber || !emailAddress || !accountPassword) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Owner name, business name, phone number, email, and password are required.",
+                    }),
+                };
+            }
+
+            const phoneDigits = phoneNumber.replace(/\D/g, "");
+
+            if (phoneDigits.length < 10 || phoneDigits.length > 15) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: "Enter a valid phone number." }),
+                };
+            }
+
+            if (!/^\S+@\S+\.\S+$/.test(emailAddress)) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: "Enter a valid email address." }),
+                };
+            }
+
+            if (accountPassword.length < 8) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: "Password must contain at least 8 characters." }),
+                };
+            }
+
+            const slug = generateSlug(storeName);
+
+            if (!slug) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: "Business name must contain letters or numbers." }),
+                };
+            }
+
+            const [phoneColumnRows] = await connection.execute(
+                "SHOW COLUMNS FROM stores LIKE 'phone_number'"
+            );
+
+            if (phoneColumnRows.length === 0) {
+                return {
+                    statusCode: 500,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Database setup is incomplete. Add stores.phone_number before creating new accounts.",
+                    }),
+                };
+            }
+
+            const [existing] = await connection.execute(
+                "SELECT id FROM stores WHERE email = ? LIMIT 1",
+                [emailAddress]
+            );
+
+            if (existing.length > 0) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: "Email already exists" }),
+                };
+            }
+
+            const otp = generateOtp();
+            const otpHash = hashOtp(otp);
+
+            await connection.execute(
+                `UPDATE signup_otps
+                 SET used = 1
+                 WHERE email = ?
+                   AND used = 0`,
+                [emailAddress]
+            );
+
+            await connection.execute(
+                `INSERT INTO signup_otps
+                     (email, otp_hash, expires_at, used)
+                 VALUES
+                     (?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
+                [emailAddress, otpHash, OTP_EXPIRY_SECONDS]
+            );
+
+            try {
+                await sendSignupOtpEmail(emailAddress, otp);
+            } catch (emailError) {
+                await connection.execute(
+                    `UPDATE signup_otps
+                     SET used = 1
+                     WHERE email = ?
+                       AND otp_hash = ?
+                       AND used = 0`,
+                    [emailAddress, otpHash]
+                );
+
+                throw emailError;
+            }
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    message: "OTP sent successfully",
+                    expires_in: OTP_EXPIRY_SECONDS,
+                }),
+            };
+        }
+
+        // VERIFY SIGNUP OTP AND CREATE OWNER ACCOUNT
+        if (action === "verify_signup_otp") {
+            await ensureSignupOtpsTable(connection);
+
+            const otp = String(body.otp ?? "").trim();
+            const otpEmail = String(body.email ?? "").trim().toLowerCase();
+
+            if (!otp || !otpEmail) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: "OTP and email are required." }),
+                };
+            }
+
+            if (!/^\d{6}$/.test(otp)) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: "OTP must be exactly 6 digits." }),
+                };
+            }
+
+            const otpHash = hashOtp(otp);
+
+            // Explicitly invalidate every expired OTP for this email.
+            await connection.execute(
+                `UPDATE signup_otps
+                 SET used = 1
+                 WHERE email = ?
+                   AND used = 0
+                   AND expires_at <= UTC_TIMESTAMP()`,
+                [otpEmail]
+            );
+
+            // Accept only an unused OTP that has not expired.
+            const [otpRows] = await connection.execute(
+                `SELECT id
+                 FROM signup_otps
+                 WHERE email = ?
+                   AND otp_hash = ?
+                   AND used = 0
+                   AND expires_at > UTC_TIMESTAMP()
+                 ORDER BY id DESC
+                     LIMIT 1`,
+                [otpEmail, otpHash]
+            );
+
+            if (otpRows.length === 0) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: "Invalid or expired OTP." }),
+                };
+            }
+
             // Accept both snake_case and camelCase because the Create Account modal
             // may submit either naming style. The current modal submits owner_name
             // and phone, which are both supported here.
@@ -140,6 +653,14 @@ exports.handler = async (event) => {
                     body: JSON.stringify({ error: "Email already exists" }),
                 };
             }
+
+            await connection.execute(
+                `UPDATE signup_otps
+                 SET used = 1
+                 WHERE email = ?
+                   AND used = 0`,
+                [emailAddress]
+            );
 
             const hashed = await bcrypt.hash(accountPassword, 10);
 
@@ -1961,10 +2482,20 @@ exports.handler = async (event) => {
             body: JSON.stringify({ error: "Invalid action" }),
         };
     } catch (err) {
+        console.error("[stocknbook-auth] Error:", {
+            action,
+            message: err?.message,
+            code: err?.code,
+            stack: err?.stack,
+        });
+
         return {
             statusCode: 500,
             headers,
-            body: JSON.stringify({ error: err.message }),
+            body: JSON.stringify({
+                error: err?.message || "Internal server error",
+                code: err?.code || "UNKNOWN_ERROR",
+            }),
         };
     } finally {
         if (connection) {

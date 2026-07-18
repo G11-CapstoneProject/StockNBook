@@ -697,28 +697,18 @@ export function useLiveForecasting() {
         setSeasonalError(null);
         setBookingError(null);
 
-        const [inventoryResult, seasonalResult, bookingResult] =
-            await Promise.allSettled([
-                requestForecastApi<ForecastApiResponse>(
+        /*
+          Load the main inventory forecast first. The old implementation fired
+          three Lambda requests at the same time. That made the heaviest request
+          compete with the seasonal and booking requests for RDS connections
+          during a cold start.
+        */
+        try {
+            const inventory =
+                await requestForecastApi<ForecastApiResponse>(
                     token,
                     "get_inventory_forecast"
-                ),
-                requestForecastApi<SeasonalApiResponse>(
-                    token,
-                    "get_seasonal_analysis",
-                    {
-                        seasonalStartMonth: seasonalRange.startMonth,
-                        seasonalEndMonth: seasonalRange.endMonth,
-                    }
-                ),
-                requestForecastApi<BookingApiResponse>(
-                    token,
-                    "get_booking_forecast"
-                ),
-            ]);
-
-        if (inventoryResult.status === "fulfilled") {
-            const inventory = inventoryResult.value;
+                );
 
             if (inventory.success && Array.isArray(inventory.items)) {
                 setData(inventory);
@@ -735,14 +725,33 @@ export function useLiveForecasting() {
                     "The Product Demand Forecast service returned an invalid response."
                 );
             }
-        } else {
+        } catch (requestError) {
             setData(null);
             setError(
-                inventoryResult.reason instanceof Error
-                    ? inventoryResult.reason.message
+                requestError instanceof Error
+                    ? requestError.message
                     : "Unable to load the Product Demand Forecast."
             );
+        } finally {
+            setLoading(false);
         }
+
+        // Secondary panels can load together after the heavy inventory query.
+        const [seasonalResult, bookingResult] =
+            await Promise.allSettled([
+                requestForecastApi<SeasonalApiResponse>(
+                    token,
+                    "get_seasonal_analysis",
+                    {
+                        seasonalStartMonth: seasonalRange.startMonth,
+                        seasonalEndMonth: seasonalRange.endMonth,
+                    }
+                ),
+                requestForecastApi<BookingApiResponse>(
+                    token,
+                    "get_booking_forecast"
+                ),
+            ]);
 
         if (seasonalResult.status === "fulfilled") {
             const seasonal = seasonalResult.value;
@@ -784,7 +793,6 @@ export function useLiveForecasting() {
             );
         }
 
-        setLoading(false);
         setSeasonalLoading(false);
         setBookingLoading(false);
     }, [seasonalRange]);
@@ -1457,19 +1465,28 @@ function InsightValue({
 
 export function ProductDemandSummaryCards({
                                               data,
+                                              seasonalData,
+                                              seasonalLoading = false,
                                           }: {
     data: ForecastApiResponse;
+    seasonalData?: SeasonalApiResponse | null;
+    seasonalLoading?: boolean;
 }) {
     const demandItems = getDemandItems(data.items);
     const highDemandItems = demandItems.filter(
         (item) => String(item.demandLevel || "").toUpperCase() === "HIGH"
     ).length;
     const stockActionCount = getStockActionItems(data.items).length;
-    const peakSeasonItems =
-        data.summary.peakSeasonItems ??
-        demandItems.filter(
-            (item) => item.seasonality?.status === "PEAK_SEASON"
-        ).length;
+
+    /*
+      Product-level seasonality was intentionally removed from the main
+      inventory forecast to prevent the AWS 503 timeout. Use the already-loaded
+      branch seasonal forecast instead of displaying the hard-coded
+      peakSeasonItems: 0 value from the lightweight inventory response.
+    */
+    const peakDemandMonths =
+        seasonalData?.seasonal?.peakMonths?.length ?? 0;
+
     const periodDays = data.scope.periodDays || 30;
     const scopeLabel = data.scope.branchId
         ? data.items[0]?.branchName || "selected branch"
@@ -1508,11 +1525,19 @@ export function ProductDemandSummaryCards({
             />
             <SummaryCard
                 icon={<CalendarDays size={18} />}
-                title="Peak-Season Signals"
-                value={`${formatNumber(peakSeasonItems)} product${
-                    peakSeasonItems === 1 ? "" : "s"
-                }`}
-                detail="Products whose current month is higher than their own usual monthly POS demand."
+                title="Peak Demand Months"
+                value={
+                    seasonalLoading && !seasonalData
+                        ? "Loading..."
+                        : `${formatNumber(peakDemandMonths)} month${
+                            peakDemandMonths === 1 ? "" : "s"
+                        }`
+                }
+                detail={
+                    peakDemandMonths > 0
+                        ? "Calendar months with the highest completed POS item demand in the selected seasonal period."
+                        : "No peak month is available yet. Open Seasonal Patterns to check whether enough monthly POS history exists."
+                }
                 tone="purple"
             />
         </div>
@@ -1521,10 +1546,14 @@ export function ProductDemandSummaryCards({
 
 function InventoryForecastPanel({
                                     data,
+                                    seasonalData,
+                                    seasonalLoading = false,
                                     canViewInventory,
                                     showSummaryCards = true,
                                 }: {
     data: ForecastApiResponse;
+    seasonalData?: SeasonalApiResponse | null;
+    seasonalLoading?: boolean;
     canViewInventory: boolean;
     showSummaryCards?: boolean;
 }) {
@@ -1555,7 +1584,13 @@ function InventoryForecastPanel({
 
     return (
         <div className="space-y-4">
-            {showSummaryCards && <ProductDemandSummaryCards data={data} />}
+            {showSummaryCards && (
+                <ProductDemandSummaryCards
+                    data={data}
+                    seasonalData={seasonalData}
+                    seasonalLoading={seasonalLoading}
+                />
+            )}
 
             <section className="rounded-[14px] border border-[#D8CBE7] bg-[#F7F1FF] p-4">
                 <button
@@ -2941,6 +2976,8 @@ export function ForecastDetails({
                 {activeTab === "inventory" && (
                     <InventoryForecastPanel
                         data={data}
+                        seasonalData={seasonalData}
+                        seasonalLoading={seasonalLoading}
                         canViewInventory={canViewInventory}
                         showSummaryCards={showProductSummaryCards}
                     />

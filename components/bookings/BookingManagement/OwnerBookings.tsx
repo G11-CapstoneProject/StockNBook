@@ -65,10 +65,11 @@ export default function OwnerBookings() {
                     Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
-                    action: "get_bookings",
+                    action: "get_booking_page_bookings",
                     store_id: Number(storeId),
                     role: "owner",
                 }),
+                cache: "no-store",
             });
 
             const data: { bookings?: unknown } = await res.json();

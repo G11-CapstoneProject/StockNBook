@@ -284,10 +284,10 @@ async function ensureBranchBelongsToStore(connection, branchId, storeId) {
 
     const [rows] = await connection.execute(
         `SELECT id
-FROM branches
-WHERE id = ?
-    AND store_id = ?
-        LIMIT 1`,
+         FROM branches
+         WHERE id = ?
+           AND store_id = ?
+             LIMIT 1`,
         [parsedBranchId, parsedStoreId]
     );
 
@@ -296,25 +296,25 @@ WHERE id = ?
 
 async function getInventoryItems(connection, { storeId, branchId = null }) {
     let query = `
-SELECT
-p.id AS product_id,
-    p.store_id,
-    p.branch_id,
-    p.name AS product_name,
-    p.category,
-    p.stock AS product_stock,
-    p.alert_level AS product_alert_level,
-    pv.id AS variant_id,
-    pv.variant_values,
-    pv.stock AS variant_stock,
-    pv.alert_level AS variant_alert_level,
-    b.branch_name
-FROM products p
-LEFT JOIN product_variants pv
-ON pv.product_id = p.id
-LEFT JOIN branches b
-ON b.id = p.branch_id
-WHERE p.store_id = ?
+        SELECT
+            p.id AS product_id,
+            p.store_id,
+            p.branch_id,
+            p.name AS product_name,
+            p.category,
+            p.stock AS product_stock,
+            p.alert_level AS product_alert_level,
+            pv.id AS variant_id,
+            pv.variant_values,
+            pv.stock AS variant_stock,
+            pv.alert_level AS variant_alert_level,
+            b.branch_name
+        FROM products p
+                 LEFT JOIN product_variants pv
+                           ON pv.product_id = p.id
+                 LEFT JOIN branches b
+                           ON b.id = p.branch_id
+        WHERE p.store_id = ?
     `;
 
     const params = [storeId];
@@ -339,42 +339,51 @@ WHERE p.store_id = ?
 
         const itemName = isVariant
             ? `${row.product_name} / ${variantName}`
-: String(row.product_name || "Unnamed Product");
+            : String(row.product_name || "Unnamed Product");
 
-return {
-    id: getInventoryKey(productId, variantId),
-    productId,
-    variantId,
-    productName: String(row.product_name || ""),
-    variantName,
-    itemName,
-    category: String(row.category || "Uncategorized"),
-    branchId: Number(row.branch_id),
-    branchName: String(row.branch_name || "Unnamed Branch"),
-    isVariant,
-    onHandQuantity: isVariant
-        ? toSafeNumber(row.variant_stock)
-        : toSafeNumber(row.product_stock),
-    lowStockThreshold: isVariant
-        ? toSafeNumber(row.variant_alert_level)
-        : toSafeNumber(row.product_alert_level),
-};
-});
+        return {
+            id: getInventoryKey(productId, variantId),
+            productId,
+            variantId,
+            productName: String(row.product_name || ""),
+            variantName,
+            itemName,
+            category: String(row.category || "Uncategorized"),
+            branchId: Number(row.branch_id),
+            branchName: String(row.branch_name || "Unnamed Branch"),
+            isVariant,
+            onHandQuantity: isVariant
+                ? toSafeNumber(row.variant_stock)
+                : toSafeNumber(row.product_stock),
+            lowStockThreshold: isVariant
+                ? toSafeNumber(row.variant_alert_level)
+                : toSafeNumber(row.product_alert_level),
+        };
+    });
 }
 
 async function getHistoricalSales(
     connection,
     { storeId, branchId = null, startDate, endDate }
 ) {
+    /*
+      Aggregate POS quantities by inventory item and calendar week inside
+      MySQL. The previous query returned every order-item row and transferred
+      a much larger result to Lambda. buildWeeklyDemandMap() accepts these
+      Monday week-start dates without any other changes.
+    */
     let query = `
         SELECT
             oi.product_id,
             oi.variant_id,
-            oi.quantity,
-            DATE_FORMAT(o.order_date, '%Y-%m-%d') AS order_date
+            SUM(oi.quantity) AS quantity,
+            DATE_FORMAT(
+                    DATE_SUB(DATE(o.order_date), INTERVAL WEEKDAY(o.order_date) DAY),
+                    '%Y-%m-%d'
+            ) AS order_date
         FROM orders o
-        INNER JOIN order_items oi
-            ON oi.order_id = o.order_id
+                 INNER JOIN order_items oi
+                            ON oi.order_id = o.order_id
         WHERE o.store_id = ?
           AND oi.product_id IS NOT NULL
           AND o.order_date BETWEEN ? AND ?
@@ -387,7 +396,13 @@ async function getHistoricalSales(
         params.push(branchId);
     }
 
-    query += " ORDER BY o.order_date ASC, oi.id ASC";
+    query += `
+        GROUP BY
+            oi.product_id,
+            oi.variant_id,
+            DATE_SUB(DATE(o.order_date), INTERVAL WEEKDAY(o.order_date) DAY)
+        ORDER BY order_date ASC
+    `;
 
     const [rows] = await connection.execute(query, params);
 
@@ -409,8 +424,8 @@ async function getMonthlySalesSummary(
             SUM(oi.quantity) AS total_units,
             COUNT(DISTINCT o.order_id) AS order_count
         FROM orders o
-        INNER JOIN order_items oi
-            ON oi.order_id = o.order_id
+                 INNER JOIN order_items oi
+                            ON oi.order_id = o.order_id
         WHERE o.store_id = ?
           AND oi.product_id IS NOT NULL
           AND o.order_date BETWEEN ? AND ?
@@ -449,8 +464,8 @@ async function getItemMonthlySalesSummary(
             SUM(oi.quantity) AS total_units,
             COUNT(DISTINCT o.order_id) AS order_count
         FROM orders o
-        INNER JOIN order_items oi
-            ON oi.order_id = o.order_id
+                 INNER JOIN order_items oi
+                            ON oi.order_id = o.order_id
         WHERE o.store_id = ?
           AND oi.product_id IS NOT NULL
           AND o.order_date BETWEEN ? AND ?
@@ -533,7 +548,15 @@ async function getUpcomingBookings(
     connection,
     { storeId, branchId = null, startDate, endDate }
 ) {
-    let query = `
+    /*
+      Exact booking_items schema used by this project:
+      id, booking_id, product_id, variant_id, product_name, quantity,
+      created_at, unit_price, line_total.
+
+      Do not query reserved_quantity, booked_quantity, store_id, or branch_id
+      from booking_items because those columns do not exist in this database.
+    */
+    let bookingQuery = `
         SELECT
             b.id,
             b.branch_id,
@@ -543,13 +566,141 @@ async function getUpcomingBookings(
             b.event_date,
             b.event_time,
             b.status,
-            b.package_name,
-            b.package_json,
-            b.packageJSON
+            b.package_name
         FROM bookings b
-        LEFT JOIN branches br
-            ON br.id = b.branch_id
-           AND br.store_id = b.store_id
+                 LEFT JOIN branches br
+                           ON br.id = b.branch_id
+                               AND br.store_id = b.store_id
+        WHERE b.store_id = ?
+          AND b.event_date BETWEEN ? AND ?
+          AND LOWER(TRIM(COALESCE(b.status, ''))) IN (
+                                                      'confirmed',
+                                                      'preparing',
+                                                      'approved'
+            )
+    `;
+
+    const bookingParams = [storeId, startDate, endDate];
+
+    if (branchId) {
+        bookingQuery += " AND b.branch_id = ?";
+        bookingParams.push(branchId);
+    }
+
+    bookingQuery += " ORDER BY b.event_date ASC, b.event_time ASC, b.id ASC";
+
+    const [bookingRows] = await connection.execute(
+        bookingQuery,
+        bookingParams
+    );
+
+    if (bookingRows.length === 0) {
+        return [];
+    }
+
+    let allocationQuery = `
+        SELECT
+            bi.booking_id,
+            bi.product_id,
+            bi.variant_id,
+            COALESCE(
+                    NULLIF(TRIM(bi.product_name), ''),
+                    NULLIF(TRIM(p.name), ''),
+                    CONCAT('Product ', bi.product_id)
+            ) AS item_name,
+            SUM(COALESCE(bi.quantity, 0)) AS quantity
+        FROM booking_items bi
+                 INNER JOIN bookings b
+                            ON b.id = bi.booking_id
+                 LEFT JOIN products p
+                           ON p.id = bi.product_id
+                               AND p.store_id = b.store_id
+        WHERE b.store_id = ?
+          AND b.event_date BETWEEN ? AND ?
+          AND LOWER(TRIM(COALESCE(b.status, ''))) IN (
+                                                      'confirmed',
+                                                      'preparing',
+                                                      'approved'
+            )
+          AND bi.product_id IS NOT NULL
+    `;
+
+    const allocationParams = [storeId, startDate, endDate];
+
+    if (branchId) {
+        allocationQuery += " AND b.branch_id = ?";
+        allocationParams.push(branchId);
+    }
+
+    allocationQuery += `
+        GROUP BY
+            bi.booking_id,
+            bi.product_id,
+            bi.variant_id,
+            bi.product_name,
+            p.name
+        ORDER BY bi.booking_id ASC
+    `;
+
+    const [allocationRows] = await connection.execute(
+        allocationQuery,
+        allocationParams
+    );
+
+    const allocationsByBooking = new Map();
+
+    allocationRows.forEach((row) => {
+        const quantity = Math.max(0, toSafeNumber(row.quantity));
+
+        if (quantity <= 0) {
+            return;
+        }
+
+        const bookingId = Number(row.booking_id);
+        const current = allocationsByBooking.get(bookingId) || [];
+
+        current.push({
+            productId: toPositiveInteger(row.product_id),
+            variantId: toPositiveInteger(row.variant_id),
+            quantity,
+            itemName: String(row.item_name || "").trim(),
+        });
+
+        allocationsByBooking.set(bookingId, current);
+    });
+
+    return bookingRows.map((row) => ({
+        id: Number(row.id),
+        branchId: toPositiveInteger(row.branch_id),
+        branchName: String(row.branch_name || "Unnamed Branch"),
+        bookingReference: String(row.booking_reference || ""),
+        customerName: String(row.name || "Customer"),
+        eventDate: toDateOnly(row.event_date),
+        eventTime: String(row.event_time || ""),
+        status: String(row.status || ""),
+        packageName:
+            String(row.package_name || "").trim() ||
+            "Custom / Unspecified",
+        allocations: allocationsByBooking.get(Number(row.id)) || [],
+    }));
+}
+
+
+async function getUpcomingBookingAllocationSummary(
+    connection,
+    { storeId, branchId = null, startDate, endDate }
+) {
+    /*
+      Lightweight data for get_inventory_forecast.
+
+      The detailed booking forecast has its own API action, so the inventory
+      request should not load every upcoming booking row and every allocation.
+      This function returns only:
+      - booking counts
+      - product/variant quantities reserved by upcoming bookings
+    */
+    let bookingWhere = `
+        FROM bookings b
         WHERE b.store_id = ?
           AND b.event_date BETWEEN ? AND ?
           AND LOWER(TRIM(COALESCE(b.status, ''))) IN (
@@ -559,45 +710,126 @@ async function getUpcomingBookings(
           )
     `;
 
-    const params = [storeId, startDate, endDate];
+    const bookingParams = [storeId, startDate, endDate];
 
     if (branchId) {
-        query += " AND b.branch_id = ?";
-        params.push(branchId);
+        bookingWhere += " AND b.branch_id = ?";
+        bookingParams.push(branchId);
     }
 
-    query += " ORDER BY b.event_date ASC, b.event_time ASC, b.id ASC";
+    const countsQuery = `
+        SELECT
+            COUNT(*) AS expected_bookings,
+            SUM(
+                CASE
+                    WHEN LOWER(TRIM(COALESCE(b.status, ''))) = 'preparing'
+                        THEN 1
+                    ELSE 0
+                END
+            ) AS preparing_bookings,
+            SUM(
+                CASE
+                    WHEN LOWER(TRIM(COALESCE(b.status, ''))) IN (
+                        'confirmed',
+                        'approved'
+                    )
+                        THEN 1
+                    ELSE 0
+                END
+            ) AS confirmed_bookings,
+            SUM(
+                CASE
+                    WHEN NOT EXISTS (
+                        SELECT 1
+                        FROM booking_items bi
+                        WHERE bi.booking_id = b.id
+                    )
+                        THEN 1
+                    ELSE 0
+                END
+            ) AS bookings_without_allocation
+        ${bookingWhere}
+    `;
 
-    const [rows] = await connection.execute(query, params);
+    let allocationQuery = `
+        SELECT
+            bi.product_id,
+            bi.variant_id,
+            COALESCE(
+                MAX(NULLIF(TRIM(bi.product_name), '')),
+                MAX(NULLIF(TRIM(p.name), '')),
+                CONCAT('Product ', bi.product_id)
+            ) AS item_name,
+            SUM(COALESCE(bi.quantity, 0)) AS quantity
+        FROM bookings b
+        INNER JOIN booking_items bi
+            ON bi.booking_id = b.id
+        LEFT JOIN products p
+            ON p.id = bi.product_id
+           AND p.store_id = b.store_id
+        WHERE b.store_id = ?
+          AND b.event_date BETWEEN ? AND ?
+          AND LOWER(TRIM(COALESCE(b.status, ''))) IN (
+              'confirmed',
+              'preparing',
+              'approved'
+          )
+          AND bi.product_id IS NOT NULL
+    `;
 
-    return rows.map((row) => {
-        const primaryPayload =
-            safeParseJSON(row.package_json) ||
-            safeParseJSON(row.packageJSON);
+    const allocationParams = [storeId, startDate, endDate];
 
-        const packageName =
-            String(row.package_name || "").trim() ||
-            readFirstText(primaryPayload, [
-                "name",
-                "package_name",
-                "packageName",
-                "title",
-            ]) ||
-            "Custom / Unspecified";
+    if (branchId) {
+        allocationQuery += " AND b.branch_id = ?";
+        allocationParams.push(branchId);
+    }
 
-        return {
-            id: Number(row.id),
-            branchId: toPositiveInteger(row.branch_id),
-            branchName: String(row.branch_name || "Unnamed Branch"),
-            bookingReference: String(row.booking_reference || ""),
-            customerName: String(row.name || "Customer"),
-            eventDate: toDateOnly(row.event_date),
-            eventTime: String(row.event_time || ""),
-            status: String(row.status || ""),
-            packageName,
-            allocations: getBookingAllocations(primaryPayload),
-        };
-    });
+    allocationQuery += `
+        GROUP BY
+            bi.product_id,
+            bi.variant_id
+        ORDER BY quantity DESC
+    `;
+
+    const [[countRows], [allocationRows]] = await Promise.all([
+        connection.execute(countsQuery, bookingParams),
+        connection.execute(allocationQuery, allocationParams),
+    ]);
+
+    const counts = countRows[0] || {};
+
+    const allocatedInventory = allocationRows
+        .map((row) => ({
+            productId: toPositiveInteger(row.product_id),
+            variantId: toPositiveInteger(row.variant_id),
+            itemName: String(row.item_name || "").trim(),
+            quantity: Math.max(0, toSafeNumber(row.quantity)),
+        }))
+        .filter(
+            (row) =>
+                row.productId &&
+                row.quantity > 0
+        );
+
+    const allocatedUnits = allocatedInventory.reduce(
+        (total, row) => total + row.quantity,
+        0
+    );
+
+    return {
+        expectedBookings: toSafeNumber(counts.expected_bookings),
+        confirmedBookings: toSafeNumber(counts.confirmed_bookings),
+        preparingBookings: toSafeNumber(counts.preparing_bookings),
+        allocationSummary: {
+            allocatedUnits,
+            allocationItems: allocatedInventory.length,
+            bookingsWithoutAllocation: toSafeNumber(
+                counts.bookings_without_allocation
+            ),
+            unlinkedAllocationEntries: 0,
+        },
+        allocatedInventory,
+    };
 }
 
 function buildWeeklyDemandMap(inventoryItems, historicalSales, weekWindows) {
@@ -673,6 +905,7 @@ module.exports = {
     getMonthlySalesSummary,
     getItemMonthlySalesSummary,
     getUpcomingBookings,
+    getUpcomingBookingAllocationSummary,
     buildWeeklyDemandMap,
     buildItemMonthlySalesMap,
 };

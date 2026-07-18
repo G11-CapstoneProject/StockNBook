@@ -4,7 +4,6 @@ const jwt = require("jsonwebtoken");
 const {
     buildInventoryForecast,
     assignDemandLevels,
-    buildItemSeasonality,
     buildSeasonalAnalysis,
     buildBookingForecast,
 } = require("./forecastingEngine");
@@ -17,10 +16,9 @@ const {
     getInventoryItems,
     getHistoricalSales,
     getMonthlySalesSummary,
-    getItemMonthlySalesSummary,
     getUpcomingBookings,
+    getUpcomingBookingAllocationSummary,
     buildWeeklyDemandMap,
-    buildItemMonthlySalesMap,
 } = require("./forecastingRepository");
 
 /*
@@ -37,11 +35,31 @@ const {
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 
 const dbConfig = {
-    host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",    user: "admin",
+    host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",
+    user: "admin",
     password: "2qJivedWDxCQS6TLjjEl",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
+    waitForConnections: true,
+    connectionLimit: 4,
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+    connectTimeout: 10000,
 };
+
+// Reuse a connection pool across warm Lambda invocations.
+// The old code used one MySQL connection for Promise.all(), so the four
+// inventory-forecast queries were queued instead of running concurrently.
+let databasePool;
+
+function getDatabasePool() {
+    if (!databasePool) {
+        databasePool = mysql.createPool(dbConfig);
+    }
+
+    return databasePool;
+}
 
 function jsonResponse(statusCode, headers, body) {
     return {
@@ -205,8 +223,8 @@ function resolveSeasonalDateRange(body) {
     const today = new Date();
 
     const currentMonth = `${today.getUTCFullYear()}-${String(
-    today.getUTCMonth() + 1
-).padStart(2, "0")}`;
+        today.getUTCMonth() + 1
+    ).padStart(2, "0")}`;
 
     if (end.key > currentMonth) {
         return {
@@ -281,8 +299,8 @@ function buildMonthlyDemandHistory(
 
     while (cursor <= lastMonth) {
         const monthKey = `${cursor.getUTCFullYear()}-${String(
-    cursor.getUTCMonth() + 1
-).padStart(2, "0")}`;
+            cursor.getUTCMonth() + 1
+        ).padStart(2, "0")}`;
 
         const row = savedRows.get(monthKey) || {
             totalUnits: 0,
@@ -328,7 +346,7 @@ function buildBookingAllocationMap(bookingForecast) {
         allocationMap.set(
             key,
             Number(allocationMap.get(key) || 0) +
-                Number(allocation.quantity || 0)
+            Number(allocation.quantity || 0)
         );
     }
 
@@ -365,29 +383,34 @@ function alertPriority(item) {
 }
 
 async function buildInventoryForecastResponse({
-    connection,
-    storeId,
-    role,
-    selectedBranchId,
-}) {
+                                                  connection,
+                                                  storeId,
+                                                  role,
+                                                  selectedBranchId,
+                                              }) {
     const historyWeeks = 12;
-    const historyMonths = 12;
     const periodDays = 30;
     const leadTimeDays = 3;
 
     const weekWindows = getWeekWindows(historyWeeks);
-    const monthRange = getMonthRange(historyMonths);
     const bookingRange = getUpcomingBookingRange(periodDays);
 
     const historyStartDate = weekWindows[0].startDate;
     const historyEndDate =
         weekWindows[weekWindows.length - 1].endDate;
 
+    /*
+      Keep the main Product Demand request small and fast.
+
+      Product-level seasonal history and detailed upcoming bookings are already
+      provided by the separate seasonal and booking forecast actions. Loading
+      all three datasets again here caused the inventory request to run too long
+      and API Gateway returned 503 Service Unavailable.
+    */
     const [
         inventoryItems,
         historicalSales,
-        itemMonthlySales,
-        upcomingBookings,
+        bookingAllocationSummary,
     ] = await Promise.all([
         getInventoryItems(connection, {
             storeId,
@@ -401,14 +424,7 @@ async function buildInventoryForecastResponse({
             endDate: historyEndDate,
         }),
 
-        getItemMonthlySalesSummary(connection, {
-            storeId,
-            branchId: selectedBranchId,
-            startDate: monthRange.startDate,
-            endDate: monthRange.endDate,
-        }),
-
-        getUpcomingBookings(connection, {
+        getUpcomingBookingAllocationSummary(connection, {
             storeId,
             branchId: selectedBranchId,
             startDate: bookingRange.startDate,
@@ -416,39 +432,20 @@ async function buildInventoryForecastResponse({
         }),
     ]);
 
-    const bookingForecast = buildBookingForecast(
-        upcomingBookings,
-        { periodDays }
-    );
-
     const weeklyDemandMap = buildWeeklyDemandMap(
         inventoryItems,
         historicalSales,
         weekWindows
     );
 
-    const monthlySalesMap = buildItemMonthlySalesMap(
-        inventoryItems,
-        itemMonthlySales
-    );
-
     const bookingAllocationMap = buildBookingAllocationMap(
-        bookingForecast
+        bookingAllocationSummary
     );
 
     const rawItems = inventoryItems.map((item) => {
         const weeklyDemand =
             weeklyDemandMap.get(item.id) ||
             Array(historyWeeks).fill(0);
-
-        const itemMonthlyHistory =
-            monthlySalesMap.get(item.id) || [];
-
-        const monthlyDemand = buildMonthlyDemandHistory(
-            itemMonthlyHistory,
-            monthRange.startDate,
-            monthRange.endDate
-        );
 
         const allocatedQuantity = Number(
             bookingAllocationMap.get(item.id) || 0
@@ -464,6 +461,11 @@ async function buildInventoryForecastResponse({
             leadTimeDays,
         });
 
+        /*
+          Return only fields used by the Product Demand interface.
+          weeklyDemand, monthlyDemand, the twelve-month item seasonal array,
+          and the duplicate detailed booking list are intentionally omitted.
+        */
         return {
             ...item,
 
@@ -473,9 +475,6 @@ async function buildInventoryForecastResponse({
             availableQuantity: forecast.availableQuantity,
 
             historyWeeks,
-            weeklyDemand,
-            monthlyDemand,
-
             weeklyForecast: forecast.weeklyForecast,
             baseWeeklyForecast: forecast.baseWeeklyForecast,
             forecastedDemand: forecast.forecastedDemand,
@@ -483,10 +482,10 @@ async function buildInventoryForecastResponse({
             status: forecast.status,
 
             recentFourWeekDemand:
-                forecast.recentFourWeekDemand,
+            forecast.recentFourWeekDemand,
 
             previousFourWeekDemand:
-                forecast.previousFourWeekDemand,
+            forecast.previousFourWeekDemand,
 
             growthPercent: forecast.growthPercent,
             growthFactor: forecast.growthFactor,
@@ -494,15 +493,11 @@ async function buildInventoryForecastResponse({
 
             totalUnitsSold: forecast.totalUnitsSold,
             activeSalesWeeks: forecast.activeSalesWeeks,
-
-            averageWeeklyDemand:
-                forecast.averageWeeklyDemand,
+            averageWeeklyDemand: forecast.averageWeeklyDemand,
 
             movementClass: forecast.movementClass,
             dailyDemand: forecast.dailyDemand,
-
-            daysUntilStockout:
-                forecast.daysUntilStockout,
+            daysUntilStockout: forecast.daysUntilStockout,
 
             reorderPoint: forecast.reorderPoint,
             reorderNow: forecast.reorderNow,
@@ -510,15 +505,6 @@ async function buildInventoryForecastResponse({
 
             timeAlert: forecast.timeAlert,
             alertSeverity: forecast.alertSeverity,
-
-            seasonality: buildItemSeasonality(
-                itemMonthlyHistory,
-                {
-                    currentMonthNumber:
-                        new Date().getUTCMonth() + 1,
-                    minimumHistoryMonths: 6,
-                }
-            ),
         };
     });
 
@@ -533,9 +519,9 @@ async function buildInventoryForecastResponse({
 
         return (
             Number(second.suggestedRestock || 0) -
-                Number(first.suggestedRestock || 0) ||
+            Number(first.suggestedRestock || 0) ||
             Number(second.forecastedDemand || 0) -
-                Number(first.forecastedDemand || 0)
+            Number(first.forecastedDemand || 0)
         );
     });
 
@@ -567,13 +553,13 @@ async function buildInventoryForecastResponse({
             ),
 
             expectedBookings:
-                bookingForecast.expectedBookings,
+            bookingAllocationSummary.expectedBookings,
 
             confirmedBookings:
-                bookingForecast.confirmedBookings,
+            bookingAllocationSummary.confirmedBookings,
 
             preparingBookings:
-                bookingForecast.preparingBookings,
+            bookingAllocationSummary.preparingBookings,
 
             trackedItems: items.length,
 
@@ -601,40 +587,40 @@ async function buildInventoryForecastResponse({
                     item.growthTrend === "NEW_DEMAND"
             ),
 
-            peakSeasonItems: count(
-                (item) =>
-                    item.seasonality?.status === "PEAK_SEASON"
-            ),
+            // Branch-level seasonality is returned by get_seasonal_forecast.
+            peakSeasonItems: 0,
 
             bookingAllocatedUnits:
-                bookingForecast.allocationSummary
-                    .allocatedUnits,
+            bookingAllocationSummary.allocationSummary
+                .allocatedUnits,
 
             bookingsWithoutAllocation:
-                bookingForecast.allocationSummary
-                    .bookingsWithoutAllocation,
+            bookingAllocationSummary.allocationSummary
+                .bookingsWithoutAllocation,
         },
 
         notes: {
             dataSource:
-                "Completed POS sales, inventory, and upcoming confirmed/preparing bookings.",
+                "Completed POS sales, current inventory, and aggregated upcoming booking allocations.",
 
-            monthlyDemand:
-                "Each monthlyDemand point is one complete calendar month of completed POS item quantity.",
+            seasonality:
+                "Branch seasonal patterns are loaded separately by get_seasonal_forecast.",
+
+            bookingForecast:
+                "Detailed booking demand is loaded separately by get_booking_forecast.",
         },
 
-        bookingSummary: bookingForecast,
         items,
     };
 }
 
 async function buildSeasonalForecastResponse({
-    connection,
-    storeId,
-    role,
-    selectedBranchId,
-    seasonalRange,
-}) {
+                                                 connection,
+                                                 storeId,
+                                                 role,
+                                                 selectedBranchId,
+                                                 seasonalRange,
+                                             }) {
     const range =
         seasonalRange || {
             ...getMonthRange(12),
@@ -679,11 +665,11 @@ async function buildSeasonalForecastResponse({
 }
 
 async function buildBookingForecastResponse({
-    connection,
-    storeId,
-    role,
-    selectedBranchId,
-}) {
+                                                connection,
+                                                storeId,
+                                                role,
+                                                selectedBranchId,
+                                            }) {
     const periodDays = 30;
 
     const range = getUpcomingBookingRange(
@@ -807,9 +793,9 @@ exports.handler = async (event) => {
     let connection;
 
     try {
-        connection = await mysql.createConnection(
-            dbConfig
-        );
+        // Repository functions only use execute(), so a pool can be passed
+        // directly. Promise.all() can now use separate pooled connections.
+        connection = getDatabasePool();
 
         if (scope.selectedBranchId) {
             const allowed =
@@ -884,9 +870,5 @@ exports.handler = async (event) => {
         );
     } catch (error) {
         return serverError(headers, error);
-    } finally {
-        if (connection) {
-            await connection.end();
-        }
     }
 };

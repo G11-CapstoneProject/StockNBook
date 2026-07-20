@@ -16,6 +16,7 @@ export async function POST(req: NextRequest) {
             },
             body: JSON.stringify({
                 action: "save_onboarding",
+                send_invitation_emails: true,
                 ...body,
             }),
             cache: "no-store",
@@ -23,12 +24,14 @@ export async function POST(req: NextRequest) {
 
         const text = await response.text();
 
-        let data;
+        let data: unknown;
 
         try {
             data = text ? JSON.parse(text) : {};
         } catch {
-            data = { error: text || "Invalid response from onboarding server" };
+            data = {
+                error: text || "Invalid response from onboarding server",
+            };
         }
 
         return NextResponse.json(data, {
@@ -38,8 +41,12 @@ export async function POST(req: NextRequest) {
         console.error("Onboarding route error:", error);
 
         return NextResponse.json(
-            { error: "Onboarding server error" },
-            { status: 500 }
+            {
+                error: "Onboarding server error",
+            },
+            {
+                status: 500,
+            }
         );
     }
 }

@@ -10,18 +10,29 @@ const OTP_EXPIRY_SECONDS = 90;
 
 const SMTP_USER = "noreplystocknbook@gmail.com";
 
+/*
+ * Paste a NEW 16-character Google App Password here.
+ * Do not use your normal Gmail password.
+ */
 const SMTP_PASS =
     "sftp dapx ffxw qqrt"
         .replace(/\s/g, "");
 
 const EMAIL_FROM =
-    `"StockNBook" <${SMTP_USER}>`;
+    `"StockNBook No Reply" <${SMTP_USER}>`;
 
 const EMAIL_REPLY_TO = SMTP_USER;
 
 const SMTP_HOST = "smtp.gmail.com";
 const SMTP_PORT = 465;
 const SMTP_TIMEOUT_MS = 20000;
+
+const APP_BASE_URL =
+    String(
+        process.env.APP_BASE_URL ||
+        process.env.APP_URL ||
+        "http://localhost:3000"
+    ).replace(/\/+$/, "");
 function generateOtp() {
     return String(crypto.randomInt(0, 1000000)).padStart(6, "0");
 }
@@ -192,17 +203,160 @@ function buildOtpEmail(toEmail, otp) {
     return message.replace(/^\./gm, "..");
 }
 
-async function sendSignupOtpEmail(toEmail, otp) {
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function sanitizeEmailHeader(value) {
+    return String(value ?? "")
+        .replace(/[\r\n]+/g, " ")
+        .trim();
+}
+
+function permissionLabel(permission) {
+    const labels = {
+        dashboard: "Dashboard",
+        bookings: "Bookings",
+        packages: "Packages",
+        packages_manage: "Manage Packages",
+        inventory: "Inventory",
+        pos: "Sales / POS",
+        reports: "Reports",
+        staff_management: "Staff Management",
+        branch_settings: "Branch Settings",
+    };
+
+    return labels[permission] || permission;
+}
+
+function buildManagerInvitationEmail({
+                                         toEmail,
+                                         managerName,
+                                         storeName,
+                                         branchName,
+                                         inviteLink,
+                                         permissions,
+                                     }) {
+    const safeManagerName = escapeHtml(managerName || "Manager");
+    const safeStoreName = escapeHtml(storeName || "StockNBook Store");
+    const safeBranchName = escapeHtml(branchName || "Assigned Branch");
+    const safeInviteLink = escapeHtml(inviteLink);
+    const safeRecipient = escapeHtml(toEmail);
+
+    const enabledPermissions = Object.entries(permissions || {})
+        .filter(([, enabled]) => Boolean(enabled))
+        .map(([permission]) => permissionLabel(permission));
+
+    const permissionItems =
+        enabledPermissions.length > 0
+            ? enabledPermissions
+                .map(
+                    (permission) =>
+                        `<span style="display:inline-block;margin:4px 6px 4px 0;padding:7px 10px;border-radius:999px;background:#F1E9FF;color:#4B2380;font-size:12px;font-weight:700;">✓ ${escapeHtml(permission)}</span>`
+                )
+                .join("")
+            : `<span style="color:#7A6E88;font-size:13px;">Your access will be configured by the store owner.</span>`;
+
+    const subject = "StockNBook Manager Invitation";
+
+    const html = `
+        <div style="margin:0;background:#F7F4FB;padding:30px 14px;font-family:Arial,Helvetica,sans-serif;color:#21172C;">
+            <div style="max-width:620px;margin:0 auto;overflow:hidden;border:1px solid #E7DFEA;border-radius:22px;background:#FFFFFF;box-shadow:0 18px 50px rgba(45,27,78,.12);">
+                <div style="background:linear-gradient(135deg,#2D1B4E,#4B2B75);padding:28px 30px;color:#FFFFFF;">
+                    <div style="font-size:23px;font-weight:800;letter-spacing:-.6px;">
+                        Stock<span style="color:#D4A126;">N</span>Book
+                    </div>
+                    <div style="margin-top:7px;font-size:13px;color:rgba(255,255,255,.72);">
+                        Secure branch manager invitation
+                    </div>
+                </div>
+
+                <div style="padding:30px;">
+                    <h1 style="margin:0;font-size:27px;line-height:1.25;color:#21172C;">
+                        You have been invited
+                    </h1>
+
+                    <p style="margin:16px 0 0;font-size:15px;line-height:1.75;color:#6F6577;">
+                        Hello <strong style="color:#2D1B4E;">${safeManagerName}</strong>,
+                        the owner of <strong style="color:#2D1B4E;">${safeStoreName}</strong>
+                        invited you to manage the
+                        <strong style="color:#2D1B4E;">${safeBranchName}</strong> branch.
+                    </p>
+
+                    <div style="margin:24px 0;padding:18px;border:1px solid #E8DFF0;border-radius:16px;background:#FCFAFD;">
+                        <table role="presentation" style="width:100%;border-collapse:collapse;">
+                            <tr>
+                                <td style="padding:4px 10px 10px 0;color:#8A7896;font-size:12px;text-transform:uppercase;letter-spacing:.1em;">Store</td>
+                                <td style="padding:4px 0 10px;color:#2D1B4E;font-size:14px;font-weight:700;">${safeStoreName}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding:4px 10px 10px 0;color:#8A7896;font-size:12px;text-transform:uppercase;letter-spacing:.1em;">Branch</td>
+                                <td style="padding:4px 0 10px;color:#2D1B4E;font-size:14px;font-weight:700;">${safeBranchName}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding:4px 10px 0 0;color:#8A7896;font-size:12px;text-transform:uppercase;letter-spacing:.1em;">Role</td>
+                                <td style="padding:4px 0 0;color:#2D1B4E;font-size:14px;font-weight:700;">Branch Manager</td>
+                            </tr>
+                        </table>
+                    </div>
+
+                    <div style="margin:0 0 22px;">
+                        <div style="margin-bottom:9px;color:#2D1B4E;font-size:13px;font-weight:800;">Access assigned to you</div>
+                        <div>${permissionItems}</div>
+                    </div>
+
+                    <a href="${safeInviteLink}"
+                       style="display:block;border-radius:12px;background:#2D1B4E;padding:15px 20px;text-align:center;font-size:15px;font-weight:800;color:#FFFFFF;text-decoration:none;">
+                        Review and accept invitation
+                    </a>
+
+                    <p style="margin:20px 0 0;font-size:12px;line-height:1.65;color:#8A8091;">
+                        This invitation is intended only for <strong>${safeRecipient}</strong>.
+                        Do not forward this email or share the invitation link.
+                    </p>
+
+                    <p style="margin:14px 0 0;font-size:12px;line-height:1.65;color:#8A8091;">
+                        The invitation expires after 7 days. If you were not expecting this invitation,
+                        you may safely ignore this email.
+                    </p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const message = [
+        `From: ${EMAIL_FROM}`,
+        `Reply-To: ${EMAIL_REPLY_TO}`,
+        `To: ${sanitizeEmailHeader(toEmail)}`,
+        `Subject: ${subject}`,
+        `Date: ${new Date().toUTCString()}`,
+        "MIME-Version: 1.0",
+        'Content-Type: text/html; charset="UTF-8"',
+        "Content-Transfer-Encoding: 8bit",
+        "",
+        html,
+    ].join("\r\n");
+
+    return message.replace(/^\./gm, "..");
+}
+
+async function sendGmailHtmlEmail(toEmail, rawMessage, logLabel) {
     if (!SMTP_USER || !SMTP_PASS) {
         const configError = new Error(
-            "A valid Gmail App Password has not been configured."
+            "A valid Gmail App Password has not been configured in SMTP_PASS."
         );
         configError.code = "SMTP_NOT_CONFIGURED";
         throw configError;
     }
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) {
-        const emailError = new Error("Invalid OTP recipient email.");
+        const emailError = new Error("Invalid email recipient.");
         emailError.code = "INVALID_RECIPIENT";
         throw emailError;
     }
@@ -282,7 +436,7 @@ async function sendSignupOtpEmail(toEmail, otp) {
             [354]
         );
 
-        socket.write(`${buildOtpEmail(toEmail, otp)}\r\n.\r\n`);
+        socket.write(`${rawMessage}\r\n.\r\n`);
 
         const dataResponse = await expectSmtpResponse(
             readResponse,
@@ -291,7 +445,7 @@ async function sendSignupOtpEmail(toEmail, otp) {
 
         socket.write("QUIT\r\n");
 
-        console.log("[stocknbook-auth] OTP email accepted:", {
+        console.log(`[stocknbook-auth] ${logLabel} email accepted:`, {
             to: toEmail,
             smtpResponse: dataResponse.message,
         });
@@ -301,7 +455,7 @@ async function sendSignupOtpEmail(toEmail, otp) {
             response: dataResponse.message,
         };
     } catch (error) {
-        console.error("[stocknbook-auth] Gmail SMTP error:", {
+        console.error(`[stocknbook-auth] ${logLabel} Gmail SMTP error:`, {
             code: error?.code,
             message: error?.message,
         });
@@ -321,6 +475,29 @@ async function sendSignupOtpEmail(toEmail, otp) {
             socket.end();
         }
     }
+}
+
+async function sendSignupOtpEmail(toEmail, otp) {
+    return sendGmailHtmlEmail(
+        toEmail,
+        buildOtpEmail(toEmail, otp),
+        "OTP"
+    );
+}
+
+async function sendManagerInvitationEmail(invite) {
+    return sendGmailHtmlEmail(
+        invite.manager_email,
+        buildManagerInvitationEmail({
+            toEmail: invite.manager_email,
+            managerName: invite.manager_name,
+            storeName: invite.store_name,
+            branchName: invite.branch_name,
+            inviteLink: invite.invite_link,
+            permissions: invite.permissions,
+        }),
+        "manager invitation"
+    );
 }
 
 function generateSlug(storeName) {
@@ -795,11 +972,22 @@ exports.handler = async (event) => {
                 };
             }
 
+            if (decoded.role !== "owner" || !decoded.store_id) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Only the store owner can complete onboarding",
+                    }),
+                };
+            }
+
             const storeId = decoded.store_id;
             const { branches = [] } = body;
-            const inviteLinks = [];
+            const shouldSendInvitationEmails =
+                body.send_invitation_emails !== false;
 
-            if (!branches.length) {
+            if (!Array.isArray(branches) || branches.length === 0) {
                 return {
                     statusCode: 400,
                     headers,
@@ -807,11 +995,63 @@ exports.handler = async (event) => {
                 };
             }
 
+            const [storeRows] = await connection.execute(
+                `SELECT store_name
+                 FROM stores
+                 WHERE id = ?
+                     LIMIT 1`,
+                [storeId]
+            );
+
+            if (storeRows.length === 0) {
+                return {
+                    statusCode: 404,
+                    headers,
+                    body: JSON.stringify({ error: "Store not found" }),
+                };
+            }
+
+            const storeName = storeRows[0].store_name || "StockNBook Store";
+            const inviteLinks = [];
+
             await connection.beginTransaction();
 
             try {
                 for (const branch of branches) {
-                    if (!branch.branch_name) continue;
+                    const branchName = String(
+                        branch.branch_name || ""
+                    ).trim();
+
+                    const contactNumber = String(
+                        branch.contact_number || ""
+                    ).trim();
+
+                    const address = String(
+                        branch.address || ""
+                    ).trim();
+
+                    const managerName = String(
+                        branch.manager_name || ""
+                    ).trim();
+
+                    const managerEmail = String(
+                        branch.manager_email || ""
+                    )
+                        .trim()
+                        .toLowerCase();
+
+                    if (!branchName) {
+                        throw new Error("Every branch must have a branch name.");
+                    }
+
+                    if (
+                        managerEmail &&
+                        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(managerEmail)
+                    ) {
+                        throw new Error(
+                            `Invalid manager email for ${branchName}.`
+                        );
+                    }
 
                     const [branchResult] = await connection.execute(
                         `INSERT INTO branches
@@ -819,70 +1059,130 @@ exports.handler = async (event) => {
                          VALUES (?, ?, ?, ?)`,
                         [
                             storeId,
-                            branch.branch_name,
-                            branch.contact_number || null,
-                            branch.address || null,
+                            branchName,
+                            contactNumber || null,
+                            address || null,
                         ]
                     );
 
                     const branchId = branchResult.insertId;
 
-                    if (branch.manager_email) {
+                    if (managerEmail) {
+                        const [existingManagerRows] =
+                            await connection.execute(
+                                `SELECT id
+                                 FROM managers
+                                 WHERE manager_email = ?
+                                   AND store_id = ?
+                                     LIMIT 1`,
+                                [managerEmail, storeId]
+                            );
+
+                        if (existingManagerRows.length > 0) {
+                            throw new Error(
+                                `${managerEmail} is already assigned as a manager in this store.`
+                            );
+                        }
+
                         const inviteToken = jwt.sign(
                             {
                                 store_id: storeId,
                                 branch_id: branchId,
-                                email: branch.manager_email,
+                                email: managerEmail,
                                 type: "manager_invite",
                             },
                             JWT_SECRET,
                             { expiresIn: "7d" }
                         );
 
-                        const inviteLink = `http://localhost:3000/accept-invite?token=${inviteToken}`;
+                        const inviteLink =
+                            `${APP_BASE_URL}/accept-invite?token=${encodeURIComponent(inviteToken)}`;
 
-                        inviteLinks.push({
-                            manager_email: branch.manager_email,
-                            manager_name: branch.manager_name || "",
-                            branch_name: branch.branch_name,
-                            invite_link: inviteLink,
-                        });
+                        const permissions = branch.permissions || {};
 
                         await connection.execute(
                             `INSERT INTO managers
-                             (store_id, branch_id, manager_name, manager_email, invite_token, permissions)
-                             VALUES (?, ?, ?, ?, ?, ?)`,
+                             (
+                                 store_id,
+                                 branch_id,
+                                 manager_name,
+                                 manager_email,
+                                 invite_token,
+                                 permissions,
+                                 status
+                             )
+                             VALUES (?, ?, ?, ?, ?, ?, ?)`,
                             [
                                 storeId,
                                 branchId,
-                                branch.manager_name || null,
-                                branch.manager_email,
+                                managerName || null,
+                                managerEmail,
                                 inviteToken,
-                                JSON.stringify(branch.permissions || {}),
+                                JSON.stringify(permissions),
+                                "pending",
                             ]
                         );
+
+                        inviteLinks.push({
+                            manager_email: managerEmail,
+                            manager_name: managerName,
+                            store_name: storeName,
+                            branch_name: branchName,
+                            invite_link: inviteLink,
+                            permissions,
+                            email_sent: false,
+                            email_status: "pending",
+                            email_error: "",
+                        });
                     }
                 }
 
                 await connection.commit();
-
-                return {
-                    statusCode: 200,
-                    headers,
-                    body: JSON.stringify({
-                        message: "Onboarding saved successfully",
-                        invite_links: inviteLinks,
-                    }),
-                };
             } catch (err) {
                 await connection.rollback();
 
                 return {
                     statusCode: 500,
                     headers,
-                    body: JSON.stringify({ error: err.message }),
+                    body: JSON.stringify({
+                        error: err?.message || "Unable to save onboarding",
+                    }),
                 };
             }
+
+            let invitationEmailsSent = 0;
+            let invitationEmailsFailed = 0;
+
+            if (shouldSendInvitationEmails) {
+                for (const invite of inviteLinks) {
+                    try {
+                        await sendManagerInvitationEmail(invite);
+
+                        invite.email_sent = true;
+                        invite.email_status = "sent";
+                        invite.email_error = "";
+                        invitationEmailsSent += 1;
+                    } catch (emailError) {
+                        invite.email_sent = false;
+                        invite.email_status = "failed";
+                        invite.email_error =
+                            emailError?.message ||
+                            "Unable to send the manager invitation email.";
+                        invitationEmailsFailed += 1;
+                    }
+                }
+            }
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    message: "Onboarding saved successfully",
+                    invite_links: inviteLinks,
+                    invitation_emails_sent: invitationEmailsSent,
+                    invitation_emails_failed: invitationEmailsFailed,
+                }),
+            };
         }
 
         // ACCEPT MANAGER INVITE

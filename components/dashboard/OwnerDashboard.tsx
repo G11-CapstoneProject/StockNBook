@@ -3,14 +3,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import * as XLSX from "xlsx";
 import {
-    BarChart3,
+    AlertTriangle,
+    CalendarClock,
     CalendarDays,
+    ClipboardList,
     Download,
-    TriangleAlert,
-    Gift,
+    PackageCheck,
+    PackageX,
     RefreshCw,
-    Star,
+    ShoppingCart,
+    Store,
+    TriangleAlert,
 } from "lucide-react";
 
 type Branch = {
@@ -30,6 +35,21 @@ type Booking = {
     status?: string;
     packageName?: string;
     eventName?: string;
+    bookingNumber?: string;
+
+    bookingType?: string;
+    booking_type?: string;
+    customOrder?: string;
+    custom_order?: string;
+
+    agreed_price?: number | string | null;
+    agreedPrice?: number | string | null;
+    package_price?: number | string | null;
+    packagePrice?: number | string | null;
+
+    amount_paid?: number | string | null;
+    amountPaid?: number | string | null;
+    total?: number;
 };
 
 type OrderItem = {
@@ -59,6 +79,9 @@ type Order = {
     createdAt?: string;
     item?: string;
     items?: OrderItem[];
+    status?: string;
+    orderNumber?: string;
+    orderType?: string;
 };
 
 type Product = {
@@ -82,16 +105,6 @@ type Product = {
     cost_price?: number;
 };
 
-type BranchManager = {
-    id?: number;
-    managerId?: number;
-    branchId?: number;
-    branch_id?: number;
-    name?: string;
-    managerName?: string;
-    manager_name?: string;
-    status?: string;
-};
 
 function getSavedItem(key: string) {
     if (typeof window === "undefined") return "";
@@ -103,66 +116,58 @@ function getUserValue(user: unknown, key: string) {
     return String((user as Record<string, unknown>)[key] ?? "");
 }
 
-
-function downloadCsv(
+function downloadExcel(
     filename: string,
+    sheetName: string,
     headers: string[],
     rows: Array<Array<string | number | null | undefined>>,
 ) {
-    const escapeCell = (value: string | number | null | undefined) => {
-        const text = String(value ?? "");
-        return `"${text.replace(/"/g, '""')}"`;
+    const worksheetData = [
+        headers,
+        ...rows.map((row) => row.map((value) => value ?? "")),
+    ];
+
+    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+
+    worksheet["!cols"] = headers.map((header, columnIndex) => {
+        const longestValue = worksheetData.reduce((maxLength, row) => {
+            const value = String(row[columnIndex] ?? "");
+            return Math.max(maxLength, value.length);
+        }, header.length);
+
+        return {
+            wch: Math.min(Math.max(longestValue + 2, 12), 38),
+        };
+    });
+
+    worksheet["!autofilter"] = {
+        ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}${worksheetData.length}`,
     };
 
-    const csvContent = [headers, ...rows]
-        .map((row) => row.map(escapeCell).join(","))
-        .join("\n");
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+        workbook,
+        worksheet,
+        sheetName.slice(0, 31),
+    );
 
-    const blob = new Blob(["\uFEFF", csvContent], {
-        type: "text/csv;charset=utf-8;",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    XLSX.writeFile(
+        workbook,
+        filename.toLowerCase().endsWith(".xlsx")
+            ? filename
+            : `${filename}.xlsx`,
+        {
+            bookType: "xlsx",
+            compression: true,
+        },
+    );
 }
-
 
 function peso(value: number) {
     return `₱${Number(value || 0).toLocaleString("en-PH", {
         minimumFractionDigits: 0,
         maximumFractionDigits: 0,
     })}`;
-}
-
-function formatDashboardDate(value?: string) {
-    if (!value) return { dateLabel: "—", timeLabel: "" };
-
-    const parsed = new Date(value);
-
-    if (Number.isNaN(parsed.getTime())) {
-        return {
-            dateLabel: value.slice(0, 10),
-            timeLabel: value.length > 10 ? value.slice(11, 16) : "",
-        };
-    }
-
-    return {
-        dateLabel: parsed.toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-            year: "numeric",
-        }),
-        timeLabel: parsed.toLocaleTimeString("en-US", {
-            hour: "numeric",
-            minute: "2-digit",
-        }),
-    };
 }
 
 function formatCurrentDashboardDateTime(value: Date) {
@@ -257,7 +262,7 @@ function normalizeBooking(value: unknown): Booking {
         branch_name: readText(raw, ["branch_name", "branchName"]) || null,
         name: readText(raw, ["name", "customer_name"], "Unnamed Client"),
         date: readText(raw, ["date", "event_date", "created_at"]),
-        status: readText(raw, ["status"], "Pending Review"),
+        status: normalizeDashboardBookingStatus(readText(raw, ["status"])),
         packageName: readText(raw, [
             "packageName",
             "package_name",
@@ -271,7 +276,119 @@ function normalizeBooking(value: unknown): Booking {
             "event",
             "event_type",
         ]),
+        bookingNumber: readText(raw, [
+            "bookingNumber",
+            "booking_number",
+            "booking_no",
+            "reference_number",
+            "reference",
+            "bookingReference",
+            "booking_reference",
+        ]),
+        bookingType: readText(raw, ["bookingType", "booking_type"]),
+        booking_type: readText(raw, ["booking_type", "bookingType"]),
+        customOrder: readText(raw, ["customOrder", "custom_order"]),
+        custom_order: readText(raw, ["custom_order", "customOrder"]),
+        agreed_price:
+            firstDefined(raw, ["agreed_price", "agreedPrice"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        agreedPrice:
+            firstDefined(raw, ["agreedPrice", "agreed_price"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        package_price:
+            firstDefined(raw, ["package_price", "packagePrice"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        packagePrice:
+            firstDefined(raw, ["packagePrice", "package_price"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        amount_paid:
+            firstDefined(raw, ["amount_paid", "amountPaid"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        amountPaid:
+            firstDefined(raw, ["amountPaid", "amount_paid"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        total: readNumber(raw, [
+            "total",
+            "total_amount",
+            "booking_total",
+            "amount",
+            "grand_total",
+        ]),
     };
+}
+
+function normalizeDashboardBookingStatus(value?: string | null) {
+    const raw = String(value || "").trim().toLowerCase();
+
+    if (!raw || raw === "pending" || raw === "pending") {
+        return "Pending";
+    }
+
+    if (
+        raw === "awaiting down payment" ||
+        raw === "waiting down payment" ||
+        raw === "awaiting payment" ||
+        raw === "down payment required"
+    ) {
+        return "Awaiting Down Payment";
+    }
+
+    if (raw === "confirmed") return "Confirmed";
+    if (raw === "preparing") return "Preparing";
+    if (raw === "completed") return "Completed";
+    if (raw === "cancelled" || raw === "canceled") return "Cancelled";
+
+    return value || "Pending";
+}
+
+function isCustomDashboardBooking(booking: Booking) {
+    const type = String(booking.bookingType || booking.booking_type || "")
+        .trim()
+        .toLowerCase();
+
+    const packageLabel = String(booking.packageName || "")
+        .trim()
+        .toLowerCase();
+
+    const customText = String(booking.customOrder || booking.custom_order || "")
+        .trim();
+
+    return (
+        type.includes("custom") ||
+        packageLabel.includes("custom") ||
+        Boolean(customText)
+    );
+}
+
+function getDashboardBookingTotalPrice(booking: Booking) {
+    const rawValue = isCustomDashboardBooking(booking)
+        ? booking.agreed_price ?? booking.agreedPrice
+        : booking.package_price ??
+        booking.packagePrice ??
+        booking.agreed_price ??
+        booking.agreedPrice ??
+        booking.total;
+
+    const value = Number(rawValue || 0);
+    return Number.isFinite(value) ? value : 0;
 }
 
 function parseOrderItems(itemText?: string): OrderItem[] {
@@ -336,6 +453,18 @@ function normalizeOrder(value: unknown): Order {
         createdAt: readText(raw, ["createdAt", "created_at"]),
         item: itemText,
         items,
+        status: readText(raw, ["status", "order_status"]),
+        orderNumber: readText(raw, [
+            "orderNumber",
+            "order_number",
+            "order_no",
+            "reference_number",
+            "reference",
+            "orderId",
+            "order_id",
+            "id",
+        ]),
+        orderType: readText(raw, ["orderType", "order_type", "type", "source"]),
     };
 }
 
@@ -390,6 +519,32 @@ function getBranchNameFromId(branches: Branch[], branchId?: number | null) {
     );
 }
 
+function compactDashboardReference(
+    prefix: "BK" | "SO",
+    explicitReference: string | undefined,
+    fallbackValue: string | number,
+) {
+    const explicit = String(explicitReference || "").trim();
+
+    // Keep already-short references such as BK-162665 or SO-102341.
+    if (explicit && explicit.length <= 12) {
+        return explicit;
+    }
+
+    // Prefer the last numeric group from an existing long reference.
+    const numericGroups = explicit.match(/\d+/g);
+    const lastNumericGroup = numericGroups?.[numericGroups.length - 1];
+
+    if (lastNumericGroup) {
+        return `${prefix}-${lastNumericGroup.slice(-6).padStart(6, "0")}`;
+    }
+
+    const fallback = String(fallbackValue || "").replace(/\D/g, "");
+    const numberPart = fallback.slice(-6).padStart(6, "0");
+
+    return `${prefix}-${numberPart}`;
+}
+
 export default function OwnerDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
@@ -399,7 +554,6 @@ export default function OwnerDashboard() {
     const [bookingsError, setBookingsError] = useState("");
     const [orders, setOrders] = useState<Order[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
-    const [managers, setManagers] = useState<BranchManager[]>([]);
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
@@ -454,7 +608,7 @@ export default function OwnerDashboard() {
                         Authorization: `Bearer ${token}`,
                     },
                     body: JSON.stringify({
-                        action: "get_dashboard_bookings",
+                        action: "get_booking_page_bookings",
                         role: "owner",
                         store_id: storeId ? Number(storeId) : undefined,
                     }),
@@ -539,26 +693,6 @@ export default function OwnerDashboard() {
             } catch (error) {
                 console.warn("Owner dashboard orders fetch failed:", error);
             }
-
-            try {
-                const managerRes = await fetch("/api/branch-managers", {
-                    method: "GET",
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                    cache: "no-store",
-                });
-
-                const managerData = await managerRes.json().catch(() => ({}));
-
-                if (managerRes.ok && Array.isArray(managerData.managers)) {
-                    setManagers(managerData.managers);
-                } else if (managerRes.ok && Array.isArray(managerData.branchManagers)) {
-                    setManagers(managerData.branchManagers);
-                }
-            } catch (error) {
-                console.warn("Owner dashboard managers fetch failed:", error);
-            }
         } finally {
             setIsRefreshing(false);
         }
@@ -570,129 +704,91 @@ export default function OwnerDashboard() {
         void loadOwnerDashboard();
     }, [loadOwnerDashboard]);
 
-    const totalSales = orders.reduce(
+    const scheduledOrders = useMemo(
+        () =>
+            orders.filter((order) => {
+                const type = String(order.orderType || "")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/_/g, "-");
+
+                return [
+                    "scheduled",
+                    "schedule",
+                    "scheduled-order",
+                    "future",
+                    "future-order",
+                    "advance-order",
+                    "pre-order",
+                    "preorder",
+                ].includes(type);
+            }),
+        [orders],
+    );
+
+    const posSales = useMemo(() => {
+        return orders
+            .filter((order) => {
+                const type = String(order.orderType || "")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/_/g, "-");
+
+                const status = String(order.status || "").trim().toLowerCase();
+
+                const isScheduledOrder = [
+                    "scheduled",
+                    "schedule",
+                    "scheduled-order",
+                    "future",
+                    "future-order",
+                    "advance-order",
+                    "pre-order",
+                    "preorder",
+                ].includes(type);
+
+                const isExcludedStatus = [
+                    "pending",
+                    "pending payment",
+                    "unpaid",
+                    "cancelled",
+                    "canceled",
+                    "refunded",
+                    "void",
+                    "draft",
+                    "failed",
+                ].includes(status);
+
+                // Records returned by /api/pos without an order type are treated
+                // as normal POS transactions. Scheduled orders and transactions
+                // that are not yet successfully completed are excluded.
+                return !isScheduledOrder && !isExcludedStatus;
+            })
+            .reduce((sum, order) => sum + Number(order.total || 0), 0);
+    }, [orders]);
+
+    const bookingSales = useMemo(
+        () =>
+            bookings
+                .filter((booking) => {
+                    const status = normalizeDashboardBookingStatus(booking.status);
+
+                    return status === "Confirmed" || status === "Completed";
+                })
+                .reduce(
+                    (sum, booking) =>
+                        sum + getDashboardBookingTotalPrice(booking),
+                    0,
+                ),
+        [bookings],
+    );
+    const scheduledOrderSales = scheduledOrders.reduce(
         (sum, order) => sum + Number(order.total || 0),
         0,
     );
+    const totalBusinessSales = posSales + bookingSales + scheduledOrderSales;
 
-    const activeManagers =
-        managers.length > 0
-            ? managers.filter((manager) => {
-                const status = String(manager.status || "").toLowerCase();
-                return status !== "inactive" && status !== "disabled";
-            }).length
-            : branches.filter((branch) => branch.managerName).length;
-
-    const branchStats = useMemo(() => {
-        return branches.map((branch) => {
-            const branchProducts = products.filter((product) => {
-                const productBranchId = product.branchId ?? product.branch_id;
-                const productBranchName = product.branchName ?? product.branch_name;
-
-                return (
-                    String(productBranchId || "") === String(branch.id) ||
-                    String(productBranchName || "").toLowerCase() ===
-                    branch.branchName.toLowerCase()
-                );
-            });
-
-            const productNames = new Set(
-                branchProducts.map((product) => product.name.trim().toLowerCase()),
-            );
-
-            const branchOrders = orders.filter((order) => {
-                const orderBranchId = order.branchId ?? order.branch_id;
-                const orderBranchName = order.branchName ?? order.branch_name;
-
-                if (orderBranchId) {
-                    return String(orderBranchId) === String(branch.id);
-                }
-
-                if (orderBranchName) {
-                    return (
-                        String(orderBranchName).toLowerCase() ===
-                        branch.branchName.toLowerCase()
-                    );
-                }
-
-                return (order.items || []).some((item) =>
-                    productNames.has((item.name || "").trim().toLowerCase()),
-                );
-            });
-
-            return {
-                branch,
-                revenue: branchOrders.reduce(
-                    (sum, order) => sum + Number(order.total || 0),
-                    0,
-                ),
-            };
-        });
-    }, [branches, orders, products]);
-
-    const topPerformingBranches = useMemo(
-        () =>
-            [...branchStats]
-                .sort((first, second) => second.revenue - first.revenue)
-                .slice(0, 3),
-        [branchStats],
-    );
-
-    const popularItems = useMemo(() => {
-        const itemMap = orders.reduce<
-            Record<string, { name: string; quantity: number }>
-        >((accumulator, order) => {
-            (order.items || []).forEach((item) => {
-                const name = item.name?.trim() || "Unnamed item";
-
-                if (!accumulator[name]) {
-                    accumulator[name] = { name, quantity: 0 };
-                }
-
-                accumulator[name].quantity += Number(item.quantity || 0);
-            });
-
-            return accumulator;
-        }, {});
-
-        return Object.values(itemMap)
-            .sort((first, second) => second.quantity - first.quantity)
-            .slice(0, 3);
-    }, [orders]);
-
-    const mostBookedPackages = useMemo(() => {
-        const packageMap = bookings.reduce<
-            Record<string, { name: string; quantity: number }>
-        >((accumulator, booking) => {
-            const packageName = booking.packageName?.trim() || "Package booking";
-
-            if (!accumulator[packageName]) {
-                accumulator[packageName] = { name: packageName, quantity: 0 };
-            }
-
-            accumulator[packageName].quantity += 1;
-            return accumulator;
-        }, {});
-
-        return Object.values(packageMap)
-            .sort((first, second) => second.quantity - first.quantity)
-            .slice(0, 3);
-    }, [bookings]);
-
-    const maxBranchRevenue = Math.max(
-        ...topPerformingBranches.map((item) => item.revenue),
-        1,
-    );
-    const maxPopularQuantity = Math.max(
-        ...popularItems.map((item) => item.quantity),
-        1,
-    );
-    const maxPackageBookings = Math.max(
-        ...mostBookedPackages.map((item) => item.quantity),
-        1,
-    );
-
-    const upcomingBookings = useMemo(() => {
+    const allUpcomingBookings = useMemo(() => {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
 
@@ -711,9 +807,46 @@ export default function OwnerDashboard() {
                 (first, second) =>
                     new Date(first.date || 0).getTime() -
                     new Date(second.date || 0).getTime(),
-            )
-            .slice(0, 3);
+            );
     }, [bookings]);
+
+    const upcomingBookings = allUpcomingBookings.slice(0, 3);
+
+    const pendingBookingCount = bookings.filter((booking) => {
+        const status = String(booking.status || "").toLowerCase();
+        return status.includes("pending") || status === "new";
+    }).length;
+
+    const allUpcomingOrders = useMemo(() => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        return [...scheduledOrders]
+            .filter((order) => {
+                const status = String(order.status || "").toLowerCase();
+                const schedule = new Date(
+                    order.orderDate || order.date || order.createdAt || "",
+                );
+
+                return (
+                    !["completed", "cancelled", "canceled"].includes(status) &&
+                    !Number.isNaN(schedule.getTime()) &&
+                    schedule.getTime() >= today.getTime()
+                );
+            })
+            .sort(
+                (first, second) =>
+                    new Date(first.orderDate || first.date || 0).getTime() -
+                    new Date(second.orderDate || second.date || 0).getTime(),
+            );
+    }, [scheduledOrders]);
+
+    const upcomingOrders = allUpcomingOrders.slice(0, 3);
+
+    const pendingOrderCount = scheduledOrders.filter((order) => {
+        const status = String(order.status || "").toLowerCase();
+        return status.includes("pending") || status === "new";
+    }).length;
 
     const allInventoryAlerts = useMemo(
         () =>
@@ -742,24 +875,6 @@ export default function OwnerDashboard() {
         return true;
     });
 
-    // Keep the existing manager loading behavior available without displaying
-    // an extra owner-dashboard card that is not present in the reference layout.
-    void activeManagers;
-
-    const firstName =
-        getUserValue(user, "first_name") || getUserValue(user, "firstName");
-    const lastName =
-        getUserValue(user, "last_name") || getUserValue(user, "lastName");
-    const dashboardUserName =
-        getUserValue(user, "full_name") ||
-        getUserValue(user, "fullName") ||
-        getUserValue(user, "name") ||
-        [firstName, lastName].filter(Boolean).join(" ") ||
-        getUserValue(user, "username") ||
-        getSavedItem("full_name") ||
-        getSavedItem("name") ||
-        getSavedItem("username") ||
-        "User";
     const dashboardStoreName =
         getUserValue(user, "store_name") ||
         getUserValue(user, "storeName") ||
@@ -781,17 +896,18 @@ export default function OwnerDashboard() {
                 <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
                     <div className="min-w-0">
                         <h1 className="truncate text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                            Welcome to Dashboard, {dashboardUserName}
+                            Dashboard
                         </h1>
                         <p className="mt-1 truncate text-[12px] text-[#7A6A84]">
-                            Here&apos;s an overview of {dashboardStoreName} business performance for {currentMonthLabel}.
+                            Here&apos;s an overview of {dashboardStoreName} business
+                            performance for {currentMonthLabel}.
                         </p>
                     </div>
 
                     <div className="flex shrink-0 items-center gap-2.5">
-                        <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-                            {formatCurrentDashboardDateTime(currentDateTime)}
-                        </span>
+            <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
+              {formatCurrentDashboardDateTime(currentDateTime)}
+            </span>
 
                         <button
                             type="button"
@@ -813,320 +929,215 @@ export default function OwnerDashboard() {
 
             <section className="px-6 py-5 font-sans">
                 <div className="mx-auto max-w-none space-y-3.5">
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                        <OwnerStatCard
-                            title="Total Branches"
-                            value={String(branches.length)}
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                        <SalesSummaryCard
+                            title="Total Business Sales"
+                            value={peso(totalBusinessSales)}
+                            subtitle="All sales channels"
+                            icon={<Store size={25} />}
+                            tone="violet"
                         />
-                        <OwnerStatCard
-                            title="Total Sales"
-                            value={peso(totalSales)}
+                        <SalesSummaryCard
+                            title="Total POS Sales"
+                            value={peso(posSales)}
+                            subtitle="Point-of-sale transactions"
+                            icon={<ShoppingCart size={25} />}
+                            tone="green"
                         />
-                        <OwnerStatCard
-                            title="Total Booking"
-                            value={bookingsError ? "Unavailable" : String(bookings.length)}
+                        <SalesSummaryCard
+                            title="Total Booking Sales"
+                            value={peso(bookingSales)}
+                            subtitle="Sales from bookings"
+                            icon={<CalendarDays size={25} />}
+                            tone="blue"
                         />
-                        <OwnerStatCard
-                            title="Total Products"
-                            value={String(products.length)}
+                        <SalesSummaryCard
+                            title="Total Scheduled Order Sales"
+                            value={peso(scheduledOrderSales)}
+                            subtitle="Sales from scheduled orders"
+                            icon={<ClipboardList size={25} />}
+                            tone="orange"
                         />
                     </div>
 
-                    <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
-                        <OwnerDashboardCard className="flex flex-col">
-                            <OwnerCardHeader
-                                title="Top Performing Branches"
-                                icon={<BarChart3 size={16} strokeWidth={1.9} />}
-                                action="View all"
-                                onAction={() => router.push("/analytics")}
-                                onDownload={() =>
-                                    downloadCsv(
-                                        "top-performing-branches.csv",
-                                        ["Branch", "Sales"],
-                                        topPerformingBranches.map((item) => [
-                                            item.branch.branchName,
-                                            item.revenue,
-                                        ]),
-                                    )
-                                }
-                            />
-
-                            {topPerformingBranches.length === 0 ? (
-                                <OwnerEmptyState text="No branch sales data yet." />
-                            ) : (
-                                <div className="flex-1">
-                                    {topPerformingBranches.map((item) => (
-                                        <OwnerRankedProgress
-                                            key={item.branch.id}
-                                            label={item.branch.branchName}
-                                            value={peso(item.revenue)}
-                                            percent={(item.revenue / maxBranchRevenue) * 100}
-                                        />
-                                    ))}
-                                </div>
-                            )}
-                        </OwnerDashboardCard>
-
-                        <OwnerDashboardCard className="flex flex-col">
-                            <OwnerCardHeader
-                                title="Popular Items"
-                                icon={<Star size={16} strokeWidth={1.9} fill="currentColor" />}
-                                action="View all"
-                                onAction={() => router.push("/analytics")}
-                                onDownload={() =>
-                                    downloadCsv(
-                                        "popular-items.csv",
-                                        ["Product", "Units Sold"],
-                                        popularItems.map((item) => [item.name, item.quantity]),
-                                    )
-                                }
-                            />
-
-                            {popularItems.length === 0 ? (
-                                <OwnerEmptyState text="No popular item data yet." />
-                            ) : (
-                                <div className="flex-1">
-                                    {popularItems.map((item) => (
-                                        <OwnerRankedProgress
-                                            key={item.name}
-                                            label={item.name}
-                                            value={`${item.quantity} sold`}
-                                            percent={(item.quantity / maxPopularQuantity) * 100}
-                                        />
-                                    ))}
-                                </div>
-                            )}
-                        </OwnerDashboardCard>
-
-                        <OwnerDashboardCard className="flex flex-col">
-                            <OwnerCardHeader
-                                title="Most Booked Packages"
-                                icon={<Gift size={16} strokeWidth={1.9} />}
-                                action="View all"
-                                onAction={() => router.push("/analytics")}
-                                onDownload={() =>
-                                    downloadCsv(
-                                        "most-booked-packages.csv",
-                                        ["Package", "Bookings"],
-                                        mostBookedPackages.map((item) => [
-                                            item.name,
-                                            item.quantity,
-                                        ]),
-                                    )
-                                }
-                            />
-
-                            {mostBookedPackages.length === 0 ? (
-                                <OwnerEmptyState text={bookingsError || "No package bookings yet."} />
-                            ) : (
-                                <div className="flex-1">
-                                    {mostBookedPackages.map((item) => (
-                                        <OwnerRankedProgress
-                                            key={item.name}
-                                            label={item.name}
-                                            value={`${item.quantity} booking${
-                                                item.quantity === 1 ? "" : "s"
-                                            }`}
-                                            percent={(item.quantity / maxPackageBookings) * 100}
-                                        />
-                                    ))}
-                                </div>
-                            )}
-                        </OwnerDashboardCard>
+                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+                        <GlanceCard
+                            title="Out of Stock"
+                            value={outOfStockAlertCount}
+                            label="Products"
+                            icon={<PackageX size={22} />}
+                            tone="red"
+                        />
+                        <GlanceCard
+                            title="Low Stock"
+                            value={lowStockAlertCount}
+                            label="Products"
+                            icon={<AlertTriangle size={22} />}
+                            tone="orange"
+                        />
+                        <GlanceCard
+                            title="Pending Bookings"
+                            value={pendingBookingCount}
+                            label="Bookings"
+                            icon={<CalendarClock size={22} />}
+                            tone="blue"
+                        />
+                        <GlanceCard
+                            title="Upcoming Bookings"
+                            value={upcomingBookings.length}
+                            label="Bookings"
+                            icon={<CalendarDays size={22} />}
+                            tone="green"
+                        />
+                        <GlanceCard
+                            title="Pending Orders"
+                            value={pendingOrderCount}
+                            label="Orders"
+                            icon={<ClipboardList size={22} />}
+                            tone="violet"
+                        />
+                        <GlanceCard
+                            title="Upcoming Orders"
+                            value={upcomingOrders.length}
+                            label="Orders"
+                            icon={<PackageCheck size={22} />}
+                            tone="cyan"
+                        />
                     </div>
 
-                    <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                        <OwnerDashboardCard className="overflow-hidden !rounded-[12px] !p-0 font-sans shadow-[0_6px_18px_rgba(45,27,78,0.06)]">
-                            <div className="border-b border-[#F0ECF5]">
-                                <OwnerTableCardHeader
-                                    title="Upcoming Bookings"
-                                    subtitle="Upcoming reservations across all branches"
-                                    action="View all"
-                                    onAction={() => router.push("/bookings")}
-                                    onDownload={() =>
-                                        downloadCsv(
-                                            "upcoming-bookings.csv",
-                                            [
-                                                "Customer",
-                                                "Event",
-                                                "Branch",
-                                                "Schedule",
-                                                "Package",
-                                                "Status",
-                                            ],
-                                            upcomingBookings.map((booking) => [
-                                                booking.name,
-                                                booking.eventName || "Booking reservation",
-                                                booking.branchName ||
-                                                booking.branch_name ||
-                                                getBranchNameFromId(
-                                                    branches,
-                                                    booking.branchId ?? booking.branch_id,
-                                                ) ||
-                                                "Branch",
-                                                booking.date || "",
-                                                booking.packageName || "Package booking",
-                                                booking.status || "Pending Review",
-                                            ]),
-                                        )
-                                    }
-                                    tone="violet"
-                                />
-                            </div>
+                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
+                        <CompactDashboardTable
+                            title="Upcoming Bookings"
+                            subtitle="Next 3 upcoming bookings"
+                            icon={<CalendarDays size={16} />}
+                            action={() => router.push("/bookings")}
+                            onDownload={() =>
+                                downloadExcel(
+                                    "upcoming-bookings.xlsx",
+                                    "Upcoming Bookings",
+                                    ["Date", "Booking Number", "Branch", "Status"],
+                                    allUpcomingBookings.map((booking) => [
+                                        booking.date || "",
+                                        booking.bookingNumber ||
+                                        `BK-${String(booking.id).padStart(6, "0")}`,
+                                        booking.branchName ||
+                                        booking.branch_name ||
+                                        getBranchNameFromId(
+                                            branches,
+                                            booking.branchId ?? booking.branch_id,
+                                        ) ||
+                                        "Branch",
+                                        booking.status || "Pending",
+                                    ]),
+                                )
+                            }
+                            totalRecords={allUpcomingBookings.length}
+                            headers={["Date", "Booking #", "Branch", "Status"]}
+                            emptyText={bookingsError || "No upcoming bookings yet."}
+                            rows={upcomingBookings.map((booking) => ({
+                                date: booking.date,
+                                reference:
+                                    compactDashboardReference(
+                                        "BK",
+                                        booking.bookingNumber,
+                                        booking.id,
+                                    ),
+                                branch:
+                                    booking.branchName ||
+                                    booking.branch_name ||
+                                    getBranchNameFromId(
+                                        branches,
+                                        booking.branchId ?? booking.branch_id,
+                                    ) ||
+                                    "Branch",
+                                status: booking.status || "Pending",
+                            }))}
+                        />
 
-                            {upcomingBookings.length === 0 ? (
-                                <div className="px-4 py-4">
-                                    <OwnerEmptyState text={bookingsError || "No upcoming bookings yet."} />
-                                </div>
-                            ) : (
-                                <>
-                                    <div className="overflow-hidden">
-                                        <table className="w-full table-fixed border-collapse">
-                                            <colgroup>
-                                                <col className="w-[31%]" />
-                                                <col className="w-[18%]" />
-                                                <col className="w-[18%]" />
-                                                <col className="w-[20%]" />
-                                                <col className="w-[13%]" />
-                                            </colgroup>
-                                            <thead>
-                                            <tr className="border-b border-[#F1EDF5] bg-[#FBFAFD]">
-                                                <th className="px-2.5 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                                                    Customer / Event
-                                                </th>
-                                                <th className="px-2 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                                                    Branch
-                                                </th>
-                                                <th className="px-2 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                                                    Schedule
-                                                </th>
-                                                <th className="px-2 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                                                    Package
-                                                </th>
-                                                <th className="px-2.5 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                                                    Status
-                                                </th>
-                                            </tr>
-                                            </thead>
-                                            <tbody>
-                                            {upcomingBookings.map((booking) => (
-                                                <OwnerBookingTableRow
-                                                    key={booking.id}
-                                                    booking={booking}
-                                                    branchName={
-                                                        booking.branchName ||
-                                                        booking.branch_name ||
-                                                        getBranchNameFromId(
-                                                            branches,
-                                                            booking.branchId ?? booking.branch_id,
-                                                        ) ||
-                                                        "Branch"
-                                                    }
-                                                />
-                                            ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </>
-                            )}
-                        </OwnerDashboardCard>
+                        <CompactDashboardTable
+                            title="Upcoming Orders"
+                            subtitle="Next 3 scheduled orders"
+                            icon={<ClipboardList size={16} />}
+                            action={() => router.push("/orders")}
+                            onDownload={() =>
+                                downloadExcel(
+                                    "upcoming-orders.xlsx",
+                                    "Upcoming Orders",
+                                    ["Date", "Order Number", "Branch", "Status"],
+                                    allUpcomingOrders.map((order, index) => [
+                                        order.orderDate || order.date || order.createdAt || "",
+                                        compactDashboardReference(
+                                            "SO",
+                                            order.orderNumber ||
+                                            order.orderId ||
+                                            order.id,
+                                            index + 1,
+                                        ),
+                                        order.branchName ||
+                                        order.branch_name ||
+                                        getBranchNameFromId(
+                                            branches,
+                                            order.branchId ?? order.branch_id,
+                                        ) ||
+                                        "Branch",
+                                        order.status || "Pending",
+                                    ]),
+                                )
+                            }
+                            totalRecords={allUpcomingOrders.length}
+                            headers={["Date", "Order #", "Branch", "Status"]}
+                            emptyText="No upcoming scheduled orders yet."
+                            rows={upcomingOrders.map((order, index) => ({
+                                date: order.orderDate || order.date || order.createdAt,
+                                reference: compactDashboardReference(
+                                    "SO",
+                                    order.orderNumber ||
+                                    order.orderId ||
+                                    order.id,
+                                    index + 1,
+                                ),
+                                branch:
+                                    order.branchName ||
+                                    order.branch_name ||
+                                    getBranchNameFromId(
+                                        branches,
+                                        order.branchId ?? order.branch_id,
+                                    ) ||
+                                    "Branch",
+                                status: order.status || "Pending",
+                            }))}
+                        />
 
-                        <OwnerDashboardCard className="overflow-hidden !rounded-[12px] !p-0 font-sans shadow-[0_6px_18px_rgba(45,27,78,0.06)]">
-                            <div className="border-b border-[#F0ECF5]">
-                                <OwnerTableCardHeader
-                                    title="Inventory Alerts"
-                                    subtitle="Products that need attention or restocking"
-                                    action="View all"
-                                    onAction={() => {
-                                        setStockAlertFilter("all");
-                                        setShowStockAlertsModal(true);
-                                    }}
-                                    onDownload={() =>
-                                        downloadCsv(
-                                            "inventory-alerts.csv",
-                                            [
-                                                "Product",
-                                                "Branch",
-                                                "Category",
-                                                "Current Stock",
-                                                "Alert Level",
-                                                "Status",
-                                            ],
-                                            inventoryAlerts.map((product) => [
-                                                product.name,
-                                                product.branchName ||
-                                                product.branch_name ||
-                                                getBranchNameFromId(
-                                                    branches,
-                                                    product.branchId ?? product.branch_id,
-                                                ) ||
-                                                "Branch",
-                                                product.category || "Uncategorized",
-                                                Number(product.stock || 0),
-                                                Number(product.alertLevel || 0),
-                                                Number(product.stock || 0) <= 0
-                                                    ? "Out of Stock"
-                                                    : "Low Stock",
-                                            ]),
-                                        )
-                                    }
-                                    tone="red"
-                                />
-                            </div>
-
-                            {inventoryAlerts.length === 0 ? (
-                                <div className="px-4 py-4">
-                                    <OwnerEmptyState text="All products are well stocked." />
-                                </div>
-                            ) : (
-                                <>
-                                    <div className="overflow-hidden">
-                                        <table className="w-full table-fixed border-collapse">
-                                            <colgroup>
-                                                <col className="w-[34%]" />
-                                                <col className="w-[23%]" />
-                                                <col className="w-[25%]" />
-                                                <col className="w-[18%]" />
-                                            </colgroup>
-                                            <thead>
-                                            <tr className="border-b border-[#F1EDF5] bg-[#FBFAFD]">
-                                                <th className="px-2.5 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                                                    Product
-                                                </th>
-                                                <th className="px-2 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                                                    Branch
-                                                </th>
-                                                <th className="px-2 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                                                    Category
-                                                </th>
-                                                <th className="px-2 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                                                    Stock Level
-                                                </th>
-
-                                            </tr>
-                                            </thead>
-                                            <tbody>
-                                            {inventoryAlerts.map((product) => (
-                                                <OwnerInventoryAlertRow
-                                                    key={product.id}
-                                                    product={product}
-                                                    branchName={
-                                                        product.branchName ||
-                                                        product.branch_name ||
-                                                        getBranchNameFromId(
-                                                            branches,
-                                                            product.branchId ?? product.branch_id,
-                                                        ) ||
-                                                        "Branch"
-                                                    }
-                                                />
-                                            ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </>
-                            )}
-                        </OwnerDashboardCard>
+                        <InventoryAlertPanel
+                            items={inventoryAlerts}
+                            branches={branches}
+                            totalAlerts={allInventoryAlerts.length}
+                            onDownload={() =>
+                                downloadExcel(
+                                    "inventory-alerts.xlsx",
+                                    "Inventory Alerts",
+                                    ["Product", "Branch", "Stock Level", "Status"],
+                                    allInventoryAlerts.map((product) => [
+                                        product.name,
+                                        product.branchName ||
+                                        product.branch_name ||
+                                        getBranchNameFromId(
+                                            branches,
+                                            product.branchId ?? product.branch_id,
+                                        ) ||
+                                        "Branch",
+                                        Number(product.stock || 0),
+                                        Number(product.stock || 0) <= 0
+                                            ? "Out of Stock"
+                                            : "Low Stock",
+                                    ]),
+                                )
+                            }
+                            onViewAll={() => {
+                                setStockAlertFilter("all");
+                                setShowStockAlertsModal(true);
+                            }}
+                        />
                     </div>
                 </div>
             </section>
@@ -1147,363 +1158,378 @@ export default function OwnerDashboard() {
     );
 }
 
-function OwnerDashboardCard({
-                                children,
-                                className = "",
-                            }: {
-    children: React.ReactNode;
-    className?: string;
-}) {
-    return (
-        <div
-            className={`rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm ${className}`}
-        >
-            {children}
-        </div>
-    );
-}
+type DashboardTone = "violet" | "green" | "blue" | "orange" | "red" | "cyan";
 
-function OwnerStatCard({
-                           title,
-                           value,
-                       }: {
+const toneStyles: Record<DashboardTone, { icon: string; background: string }> =
+    {
+        violet: { icon: "text-[#6D35D4]", background: "bg-[#F1EBFF]" },
+        green: { icon: "text-[#159455]", background: "bg-[#E6F7EE]" },
+        blue: { icon: "text-[#2563EB]", background: "bg-[#EAF1FF]" },
+        orange: { icon: "text-[#E66B20]", background: "bg-[#FFF0E5]" },
+        red: { icon: "text-[#DC2626]", background: "bg-[#FDECEC]" },
+        cyan: { icon: "text-[#138A96]", background: "bg-[#E8F8FA]" },
+    };
+
+function SalesSummaryCard({
+                              title,
+                              value,
+                              subtitle,
+                              icon,
+                              tone,
+                          }: {
     title: string;
     value: string;
-}) {
-    return (
-        <div className="flex min-h-[96px] flex-col justify-center rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-4 shadow-sm">
-            <p className="text-sm font-medium text-[#281246]">{title}</p>
-            <p className="mt-2 text-[24px] font-bold leading-none tracking-[-0.02em] text-[#1A1220]">
-                {value}
-            </p>
-        </div>
-    );
-}
-
-function OwnerCardHeader({
-                             title,
-                             icon,
-                             action,
-                             onAction,
-                             onDownload,
-                         }: {
-    title: string;
-    icon?: React.ReactNode;
-    action?: string;
-    onAction?: () => void;
-    onDownload?: () => void;
-}) {
-    return (
-        <div className="mb-3 flex items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-2 text-[#6D35D4]">
-                {icon && (
-                    <span className="flex h-6 w-6 shrink-0 items-center justify-center">
-            {icon}
-          </span>
-                )}
-                <h2 className="min-w-0 truncate text-[14px] font-bold text-[#24152F]">
-                    {title}
-                </h2>
-            </div>
-
-            <div className="flex shrink-0 items-center gap-2">
-                {onDownload && (
-                    <button
-                        type="button"
-                        onClick={onDownload}
-                        aria-label={`Download ${title}`}
-                        title={`Download ${title}`}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] shadow-sm transition hover:border-[#D7C7EC] hover:bg-[#F3EEFF] hover:text-[#4B21BD]"
-                    >
-                        <Download size={14} strokeWidth={2} />
-                    </button>
-                )}
-
-                {action && onAction && (
-                    <button
-                        type="button"
-                        onClick={onAction}
-                        className="inline-flex h-7 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-3 text-[11px] font-semibold text-[#6D35D4] shadow-sm transition hover:border-[#D7C7EC] hover:bg-[#F3EEFF] hover:text-[#4B21BD]"
-                    >
-                        {action}
-                    </button>
-                )}
-            </div>
-        </div>
-    );
-}
-
-function OwnerTableCardHeader({
-                                  title,
-                                  subtitle,
-                                  action,
-                                  onAction,
-                                  onDownload,
-                                  tone,
-                              }: {
-    title: string;
     subtitle: string;
-    action: string;
-    onAction: () => void;
-    onDownload?: () => void;
-    tone: "violet" | "red";
+    icon: React.ReactNode;
+    tone: DashboardTone;
 }) {
-    const isAlert = tone === "red";
+    const style = toneStyles[tone];
 
     return (
-        <div className="flex min-h-[64px] items-center justify-between gap-4 px-4 py-3">
-            <div className="flex min-w-0 items-start gap-2">
-        <span
-            className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center ${
-                isAlert ? "text-[#EF4444]" : "text-[#6D35D4]"
-            }`}
-        >
-          {isAlert ? (
-              <TriangleAlert size={16} strokeWidth={2} />
-          ) : (
-              <CalendarDays size={16} strokeWidth={2} />
-          )}
-        </span>
-
-                <div className="min-w-0">
-                    <h2 className="truncate text-[14px] font-bold text-[#24152F]">
-                        {title}
-                    </h2>
-                    <p className="truncate text-[10px] leading-4 text-[#8A7D92]">
-                        {subtitle}
-                    </p>
-                </div>
-            </div>
-
-            <div className="flex shrink-0 items-center gap-2">
-                {onDownload && (
-                    <button
-                        type="button"
-                        onClick={onDownload}
-                        aria-label={`Download ${title}`}
-                        title={`Download ${title}`}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] shadow-sm transition hover:border-[#D7C7EC] hover:bg-[#F3EEFF] hover:text-[#4B21BD]"
-                    >
-                        <Download size={14} strokeWidth={2} />
-                    </button>
-                )}
-
-                <button
-                    type="button"
-                    onClick={onAction}
-                    className="inline-flex h-7 items-center justify-center whitespace-nowrap rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-3 text-[11px] font-semibold text-[#6D35D4] shadow-sm transition hover:border-[#D7C7EC] hover:bg-[#F3EEFF] hover:text-[#4B21BD]"
-                >
-                    {action}
-                </button>
-            </div>
-        </div>
-    );
-}
-function OwnerRankedProgress({
-                                 label,
-                                 value,
-                                 percent,
-                             }: {
-    label: string;
-    value: string;
-    percent: number;
-}) {
-    return (
-        <div className="border-b border-[#F0EBF5] py-3 first:pt-1 last:border-b-0 last:pb-1">
-            <div className="mb-2 flex items-center justify-between gap-3">
-                <p
-                    title={label}
-                    className="min-w-0 flex-1 truncate text-[12px] font-medium text-[#30243A]"
-                >
-                    {label}
+        <div className="flex min-h-[128px] items-center gap-5 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-5 shadow-sm">
+      <span
+          className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
+      >
+        {icon}
+      </span>
+            <div className="min-w-0">
+                <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">
+                    {title}
                 </p>
-                <p className="shrink-0 text-[11px] font-semibold text-[#7C3AED]">
+                <p className="mt-2 truncate text-[26px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
                     {value}
                 </p>
-            </div>
-
-            <div className="h-1.5 overflow-hidden rounded-full bg-[#ECE8F2]">
-                <div
-                    className="h-full rounded-full bg-[#7C3AED] transition-[width] duration-300"
-                    style={{
-                        width: `${Math.max(Math.min(percent, 100), 7)}%`,
-                    }}
-                />
+                <p className="mt-2 text-[12px] leading-4 text-[#8A7D92]">{subtitle}</p>
             </div>
         </div>
     );
 }
 
-
-function OwnerBookingTableRow({
-                                  booking,
-                                  branchName,
-                              }: {
-    booking: Booking;
-    branchName: string;
+function GlanceCard({
+                        title,
+                        value,
+                        label,
+                        icon,
+                        tone,
+                    }: {
+    title: string;
+    value: number;
+    label: string;
+    icon: React.ReactNode;
+    tone: DashboardTone;
 }) {
-    const parsedDate = new Date(booking.date || "");
-    const hasValidDate = !Number.isNaN(parsedDate.getTime());
-    const monthLabel = hasValidDate
-        ? parsedDate.toLocaleDateString("en-US", { month: "short" }).toUpperCase()
-        : "—";
-    const dayLabel = hasValidDate ? String(parsedDate.getDate()) : "—";
-    const dateLabel = hasValidDate
-        ? parsedDate.toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-            year: "numeric",
-        })
-        : "—";
-    const timeLabel = hasValidDate
-        ? parsedDate.toLocaleTimeString("en-US", {
-            hour: "numeric",
-            minute: "2-digit",
-        })
-        : "";
-
-    const status = booking.status || "Pending Review";
-    const normalizedStatus = status.trim().toLowerCase();
-
-    const statusClass =
-        normalizedStatus === "completed"
-            ? "text-[#16A34A]"
-            : normalizedStatus === "confirmed"
-                ? "text-[#2563EB]"
-                : normalizedStatus === "preparing"
-                    ? "text-[#7C3AED]"
-                    : normalizedStatus === "cancelled" || normalizedStatus === "canceled"
-                        ? "text-[#DC2626]"
-                        : "text-[#B7791F]";
+    const style = toneStyles[tone];
 
     return (
-        <tr className="h-[58px] border-b border-[#F3EFF6] transition hover:bg-[#FCFAFF] last:border-b-0">
-            <td className="px-2.5 py-2">
-                <div className="flex min-w-0 items-center gap-2">
-                    <div className="flex h-9 w-9 shrink-0 flex-col items-center justify-center rounded-md border border-[#E8E0F0] bg-[#FBF9FE] leading-none">
-            <span className="text-[8px] font-bold text-[#7C3AED]">
-              {monthLabel}
-            </span>
-                        <span className="mt-0.5 text-[12px] font-bold text-[#342047]">
-              {dayLabel}
-            </span>
-                    </div>
+        <div className="flex min-h-[124px] items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-4 py-5 shadow-sm">
+      <span
+          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
+      >
+        {icon}
+      </span>
+            <div className="min-w-0 flex-1">
+                <p className="whitespace-nowrap text-[12px] font-semibold leading-4 text-[#4B3E55]">
+                    {title}
+                </p>
+                <p className={`mt-1 text-[25px] font-bold leading-none ${style.icon}`}>{value}</p>
+                <p className="mt-1 text-[12px] text-[#8A7D92]">{label}</p>
+            </div>
+        </div>
+    );
+}
 
-                    <p
-                        title={booking.name}
-                        className="min-w-0 truncate text-[12px] font-medium text-[#30243A]"
+type CompactTableRow = {
+    date?: string;
+    reference: string;
+    branch: string;
+    status: string;
+};
+
+function CompactDashboardTable({
+                                   title,
+                                   subtitle,
+                                   icon,
+                                   action,
+                                   onDownload,
+                                   totalRecords,
+                                   headers,
+                                   rows,
+                                   emptyText,
+                               }: {
+    title: string;
+    subtitle: string;
+    icon: React.ReactNode;
+    action: () => void;
+    onDownload: () => void;
+    totalRecords: number;
+    headers: [string, string, string, string];
+    rows: CompactTableRow[];
+    emptyText: string;
+}) {
+    return (
+        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+            <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
+                <div className="flex min-w-0 items-start gap-2 text-[#6D35D4]">
+          <span className="mt-0.5 flex h-6 w-6 items-center justify-center">
+            {icon}
+          </span>
+                    <div className="min-w-0">
+                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                            {title}
+                        </h2>
+                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">{subtitle}</p>
+                    </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={onDownload}
+                        aria-label={`Download ${title}`}
+                        title={`Download ${title}`}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
                     >
-                        {booking.name}
-                    </p>
+                        <Download size={16} strokeWidth={2} />
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={action}
+                        className="rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4]"
+                    >
+                        View all
+                    </button>
+                </div>
+            </div>
+
+            <table className="w-full flex-1 table-fixed border-collapse">
+                <colgroup>
+                    <col className="w-[18%]" />
+                    <col className="w-[28%]" />
+                    <col className="w-[34%]" />
+                    <col className="w-[20%]" />
+                </colgroup>
+                <thead className="bg-[#FBFAFD]">
+                <tr className="border-b border-[#EEE8F2]">
+                    {headers.map((header) => (
+                        <th
+                            key={header}
+                            className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]"
+                        >
+                            {header}
+                        </th>
+                    ))}
+                </tr>
+                </thead>
+                <tbody>
+                {rows.length === 0 ? (
+                    <tr>
+                        <td
+                            colSpan={4}
+                            className="h-[170px] px-4 text-center text-[13px] text-[#8A7D92]"
+                        >
+                            {emptyText}
+                        </td>
+                    </tr>
+                ) : (
+                    rows.map((row, index) => (
+                        <CompactDashboardRow
+                            key={`${row.reference}-${index}`}
+                            row={row}
+                        />
+                    ))
+                )}
+                </tbody>
+            </table>
+            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
+                Showing {rows.length} of {totalRecords} record
+                {totalRecords === 1 ? "" : "s"}
+            </div>
+        </section>
+    );
+}
+
+function CompactDashboardRow({ row }: { row: CompactTableRow }) {
+    const parsed = new Date(row.date || "");
+    const validDate = !Number.isNaN(parsed.getTime());
+    const month = validDate
+        ? parsed.toLocaleDateString("en-US", { month: "short" }).toUpperCase()
+        : "—";
+    const day = validDate ? parsed.getDate() : "—";
+    const normalized = row.status.toLowerCase();
+    const statusClass =
+        normalized.includes("confirm") || normalized.includes("complete")
+            ? "text-[#16834A]"
+            : normalized.includes("cancel")
+                ? "text-[#C53030]"
+                : "text-[#B66B00]";
+
+    return (
+        <tr className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FCFAFF]">
+            <td className="px-3 py-2">
+                <div className="flex h-10 w-10 flex-col items-center justify-center rounded-lg border border-[#E8E0F0] bg-[#FBF9FE] leading-none">
+                    <span className="text-[7px] font-bold text-[#7C3AED]">{month}</span>
+                    <span className="mt-1 text-[14px] font-bold text-[#342047]">
+            {day}
+          </span>
                 </div>
             </td>
-
-            <td className="px-2 py-2">
+            <td className="px-3 py-2">
                 <p
-                    title={branchName}
-                    className="truncate text-[11px] font-semibold text-[#7C3AED]"
+                    title={row.reference}
+                    className="whitespace-nowrap text-[13px] font-semibold text-[#30243A]"
                 >
-                    {branchName}
+                    {row.reference}
                 </p>
             </td>
-
-            <td className="px-2 py-2">
-                <p className="truncate text-[12px] font-medium text-[#30243A]">
-                    {dateLabel}
-                </p>
-                {timeLabel && (
-                    <p className="mt-0.5 text-[10px] text-[#7A6A84]">{timeLabel}</p>
-                )}
-            </td>
-
-            <td className="px-2 py-2">
+            <td className="px-3 py-2">
                 <p
-                    title={booking.packageName || "Package booking"}
-                    className="truncate text-[12px] font-medium text-[#30243A]"
+                    title={row.branch}
+                    className="whitespace-nowrap text-[13px] font-semibold text-[#6D35D4]"
                 >
-                    {booking.packageName || "Package booking"}
+                    {row.branch}
                 </p>
             </td>
-
-            <td className="px-2.5 py-2">
+            <td className="px-3 py-2">
         <span
-            className={`block max-w-full truncate text-[11px] font-semibold capitalize ${statusClass}`}
+            className={`whitespace-nowrap text-[13px] font-semibold capitalize ${statusClass}`}
         >
-          {normalizedStatus === "pending review" ? "Pending" : status}
+          {row.status}
         </span>
             </td>
         </tr>
     );
 }
 
-function OwnerInventoryAlertRow({
-                                    product,
-                                    branchName,
-                                }: {
-    product: Product;
-    branchName: string;
+function InventoryAlertPanel({
+                                 items,
+                                 branches,
+                                 totalAlerts,
+                                 onDownload,
+                                 onViewAll,
+                             }: {
+    items: Product[];
+    branches: Branch[];
+    totalAlerts: number;
+    onDownload: () => void;
+    onViewAll: () => void;
 }) {
-    const unitsLeft = Number(product.stock || 0);
-    const isOutOfStock = unitsLeft <= 0;
-
     return (
-        <tr className="h-[58px] border-b border-[#F3EFF6] transition hover:bg-[#FFFCFC] last:border-b-0">
-            <td className="px-2.5 py-2">
-                <p
-                    title={product.name}
-                    className="truncate text-[12px] font-medium text-[#30243A]"
-                >
-                    {product.name}
-                </p>
-                <p
-                    className={`mt-0.5 text-[10px] font-semibold ${
-                        isOutOfStock ? "text-[#DC2626]" : "text-[#B45309]"
-                    }`}
-                >
-                    {isOutOfStock ? "Out of stock" : "Low stock"}
-                </p>
-            </td>
+        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+            <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
+                <div className="flex min-w-0 items-start gap-2">
+                    <TriangleAlert size={18} className="mt-0.5 shrink-0 text-[#EF4444]" />
+                    <div className="min-w-0">
+                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                            Inventory Alerts
+                        </h2>
+                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
+                            Items that need attention
+                        </p>
+                    </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={onDownload}
+                        aria-label="Download Inventory Alerts"
+                        title="Download Inventory Alerts"
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
+                    >
+                        <Download size={16} strokeWidth={2} />
+                    </button>
 
-            <td className="px-2 py-2">
-                <p
-                    title={branchName}
-                    className="truncate text-[11px] font-semibold text-[#7C3AED]"
-                >
-                    {branchName}
-                </p>
-            </td>
+                    <button
+                        type="button"
+                        onClick={onViewAll}
+                        className="rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[13px] font-semibold text-[#6D35D4]"
+                    >
+                        View all
+                    </button>
+                </div>
+            </div>
 
-            <td className="px-2 py-2">
-                <p
-                    title={product.category || "Uncategorized"}
-                    className="truncate text-[11px] font-medium text-[#5F4E75]"
-                >
-                    {product.category || "Uncategorized"}
-                </p>
-            </td>
+            <table className="w-full flex-1 table-fixed border-collapse">
+                <colgroup>
+                    <col className="w-[42%]" />
+                    <col className="w-[38%]" />
+                    <col className="w-[20%]" />
+                </colgroup>
+                <thead className="bg-[#FBFAFD]">
+                <tr className="border-b border-[#EEE8F2]">
+                    <th className="px-3 py-2 text-left text-[13px] font-semibold uppercase text-[#806A8C]">
+                        Product
+                    </th>
+                    <th className="px-3 py-2 text-left text-[13px] font-semibold uppercase text-[#806A8C]">
+                        Branch
+                    </th>
+                    <th className="px-3 py-2 text-left text-[13px] font-semibold uppercase text-[#806A8C]">
+                        Stock Level
+                    </th>
+                </tr>
+                </thead>
+                <tbody>
+                {items.length === 0 ? (
+                    <tr>
+                        <td
+                            colSpan={3}
+                            className="h-[170px] px-4 text-center text-[13px] text-[#8A7D92]"
+                        >
+                            All products are well stocked.
+                        </td>
+                    </tr>
+                ) : (
+                    items.map((product) => {
+                        const stock = Number(product.stock || 0);
+                        const branch =
+                            product.branchName ||
+                            product.branch_name ||
+                            getBranchNameFromId(
+                                branches,
+                                product.branchId ?? product.branch_id,
+                            ) ||
+                            "Branch";
 
-            <td className="px-2 py-2">
-        <span
-            className={`whitespace-nowrap text-[11px] font-semibold ${
-                isOutOfStock ? "text-[#DC2626]" : "text-[#B7791F]"
-            }`}
-        >
-          {unitsLeft} left
-        </span>
-            </td>
-
-        </tr>
+                        return (
+                            <tr
+                                key={product.id}
+                                className="min-h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FFFCFC]"
+                            >
+                                <td className="px-3 py-2">
+                                    <p
+                                        title={product.name}
+                                        className="line-clamp-2 text-[13px] font-semibold leading-5 text-[#30243A]"
+                                    >
+                                        {product.name}
+                                    </p>
+                                </td>
+                                <td className="px-3 py-2">
+                                    <p
+                                        title={branch}
+                                        className="whitespace-nowrap text-[13px] font-semibold text-[#6D35D4]"
+                                    >
+                                        {branch}
+                                    </p>
+                                </td>
+                                <td className="px-3 py-2">
+                    <span
+                        className={`whitespace-nowrap text-[13px] font-semibold ${stock <= 0 ? "text-[#DC2626]" : "text-[#B7791F]"}`}
+                    >
+                      {stock} left
+                    </span>
+                                </td>
+                            </tr>
+                        );
+                    })
+                )}
+                </tbody>
+            </table>
+            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
+                Showing {items.length} of {totalAlerts} alert
+                {totalAlerts === 1 ? "" : "s"}
+            </div>
+        </section>
     );
 }
-
-function OwnerEmptyState({ text }: { text: string }) {
-    return (
-        <div className="flex min-h-[150px] items-center justify-center rounded-xl border border-dashed border-[#E6DDF0] bg-[#FCFBFE] px-5 text-center">
-            <p className="text-sm text-[#7A6A84]">{text}</p>
-        </div>
-    );
-}
-
 
 function OwnerStockAlertsModal({
                                    items,

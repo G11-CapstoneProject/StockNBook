@@ -1,52 +1,70 @@
 "use client";
 
-import Link from "next/link";
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { CalendarDays, Download, TriangleAlert, Gift, RefreshCw, Star } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import { useInventoryController } from "@/hooks/useInventory";
+import * as XLSX from "xlsx";
 import {
-    InventoryDialogs,
-    type Product as InventoryProduct,
-} from "@/components/inventory/_shared";
+    AlertTriangle,
+    CalendarClock,
+    CalendarDays,
+    ClipboardList,
+    Download,
+    PackageCheck,
+    PackageX,
+    RefreshCw,
+    ShoppingCart,
+    Store,
+    TriangleAlert,
+} from "lucide-react";
 
-type Product = {
+type Branch = {
+    id: number;
+    branchName: string;
+    managerName?: string;
+};
+
+type Booking = {
     id: number;
     branchId?: number | null;
     branch_id?: number | null;
+    branchName?: string | null;
+    branch_name?: string | null;
     name: string;
-    category: string;
-    stock: number;
-    alertLevel: number;
-    alert_level?: number;
-    originalPrice: number;
-    original_price?: number;
-    salesPrice: number;
-    sales_price?: number;
-    hasVariants?: boolean;
-    variant?: string;
-    variantName?: string;
-    variant_name?: string;
+    date?: string;
+    time?: string;
+    status?: string;
+    packageName?: string;
+    eventName?: string;
+    bookingNumber?: string;
+
+    bookingType?: string;
+    booking_type?: string;
+    customOrder?: string;
+    custom_order?: string;
+
+    agreed_price?: number | string | null;
+    agreedPrice?: number | string | null;
+    package_price?: number | string | null;
+    packagePrice?: number | string | null;
+
+    amount_paid?: number | string | null;
+    amountPaid?: number | string | null;
+    total?: number;
 };
 
-type ProductApiRaw = {
-    id: number | string;
-    branchId?: number | string | null;
-    branch_id?: number | string | null;
-    name: string;
-    category?: string;
-    stock?: number | string;
-    alertLevel?: number | string;
-    alert_level?: number | string;
-    originalPrice?: number | string;
-    original_price?: number | string;
-    salesPrice?: number | string;
-    sales_price?: number | string;
-    hasVariants?: boolean;
-    has_variants?: boolean;
-    variant?: string;
-    variantName?: string;
-    variant_name?: string;
+type OrderItem = {
+    name?: string;
+    quantity?: number;
+    salesPrice?: number;
+    sales_price?: number;
+    sellingPrice?: number;
+    selling_price?: number;
+    price?: number;
+    originalPrice?: number;
+    original_price?: number;
+    costPrice?: number;
+    cost_price?: number;
 };
 
 type Order = {
@@ -54,128 +72,78 @@ type Order = {
     orderId?: string;
     branchId?: number | null;
     branch_id?: number | null;
+    branchName?: string | null;
+    branch_name?: string | null;
     total?: number;
     date?: string;
     orderDate?: string;
     createdAt?: string;
+    time?: string;
     item?: string;
-    items?: {
-        name?: string;
-        quantity?: number;
-    }[];
+    items?: OrderItem[];
+    status?: string;
+    orderNumber?: string;
+    orderType?: string;
 };
 
-type OrderApiRaw = {
-    id?: string;
-    orderId?: string;
-    order_id?: string;
-    branchId?: number | string | null;
-    branch_id?: number | string | null;
-    total?: number | string;
-    date?: string;
-    orderDate?: string;
-    order_date?: string;
-    createdAt?: string;
-    created_at?: string;
-    item?: string;
-    items?: {
-        name?: string;
-        quantity?: number;
-    }[];
-};
-
-type Booking = {
+type Product = {
     id: number;
     branchId?: number | null;
     branch_id?: number | null;
-    date: string;
+    branchName?: string | null;
+    branch_name?: string | null;
     name: string;
-    status?: string;
-    packageName?: string;
-    eventName?: string;
+    category?: string;
+    stock?: number;
+    alertLevel?: number;
+    salesPrice?: number;
+    sales_price?: number;
+    sellingPrice?: number;
+    selling_price?: number;
+    price?: number;
+    originalPrice?: number;
+    original_price?: number;
+    costPrice?: number;
+    cost_price?: number;
 };
 
-type BookingApiRaw = {
-    id?: number | string;
-    booking_id?: number | string;
-    branchId?: number | string | null;
-    branch_id?: number | string | null;
-    date?: string;
-    event_date?: string;
-    name?: string;
-    customer_name?: string;
-    status?: string;
-    packageName?: string;
-    package_name?: string;
-    package?: string;
-    package_title?: string;
-    service_name?: string;
-    eventName?: string;
-    event_name?: string;
-    event?: string;
-    event_type?: string;
-};
-
-const STORAGE_KEY = "stocknbook_inventory_products";
-const ORDERS_KEY = "stocknbook_orders";
 
 function getSavedItem(key: string) {
     if (typeof window === "undefined") return "";
     return sessionStorage.getItem(key) || localStorage.getItem(key) || "";
 }
 
-
-function downloadCsv(
-    filename: string,
-    headers: string[],
-    rows: Array<Array<string | number | null | undefined>>,
-) {
-    const escapeCell = (value: string | number | null | undefined) => {
-        const text = String(value ?? "");
-        return `"${text.replace(/"/g, '""')}"`;
-    };
-
-    const csvContent = [headers, ...rows]
-        .map((row) => row.map(escapeCell).join(","))
-        .join("\n");
-
-    const blob = new Blob(["\uFEFF", csvContent], {
-        type: "text/csv;charset=utf-8;",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+function getAssignedBranchId(user: unknown) {
+    return (
+        getUserValue(user, "branch_id") ||
+        getUserValue(user, "branchId") ||
+        getSavedItem("branch_id") ||
+        getSavedItem("stocknbook_branch_id") ||
+        getSavedItem("manager_branch_id")
+    );
 }
 
-
-function getSavedJson<T>(key: string, fallback: T): T {
-    try {
-        if (typeof window === "undefined") return fallback;
-
-        const raw = sessionStorage.getItem(key) || localStorage.getItem(key) || "";
-
-        return raw ? (JSON.parse(raw) as T) : fallback;
-    } catch {
-        return fallback;
-    }
+function getAssignedBranchName(user: unknown) {
+    return (
+        getUserValue(user, "branch_name") ||
+        getUserValue(user, "branchName") ||
+        getSavedItem("branch_name") ||
+        getSavedItem("stocknbook_branch_name") ||
+        getSavedItem("manager_branch_name") ||
+        "Assigned Branch"
+    );
 }
 
-function getSavedPermissions() {
-    try {
-        return JSON.parse(
-            sessionStorage.getItem("permissions") ||
-            localStorage.getItem("permissions") ||
-            "{}",
-        );
-    } catch {
-        return {};
-    }
+function belongsToAssignedBranch<
+    T extends { branchId?: number | null; branch_id?: number | null }
+>(item: T, branchId: string) {
+    if (!branchId) return false;
+
+    const itemBranchId = item.branchId ?? item.branch_id;
+
+    return itemBranchId !== null &&
+        itemBranchId !== undefined &&
+        String(itemBranchId) === String(branchId);
 }
 
 function getUserValue(user: unknown, key: string) {
@@ -183,209 +151,61 @@ function getUserValue(user: unknown, key: string) {
     return String((user as Record<string, unknown>)[key] ?? "");
 }
 
-function mapProduct(product: ProductApiRaw): Product {
-    const rawBranchId = product.branchId ?? product.branch_id ?? null;
-
-    return {
-        id: Number(product.id),
-        branchId: rawBranchId ? Number(rawBranchId) : null,
-        branch_id: rawBranchId ? Number(rawBranchId) : null,
-        name: String(product.name ?? ""),
-        category: String(product.category ?? ""),
-        stock: Number(product.stock ?? 0),
-        alertLevel: Number(product.alertLevel ?? product.alert_level ?? 0),
-        alert_level: Number(product.alertLevel ?? product.alert_level ?? 0),
-        originalPrice: Number(product.originalPrice ?? product.original_price ?? 0),
-        original_price: Number(
-            product.originalPrice ?? product.original_price ?? 0,
-        ),
-        salesPrice: Number(product.salesPrice ?? product.sales_price ?? 0),
-        sales_price: Number(product.salesPrice ?? product.sales_price ?? 0),
-        hasVariants: Boolean(product.hasVariants ?? product.has_variants),
-        variant: String(
-            product.variant ??
-            product.variantName ??
-            product.variant_name ??
-            "",
-        ),
-        variantName: String(
-            product.variantName ??
-            product.variant_name ??
-            product.variant ??
-            "",
-        ),
-        variant_name: String(
-            product.variant_name ??
-            product.variantName ??
-            product.variant ??
-            "",
-        ),
-    };
-}
-
-function toInventoryProduct(
-    product: Product,
-    branchName: string,
-): InventoryProduct {
-    return {
-        id: Number(product.id),
-        branchId: product.branchId ?? product.branch_id ?? null,
-        branchName,
-        name: product.name,
-        category: product.category,
-        stock: Number(product.stock || 0),
-        alertLevel: Number(product.alertLevel || 0),
-        originalPrice: Number(product.originalPrice ?? product.original_price ?? 0),
-        salesPrice: Number(product.salesPrice ?? product.sales_price ?? 0),
-        hasVariants: Boolean(product.hasVariants),
-        variants: [],
-    };
-}
-
-function toDashboardProduct(product: InventoryProduct): Product {
-    return {
-        id: Number(product.id),
-        branchId: product.branchId ?? null,
-        branch_id: product.branchId ?? null,
-        name: product.name,
-        category: product.category,
-        stock: Number(product.stock || 0),
-        alertLevel: Number(product.alertLevel || 0),
-        alert_level: Number(product.alertLevel || 0),
-        originalPrice: Number(product.originalPrice || 0),
-        original_price: Number(product.originalPrice || 0),
-        salesPrice: Number(product.salesPrice || 0),
-        sales_price: Number(product.salesPrice || 0),
-        hasVariants: Boolean(product.hasVariants),
-    };
-}
-
-function normalizeBooking(raw: BookingApiRaw): Booking {
-    const rawBranchId = raw.branchId ?? raw.branch_id ?? null;
-
-    return {
-        id: Number(raw.id ?? raw.booking_id),
-        branchId: rawBranchId ? Number(rawBranchId) : null,
-        branch_id: rawBranchId ? Number(rawBranchId) : null,
-        date: raw.date ?? raw.event_date ?? "",
-        name: raw.name ?? raw.customer_name ?? "",
-        status: raw.status ?? "Pending Review",
-        packageName: String(
-            raw.packageName ??
-            raw.package_name ??
-            raw.package ??
-            raw.package_title ??
-            raw.service_name ??
-            "",
-        ),
-        eventName: String(
-            raw.eventName ?? raw.event_name ?? raw.event ?? raw.event_type ?? "",
-        ),
-    };
-}
-
-function parseOrderItems(itemText?: string) {
-    if (!itemText) return [];
-
-    return itemText
-        .split(",")
-        .map((item) => {
-            const [name, quantity] = item.split(" x");
-
-            return {
-                name: name?.trim() || "Unnamed item",
-                quantity: Number(quantity || 0),
-            };
-        })
-        .filter((item) => item.name);
-}
-
-function normalizeOrder(raw: OrderApiRaw): Order {
-    const rawBranchId = raw.branchId ?? raw.branch_id ?? null;
-
-    return {
-        id: raw.id ?? raw.orderId ?? raw.order_id,
-        orderId: raw.orderId ?? raw.order_id ?? raw.id,
-        branchId: rawBranchId ? Number(rawBranchId) : null,
-        branch_id: rawBranchId ? Number(rawBranchId) : null,
-        total: Number(raw.total ?? 0),
-        date:
-            raw.date ??
-            raw.orderDate ??
-            raw.order_date ??
-            raw.createdAt ??
-            raw.created_at ??
-            "",
-        orderDate: raw.orderDate ?? raw.order_date ?? raw.date ?? "",
-        createdAt: raw.createdAt ?? raw.created_at ?? "",
-        item: raw.item ?? "",
-        items: Array.isArray(raw.items) ? raw.items : parseOrderItems(raw.item),
-    };
-}
-
-function filterByBranch<
-    T extends { branchId?: number | null; branch_id?: number | null },
->(items: T[], branchId: string) {
-    if (!branchId) return items;
-
-    const hasBranchIds = items.some((item) => item.branchId || item.branch_id);
-
-    if (!hasBranchIds) return items;
-
-    return items.filter((item) => {
-        const itemBranchId = item.branchId ?? item.branch_id;
-        return String(itemBranchId) === String(branchId);
-    });
-}
-
-async function loadBranchStaffCount(
-    token: string,
-    branchId: string,
-    storeId: string,
+function downloadExcel(
+    filename: string,
+    sheetName: string,
+    headers: string[],
+    rows: Array<Array<string | number | null | undefined>>,
 ) {
-    const possibleActions = [
-        "get_staff",
-        "get_staff_members",
-        "get_branch_staff",
-        "get_staff_by_branch",
-        "get_users",
+    const worksheetData = [
+        headers,
+        ...rows.map((row) => row.map((value) => value ?? "")),
     ];
 
-    for (const action of possibleActions) {
-        try {
-            const response = await fetch("/api/staff-management", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    action,
-                    store_id: Number(storeId),
-                    branch_id: Number(branchId),
-                    branchId: Number(branchId),
-                }),
-            });
+    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
 
-            const text = await response.text();
-            const data = text ? JSON.parse(text) : {};
+    worksheet["!cols"] = headers.map((header, columnIndex) => {
+        const longestValue = worksheetData.reduce((maxLength, row) => {
+            const value = String(row[columnIndex] ?? "");
+            return Math.max(maxLength, value.length);
+        }, header.length);
 
-            if (!response.ok) continue;
+        return {
+            wch: Math.min(Math.max(longestValue + 2, 12), 38),
+        };
+    });
 
-            if (Array.isArray(data.staff)) return data.staff.length;
-            if (Array.isArray(data.staffMembers)) return data.staffMembers.length;
-            if (Array.isArray(data.users)) return data.users.length;
-            if (Array.isArray(data.members)) return data.members.length;
-            if (Array.isArray(data.data)) return data.data.length;
-        } catch {
-            // Try the next compatible action.
-        }
-    }
+    worksheet["!autofilter"] = {
+        ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}${worksheetData.length}`,
+    };
 
-    return 0;
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+        workbook,
+        worksheet,
+        sheetName.slice(0, 31),
+    );
+
+    XLSX.writeFile(
+        workbook,
+        filename.toLowerCase().endsWith(".xlsx")
+            ? filename
+            : `${filename}.xlsx`,
+        {
+            bookType: "xlsx",
+            compression: true,
+        },
+    );
 }
 
-function formatCurrentDateTime(value: Date) {
+function peso(value: number) {
+    return `₱${Number(value || 0).toLocaleString("en-PH", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+    })}`;
+}
+
+function formatCurrentDashboardDateTime(value: Date) {
     const dateLabel = value.toLocaleDateString("en-US", {
         month: "long",
         day: "numeric",
@@ -403,167 +223,553 @@ function formatCurrentDateTime(value: Date) {
     return `${dateLabel} | ${timeLabel}`;
 }
 
-export default function ManagerDashboard() {
-    const { user } = useCurrentUser();
-    const inventoryController = useInventoryController();
+type ApiRecord = Record<string, unknown>;
 
-    const [orders, setOrders] = useState<Order[]>([]);
-    const [products, setProducts] = useState<Product[]>([]);
+function toRecord(value: unknown): ApiRecord {
+    return value && typeof value === "object" && !Array.isArray(value)
+        ? (value as ApiRecord)
+        : {};
+}
+
+function firstDefined(record: ApiRecord, keys: string[]) {
+    for (const key of keys) {
+        const value = record[key];
+
+        if (value !== null && value !== undefined) {
+            return value;
+        }
+    }
+
+    return undefined;
+}
+
+function readText(record: ApiRecord, keys: string[], fallback = "") {
+    const value = firstDefined(record, keys);
+
+    if (typeof value === "string") return value;
+    if (typeof value === "number") return String(value);
+
+    return fallback;
+}
+
+function readNumber(record: ApiRecord, keys: string[], fallback = 0) {
+    const value = firstDefined(record, keys);
+    const parsed = Number(value);
+
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readNullableNumber(record: ApiRecord, keys: string[]) {
+    const value = firstDefined(record, keys);
+
+    if (value === null || value === undefined || value === "") {
+        return null;
+    }
+
+    const parsed = Number(value);
+
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeBranch(value: unknown): Branch {
+    const raw = toRecord(value);
+
+    return {
+        id: readNumber(raw, ["id", "branch_id", "branchId"]),
+        branchName: readText(
+            raw,
+            ["branchName", "branch_name", "name", "branch"],
+            "Unnamed Branch",
+        ),
+        managerName: readText(raw, ["managerName", "manager_name", "manager"]),
+    };
+}
+
+function normalizeBooking(value: unknown): Booking {
+    const raw = toRecord(value);
+    const rawBranchId = readNullableNumber(raw, ["branchId", "branch_id"]);
+
+    return {
+        id: readNumber(raw, ["id", "booking_id"]),
+        branchId: rawBranchId,
+        branch_id: rawBranchId,
+        branchName: readText(raw, ["branchName", "branch_name"]) || null,
+        branch_name: readText(raw, ["branch_name", "branchName"]) || null,
+        name: readText(raw, ["name", "customer_name"], "Unnamed Client"),
+        date: readText(raw, [
+            "date",
+            "event_date",
+            "eventDate",
+            "booking_date",
+            "bookingDate",
+            "event_datetime",
+            "eventDateTime",
+            "booking_datetime",
+            "bookingDateTime",
+            "scheduled_at",
+            "scheduledAt",
+            "start_at",
+            "startAt",
+            "created_at",
+            "createdAt",
+        ]),
+        time: readText(raw, [
+            "time",
+            "event_time",
+            "eventTime",
+            "booking_time",
+            "bookingTime",
+            "start_time",
+            "startTime",
+            "scheduled_time",
+            "scheduledTime",
+            "time_slot",
+            "timeSlot",
+        ]),
+        status: normalizeDashboardBookingStatus(readText(raw, ["status"])),
+        packageName: readText(raw, [
+            "packageName",
+            "package_name",
+            "package",
+            "package_title",
+            "service_name",
+        ]),
+        eventName: readText(raw, [
+            "eventName",
+            "event_name",
+            "event",
+            "event_type",
+        ]),
+        bookingNumber: readText(raw, [
+            "bookingNumber",
+            "booking_number",
+            "booking_no",
+            "reference_number",
+            "reference",
+            "bookingReference",
+            "booking_reference",
+        ]),
+        bookingType: readText(raw, ["bookingType", "booking_type"]),
+        booking_type: readText(raw, ["booking_type", "bookingType"]),
+        customOrder: readText(raw, ["customOrder", "custom_order"]),
+        custom_order: readText(raw, ["custom_order", "customOrder"]),
+        agreed_price:
+            firstDefined(raw, ["agreed_price", "agreedPrice"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        agreedPrice:
+            firstDefined(raw, ["agreedPrice", "agreed_price"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        package_price:
+            firstDefined(raw, ["package_price", "packagePrice"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        packagePrice:
+            firstDefined(raw, ["packagePrice", "package_price"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        amount_paid:
+            firstDefined(raw, ["amount_paid", "amountPaid"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        amountPaid:
+            firstDefined(raw, ["amountPaid", "amount_paid"]) as
+                | number
+                | string
+                | null
+                | undefined,
+        total: readNumber(raw, [
+            "total",
+            "total_amount",
+            "booking_total",
+            "amount",
+            "grand_total",
+        ]),
+    };
+}
+
+function normalizeDashboardBookingStatus(value?: string | null) {
+    const raw = String(value || "").trim().toLowerCase();
+
+    if (!raw || raw === "pending" || raw === "pending") {
+        return "Pending";
+    }
+
+    if (
+        raw === "awaiting down payment" ||
+        raw === "waiting down payment" ||
+        raw === "awaiting payment" ||
+        raw === "down payment required"
+    ) {
+        return "Awaiting Down Payment";
+    }
+
+    if (raw === "confirmed") return "Confirmed";
+    if (raw === "preparing") return "Preparing";
+    if (raw === "completed") return "Completed";
+    if (raw === "cancelled" || raw === "canceled") return "Cancelled";
+
+    return value || "Pending";
+}
+
+function isCustomDashboardBooking(booking: Booking) {
+    const type = String(booking.bookingType || booking.booking_type || "")
+        .trim()
+        .toLowerCase();
+
+    const packageLabel = String(booking.packageName || "")
+        .trim()
+        .toLowerCase();
+
+    const customText = String(booking.customOrder || booking.custom_order || "")
+        .trim();
+
+    return (
+        type.includes("custom") ||
+        packageLabel.includes("custom") ||
+        Boolean(customText)
+    );
+}
+
+function getDashboardBookingTotalPrice(booking: Booking) {
+    const rawValue = isCustomDashboardBooking(booking)
+        ? booking.agreed_price ?? booking.agreedPrice
+        : booking.package_price ??
+        booking.packagePrice ??
+        booking.agreed_price ??
+        booking.agreedPrice ??
+        booking.total;
+
+    const value = Number(rawValue || 0);
+    return Number.isFinite(value) ? value : 0;
+}
+
+function parseOrderItems(itemText?: string): OrderItem[] {
+    if (!itemText) return [];
+
+    return itemText
+        .split(",")
+        .map((item) => {
+            const [name, qty] = item.split(" x");
+
+            return {
+                name: name?.trim() || "",
+                quantity: Number(qty || 0),
+            };
+        })
+        .filter((item) => item.name);
+}
+
+function normalizeOrderItem(value: unknown): OrderItem {
+    const raw = toRecord(value);
+
+    return {
+        name: readText(raw, ["name", "productName", "product_name"]),
+        quantity: readNumber(raw, ["quantity", "qty"]),
+        salesPrice: readNumber(raw, ["salesPrice", "sales_price"]),
+        sales_price: readNumber(raw, ["sales_price", "salesPrice"]),
+        sellingPrice: readNumber(raw, ["sellingPrice", "selling_price"]),
+        selling_price: readNumber(raw, ["selling_price", "sellingPrice"]),
+        price: readNumber(raw, ["price"]),
+        originalPrice: readNumber(raw, ["originalPrice", "original_price"]),
+        original_price: readNumber(raw, ["original_price", "originalPrice"]),
+        costPrice: readNumber(raw, ["costPrice", "cost_price"]),
+        cost_price: readNumber(raw, ["cost_price", "costPrice"]),
+    };
+}
+
+function normalizeOrder(value: unknown): Order {
+    const raw = toRecord(value);
+    const rawBranchId = readNullableNumber(raw, ["branchId", "branch_id"]);
+    const itemText = readText(raw, ["item"]);
+    const rawItems = firstDefined(raw, ["items"]);
+    const items = Array.isArray(rawItems)
+        ? rawItems.map(normalizeOrderItem).filter((item) => item.name)
+        : parseOrderItems(itemText);
+
+    return {
+        id: readText(raw, ["id", "orderId", "order_id"]) || undefined,
+        orderId: readText(raw, ["orderId", "order_id", "id"]) || undefined,
+        branchId: rawBranchId,
+        branch_id: rawBranchId,
+        branchName: readText(raw, ["branchName", "branch_name"]) || null,
+        branch_name: readText(raw, ["branch_name", "branchName"]) || null,
+        total: readNumber(raw, ["total"]),
+        date: readText(raw, [
+            "date",
+            "orderDate",
+            "order_date",
+            "scheduled_date",
+            "scheduledDate",
+            "pickup_date",
+            "pickupDate",
+            "delivery_date",
+            "deliveryDate",
+            "scheduled_at",
+            "scheduledAt",
+            "pickup_at",
+            "pickupAt",
+            "delivery_at",
+            "deliveryAt",
+            "createdAt",
+            "created_at",
+        ]),
+        orderDate: readText(raw, [
+            "orderDate",
+            "order_date",
+            "scheduled_date",
+            "scheduledDate",
+            "pickup_date",
+            "pickupDate",
+            "delivery_date",
+            "deliveryDate",
+            "date",
+        ]),
+        createdAt: readText(raw, ["createdAt", "created_at"]),
+        time: readText(raw, [
+            "time",
+            "order_time",
+            "orderTime",
+            "scheduled_time",
+            "scheduledTime",
+            "pickup_time",
+            "pickupTime",
+            "delivery_time",
+            "deliveryTime",
+            "time_slot",
+            "timeSlot",
+        ]),
+        item: itemText,
+        items,
+        status: readText(raw, ["status", "order_status"]),
+        orderNumber: readText(raw, [
+            "orderNumber",
+            "order_number",
+            "order_no",
+            "reference_number",
+            "reference",
+            "orderId",
+            "order_id",
+            "id",
+        ]),
+        orderType: readText(raw, ["orderType", "order_type", "type", "source"]),
+    };
+}
+
+function normalizeProduct(value: unknown): Product {
+    const raw = toRecord(value);
+    const rawBranchId = readNullableNumber(raw, ["branchId", "branch_id"]);
+
+    const sellingPrice = readNumber(raw, [
+        "salesPrice",
+        "sales_price",
+        "sellingPrice",
+        "selling_price",
+        "price",
+    ]);
+
+    const originalPrice = readNumber(raw, [
+        "originalPrice",
+        "original_price",
+        "costPrice",
+        "cost_price",
+        "origPrice",
+        "orig_price",
+    ]);
+
+    return {
+        id: readNumber(raw, ["id"]),
+        branchId: rawBranchId,
+        branch_id: rawBranchId,
+        branchName: readText(raw, ["branchName", "branch_name"]) || null,
+        branch_name: readText(raw, ["branch_name", "branchName"]) || null,
+        name: readText(raw, ["name"]),
+        category: readText(raw, ["category"]),
+        stock: readNumber(raw, ["stock"]),
+        alertLevel: readNumber(raw, ["alertLevel", "alert_level"]),
+        salesPrice: sellingPrice,
+        sales_price: sellingPrice,
+        sellingPrice: sellingPrice,
+        selling_price: sellingPrice,
+        price: sellingPrice,
+        originalPrice,
+        original_price: originalPrice,
+        costPrice: originalPrice,
+        cost_price: originalPrice,
+    };
+}
+
+function compactDashboardReference(
+    prefix: "BK" | "SO",
+    explicitReference: string | undefined,
+    fallbackValue: string | number,
+) {
+    const explicit = String(explicitReference || "").trim();
+
+    // Keep already-short references such as BK-162665 or SO-102341.
+    if (explicit && explicit.length <= 12) {
+        return explicit;
+    }
+
+    // Prefer the last numeric group from an existing long reference.
+    const numericGroups = explicit.match(/\d+/g);
+    const lastNumericGroup = numericGroups?.[numericGroups.length - 1];
+
+    if (lastNumericGroup) {
+        return `${prefix}-${lastNumericGroup.slice(-6).padStart(6, "0")}`;
+    }
+
+    const fallback = String(fallbackValue || "").replace(/\D/g, "");
+    const numberPart = fallback.slice(-6).padStart(6, "0");
+
+    return `${prefix}-${numberPart}`;
+}
+
+
+function formatDashboardTime(dateValue?: string, explicitTime?: string) {
+    const format = (value: Date) =>
+        value.toLocaleTimeString("en-US", {
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true,
+        });
+
+    const rawTime = String(explicitTime || "").trim();
+
+    if (rawTime) {
+        const timeOnlyMatch = rawTime.match(
+            /^(\d{1,2}):(\d{2})(?::\d{2})?(?:\.\d+)?\s*(AM|PM)?(?:Z|[+-]\d{2}:?\d{2})?$/i,
+        );
+
+        if (timeOnlyMatch) {
+            let hour = Number(timeOnlyMatch[1]);
+            const minute = Number(timeOnlyMatch[2]);
+            const period = timeOnlyMatch[3]?.toUpperCase();
+
+            if (period === "PM" && hour < 12) hour += 12;
+            if (period === "AM" && hour === 12) hour = 0;
+
+            if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+                return format(new Date(2000, 0, 1, hour, minute));
+            }
+        }
+
+        const parsedExplicit = new Date(rawTime);
+        if (!Number.isNaN(parsedExplicit.getTime())) {
+            return format(parsedExplicit);
+        }
+    }
+
+    const rawDate = String(dateValue || "").trim();
+    const containsTime = /(?:T|\s)\d{1,2}:\d{2}/.test(rawDate);
+
+    if (!containsTime) return "—";
+
+    const parsedDate = new Date(rawDate);
+    return Number.isNaN(parsedDate.getTime()) ? "—" : format(parsedDate);
+}
+
+export default function ManagerDashboard() {
+    const router = useRouter();
+    const { user } = useCurrentUser();
+
+    const [branches, setBranches] = useState<Branch[]>([]);
     const [bookings, setBookings] = useState<Booking[]>([]);
     const [bookingsError, setBookingsError] = useState("");
-    const [branchName, setBranchName] = useState("Branch");
-    const [permissions, setPermissions] = useState<Record<string, boolean>>({});
-    const [activeStaffCount, setActiveStaffCount] = useState(0);
-
-    const [showAlertsModal, setShowAlertsModal] = useState(false);
-    const [alertFilter, setAlertFilter] = useState<"all" | "low" | "out">("all");
-    const inventoryEditWasOpenRef = useRef(false);
-    const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
-    const [refreshKey, setRefreshKey] = useState(0);
+    const [orders, setOrders] = useState<Order[]>([]);
+    const [products, setProducts] = useState<Product[]>([]);
+    const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
+    const [isRefreshing, setIsRefreshing] = useState(false);
+    const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
+    const [stockAlertFilter, setStockAlertFilter] = useState<
+        "all" | "low" | "out"
+    >("all");
 
     useEffect(() => {
-        const loadData = async () => {
-            const currentBranchName =
-                getUserValue(user, "branch_name") ||
-                getSavedItem("branch_name") ||
-                getSavedItem("stocknbook_branch_name") ||
-                "Branch";
+        const timer = window.setInterval(() => {
+            setCurrentDateTime(new Date());
+        }, 30_000);
 
-            const branchId =
-                getUserValue(user, "branch_id") ||
-                getSavedItem("branch_id") ||
-                getSavedItem("stocknbook_branch_id");
+        return () => {
+            window.clearInterval(timer);
+        };
+    }, []);
 
-            const storeId =
-                getUserValue(user, "store_id") ||
-                getSavedItem("store_id") ||
-                getSavedItem("stocknbook_store_id");
+    const loadManagerDashboard = useCallback(async () => {
+        const token = getSavedItem("token");
+        const storeId =
+            getUserValue(user, "store_id") ||
+            getUserValue(user, "storeId") ||
+            getSavedItem("store_id") ||
+            getSavedItem("stocknbook_store_id");
+        const branchId = getAssignedBranchId(user);
+        const assignedBranchName = getAssignedBranchName(user);
 
-            const token = getSavedItem("token");
+        if (!token || !branchId) {
+            setBranches([]);
+            setBookings([]);
+            setOrders([]);
+            setProducts([]);
+            setBookingsError("No assigned branch was found for this account.");
+            return;
+        }
 
-            setBranchName(currentBranchName);
+        setIsRefreshing(true);
 
-            setPermissions(
-                user && typeof user === "object" && "permissions" in user
-                    ? (
-                    user as {
-                        permissions?: Record<string, boolean>;
-                    }
-                ).permissions || {}
-                    : getSavedPermissions(),
-            );
-
-            const savedProducts = getSavedJson<Product[]>(STORAGE_KEY, []);
-            setProducts(filterByBranch(savedProducts, branchId));
-
-            const savedOrders = getSavedJson<Order[]>(ORDERS_KEY, []);
-            setOrders(filterByBranch(savedOrders, branchId));
-
-            if (!token || !branchId) {
-                setBookings([]);
-                setActiveStaffCount(0);
-                return;
-            }
-
+        try {
             try {
-                const productsResponse = await fetch("/api/products", {
-                    method: "POST",
+                const branchesRes = await fetch("/api/branches", {
+                    method: "GET",
                     headers: {
-                        "Content-Type": "application/json",
                         Authorization: `Bearer ${token}`,
                     },
-                    body: JSON.stringify({
-                        action: "get_products",
-                        branch_id: Number(branchId),
-                    }),
                 });
 
-                const productsText = await productsResponse.text();
-                const productsData = productsText ? JSON.parse(productsText) : {};
+                const branchesData = await branchesRes.json().catch(() => ({}));
 
-                if (productsResponse.ok && Array.isArray(productsData.products)) {
-                    const scopedProducts = productsData.products.map(mapProduct);
-                    setProducts(scopedProducts);
-                    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(scopedProducts));
-                }
-            } catch (error) {
-                console.warn("Manager dashboard products fetch failed:", error);
-            }
-
-            try {
-                const ordersResponse = await fetch("/api/pos", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_orders",
-                        branch_id: Number(branchId),
-                    }),
-                });
-
-                const ordersText = await ordersResponse.text();
-                const ordersData: { orders?: OrderApiRaw[] } = ordersText
-                    ? JSON.parse(ordersText)
-                    : {};
-
-                if (ordersResponse.ok && Array.isArray(ordersData.orders)) {
-                    const normalizedOrders: Order[] =
-                        ordersData.orders.map(normalizeOrder);
-
-                    const currentBranchProducts =
-                        getSavedJson<Product[]>(STORAGE_KEY, []);
-
-                    const branchProductNames = new Set(
-                        currentBranchProducts
-                            .filter((product) => {
-                                const productBranchId = product.branchId ?? product.branch_id;
-
-                                return (
-                                    !productBranchId ||
-                                    String(productBranchId) === String(branchId)
-                                );
-                            })
-                            .map((product) => product.name.trim().toLowerCase()),
+                if (branchesRes.ok && Array.isArray(branchesData.branches)) {
+                    const normalizedBranches: Branch[] = (branchesData.branches as unknown[]).map(normalizeBranch);
+                    const assignedBranches = normalizedBranches.filter(
+                        (branch) => String(branch.id) === String(branchId),
                     );
 
-                    const hasOrderBranchIds = normalizedOrders.some((order) =>
-                        Boolean(order.branchId ?? order.branch_id),
+                    setBranches(
+                        assignedBranches.length > 0
+                            ? assignedBranches
+                            : [
+                                {
+                                    id: Number(branchId),
+                                    branchName: assignedBranchName,
+                                },
+                            ],
                     );
-
-                    const scopedOrders = hasOrderBranchIds
-                        ? normalizedOrders.filter((order) => {
-                            const orderBranchId = order.branchId ?? order.branch_id;
-
-                            return String(orderBranchId) === String(branchId);
-                        })
-                        : normalizedOrders.filter((order) =>
-                            (order.items || []).some((item) =>
-                                branchProductNames.has(
-                                    (item.name || "").trim().toLowerCase(),
-                                ),
-                            ),
-                        );
-
-                    setOrders(scopedOrders);
-                    sessionStorage.setItem(ORDERS_KEY, JSON.stringify(scopedOrders));
                 }
             } catch (error) {
-                console.warn("Manager dashboard orders fetch failed:", error);
+                console.warn("Manager dashboard branches fetch failed:", error);
             }
 
             try {
                 setBookingsError("");
 
-                const bookingsResponse = await fetch("/api/bookings", {
+                const bookingsRes = await fetch("/api/bookings", {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
                         Authorization: `Bearer ${token}`,
                     },
                     body: JSON.stringify({
-                        action: "get_dashboard_bookings",
+                        action: "get_booking_page_bookings",
                         role: "manager",
                         store_id: storeId ? Number(storeId) : undefined,
                         branch_id: Number(branchId),
@@ -571,15 +777,15 @@ export default function ManagerDashboard() {
                     cache: "no-store",
                 });
 
-                const bookingsText = await bookingsResponse.text();
+                const bookingsText = await bookingsRes.text();
                 const bookingsData: {
-                    bookings?: BookingApiRaw[];
+                    bookings?: unknown[];
                     error?: unknown;
                     message?: unknown;
                     details?: unknown;
                 } = bookingsText ? JSON.parse(bookingsText) : {};
 
-                if (!bookingsResponse.ok) {
+                if (!bookingsRes.ok) {
                     const message = String(
                         bookingsData.error ||
                         bookingsData.message ||
@@ -587,13 +793,18 @@ export default function ManagerDashboard() {
                     );
 
                     console.error("Manager dashboard bookings request failed:", {
-                        status: bookingsResponse.status,
+                        status: bookingsRes.status,
                         response: bookingsData,
                     });
                     setBookings([]);
                     setBookingsError(message);
                 } else if (Array.isArray(bookingsData.bookings)) {
-                    setBookings(bookingsData.bookings.map(normalizeBooking));
+                    const normalizedBookings = bookingsData.bookings.map(normalizeBooking);
+                    setBookings(
+                        normalizedBookings.filter((booking) =>
+                            belongsToAssignedBranch(booking, branchId),
+                        ),
+                    );
                 } else {
                     setBookings([]);
                     setBookingsError("Bookings API returned an invalid response.");
@@ -608,964 +819,889 @@ export default function ManagerDashboard() {
                 );
             }
 
-            if (storeId) {
-                const staffCount = await loadBranchStaffCount(
-                    token,
-                    String(branchId),
-                    String(storeId),
-                );
+            try {
+                const productsRes = await fetch("/api/products", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`,
+                    },
+                    body: JSON.stringify({
+                        action: "get_products",
+                        branch_id: Number(branchId),
+                    }),
+                });
 
-                setActiveStaffCount(staffCount);
-            } else {
-                setActiveStaffCount(0);
+                const productsData = await productsRes.json().catch(() => ({}));
+
+                if (productsRes.ok && Array.isArray(productsData.products)) {
+                    const normalizedProducts: Product[] = (productsData.products as unknown[]).map(normalizeProduct);
+                    setProducts(
+                        normalizedProducts.filter((product) =>
+                            belongsToAssignedBranch(product, branchId),
+                        ),
+                    );
+                }
+            } catch (error) {
+                console.warn("Manager dashboard products fetch failed:", error);
             }
-        };
 
-        void loadData();
-        window.addEventListener("focus", loadData);
+            try {
+                const ordersRes = await fetch("/api/pos", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`,
+                    },
+                    body: JSON.stringify({
+                        action: "get_orders",
+                        branch_id: Number(branchId),
+                    }),
+                });
 
-        return () => {
-            window.removeEventListener("focus", loadData);
-        };
-    }, [user, refreshKey]);
+                const ordersData = await ordersRes.json().catch(() => ({}));
+
+                if (ordersRes.ok && Array.isArray(ordersData.orders)) {
+                    const normalizedOrders: Order[] = (ordersData.orders as unknown[]).map(normalizeOrder);
+                    setOrders(
+                        normalizedOrders.filter((order) =>
+                            belongsToAssignedBranch(order, branchId),
+                        ),
+                    );
+                }
+            } catch (error) {
+                console.warn("Manager dashboard orders fetch failed:", error);
+            }
+        } finally {
+            setIsRefreshing(false);
+        }
+    }, [user]);
 
     useEffect(() => {
-        const updateDateTime = () => setCurrentDateTime(new Date());
+        // Load the dashboard once when the page opens.
+        // After that, data refreshes only when the user presses Refresh.
+        void loadManagerDashboard();
+    }, [loadManagerDashboard]);
 
-        updateDateTime();
-        const timer = window.setInterval(updateDateTime, 30_000);
+    const scheduledOrders = useMemo(
+        () =>
+            orders.filter((order) => {
+                const type = String(order.orderType || "")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/_/g, "-");
 
-        return () => window.clearInterval(timer);
-    }, []);
+                return [
+                    "scheduled",
+                    "schedule",
+                    "scheduled-order",
+                    "future",
+                    "future-order",
+                    "advance-order",
+                    "pre-order",
+                    "preorder",
+                ].includes(type);
+            }),
+        [orders],
+    );
 
-    const canAccess = (permission: string) => permissions[permission] === true;
+    const posSales = useMemo(() => {
+        return orders
+            .filter((order) => {
+                const type = String(order.orderType || "")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/_/g, "-");
 
-    const totalSales = orders.reduce(
+                const status = String(order.status || "").trim().toLowerCase();
+
+                const isScheduledOrder = [
+                    "scheduled",
+                    "schedule",
+                    "scheduled-order",
+                    "future",
+                    "future-order",
+                    "advance-order",
+                    "pre-order",
+                    "preorder",
+                ].includes(type);
+
+                const isExcludedStatus = [
+                    "pending",
+                    "pending payment",
+                    "unpaid",
+                    "cancelled",
+                    "canceled",
+                    "refunded",
+                    "void",
+                    "draft",
+                    "failed",
+                ].includes(status);
+
+                // Records returned by /api/pos without an order type are treated
+                // as normal POS transactions. Scheduled orders and transactions
+                // that are not yet successfully completed are excluded.
+                return !isScheduledOrder && !isExcludedStatus;
+            })
+            .reduce((sum, order) => sum + Number(order.total || 0), 0);
+    }, [orders]);
+
+    const bookingSales = useMemo(
+        () =>
+            bookings
+                .filter((booking) => {
+                    const status = normalizeDashboardBookingStatus(booking.status);
+
+                    return status === "Confirmed" || status === "Completed";
+                })
+                .reduce(
+                    (sum, booking) =>
+                        sum + getDashboardBookingTotalPrice(booking),
+                    0,
+                ),
+        [bookings],
+    );
+    const scheduledOrderSales = scheduledOrders.reduce(
         (sum, order) => sum + Number(order.total || 0),
         0,
     );
+    const totalBusinessSales = posSales + bookingSales + scheduledOrderSales;
 
+    const allUpcomingBookings = useMemo(() => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
 
-    const totalBookings = bookings.length;
-    const totalProducts = products.length;
+        return [...bookings]
+            .filter((booking) => {
+                const status = String(booking.status || "").toLowerCase();
+                const schedule = new Date(booking.date || "");
 
-    const allAlertItems = products.filter(
-        (product) => product.stock <= product.alertLevel,
-    );
-    const lowStockAlertItems = allAlertItems.filter(
-        (product) => product.stock > 0,
-    );
-    const outOfStockAlertItems = allAlertItems.filter(
-        (product) => product.stock <= 0,
-    );
-
-    const modalAlertItems =
-        alertFilter === "low"
-            ? lowStockAlertItems
-            : alertFilter === "out"
-                ? outOfStockAlertItems
-                : allAlertItems;
-
-    const lowStockItems = allAlertItems.slice(0, 3);
-    const upcomingBookings = [...bookings]
-        .filter((booking) => {
-            const status = String(booking.status || "").toLowerCase();
-            const schedule = new Date(booking.date || "");
-
-            return (
-                !["completed", "cancelled", "canceled"].includes(status) &&
-                !Number.isNaN(schedule.getTime())
+                return (
+                    !["completed", "cancelled", "canceled"].includes(status) &&
+                    !Number.isNaN(schedule.getTime()) &&
+                    schedule.getTime() >= today.getTime()
+                );
+            })
+            .sort(
+                (first, second) =>
+                    new Date(first.date || 0).getTime() -
+                    new Date(second.date || 0).getTime(),
             );
-        })
-        .sort(
-            (first, second) =>
-                new Date(first.date || 0).getTime() -
-                new Date(second.date || 0).getTime(),
-        )
-        .slice(0, 3);
+    }, [bookings]);
 
-    const popularItems = Object.values(
-        orders.reduce<Record<string, { name: string; quantity: number }>>(
-            (accumulator, order) => {
-                (order.items || []).forEach((item) => {
-                    const name = item.name || "Unnamed item";
-                    const quantity = item.quantity || 0;
+    const upcomingBookings = allUpcomingBookings.slice(0, 3);
 
-                    if (!accumulator[name]) {
-                        accumulator[name] = { name, quantity: 0 };
-                    }
+    const pendingBookingCount = bookings.filter((booking) => {
+        const status = String(booking.status || "").toLowerCase();
+        return status.includes("pending") || status === "new";
+    }).length;
 
-                    accumulator[name].quantity += quantity;
-                });
+    const allUpcomingOrders = useMemo(() => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
 
-                return accumulator;
-            },
-            {},
-        ),
-    )
-        .sort((first, second) => second.quantity - first.quantity)
-        .slice(0, 3);
+        return [...scheduledOrders]
+            .filter((order) => {
+                const status = String(order.status || "").toLowerCase();
+                const schedule = new Date(
+                    order.orderDate || order.date || order.createdAt || "",
+                );
 
-    const mostBookedPackages = Object.values(
-        bookings.reduce<Record<string, { name: string; quantity: number }>>(
-            (accumulator, booking) => {
-                const packageName = booking.packageName?.trim() || "Package booking";
+                return (
+                    !["completed", "cancelled", "canceled"].includes(status) &&
+                    !Number.isNaN(schedule.getTime()) &&
+                    schedule.getTime() >= today.getTime()
+                );
+            })
+            .sort(
+                (first, second) =>
+                    new Date(first.orderDate || first.date || 0).getTime() -
+                    new Date(second.orderDate || second.date || 0).getTime(),
+            );
+    }, [scheduledOrders]);
 
-                if (!accumulator[packageName]) {
-                    accumulator[packageName] = {
-                        name: packageName,
-                        quantity: 0,
-                    };
-                }
+    const upcomingOrders = allUpcomingOrders.slice(0, 3);
 
-                accumulator[packageName].quantity += 1;
-                return accumulator;
-            },
-            {},
-        ),
-    )
-        .sort((first, second) => second.quantity - first.quantity)
-        .slice(0, 3);
+    const pendingOrderCount = scheduledOrders.filter((order) => {
+        const status = String(order.status || "").toLowerCase();
+        return status.includes("pending") || status === "new";
+    }).length;
 
-    const popularMax = Math.max(...popularItems.map((item) => item.quantity), 1);
-    const packageMax = Math.max(
-        ...mostBookedPackages.map((item) => item.quantity),
-        1,
+    const allInventoryAlerts = useMemo(
+        () =>
+            products
+                .filter(
+                    (product) =>
+                        Number(product.stock || 0) <= Number(product.alertLevel || 0),
+                )
+                .sort(
+                    (first, second) =>
+                        Number(first.stock || 0) - Number(second.stock || 0),
+                ),
+        [products],
     );
 
-    const openInventoryEditProduct = (product: Product) => {
-        const matchingInventoryProduct = inventoryController.products.find(
-            (inventoryProduct) => Number(inventoryProduct.id) === Number(product.id),
-        );
+    const inventoryAlerts = allInventoryAlerts.slice(0, 3);
+    const lowStockAlertCount = allInventoryAlerts.filter(
+        (product) => Number(product.stock || 0) > 0,
+    ).length;
+    const outOfStockAlertCount = allInventoryAlerts.filter(
+        (product) => Number(product.stock || 0) <= 0,
+    ).length;
+    const visibleStockAlerts = allInventoryAlerts.filter((product) => {
+        if (stockAlertFilter === "low") return Number(product.stock || 0) > 0;
+        if (stockAlertFilter === "out") return Number(product.stock || 0) <= 0;
+        return true;
+    });
 
-        inventoryController.handleEditProduct(
-            matchingInventoryProduct ?? toInventoryProduct(product, branchName),
-        );
-    };
-
-    const inventoryEditOpen =
-        inventoryController.showForm && inventoryController.editingId !== null;
-
-    useEffect(() => {
-        if (inventoryEditOpen) {
-            inventoryEditWasOpenRef.current = true;
-            return;
-        }
-
-        if (!inventoryEditWasOpenRef.current) return;
-
-        const activeBranchId =
-            getUserValue(user, "branch_id") ||
-            getSavedItem("branch_id") ||
-            getSavedItem("stocknbook_branch_id");
-
-        const refreshedProducts = filterByBranch(
-            inventoryController.products.map(toDashboardProduct),
-            activeBranchId,
-        );
-
-        inventoryEditWasOpenRef.current = false;
-
-        if (refreshedProducts.length === 0) return;
-
-        setProducts(refreshedProducts);
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(refreshedProducts));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(refreshedProducts));
-    }, [inventoryEditOpen, inventoryController.products, user]);
-
-    // Kept to preserve the existing active-staff data flow.
-    void activeStaffCount;
-
-    const firstName =
-        getUserValue(user, "first_name") || getUserValue(user, "firstName");
-    const lastName =
-        getUserValue(user, "last_name") || getUserValue(user, "lastName");
-    const dashboardUserName =
-        getUserValue(user, "full_name") ||
-        getUserValue(user, "fullName") ||
-        getUserValue(user, "name") ||
-        [firstName, lastName].filter(Boolean).join(" ") ||
-        getUserValue(user, "username") ||
-        getSavedItem("full_name") ||
-        getSavedItem("name") ||
-        getSavedItem("username") ||
-        "User";
-    const dashboardStoreName =
-        getUserValue(user, "store_name") ||
-        getUserValue(user, "storeName") ||
-        getUserValue(user, "business_name") ||
-        getUserValue(user, "businessName") ||
-        getSavedItem("store_name") ||
-        getSavedItem("storeName") ||
-        getSavedItem("stocknbook_store_name") ||
-        getSavedItem("business_name") ||
-        branchName ||
-        "your store";
-    const currentMonthLabel = currentDateTime
-        ? currentDateTime.toLocaleDateString("en-US", {
-            month: "long",
-            year: "numeric",
-        })
-        : "the current month";
+    const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", {
+        month: "long",
+        year: "numeric",
+    });
 
     return (
         <>
-            <main className="min-w-0 flex-1 overflow-x-hidden bg-[#FDFAF4] font-sans text-[#1A1220]">
-                <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
-                    <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
-                        <div className="min-w-0">
-                            <h1 className="truncate text-[25px] font-bold text-[#1A1220]">
-                                Welcome to Dashboard, {dashboardUserName}
-                            </h1>
-                            <p className="mt-1 truncate text-[12px] text-[#7A6A84]">
-                                Here&apos;s an overview of {dashboardStoreName} business performance for {currentMonthLabel}.
-                            </p>
-                        </div>
-
-                        <div className="flex shrink-0 items-center gap-2.5">
-              <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-                {currentDateTime
-                    ? formatCurrentDateTime(currentDateTime)
-                    : "Loading date..."}
-              </span>
-
-                            <button
-                                type="button"
-                                onClick={() => setRefreshKey((current) => current + 1)}
-                                aria-label="Refresh dashboard"
-                                title="Refresh dashboard"
-                                className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                            >
-                                <RefreshCw size={16} />
-                                Refresh
-                            </button>
-                        </div>
-                    </div>
-                </header>
-
-                <section className="space-y-3.5 px-6 py-4">
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                        <MetricCard
-                            title="Total Sales"
-                            value={
-                                canAccess("pos")
-                                    ? `₱${totalSales.toLocaleString("en-PH")}`
-                                    : "—"
-                            }
-                        />
-                        <MetricCard
-                            title="Total Bookings"
-                            value={
-                                canAccess("bookings")
-                                    ? bookingsError
-                                        ? "Unavailable"
-                                        : String(totalBookings)
-                                    : "—"
-                            }
-                        />
-                        <MetricCard
-                            title="Total Products"
-                            value={canAccess("inventory") ? String(totalProducts) : "—"}
-                        />
+            <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
+                <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
+                    <div className="min-w-0">
+                        <h1 className="truncate text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">
+                            Dashboard
+                        </h1>
+                        <p className="mt-1 truncate text-[12px] text-[#7A6A84]">
+                            Here&apos;s an overview of {getAssignedBranchName(user)} branch performance for {currentMonthLabel}.
+                        </p>
                     </div>
 
-                    <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                        <DashboardPanel className="flex flex-col">
-                            <PanelHeading
-                                title="Popular Items"
-                                icon={<Star size={16} strokeWidth={1.9} fill="currentColor" />}
-                                action="View all"
-                                href="/analytics"
-                                onDownload={() =>
-                                    downloadCsv(
-                                        "popular-items.csv",
-                                        ["Product", "Units Sold"],
-                                        popularItems.map((item) => [item.name, item.quantity]),
-                                    )
-                                }
+                    <div className="flex shrink-0 items-center gap-2.5">
+            <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
+              {formatCurrentDashboardDateTime(currentDateTime)}
+            </span>
+
+                        <button
+                            type="button"
+                            onClick={() => void loadManagerDashboard()}
+                            disabled={isRefreshing}
+                            aria-label="Refresh dashboard details"
+                            title="Refresh dashboard details"
+                            className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                            <RefreshCw
+                                size={16}
+                                className={isRefreshing ? "animate-spin" : ""}
                             />
-
-                            {canAccess("pos") ? (
-                                popularItems.length > 0 ? (
-                                    <div className="flex-1">
-                                        {popularItems.map((item) => (
-                                            <RankedProgressRow
-                                                key={item.name}
-                                                label={item.name}
-                                                value={`${item.quantity} sold`}
-                                                percent={(item.quantity / popularMax) * 100}
-                                            />
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <DashboardEmptyText text="No popular items yet." />
-                                )
-                            ) : (
-                                <DashboardEmptyText text="Popular items are hidden because POS access is not enabled." />
-                            )}
-                        </DashboardPanel>
-
-                        <DashboardPanel className="flex flex-col">
-                            <PanelHeading
-                                title="Most Booked Packages"
-                                icon={<Gift size={16} strokeWidth={1.9} />}
-                                action="View all"
-                                href="/analytics"
-                                onDownload={() =>
-                                    downloadCsv(
-                                        "most-booked-packages.csv",
-                                        ["Package", "Bookings"],
-                                        mostBookedPackages.map((item) => [
-                                            item.name,
-                                            item.quantity,
-                                        ]),
-                                    )
-                                }
-                            />
-
-                            {canAccess("bookings") ? (
-                                mostBookedPackages.length > 0 ? (
-                                    <div className="flex-1">
-                                        {mostBookedPackages.map((item) => (
-                                            <RankedProgressRow
-                                                key={item.name}
-                                                label={item.name}
-                                                value={`${item.quantity} booking${
-                                                    item.quantity === 1 ? "" : "s"
-                                                }`}
-                                                percent={(item.quantity / packageMax) * 100}
-                                            />
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <DashboardEmptyText text={bookingsError || "No package bookings yet."} />
-                                )
-                            ) : (
-                                <DashboardEmptyText text="Package bookings are hidden because booking access is not enabled." />
-                            )}
-                        </DashboardPanel>
+                            {isRefreshing ? "Refreshing..." : "Refresh"}
+                        </button>
                     </div>
-
-                    <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                        <DashboardPanel className="overflow-hidden !rounded-[12px] !p-0 font-sans shadow-[0_6px_18px_rgba(45,27,78,0.06)]">
-                            <div className="border-b border-[#F0ECF5]">
-                                <ManagerTableHeader
-                                    title="Upcoming Bookings"
-                                    action="View all"
-                                    onAction={() => window.location.assign("/bookings")}
-                                    onDownload={() =>
-                                        downloadCsv(
-                                            "upcoming-bookings.csv",
-                                            [
-                                                "Customer",
-                                                "Event",
-                                                "Schedule",
-                                                "Package",
-                                                "Status",
-                                            ],
-                                            upcomingBookings.map((booking) => [
-                                                booking.name,
-                                                booking.eventName || "Booking reservation",
-                                                booking.date || "",
-                                                booking.packageName || "Package booking",
-                                                booking.status || "Pending Review",
-                                            ]),
-                                        )
-                                    }
-                                    tone="violet"
-                                />
-                            </div>
-
-                            {!canAccess("bookings") ? (
-                                <div className="px-4 py-4">
-                                    <DashboardEmptyText text="Booking access is not enabled for this account." />
-                                </div>
-                            ) : upcomingBookings.length === 0 ? (
-                                <div className="px-4 py-4">
-                                    <DashboardEmptyText text={bookingsError || "No upcoming bookings yet."} />
-                                </div>
-                            ) : (
-                                <>
-                                    <div className="overflow-hidden">
-                                        <table className="w-full table-fixed border-collapse">
-                                            <colgroup>
-                                                <col className="w-[32%]" />
-                                                <col className="w-[24%]" />
-                                                <col className="w-[29%]" />
-                                                <col className="w-[15%]" />
-                                            </colgroup>
-                                            <thead className="bg-[#FCFBFE]">
-                                            <tr className="border-b border-[#F0ECF5]">
-                                                <CompactTableHeader align="left">
-                                                    Customer / Event
-                                                </CompactTableHeader>
-                                                <CompactTableHeader align="left">
-                                                    Schedule
-                                                </CompactTableHeader>
-                                                <CompactTableHeader align="left">
-                                                    Package
-                                                </CompactTableHeader>
-                                                <CompactTableHeader align="left">
-                                                    Status
-                                                </CompactTableHeader>
-                                            </tr>
-                                            </thead>
-                                            <tbody>
-                                            {upcomingBookings.map((booking) => (
-                                                <UpcomingBookingRow
-                                                    key={booking.id}
-                                                    booking={booking}
-                                                />
-                                            ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </>
-                            )}
-                        </DashboardPanel>
-
-                        <DashboardPanel className="overflow-hidden !rounded-[12px] !p-0 font-sans shadow-[0_6px_18px_rgba(45,27,78,0.06)]">
-                            <div className="border-b border-[#F0ECF5]">
-                                <ManagerTableHeader
-                                    title="Inventory Alerts"
-                                    action="View all"
-                                    onAction={() => {
-                                        setAlertFilter("all");
-                                        setShowAlertsModal(true);
-                                    }}
-                                    onDownload={() =>
-                                        downloadCsv(
-                                            "inventory-alerts.csv",
-                                            [
-                                                "Product",
-                                                "Category",
-                                                "Current Stock",
-                                                "Alert Level",
-                                                "Status",
-                                            ],
-                                            lowStockItems.map((product) => [
-                                                product.name,
-                                                product.category || "Uncategorized",
-                                                Number(product.stock || 0),
-                                                Number(product.alertLevel || 0),
-                                                Number(product.stock || 0) <= 0
-                                                    ? "Out of Stock"
-                                                    : "Low Stock",
-                                            ]),
-                                        )
-                                    }
-                                    tone="red"
-                                />
-                            </div>
-
-                            {!canAccess("inventory") ? (
-                                <div className="px-4 py-4">
-                                    <DashboardEmptyText text="Inventory access is not enabled for this account." />
-                                </div>
-                            ) : lowStockItems.length === 0 ? (
-                                <div className="px-4 py-4">
-                                    <DashboardEmptyText text="All items are well stocked." />
-                                </div>
-                            ) : (
-                                <>
-                                    <div className="overflow-hidden">
-                                        <table className="w-full table-fixed border-collapse">
-                                            <colgroup>
-                                                <col className="w-[32%]" />
-                                                <col className="w-[27%]" />
-                                                <col className="w-[19%]" />
-                                                <col className="w-[22%]" />
-                                            </colgroup>
-                                            <thead className="bg-[#FCFBFE]">
-                                            <tr className="border-b border-[#F0ECF5]">
-                                                <CompactTableHeader align="left">
-                                                    Item
-                                                </CompactTableHeader>
-                                                <CompactTableHeader align="left">
-                                                    Category
-                                                </CompactTableHeader>
-                                                <CompactTableHeader align="left">
-                                                    Stock Level
-                                                </CompactTableHeader>
-                                                <CompactTableHeader align="left">
-                                                    Action
-                                                </CompactTableHeader>
-                                            </tr>
-                                            </thead>
-                                            <tbody>
-                                            {lowStockItems.map((product) => (
-                                                <InventoryAlertTableRow
-                                                    key={product.id}
-                                                    product={product}
-                                                    onRestock={() => openInventoryEditProduct(product)}
-                                                />
-                                            ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </>
-                            )}
-                        </DashboardPanel>
-                    </div>
-                </section>
-
-                {showAlertsModal && (
-                    <RestockAlertsModal
-                        items={modalAlertItems}
-                        activeFilter={alertFilter}
-                        lowStockCount={lowStockAlertItems.length}
-                        outOfStockCount={outOfStockAlertItems.length}
-                        onChangeFilter={setAlertFilter}
-                        onClose={() => setShowAlertsModal(false)}
-                        onRestock={(product) => {
-                            setShowAlertsModal(false);
-                            openInventoryEditProduct(product);
-                        }}
-                    />
-                )}
-
-                <div className="font-sans text-[#1A1220] [&_*]:font-sans">
-                    <InventoryDialogs inv={inventoryController} />
                 </div>
-            </main>
+            </header>
+
+            <section className="px-6 py-5 font-sans">
+                <div className="mx-auto max-w-none space-y-3.5">
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                        <SalesSummaryCard
+                            title="Total Branch Sales"
+                            value={peso(totalBusinessSales)}
+                            subtitle="All sales channels"
+                            icon={<Store size={25} />}
+                            tone="violet"
+                        />
+                        <SalesSummaryCard
+                            title="Total POS Sales"
+                            value={peso(posSales)}
+                            subtitle="Point-of-sale transactions"
+                            icon={<ShoppingCart size={25} />}
+                            tone="green"
+                        />
+                        <SalesSummaryCard
+                            title="Total Booking Sales"
+                            value={peso(bookingSales)}
+                            subtitle="Sales from bookings"
+                            icon={<CalendarDays size={25} />}
+                            tone="blue"
+                        />
+                        <SalesSummaryCard
+                            title="Total Scheduled Order Sales"
+                            value={peso(scheduledOrderSales)}
+                            subtitle="Sales from scheduled orders"
+                            icon={<ClipboardList size={25} />}
+                            tone="orange"
+                        />
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+                        <GlanceCard
+                            title="Out of Stock"
+                            value={outOfStockAlertCount}
+                            label="Products"
+                            icon={<PackageX size={22} />}
+                            tone="red"
+                        />
+                        <GlanceCard
+                            title="Low Stock"
+                            value={lowStockAlertCount}
+                            label="Products"
+                            icon={<AlertTriangle size={22} />}
+                            tone="orange"
+                        />
+                        <GlanceCard
+                            title="Pending Bookings"
+                            value={pendingBookingCount}
+                            label="Bookings"
+                            icon={<CalendarClock size={22} />}
+                            tone="blue"
+                        />
+                        <GlanceCard
+                            title="Upcoming Bookings"
+                            value={upcomingBookings.length}
+                            label="Bookings"
+                            icon={<CalendarDays size={22} />}
+                            tone="green"
+                        />
+                        <GlanceCard
+                            title="Pending Orders"
+                            value={pendingOrderCount}
+                            label="Orders"
+                            icon={<ClipboardList size={22} />}
+                            tone="violet"
+                        />
+                        <GlanceCard
+                            title="Upcoming Orders"
+                            value={upcomingOrders.length}
+                            label="Orders"
+                            icon={<PackageCheck size={22} />}
+                            tone="cyan"
+                        />
+                    </div>
+
+                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
+                        <CompactDashboardTable
+                            title="Upcoming Bookings"
+                            subtitle="Next 3 upcoming bookings"
+                            icon={<CalendarDays size={18} />}
+                            action={() => router.push("/bookings")}
+                            onDownload={() =>
+                                downloadExcel(
+                                    "upcoming-bookings.xlsx",
+                                    "Upcoming Bookings",
+                                    ["Date", "Booking Number", "Time", "Status"],
+                                    allUpcomingBookings.map((booking) => [
+                                        booking.date || "",
+                                        booking.bookingNumber ||
+                                        `BK-${String(booking.id).padStart(6, "0")}`,
+                                        formatDashboardTime(booking.date, booking.time),
+                                        booking.status || "Pending",
+                                    ]),
+                                )
+                            }
+                            totalRecords={allUpcomingBookings.length}
+                            headers={["Date", "Booking #", "Time", "Status"]}
+                            emptyText={bookingsError || "No upcoming bookings yet."}
+                            rows={upcomingBookings.map((booking) => ({
+                                date: booking.date,
+                                reference: compactDashboardReference(
+                                    "BK",
+                                    booking.bookingNumber,
+                                    booking.id,
+                                ),
+                                time: formatDashboardTime(booking.date, booking.time),
+                                status: booking.status || "Pending",
+                            }))}
+                        />
+
+                        <CompactDashboardTable
+                            title="Upcoming Orders"
+                            subtitle="Next 3 scheduled orders"
+                            icon={<ClipboardList size={18} />}
+                            action={() => router.push("/orders")}
+                            onDownload={() =>
+                                downloadExcel(
+                                    "upcoming-orders.xlsx",
+                                    "Upcoming Orders",
+                                    ["Date", "Order Number", "Time", "Status"],
+                                    allUpcomingOrders.map((order, index) => {
+                                        const orderDate =
+                                            order.orderDate || order.date || order.createdAt || "";
+
+                                        return [
+                                            orderDate,
+                                            compactDashboardReference(
+                                                "SO",
+                                                order.orderNumber || order.orderId || order.id,
+                                                index + 1,
+                                            ),
+                                            formatDashboardTime(orderDate, order.time),
+                                            order.status || "Pending",
+                                        ];
+                                    }),
+                                )
+                            }
+                            totalRecords={allUpcomingOrders.length}
+                            headers={["Date", "Order #", "Time", "Status"]}
+                            emptyText="No upcoming scheduled orders yet."
+                            rows={upcomingOrders.map((order, index) => {
+                                const orderDate =
+                                    order.orderDate || order.date || order.createdAt;
+
+                                return {
+                                    date: orderDate,
+                                    reference: compactDashboardReference(
+                                        "SO",
+                                        order.orderNumber || order.orderId || order.id,
+                                        index + 1,
+                                    ),
+                                    time: formatDashboardTime(orderDate, order.time),
+                                    status: order.status || "Pending",
+                                };
+                            })}
+                        />
+
+                        <InventoryAlertPanel
+                            items={inventoryAlerts}
+                            totalAlerts={allInventoryAlerts.length}
+                            onDownload={() =>
+                                downloadExcel(
+                                    "inventory-alerts.xlsx",
+                                    "Inventory Alerts",
+                                    ["Product", "Stock Level", "Status"],
+                                    allInventoryAlerts.map((product) => [
+                                        product.name,
+                                        Number(product.stock || 0),
+                                        Number(product.stock || 0) <= 0
+                                            ? "Out of Stock"
+                                            : "Low Stock",
+                                    ]),
+                                )
+                            }
+                            onViewAll={() => {
+                                setStockAlertFilter("all");
+                                setShowStockAlertsModal(true);
+                            }}
+                        />
+                    </div>
+                </div>
+            </section>
+
+            {showStockAlertsModal && (
+                <ManagerStockAlertsModal
+                    items={visibleStockAlerts}
+                    activeFilter={stockAlertFilter}
+                    totalCount={allInventoryAlerts.length}
+                    lowStockCount={lowStockAlertCount}
+                    outOfStockCount={outOfStockAlertCount}
+                    onChangeFilter={setStockAlertFilter}
+                    onClose={() => setShowStockAlertsModal(false)}
+                />
+            )}
         </>
     );
 }
 
-function DashboardPanel({
-                            children,
-                            className = "",
-                        }: {
-    children: ReactNode;
-    className?: string;
+type DashboardTone = "violet" | "green" | "blue" | "orange" | "red" | "cyan";
+
+const toneStyles: Record<DashboardTone, { icon: string; background: string }> =
+    {
+        violet: { icon: "text-[#6D35D4]", background: "bg-[#F1EBFF]" },
+        green: { icon: "text-[#159455]", background: "bg-[#E6F7EE]" },
+        blue: { icon: "text-[#2563EB]", background: "bg-[#EAF1FF]" },
+        orange: { icon: "text-[#E66B20]", background: "bg-[#FFF0E5]" },
+        red: { icon: "text-[#DC2626]", background: "bg-[#FDECEC]" },
+        cyan: { icon: "text-[#138A96]", background: "bg-[#E8F8FA]" },
+    };
+
+function SalesSummaryCard({
+                              title,
+                              value,
+                              subtitle,
+                              icon,
+                              tone,
+                          }: {
+    title: string;
+    value: string;
+    subtitle: string;
+    icon: React.ReactNode;
+    tone: DashboardTone;
+}) {
+    const style = toneStyles[tone];
+
+    return (
+        <div className="flex min-h-[128px] items-center gap-5 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-5 shadow-sm">
+      <span
+          className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
+      >
+        {icon}
+      </span>
+            <div className="min-w-0">
+                <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">
+                    {title}
+                </p>
+                <p className="mt-2 truncate text-[26px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
+                    {value}
+                </p>
+                <p className="mt-2 text-[12px] leading-4 text-[#8A7D92]">{subtitle}</p>
+            </div>
+        </div>
+    );
+}
+
+function GlanceCard({
+                        title,
+                        value,
+                        label,
+                        icon,
+                        tone,
+                    }: {
+    title: string;
+    value: number;
+    label: string;
+    icon: React.ReactNode;
+    tone: DashboardTone;
+}) {
+    const style = toneStyles[tone];
+
+    return (
+        <div className="flex min-h-[124px] items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-4 py-5 shadow-sm">
+      <span
+          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
+      >
+        {icon}
+      </span>
+            <div className="min-w-0 flex-1">
+                <p className="whitespace-nowrap text-[12px] font-semibold leading-4 text-[#4B3E55]">
+                    {title}
+                </p>
+                <p className={`mt-1 text-[25px] font-bold leading-none ${style.icon}`}>{value}</p>
+                <p className="mt-1 text-[12px] text-[#8A7D92]">{label}</p>
+            </div>
+        </div>
+    );
+}
+
+type CompactTableRow = {
+    date?: string;
+    reference: string;
+    time: string;
+    status: string;
+};
+
+function CompactDashboardTable({
+                                   title,
+                                   subtitle,
+                                   icon,
+                                   action,
+                                   onDownload,
+                                   totalRecords,
+                                   headers,
+                                   rows,
+                                   emptyText,
+                               }: {
+    title: string;
+    subtitle: string;
+    icon: React.ReactNode;
+    action: () => void;
+    onDownload: () => void;
+    totalRecords: number;
+    headers: [string, string, string, string];
+    rows: CompactTableRow[];
+    emptyText: string;
 }) {
     return (
-        <section
-            className={`rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm ${className}`}
-        >
-            {children}
+        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+            <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
+                <div className="flex min-w-0 items-start gap-2 text-[#6D35D4]">
+                    <span className="mt-0.5 flex h-6 w-6 items-center justify-center">
+                        {icon}
+                    </span>
+                    <div className="min-w-0">
+                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                            {title}
+                        </h2>
+                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
+                            {subtitle}
+                        </p>
+                    </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={onDownload}
+                        aria-label={`Download ${title}`}
+                        title={`Download ${title}`}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
+                    >
+                        <Download size={16} strokeWidth={2} />
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={action}
+                        className="rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4]"
+                    >
+                        View all
+                    </button>
+                </div>
+            </div>
+
+            <table className="w-full flex-1 table-fixed border-collapse">
+                <colgroup>
+                    <col className="w-[22%]" />
+                    <col className="w-[31%]" />
+                    <col className="w-[22%]" />
+                    <col className="w-[25%]" />
+                </colgroup>
+                <thead className="bg-[#FBFAFD]">
+                <tr className="border-b border-[#EEE8F2]">
+                    {headers.map((header) => (
+                        <th
+                            key={header}
+                            className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C]"
+                        >
+                            {header}
+                        </th>
+                    ))}
+                </tr>
+                </thead>
+                <tbody>
+                {rows.length === 0 ? (
+                    <tr>
+                        <td
+                            colSpan={4}
+                            className="h-[170px] px-4 text-center text-[13px] text-[#8A7D92]"
+                        >
+                            {emptyText}
+                        </td>
+                    </tr>
+                ) : (
+                    rows.map((row, index) => (
+                        <CompactDashboardRow
+                            key={`${row.reference}-${index}`}
+                            row={row}
+                        />
+                    ))
+                )}
+                </tbody>
+            </table>
+            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
+                Showing {rows.length} of {totalRecords} record
+                {totalRecords === 1 ? "" : "s"}
+            </div>
         </section>
     );
 }
 
-function MetricCard({
-                        title,
-                        value,
-                    }: {
-    title: string;
-    value: string;
-}) {
-    return (
-        <div className="flex min-h-[90px] flex-col justify-center rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-3 shadow-sm">
-            <p className="text-sm font-semibold text-[#2B174C]">{title}</p>
-            <p className="mt-1 text-[24px] font-bold leading-tight text-[#1A1220]">
-                {value}
-            </p>
-        </div>
-    );
-}
-
-function PanelHeading({
-                          title,
-                          icon,
-                          action,
-                          href,
-                          onDownload,
-                      }: {
-    title: string;
-    icon?: ReactNode;
-    action: string;
-    href: string;
-    onDownload?: () => void;
-}) {
-    return (
-        <div className="mb-3 flex items-center justify-between gap-4">
-            <div className="flex min-w-0 items-center gap-2 text-[#6D35D4]">
-                {icon && (
-                    <span className="flex h-6 w-6 shrink-0 items-center justify-center">
-            {icon}
-          </span>
-                )}
-                <h2 className="min-w-0 truncate text-[14px] font-bold text-[#24152F]">
-                    {title}
-                </h2>
-            </div>
-
-            <div className="flex shrink-0 items-center gap-2">
-                {onDownload && (
-                    <button
-                        type="button"
-                        onClick={onDownload}
-                        aria-label={`Download ${title}`}
-                        title={`Download ${title}`}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] shadow-sm transition hover:border-[#D7C7EC] hover:bg-[#F3EEFF] hover:text-[#4B21BD]"
-                    >
-                        <Download size={14} strokeWidth={2} />
-                    </button>
-                )}
-
-                <Link
-                    href={href}
-                    className="inline-flex h-7 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-3 text-[11px] font-semibold text-[#6D35D4] shadow-sm transition hover:border-[#D7C7EC] hover:bg-[#F3EEFF] hover:text-[#4B21BD]"
-                >
-                    {action}
-                </Link>
-            </div>
-        </div>
-    );
-}
-
-function ManagerTableHeader({
-                                title,
-                                subtitle,
-                                action,
-                                onAction,
-                                onDownload,
-                                tone,
-                            }: {
-    title: string;
-    subtitle?: string;
-    action: string;
-    onAction: () => void;
-    onDownload?: () => void;
-    tone: "violet" | "red";
-}) {
-    const isAlert = tone === "red";
-
-    return (
-        <div className="flex min-h-[56px] items-center justify-between gap-4 px-4 py-3">
-            <div className="flex min-w-0 items-start gap-2">
-        <span
-            className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center ${
-                isAlert ? "text-[#EF4444]" : "text-[#6D35D4]"
-            }`}
-        >
-          {isAlert ? (
-              <TriangleAlert size={16} strokeWidth={2} />
-          ) : (
-              <CalendarDays size={16} strokeWidth={2} />
-          )}
-        </span>
-
-                <div className="min-w-0">
-                    <h2 className="truncate text-[14px] font-bold text-[#24152F]">
-                        {title}
-                    </h2>
-                    {subtitle && (
-                        <p className="truncate text-[10px] leading-4 text-[#8A7D92]">
-                            {subtitle}
-                        </p>
-                    )}
-                </div>
-            </div>
-
-            <div className="flex shrink-0 items-center gap-2">
-                {onDownload && (
-                    <button
-                        type="button"
-                        onClick={onDownload}
-                        aria-label={`Download ${title}`}
-                        title={`Download ${title}`}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] shadow-sm transition hover:border-[#D7C7EC] hover:bg-[#F3EEFF] hover:text-[#4B21BD]"
-                    >
-                        <Download size={14} strokeWidth={2} />
-                    </button>
-                )}
-
-                <button
-                    type="button"
-                    onClick={onAction}
-                    className="inline-flex h-7 items-center justify-center whitespace-nowrap rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-3 text-[11px] font-semibold text-[#6D35D4] shadow-sm transition hover:border-[#D7C7EC] hover:bg-[#F3EEFF] hover:text-[#4B21BD]"
-                >
-                    {action}
-                </button>
-            </div>
-        </div>
-    );
-}
-function RankedProgressRow({
-                               label,
-                               value,
-                               percent,
-                           }: {
-    label: string;
-    value: string;
-    percent: number;
-}) {
-    return (
-        <div className="py-3 first:pt-1 last:pb-1">
-            <div className="mb-2 flex items-center justify-between gap-3">
-                <p
-                    title={label}
-                    className="min-w-0 flex-1 truncate text-[12px] font-medium text-[#30243A]"
-                >
-                    {label}
-                </p>
-
-                <p className="shrink-0 text-[11px] font-semibold text-[#7C3AED]">
-                    {value}
-                </p>
-            </div>
-
-            <div className="h-1.5 overflow-hidden rounded-full bg-[#ECE8F2]">
-                <div
-                    className="h-full rounded-full bg-[#7C3AED] transition-[width] duration-300"
-                    style={{
-                        width: `${Math.max(Math.min(percent, 100), 7)}%`,
-                    }}
-                />
-            </div>
-        </div>
-    );
-}
-
-function CompactTableHeader({
-                                children,
-                                align = "left",
-                            }: {
-    children: ReactNode;
-    align?: "left" | "center" | "right";
-}) {
-    const alignmentClass =
-        align === "right"
-            ? "text-right"
-            : align === "left"
-                ? "text-left"
-                : "text-center";
-
-    return (
-        <th
-            className={`px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C] ${alignmentClass}`}
-        >
-            {children}
-        </th>
-    );
-}
-
-function UpcomingBookingRow({
-                                booking,
-                            }: {
-    booking: Booking;
-}) {
-    const parsedDate = new Date(booking.date || "");
-    const hasValidDate = !Number.isNaN(parsedDate.getTime());
-    const monthLabel = hasValidDate
-        ? parsedDate.toLocaleDateString("en-US", { month: "short" }).toUpperCase()
+function CompactDashboardRow({ row }: { row: CompactTableRow }) {
+    const parsed = new Date(row.date || "");
+    const validDate = !Number.isNaN(parsed.getTime());
+    const month = validDate
+        ? parsed.toLocaleDateString("en-US", { month: "short" }).toUpperCase()
         : "—";
-    const dayLabel = hasValidDate ? String(parsedDate.getDate()) : "—";
-    const dateLabel = hasValidDate
-        ? parsedDate.toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-            year: "numeric",
-        })
-        : "—";
-    const timeLabel = hasValidDate
-        ? parsedDate.toLocaleTimeString("en-US", {
-            hour: "numeric",
-            minute: "2-digit",
-        })
-        : "";
-
-    const status = booking.status || "Pending Review";
-    const normalized = status.trim().toLowerCase();
-
+    const day = validDate ? parsed.getDate() : "—";
+    const normalized = row.status.toLowerCase();
     const statusClass =
-        normalized === "completed"
-            ? "text-[#16A34A]"
-            : normalized === "confirmed"
-                ? "text-[#2563EB]"
-                : normalized === "preparing"
-                    ? "text-[#7C3AED]"
-                    : normalized === "cancelled" || normalized === "canceled"
-                        ? "text-[#DC2626]"
-                        : "text-[#B7791F]";
-
-    const displayStatus =
-        normalized === "pending review"
-            ? "Pending"
-            : status.charAt(0).toUpperCase() + status.slice(1);
+        normalized.includes("confirm") || normalized.includes("complete")
+            ? "text-[#16834A]"
+            : normalized.includes("cancel")
+                ? "text-[#C53030]"
+                : "text-[#B66B00]";
 
     return (
-        <tr className="h-[58px] border-b border-[#F3EFF6] transition hover:bg-[#FCFAFF] last:border-b-0">
-            <td className="px-2.5 py-2 text-left">
-                <div className="flex min-w-0 items-center gap-2">
-                    <div className="flex h-9 w-9 shrink-0 flex-col items-center justify-center rounded-md border border-[#E8E0F0] bg-[#FBF9FE] leading-none">
-            <span className="text-[8px] font-bold text-[#7C3AED]">
-              {monthLabel}
-            </span>
-                        <span className="mt-0.5 text-[12px] font-bold text-[#342047]">
-              {dayLabel}
-            </span>
-                    </div>
-
-                    <p
-                        title={booking.name || "Customer"}
-                        className="min-w-0 truncate text-[12px] font-medium text-[#30243A]"
-                    >
-                        {booking.name || "Customer"}
-                    </p>
+        <tr className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FCFAFF]">
+            <td className="px-3 py-2">
+                <div className="flex h-10 w-10 flex-col items-center justify-center rounded-lg border border-[#E8E0F0] bg-[#FBF9FE] leading-none">
+                    <span className="text-[7px] font-bold text-[#7C3AED]">{month}</span>
+                    <span className="mt-1 text-[14px] font-bold text-[#342047]">
+                        {day}
+                    </span>
                 </div>
             </td>
-
-            <td className="px-2 py-2 text-left">
-                <p className="truncate text-[12px] font-medium text-[#30243A]">
-                    {dateLabel}
-                </p>
-                {timeLabel && (
-                    <p className="mt-0.5 text-[10px] text-[#7A6A84]">{timeLabel}</p>
-                )}
-            </td>
-
-            <td className="px-2 py-2 text-left">
+            <td className="px-3 py-2">
                 <p
-                    title={booking.packageName || "Package booking"}
-                    className="truncate text-[12px] font-medium text-[#30243A]"
+                    title={row.reference}
+                    className="whitespace-nowrap text-[13px] font-semibold text-[#30243A]"
                 >
-                    {booking.packageName || "Package booking"}
+                    {row.reference}
                 </p>
             </td>
-
-            <td className="px-2.5 py-2 text-left">
-        <span
-            className={`block max-w-full truncate text-[11px] font-semibold capitalize ${statusClass}`}
-        >
-          {displayStatus}
-        </span>
+            <td className="px-3 py-2">
+                <p className="whitespace-nowrap text-[13px] font-semibold text-[#5F4E75]">
+                    {row.time}
+                </p>
+            </td>
+            <td className="px-3 py-2">
+                <span
+                    className={`whitespace-nowrap text-[13px] font-semibold capitalize ${statusClass}`}
+                >
+                    {row.status}
+                </span>
             </td>
         </tr>
     );
 }
 
-function InventoryAlertTableRow({
-                                    product,
-                                    onRestock,
-                                }: {
-    product: Product;
-    onRestock: () => void;
+function InventoryAlertPanel({
+                                 items,
+                                 totalAlerts,
+                                 onDownload,
+                                 onViewAll,
+                             }: {
+    items: Product[];
+    totalAlerts: number;
+    onDownload: () => void;
+    onViewAll: () => void;
 }) {
-    const unitsLeft = Number(product.stock || 0);
-    const isOutOfStock = unitsLeft <= 0;
-
     return (
-        <tr className="h-[58px] border-b border-[#F3EFF6] transition hover:bg-[#FFFCFC] last:border-b-0">
-            <td className="px-2.5 py-2 text-left">
-                <p
-                    title={product.name}
-                    className="truncate text-[12px] font-medium text-[#30243A]"
-                >
-                    {product.name}
-                </p>
-                <p
-                    className={`mt-0.5 text-[10px] font-semibold ${
-                        isOutOfStock ? "text-[#DC2626]" : "text-[#B45309]"
-                    }`}
-                >
-                    {isOutOfStock ? "Out of stock" : "Low stock"}
-                </p>
-            </td>
+        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+            <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
+                <div className="flex min-w-0 items-start gap-2">
+                    <TriangleAlert size={18} className="mt-0.5 shrink-0 text-[#EF4444]" />
+                    <div className="min-w-0">
+                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                            Inventory Alerts
+                        </h2>
+                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
+                            Items that need attention
+                        </p>
+                    </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={onDownload}
+                        aria-label="Download Inventory Alerts"
+                        title="Download Inventory Alerts"
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
+                    >
+                        <Download size={16} strokeWidth={2} />
+                    </button>
 
-            <td className="px-2 py-2 text-left">
-                <p
-                    title={product.category || "Uncategorized"}
-                    className="truncate text-[11px] font-medium text-[#5F4E75]"
-                >
-                    {product.category || "Uncategorized"}
-                </p>
-            </td>
+                    <button
+                        type="button"
+                        onClick={onViewAll}
+                        className="rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4]"
+                    >
+                        View all
+                    </button>
+                </div>
+            </div>
 
-            <td className="px-2 py-2 text-left">
-        <span
-            className={`whitespace-nowrap text-[11px] font-semibold ${
-                isOutOfStock ? "text-[#DC2626]" : "text-[#B7791F]"
-            }`}
-        >
-          {unitsLeft} left
-        </span>
-            </td>
+            <table className="w-full flex-1 table-fixed border-collapse">
+                <colgroup>
+                    <col className="w-[72%]" />
+                    <col className="w-[28%]" />
+                </colgroup>
+                <thead className="bg-[#FBFAFD]">
+                <tr className="border-b border-[#EEE8F2]">
+                    <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C]">
+                        Product
+                    </th>
+                    <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C]">
+                        Stock Level
+                    </th>
+                </tr>
+                </thead>
+                <tbody>
+                {items.length === 0 ? (
+                    <tr>
+                        <td
+                            colSpan={2}
+                            className="h-[170px] px-4 text-center text-[13px] text-[#8A7D92]"
+                        >
+                            All products are well stocked.
+                        </td>
+                    </tr>
+                ) : (
+                    items.map((product) => {
+                        const stock = Number(product.stock || 0);
 
-            <td className="px-2.5 py-2 text-left">
-                <button
-                    type="button"
-                    onClick={onRestock}
-                    className="whitespace-nowrap rounded-md bg-[#F2EDFF] px-3 py-1.5 text-[10px] font-semibold text-[#5B2FC6] transition hover:bg-[#E6DDFF]"
-                >
-                    Restock
-                </button>
-            </td>
-        </tr>
+                        return (
+                            <tr
+                                key={product.id}
+                                className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FFFCFC]"
+                            >
+                                <td className="px-3 py-2">
+                                    <p
+                                        title={product.name}
+                                        className="line-clamp-2 text-[13px] font-semibold leading-6 text-[#30243A]"
+                                    >
+                                        {product.name}
+                                    </p>
+                                </td>
+                                <td className="px-3 py-2">
+                                    <span
+                                        className={`whitespace-nowrap text-[13px] font-semibold ${stock <= 0 ? "text-[#DC2626]" : "text-[#B7791F]"}`}
+                                    >
+                                        {stock} left
+                                    </span>
+                                </td>
+                            </tr>
+                        );
+                    })
+                )}
+                </tbody>
+            </table>
+            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
+                Showing {items.length} of {totalAlerts} alert
+                {totalAlerts === 1 ? "" : "s"}
+            </div>
+        </section>
     );
 }
 
-function DashboardEmptyText({ text }: { text: string }) {
-    return (
-        <div className="flex min-h-[154px] items-center justify-center rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFCF7] px-5 text-center">
-            <p className="text-sm leading-6 text-[#7A6A84]">{text}</p>
-        </div>
-    );
-}
-
-function RestockAlertsModal({
-                                items,
-                                activeFilter,
-                                lowStockCount,
-                                outOfStockCount,
-                                onChangeFilter,
-                                onClose,
-                                onRestock,
-                            }: {
+function ManagerStockAlertsModal({
+                                     items,
+                                     activeFilter,
+                                     totalCount,
+                                     lowStockCount,
+                                     outOfStockCount,
+                                     onChangeFilter,
+                                     onClose,
+                                 }: {
     items: Product[];
     activeFilter: "all" | "low" | "out";
+    totalCount: number;
     lowStockCount: number;
     outOfStockCount: number;
     onChangeFilter: (filter: "all" | "low" | "out") => void;
     onClose: () => void;
-    onRestock: (product: Product) => void;
 }) {
-    const filterButtonClass = (
-        isActive: boolean,
-        tone: "all" | "low" | "out",
-    ) => {
-        if (tone === "all") {
-            return isActive
-                ? "border-[#2B174C] bg-[#2B174C] text-white"
-                : "border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#F7F1FF]";
+    const filterClass = (active: boolean, tone: "all" | "low" | "out") => {
+        if (active && tone === "all") {
+            return "border-[#2B174C] bg-[#2B174C] text-white";
         }
 
-        if (tone === "low") {
-            return isActive
-                ? "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]"
-                : "border-[#E6DDF0] bg-white text-[#A56607] hover:bg-[#FFF8E8]";
+        if (active && tone === "low") {
+            return "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]";
         }
 
-        return isActive
-            ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
-            : "border-[#E6DDF0] bg-white text-[#C32F2F] hover:bg-[#FFF0F0]";
+        if (active && tone === "out") {
+            return "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]";
+        }
+
+        return "border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#FAF8FF]";
     };
 
     return (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4 py-6 font-sans text-[#1A1220] backdrop-blur-sm [&_*]:font-sans">
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 px-4 py-6 font-sans text-[#1A1220] backdrop-blur-[2px] [&_*]:font-sans">
             <div
                 role="dialog"
                 aria-modal="true"
-                aria-labelledby="dashboard-restock-alerts-title"
-                className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
+                aria-labelledby="manager-stock-alerts-title"
+                className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
             >
-                <div className="flex items-start justify-between gap-4 border-b border-[#E6DDF0] px-6 py-5">
+                <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
                     <div className="flex min-w-0 items-start gap-3">
-                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#FFF4D8] text-[#B7791F]">
-                            <TriangleAlert size={21} strokeWidth={2} />
-                        </span>
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#FFF4D8] text-[#B7791F]">
+              <TriangleAlert size={21} strokeWidth={2} />
+            </span>
 
                         <div className="min-w-0">
-                            <h3
-                                id="dashboard-restock-alerts-title"
+                            <h2
+                                id="manager-stock-alerts-title"
                                 className="!text-[20px] !font-bold !leading-6 text-[#1A1220]"
                             >
-                                Restock Alerts
-                            </h3>
+                                Stock Alerts
+                            </h2>
                             <p className="mt-1 !text-sm !font-normal !leading-5 text-[#7A6A84]">
-                                Low-stock and out-of-stock items that need restocking.
+                                Low-stock and out-of-stock items for the current inventory view.
                             </p>
                         </div>
                     </div>
@@ -1573,156 +1709,143 @@ function RestockAlertsModal({
                     <button
                         type="button"
                         onClick={onClose}
-                        aria-label="Close restock alerts"
+                        aria-label="Close stock alerts"
                         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl !text-[22px] !font-normal !leading-none text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C]"
                     >
                         ×
                     </button>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 border-b border-[#E6DDF0] px-6 py-4">
-                    <button
-                        type="button"
-                        onClick={() => onChangeFilter("all")}
-                        className={`h-9 rounded-xl border px-4 !text-xs !font-semibold transition ${filterButtonClass(
-                            activeFilter === "all",
-                            "all",
-                        )}`}
-                    >
-                        All ({lowStockCount + outOfStockCount})
-                    </button>
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9E0EF] px-6 py-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={() => onChangeFilter("all")}
+                            className={`h-9 rounded-xl border px-4 !text-xs !font-semibold transition ${filterClass(
+                                activeFilter === "all",
+                                "all",
+                            )}`}
+                        >
+                            All ({totalCount})
+                        </button>
 
-                    <button
-                        type="button"
-                        onClick={() => onChangeFilter("low")}
-                        className={`h-9 rounded-xl border px-4 !text-xs !font-semibold transition ${filterButtonClass(
-                            activeFilter === "low",
-                            "low",
-                        )}`}
-                    >
-                        Low Stock ({lowStockCount})
-                    </button>
+                        <button
+                            type="button"
+                            onClick={() => onChangeFilter("low")}
+                            className={`h-9 rounded-xl border px-4 !text-xs !font-semibold transition ${filterClass(
+                                activeFilter === "low",
+                                "low",
+                            )}`}
+                        >
+                            Low Stock ({lowStockCount})
+                        </button>
 
-                    <button
-                        type="button"
-                        onClick={() => onChangeFilter("out")}
-                        className={`h-9 rounded-xl border px-4 !text-xs !font-semibold transition ${filterButtonClass(
-                            activeFilter === "out",
-                            "out",
-                        )}`}
-                    >
-                        Out of Stock ({outOfStockCount})
-                    </button>
+                        <button
+                            type="button"
+                            onClick={() => onChangeFilter("out")}
+                            className={`h-9 rounded-xl border px-4 !text-xs !font-semibold transition ${filterClass(
+                                activeFilter === "out",
+                                "out",
+                            )}`}
+                        >
+                            Out of Stock ({outOfStockCount})
+                        </button>
+                    </div>
+
+                    <span className="!text-xs !font-semibold text-[#806A8C]">
+            View only
+          </span>
                 </div>
 
-                <div className="min-h-0 flex-1 overflow-auto px-6 pb-6 pt-4">
-                    <div className="overflow-hidden rounded-xl border border-[#E6DDF0]">
-                        <table className="w-full min-w-[780px] table-fixed border-collapse">
-                            <colgroup>
-                                <col className="w-[39%]" />
-                                <col className="w-[18%]" />
-                                <col className="w-[15%]" />
-                                <col className="w-[15%]" />
-                                <col className="w-[13%]" />
-                            </colgroup>
+                <div className="min-h-0 flex-1 overflow-auto">
+                    <table className="w-full min-w-[700px] border-collapse">
+                        <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
+                        <tr className="border-b border-[#E9E0EF]">
+                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Product
+                            </th>
+                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Variant
+                            </th>
+                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Current Stock
+                            </th>
+                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Alert Level
+                            </th>
+                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Status
+                            </th>
+                        </tr>
+                        </thead>
 
-                            <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
-                            <tr className="border-b border-[#E6DDF0]">
-                                <th className="px-4 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                    Product
-                                </th>
-                                <th className="px-4 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                    Variant
-                                </th>
-                                <th className="px-4 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                    Current Stock
-                                </th>
-                                <th className="px-4 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                    Alert Level
-                                </th>
-                                <th className="px-4 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                    Action
-                                </th>
+                        <tbody>
+                        {items.length === 0 ? (
+                            <tr>
+                                <td
+                                    colSpan={5}
+                                    className="px-5 py-14 text-center text-sm text-[#7A6A84]"
+                                >
+                                    No stock alerts found for this filter.
+                                </td>
                             </tr>
-                            </thead>
+                        ) : (
+                            items.map((product) => {
+                                const stock = Number(product.stock || 0);
+                                const isOut = stock <= 0;
 
-                            <tbody>
-                            {items.length === 0 ? (
-                                <tr>
-                                    <td
-                                        colSpan={5}
-                                        className="px-4 py-10 text-center text-sm text-[#7A6A84]"
+                                return (
+                                    <tr
+                                        key={product.id}
+                                        className="border-b border-[#EEE7F2] transition hover:bg-[#FFFCF7] last:border-b-0"
                                     >
-                                        No restock alerts found.
-                                    </td>
-                                </tr>
-                            ) : (
-                                items.map((product) => {
-                                    const currentStock = Number(product.stock || 0);
-                                    const alertLevel = Number(product.alertLevel || 0);
-                                    const isOutOfStock = currentStock <= 0;
-                                    const variantLabel =
-                                        product.variantName?.trim() ||
-                                        product.variant_name?.trim() ||
-                                        product.variant?.trim() ||
-                                        "—";
-
-                                    return (
-                                        <tr
-                                            key={product.id}
-                                            className="border-b border-[#EEE7F2] transition hover:bg-[#FFFCF7] last:border-b-0"
-                                        >
-                                            <td className="px-4 py-3.5 text-left">
-                                                <p className="truncate !text-sm !font-semibold !leading-5 text-[#1A1220]">
-                                                    {product.name}
-                                                </p>
-                                                <p
-                                                    className={`mt-0.5 !text-xs !font-medium !leading-4 ${
-                                                        isOutOfStock
-                                                            ? "text-[#C32F2F]"
-                                                            : "text-[#A56607]"
-                                                    }`}
-                                                >
-                                                    {isOutOfStock
-                                                        ? "Out of Stock"
-                                                        : "Low Stock"}
-                                                </p>
-                                            </td>
-
-                                            <td className="px-4 py-3.5 text-left !text-sm !font-normal !leading-5 text-[#7A6A84]">
-                                                {variantLabel}
-                                            </td>
-
-                                            <td
-                                                className={`px-4 py-3.5 text-left !text-sm !font-semibold !leading-5 ${
-                                                    isOutOfStock
-                                                        ? "text-[#C32F2F]"
-                                                        : "text-[#A56607]"
+                                        <td className="px-5 py-3.5">
+                                            <p className="!text-sm !font-semibold !leading-5 text-[#1A1220]">
+                                                {product.name}
+                                            </p>
+                                            <p
+                                                className={`mt-0.5 !text-xs !font-medium !leading-4 ${
+                                                    isOut ? "text-[#D92D20]" : "text-[#A56607]"
                                                 }`}
                                             >
-                                                {currentStock}
-                                            </td>
+                                                {isOut ? "Out of Stock" : "Low Stock"}
+                                            </p>
+                                        </td>
+                                        <td className="px-5 py-3.5 !text-sm !font-normal !leading-5 text-[#806A8C]">
+                                            —
+                                        </td>
+                                        <td
+                                            className={`px-5 py-3.5 !text-sm !font-semibold !leading-5 ${
+                                                isOut ? "text-[#D92D20]" : "text-[#A56607]"
+                                            }`}
+                                        >
+                                            {stock}
+                                        </td>
+                                        <td className="px-5 py-3.5 !text-sm !font-normal !leading-5 text-[#665875]">
+                                            {Number(product.alertLevel || 0)}
+                                        </td>
+                                        <td className="px-5 py-3.5">
+                        <span
+                            className={`inline-flex rounded-full border px-3 py-1 !text-xs !font-semibold !leading-4 ${
+                                isOut
+                                    ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
+                                    : "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]"
+                            }`}
+                        >
+                          {isOut ? "Out of Stock" : "Low Stock"}
+                        </span>
+                                        </td>
+                                    </tr>
+                                );
+                            })
+                        )}
+                        </tbody>
+                    </table>
+                </div>
 
-                                            <td className="px-4 py-3.5 text-left !text-sm !font-semibold !leading-5 text-[#5F4E75]">
-                                                {alertLevel}
-                                            </td>
-
-                                            <td className="px-4 py-3.5 text-left">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => onRestock(product)}
-                                                    className="inline-flex h-9 min-w-[74px] items-center justify-center rounded-xl border border-[#2B174C] bg-white px-3 !text-xs !font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
-                                                >
-                                                    Restock
-                                                </button>
-                                            </td>
-                                        </tr>
-                                    );
-                                })
-                            )}
-                            </tbody>
-                        </table>
-                    </div>
+                <div className="border-t border-[#E9E0EF] bg-[#FFFCF7] px-6 py-3 text-xs leading-5 text-[#7A6A84]">
+                    Manager accounts can review stock alerts for their assigned branch here. Restocking and inventory
+                    changes are managed by authorized branch users.
                 </div>
             </div>
         </div>

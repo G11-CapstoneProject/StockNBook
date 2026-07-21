@@ -3,12 +3,16 @@
 import * as React from "react";
 import {
     AlertTriangle,
+    Boxes,
     CheckCircle2,
     ChevronDown,
+    DollarSign,
     RefreshCw,
     Search,
     Store,
+    TrendingUp,
     Upload,
+    Wallet,
 } from "lucide-react";
 import type { InventoryController } from "@/hooks/useInventory";
 
@@ -129,6 +133,7 @@ function money(value: number | string) {
         maximumFractionDigits: 2,
     })}`;
 }
+
 
 function formatNumber(value: number | string) {
     return Number(value || 0).toLocaleString("en-PH");
@@ -441,6 +446,7 @@ export function SearchAndActions({
 type StockSummaryItem = {
     stock: number;
     alertLevel: number;
+    originalPrice: number;
     salesPrice: number;
 };
 
@@ -453,6 +459,7 @@ function getProductStockSummaryItems(products: Product[]): StockSummaryItem[] {
             return variants.map((variant) => ({
                 stock: Number(variant.stock || 0),
                 alertLevel: Number(variant.alertLevel || 0),
+                originalPrice: Number(variant.originalPrice || 0),
                 salesPrice: Number(variant.salesPrice || 0),
             }));
         }
@@ -461,6 +468,7 @@ function getProductStockSummaryItems(products: Product[]): StockSummaryItem[] {
             {
                 stock: Number(product.stock || 0),
                 alertLevel: Number(product.alertLevel || 0),
+                originalPrice: Number(product.originalPrice || 0),
                 salesPrice: Number(product.salesPrice || 0),
             },
         ];
@@ -546,15 +554,41 @@ function getStockAlertItems(products: Product[]): StockAlertItem[] {
 export function StatCard({
                              label,
                              value,
+                             helper,
+                             icon,
+                             iconClassName = "bg-[#F0E9FF] text-[#5A35A5]",
+                             valueClassName = "text-[#1A1220]",
                          }: {
     label: string;
-    value: React.ReactNode;
+    value: string;
+    helper: string;
+    icon: React.ReactNode;
+    iconClassName?: string;
+    valueClassName?: string;
 }) {
     return (
-        <div className="min-h-[102px] rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-            <p className="text-xs font-semibold text-[#2B174C]">{label}</p>
+        <div className="flex h-[132px] flex-col rounded-[18px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <p className="pt-1 text-sm font-semibold text-[#1A1220]">
+                    {label}
+                </p>
 
-            <div className="mt-1">{value}</div>
+                <span
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
+                >
+                    {icon}
+                </span>
+            </div>
+
+            <p
+                className={`mt-3 break-words text-[23px] font-bold leading-tight tracking-[-0.025em] ${valueClassName}`}
+            >
+                {value}
+            </p>
+
+            <p className="mt-1 text-[11px] leading-4 text-[#8A7D90]">
+                {helper}
+            </p>
         </div>
     );
 }
@@ -572,44 +606,45 @@ export function CombinedStockCard({
         <button
             type="button"
             onClick={onClick}
-            title="Click to view stock alert details"
             aria-label={`View stock alerts: ${lowStock} low stock and ${outStock} out of stock`}
-            className="group min-h-[102px] rounded-[14px] border border-[#E6DDF0] bg-white p-3 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-[#D9C4EE] hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2B174C] focus-visible:ring-offset-2"
+            className="group h-[132px] rounded-[18px] border border-[#E6DDF0] bg-white p-3 text-left shadow-sm transition-all duration-200 ease-out hover:-translate-y-1 hover:border-[#CDB9E1] hover:shadow-lg focus:outline-none focus:ring-4 focus:ring-[#2B174C]/10"
         >
-            <div className="mb-1.5 flex items-center justify-between">
-                <p className="text-xs font-semibold text-[#2B174C]">
+            <div className="flex items-start justify-between gap-3">
+                <p className="pt-1 text-sm font-semibold text-[#1A1220]">
                     Stock Alerts
                 </p>
 
-                <div className="flex items-center gap-1 text-[#2B174C]">
-                    <span className="max-w-0 overflow-hidden whitespace-nowrap text-[10px] font-semibold opacity-0 transition-all duration-200 group-hover:max-w-[34px] group-hover:opacity-100">
+                <span className="inline-flex h-9 min-w-9 items-center justify-center gap-1 rounded-full bg-[#FFF3D8] px-2 text-xs font-semibold text-[#9A6200] transition-all duration-200 group-hover:min-w-[72px]">
+                    <span className="max-w-0 translate-x-1 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 group-hover:max-w-[34px] group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:max-w-[34px] group-focus-visible:translate-x-0 group-focus-visible:opacity-100">
                         View
                     </span>
 
                     <AlertTriangle
-                        size={14}
-                        className="text-[#8A5A00] transition-transform duration-200 group-hover:scale-110"
+                        size={18}
+                        strokeWidth={1.9}
+                        className="shrink-0 transition-transform duration-200 group-hover:scale-110"
+                        aria-hidden="true"
                     />
-                </div>
+                </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
-                <div className="rounded-[8px] border border-[#F5D56B] bg-[#FFF8D8] px-2 py-1.5 text-center">
-                    <p className="whitespace-nowrap text-[9px] font-semibold leading-none text-[#8A5A00]">
+            <div className="mt-2 grid grid-cols-2 gap-2">
+                <div className="rounded-xl border border-[#F0CF78] bg-[#FFF8DC] px-2 py-2 text-center transition-transform duration-200 group-hover:-translate-y-0.5">
+                    <p className="text-[10px] font-semibold text-[#9A6200]">
                         Low Stock
                     </p>
 
-                    <p className="mt-1 text-[16px] font-bold leading-none text-[#8A5A00]">
+                    <p className="mt-0.5 text-[21px] font-bold leading-none text-[#D68B00]">
                         {formatNumber(lowStock)}
                     </p>
                 </div>
 
-                <div className="rounded-[8px] border border-[#F3A3A3] bg-[#FFE5E5] px-2 py-1.5 text-center">
-                    <p className="whitespace-nowrap text-[9px] font-semibold leading-none text-[#9A2424]">
+                <div className="rounded-xl border border-[#F0B6B6] bg-[#FFF0F0] px-2 py-2 text-center transition-transform duration-200 group-hover:-translate-y-0.5">
+                    <p className="text-[10px] font-semibold text-[#B92727]">
                         Out of Stock
                     </p>
 
-                    <p className="mt-1 text-[16px] font-bold leading-none text-[#9A2424]">
+                    <p className="mt-0.5 text-[21px] font-bold leading-none text-[#C92D2D]">
                         {formatNumber(outStock)}
                     </p>
                 </div>
@@ -814,30 +849,16 @@ export function InventoryStats({
     products: Product[];
     onRestock?: (product: Product) => void;
 }) {
-    const [showStockAlertsDialog, setShowStockAlertsDialog] = React.useState(false);
+    const [showStockAlertsDialog, setShowStockAlertsDialog] =
+        React.useState(false);
 
     const stockItems = getProductStockSummaryItems(products);
     const alertItems = getStockAlertItems(products);
 
-    const totalProducts = products.length;
-
-    const totalStock = products.reduce((sum, product) => {
-        const variants = Array.isArray(product.variants) ? product.variants : [];
-        const hasVariants = product.hasVariants && variants.length > 0;
-
-        if (hasVariants) {
-            return (
-                sum +
-                variants.reduce(
-                    (variantSum, variant) =>
-                        variantSum + Number(variant.stock || 0),
-                    0
-                )
-            );
-        }
-
-        return sum + Number(product.stock || 0);
-    }, 0);
+    const totalStock = stockItems.reduce(
+        (sum, item) => sum + Math.max(0, Number(item.stock || 0)),
+        0
+    );
 
     const lowStock = alertItems.filter(
         (item) => item.status === "Low Stock"
@@ -847,30 +868,33 @@ export function InventoryStats({
         (item) => item.status === "Out of Stock"
     ).length;
 
-    const value = stockItems.reduce(
-        (sum, item) => sum + item.salesPrice * item.stock,
+    const totalCostValue = stockItems.reduce(
+        (sum, item) =>
+            sum +
+            Math.max(0, Number(item.stock || 0)) *
+            Number(item.originalPrice || 0),
         0
     );
 
+    const retailValue = stockItems.reduce(
+        (sum, item) =>
+            sum +
+            Math.max(0, Number(item.stock || 0)) *
+            Number(item.salesPrice || 0),
+        0
+    );
+
+    const potentialProfit = retailValue - totalCostValue;
+
     return (
         <>
-            <div className="mb-3 grid gap-3 lg:grid-cols-4">
-                <StatCard
-                    label="Products"
-                    value={
-                        <p className="truncate text-[19px] font-bold leading-tight text-[#1A1220]">
-                            {formatNumber(totalProducts)}
-                        </p>
-                    }
-                />
-
+            <div className="mb-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <StatCard
                     label="Total Stock"
-                    value={
-                        <p className="truncate text-[19px] font-bold leading-tight text-[#1A1220]">
-                            {formatNumber(totalStock)}
-                        </p>
-                    }
+                    value={formatNumber(totalStock)}
+                    helper="Total units currently in stock"
+                    icon={<Boxes size={18} strokeWidth={1.9} />}
+                    iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
                 />
 
                 <CombinedStockCard
@@ -880,12 +904,29 @@ export function InventoryStats({
                 />
 
                 <StatCard
-                    label="Inventory Value"
-                    value={
-                        <p className="truncate text-[19px] font-bold leading-tight text-[#1A1220]">
-                            {money(value)}
-                        </p>
-                    }
+                    label="Total cost value"
+                    value={money(totalCostValue)}
+                    helper="Sum of remaining stock at cost price"
+                    icon={<Wallet size={18} strokeWidth={1.9} />}
+                    iconClassName="bg-[#EAF4ED] text-[#315847]"
+                />
+
+                <StatCard
+                    label="Retail value"
+                    value={money(retailValue)}
+                    helper="Sum of remaining stock at selling price"
+                    icon={<DollarSign size={18} strokeWidth={2} />}
+                    iconClassName="bg-[#EAF1FF] text-[#245EDB]"
+                    valueClassName="text-[#245EDB]"
+                />
+
+                <StatCard
+                    label="Potential profit"
+                    value={money(potentialProfit)}
+                    helper="Retail value minus cost value"
+                    icon={<TrendingUp size={18} strokeWidth={1.9} />}
+                    iconClassName="bg-[#EAF8EF] text-[#168A48]"
+                    valueClassName="text-[#168A48]"
                 />
             </div>
 
@@ -1187,7 +1228,7 @@ export function ProductTable({
                         "Stock",
                         "Alert",
                         "Cost Price",
-                        "Sales Price",
+                        "Selling Price",
                         "Status",
                         "Actions",
                     ].map((head: string) => (
@@ -1848,8 +1889,8 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                                         "Category",
                                         "Stock",
                                         "Alert",
-                                        "Original",
-                                        "Sales",
+                                        "Cost Price",
+                                        "Selling Price",
                                         "Type",
                                     ].map((head) => (
                                         <th
@@ -2612,7 +2653,7 @@ function SimpleProductFields({ inv }: { inv: InventoryController }) {
 
             <div className="grid grid-cols-2 gap-2">
                 <div className="space-y-1">
-                    <label className={labelClass}>Original Price</label>
+                    <label className={labelClass}>Cost Price</label>
                     <PesoPriceInput
                         value={inv.originalPrice}
                         onChange={(value) => inv.setOriginalPrice(value)}
@@ -2620,7 +2661,7 @@ function SimpleProductFields({ inv }: { inv: InventoryController }) {
                 </div>
 
                 <div className="space-y-1">
-                    <label className={labelClass}>Sales Price</label>
+                    <label className={labelClass}>Selling Price</label>
                     <PesoPriceInput
                         value={inv.salesPrice}
                         onChange={(value) => inv.setSalesPrice(value)}
@@ -2880,11 +2921,11 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
                         </th>
 
                         <th className="pb-2 pr-2 text-center text-[11px] font-semibold uppercase tracking-[0.12em] text-[#806A8C]">
-                            Original Price
+                            Cost Price
                         </th>
 
                         <th className="pb-2 pr-2 text-center text-[11px] font-semibold uppercase tracking-[0.12em] text-[#806A8C]">
-                            Sales Price
+                            Selling Price
                         </th>
 
                         <th className="pb-2 text-center text-[11px] font-semibold uppercase tracking-[0.12em] text-[#806A8C]">

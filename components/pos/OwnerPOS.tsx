@@ -3,10 +3,13 @@
 import {
     Building2,
     CalendarDays,
+    CircleDollarSign,
     Check,
     ChevronDown,
+    ReceiptText,
     RefreshCw,
     Search,
+    TrendingUp,
     X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -298,14 +301,27 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                         <StatCard
                             label="Total Orders"
                             value={scopeSales.orders.length}
+                            helper="Orders in the selected sales scope"
+                            icon={<ReceiptText size={18} strokeWidth={1.9} />}
+                            iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
                         />
+
                         <StatCard
                             label="Total Sales"
                             value={peso(scopeSales.sales)}
+                            helper="Sales recorded in the selected scope"
+                            icon={<CircleDollarSign size={18} strokeWidth={1.9} />}
+                            iconClassName="bg-[#EAF1FF] text-[#245EDB]"
+                            valueClassName="text-[#245EDB]"
                         />
+
                         <StatCard
                             label="Total Revenue"
                             value={peso(scopeSales.profit)}
+                            helper="Revenue recorded in the selected scope"
+                            icon={<TrendingUp size={18} strokeWidth={1.9} />}
+                            iconClassName="bg-[#EAF8EF] text-[#168A48]"
+                            valueClassName="text-[#168A48]"
                         />
                     </div>
 

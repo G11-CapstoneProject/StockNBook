@@ -5,11 +5,14 @@ import { useEffect, useState } from "react";
 import {
     CheckCircle2,
     ChevronDown,
+    CircleDollarSign,
     ChevronRight,
     Minus,
     Plus,
     Search,
+    ReceiptText,
     ShoppingBag,
+    TrendingUp,
     Trash2,
     X,
 } from "lucide-react";
@@ -26,9 +29,31 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
             onRefresh={() => window.location.reload()}
         >
             <div className="mb-3 grid gap-3 md:grid-cols-3">
-                <StatCard label="Today's Sales" value={peso(pos.todayRevenue)} />
-                <StatCard label="Orders Today" value={pos.todayOrders.length} />
-                <StatCard label="Today's Profit" value={peso(pos.todayProfit)} />
+                <StatCard
+                    label="Today's Sales"
+                    value={peso(pos.todayRevenue)}
+                    helper="Sales recorded today"
+                    icon={<CircleDollarSign size={18} strokeWidth={1.9} />}
+                    iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
+                />
+
+                <StatCard
+                    label="Orders Today"
+                    value={pos.todayOrders.length}
+                    helper="Orders recorded today"
+                    icon={<ReceiptText size={18} strokeWidth={1.9} />}
+                    iconClassName="bg-[#EAF1FF] text-[#245EDB]"
+                    valueClassName="text-[#245EDB]"
+                />
+
+                <StatCard
+                    label="Today's Profit"
+                    value={peso(pos.todayProfit)}
+                    helper="Profit earned from today's sales"
+                    icon={<TrendingUp size={18} strokeWidth={1.9} />}
+                    iconClassName="bg-[#EAF8EF] text-[#168A48]"
+                    valueClassName="text-[#168A48]"
+                />
             </div>
 
             <div className="space-y-3">

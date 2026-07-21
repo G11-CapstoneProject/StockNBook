@@ -364,18 +364,40 @@ export const readBranchName = (): string => {
 export function StatCard({
                              label,
                              value,
+                             helper,
+                             icon,
+                             iconClassName = "bg-[#F0E9FF] text-[#5A35A5]",
+                             valueClassName = "text-[#1A1220]",
                          }: {
     label: string;
     value: string | number;
+    helper: string;
+    icon: ReactNode;
+    iconClassName?: string;
+    valueClassName?: string;
 }) {
     return (
-        <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-            <p className="text-xs font-semibold text-[#2B174C]">
-                {label}
+        <div className="flex h-[132px] flex-col rounded-[18px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <p className="pt-1 text-sm font-semibold text-[#1A1220]">
+                    {label}
+                </p>
+
+                <span
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
+                >
+                    {icon}
+                </span>
+            </div>
+
+            <p
+                className={`mt-3 break-words text-[23px] font-bold leading-tight tracking-[-0.025em] ${valueClassName}`}
+            >
+                {value}
             </p>
 
-            <p className="mt-1 text-[19px] font-bold leading-tight text-[#1A1220]">
-                {value}
+            <p className="mt-1 text-[11px] leading-4 text-[#8A7D90]">
+                {helper}
             </p>
         </div>
     );

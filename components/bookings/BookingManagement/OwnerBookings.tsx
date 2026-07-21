@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import {
+    Building2,
+    CalendarDays,
+    CircleDollarSign,
+    RefreshCw,
+} from "lucide-react";
 import {
     Booking,
     BookingRow,
@@ -257,12 +262,14 @@ export default function OwnerBookings() {
             </div>
 
             <section className="px-6 py-4 font-sans">
-                <div className="mb-3 grid gap-3 lg:grid-cols-3">
+                <div className="mb-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                     <CompactMetricCard
                         title="Booking Sales"
                         value={peso(bookingSales)}
                         subLabel="Revenue"
                         subValue={peso(bookingRevenue)}
+                        icon={<CircleDollarSign size={18} strokeWidth={1.9} />}
+                        iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
                     />
 
                     <CompactMetricCard
@@ -270,6 +277,9 @@ export default function OwnerBookings() {
                         value={String(totalBookings)}
                         subLabel="Scope"
                         subValue="All branches"
+                        icon={<CalendarDays size={18} strokeWidth={1.9} />}
+                        iconClassName="bg-[#EAF1FF] text-[#245EDB]"
+                        valueClassName="text-[#245EDB]"
                     />
 
                     <CompactMetricCard
@@ -283,6 +293,10 @@ export default function OwnerBookings() {
                                 }`
                                 : "—"
                         }
+                        icon={<Building2 size={18} strokeWidth={1.9} />}
+                        iconClassName="bg-[#EAF8EF] text-[#168A48]"
+                        valueClassName="text-[#168A48]"
+                        compactValue
                     />
                 </div>
 
@@ -466,30 +480,55 @@ function CompactMetricCard({
                                value,
                                subLabel,
                                subValue,
+                               icon,
+                               iconClassName = "bg-[#F0E9FF] text-[#5A35A5]",
+                               valueClassName = "text-[#1A1220]",
+                               compactValue = false,
                            }: {
     title: string;
     value: string;
     subLabel?: string;
     subValue?: string;
+    icon: React.ReactNode;
+    iconClassName?: string;
+    valueClassName?: string;
+    compactValue?: boolean;
 }) {
-    return (
-        <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-            <div className="min-w-0">
-                <p className="text-xs font-semibold text-[#2B174C]">{title}</p>
+    const helperText =
+        subLabel && subValue
+            ? `${subLabel}: ${subValue}`
+            : "";
 
-                <p className="mt-1 truncate text-[19px] font-bold leading-tight text-[#1A1220]">
-                    {value}
+    return (
+        <div className="flex h-[132px] flex-col rounded-[18px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <p className="pt-1 text-sm font-semibold text-[#1A1220]">
+                    {title}
                 </p>
 
-                {subLabel && subValue && (
-                    <div className="mt-2 flex items-center justify-between gap-3 border-t border-[#EFE7F4] pt-2 text-xs">
-                        <span className="text-[#5F4E75]">{subLabel}</span>
-                        <span className="font-semibold text-[#1A1220]">
-                            {subValue}
-                        </span>
-                    </div>
-                )}
+                <span
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
+                >
+                    {icon}
+                </span>
             </div>
+
+            <p
+                className={[
+                    "mt-3 break-words font-bold leading-tight tracking-[-0.025em]",
+                    compactValue ? "line-clamp-2 text-[19px]" : "text-[23px]",
+                    valueClassName,
+                ].join(" ")}
+                title={value}
+            >
+                {value}
+            </p>
+
+            {helperText && (
+                <p className="mt-1 text-[11px] leading-4 text-[#8A7D90]">
+                    {helperText}
+                </p>
+            )}
         </div>
     );
 }

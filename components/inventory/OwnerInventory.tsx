@@ -3,11 +3,15 @@
 import * as React from "react";
 import {
     AlertTriangle,
+    Boxes,
     Building2,
     Check,
     ChevronDown,
+    DollarSign,
     RefreshCw,
     Search,
+    TrendingUp,
+    Wallet,
     X,
 } from "lucide-react";
 import { useInventoryController } from "@/hooks/useInventory";
@@ -173,19 +177,26 @@ function getInventoryOverview(products: Product[]) {
                     ? variants.map((variant) => ({
                         stock: Number(variant.stock || 0),
                         alertLevel: Number(variant.alertLevel || 0),
+                        costPrice: Number(variant.originalPrice || 0),
                         salesPrice: Number(variant.salesPrice || 0),
                     }))
                     : [
                         {
                             stock: Number(product.stock || 0),
                             alertLevel: Number(product.alertLevel || 0),
+                            costPrice: Number(product.originalPrice || 0),
                             salesPrice: Number(product.salesPrice || 0),
                         },
                     ];
 
             stockItems.forEach((item) => {
-                totals.totalStock += item.stock;
-                totals.inventoryValue += item.stock * item.salesPrice;
+                const availableStock = Math.max(0, item.stock);
+                const costValue = availableStock * item.costPrice;
+                const retailValue = availableStock * item.salesPrice;
+
+                totals.totalStock += availableStock;
+                totals.totalCostValue += costValue;
+                totals.retailValue += retailValue;
 
                 if (item.stock <= 0) {
                     totals.outOfStock += 1;
@@ -194,6 +205,9 @@ function getInventoryOverview(products: Product[]) {
                 }
             });
 
+            totals.potentialProfit =
+                totals.retailValue - totals.totalCostValue;
+
             return totals;
         },
         {
@@ -201,10 +215,13 @@ function getInventoryOverview(products: Product[]) {
             totalStock: 0,
             lowStock: 0,
             outOfStock: 0,
-            inventoryValue: 0,
+            totalCostValue: 0,
+            retailValue: 0,
+            potentialProfit: 0,
         }
     );
 }
+
 
 function OwnerInventoryContent() {
     const inv = useInventoryController();
@@ -608,7 +625,9 @@ function InventoryOverviewCards({
         totalStock: number;
         lowStock: number;
         outOfStock: number;
-        inventoryValue: number;
+        totalCostValue: number;
+        retailValue: number;
+        potentialProfit: number;
     };
     onViewAlerts: () => void;
 }) {
@@ -621,57 +640,62 @@ function InventoryOverviewCards({
         value.toLocaleString("en-PH", {
             style: "currency",
             currency: "PHP",
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
         });
 
     return (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <InventoryMetricCard
-                label="Products"
-                value={formatNumber(overview.totalProducts)}
-            />
-
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
             <InventoryMetricCard
                 label="Total Stock"
                 value={formatNumber(overview.totalStock)}
+                helper="Total units currently in stock"
+                icon={<Boxes size={18} strokeWidth={1.9} />}
+                iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
             />
 
             <button
                 type="button"
                 onClick={onViewAlerts}
-                title="View stock alert details"
                 aria-label="View stock alert details"
-                className="min-h-[102px] rounded-[14px] border border-[#E6DDF0] bg-white p-3 text-left shadow-sm transition hover:border-[#CDB9E1] hover:shadow-md focus:outline-none focus:ring-4 focus:ring-[#2B174C]/10"
+                className="group h-[132px] rounded-[18px] border border-[#E6DDF0] bg-white p-3 text-left shadow-sm transition-all duration-200 ease-out hover:-translate-y-1 hover:border-[#CDB9E1] hover:shadow-lg focus:outline-none focus:ring-4 focus:ring-[#2B174C]/10"
             >
-                <div className="flex items-center justify-between gap-3">
-                    <p className="text-sm font-semibold text-[#1A1220]">
+                <div className="flex items-start justify-between gap-3">
+                    <p className="pt-1 text-sm font-semibold text-[#1A1220]">
                         Stock Alerts
                     </p>
 
-                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#2B174C]">
-                        View
+                    <span className="inline-flex h-9 min-w-9 items-center justify-center gap-1 rounded-full bg-[#FFF3D8] px-2 text-xs font-semibold text-[#9A6200] transition-all duration-200 group-hover:min-w-[72px]">
+                        <span className="max-w-0 translate-x-1 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 group-hover:max-w-[34px] group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:max-w-[34px] group-focus-visible:translate-x-0 group-focus-visible:opacity-100">
+                            View
+                        </span>
+
                         <AlertTriangle
-                            size={15}
-                            className="text-[#A56607]"
+                            size={18}
+                            strokeWidth={1.9}
+                            className="shrink-0 transition-transform duration-200 group-hover:scale-110"
                             aria-hidden="true"
                         />
                     </span>
                 </div>
 
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                    <div className="rounded-lg border border-[#F4D79A] bg-[#FFF8D8] px-2 py-1.5 text-center">
-                        <p className="text-[10px] font-semibold text-[#A56607]">
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                    <div className="rounded-xl border border-[#F0CF78] bg-[#FFF8DC] px-2 py-2 text-center transition-transform duration-200 group-hover:-translate-y-0.5">
+                        <p className="text-[10px] font-semibold text-[#9A6200]">
                             Low Stock
                         </p>
-                        <p className="mt-0.5 text-[18px] font-bold leading-none text-[#A56607]">
+
+                        <p className="mt-0.5 text-[21px] font-bold leading-none text-[#D68B00]">
                             {formatNumber(overview.lowStock)}
                         </p>
                     </div>
 
-                    <div className="rounded-lg border border-[#F2C4C4] bg-[#FFF0F0] px-2 py-1.5 text-center">
-                        <p className="text-[10px] font-semibold text-[#C32F2F]">
+                    <div className="rounded-xl border border-[#F0B6B6] bg-[#FFF0F0] px-2 py-2 text-center transition-transform duration-200 group-hover:-translate-y-0.5">
+                        <p className="text-[10px] font-semibold text-[#B92727]">
                             Out of Stock
                         </p>
-                        <p className="mt-0.5 text-[18px] font-bold leading-none text-[#C32F2F]">
+
+                        <p className="mt-0.5 text-[21px] font-bold leading-none text-[#C92D2D]">
                             {formatNumber(overview.outOfStock)}
                         </p>
                     </div>
@@ -679,9 +703,29 @@ function InventoryOverviewCards({
             </button>
 
             <InventoryMetricCard
-                label="Inventory Value"
-                value={formatPeso(overview.inventoryValue)}
-                compact
+                label="Total cost value"
+                value={formatPeso(overview.totalCostValue)}
+                helper="Sum of remaining stock at cost price"
+                icon={<Wallet size={18} strokeWidth={1.9} />}
+                iconClassName="bg-[#EAF4ED] text-[#315847]"
+            />
+
+            <InventoryMetricCard
+                label="Retail value"
+                value={formatPeso(overview.retailValue)}
+                helper="Sum of remaining stock at selling price"
+                icon={<DollarSign size={18} strokeWidth={2} />}
+                iconClassName="bg-[#EAF1FF] text-[#245EDB]"
+                valueClassName="text-[#245EDB]"
+            />
+
+            <InventoryMetricCard
+                label="Potential profit"
+                value={formatPeso(overview.potentialProfit)}
+                helper="Retail value minus cost value"
+                icon={<TrendingUp size={18} strokeWidth={1.9} />}
+                iconClassName="bg-[#EAF8EF] text-[#168A48]"
+                valueClassName="text-[#168A48]"
             />
         </div>
     );
@@ -919,22 +963,40 @@ function StockAlertCell({
 function InventoryMetricCard({
                                  label,
                                  value,
-                                 compact = false,
+                                 helper,
+                                 icon,
+                                 iconClassName = "bg-[#F0E9FF] text-[#5A35A5]",
+                                 valueClassName = "text-[#1A1220]",
                              }: {
     label: string;
     value: string;
-    compact?: boolean;
+    helper: string;
+    icon: React.ReactNode;
+    iconClassName?: string;
+    valueClassName?: string;
 }) {
     return (
-        <div className="min-h-[102px] rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-            <p className="text-sm font-semibold text-[#1A1220]">{label}</p>
+        <div className="flex h-[132px] flex-col rounded-[18px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <p className="pt-1 text-sm font-semibold text-[#1A1220]">
+                    {label}
+                </p>
+
+                <span
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
+                >
+                    {icon}
+                </span>
+            </div>
 
             <p
-                className={`mt-1.5 font-bold leading-none text-[#1A1220] ${
-                    compact ? "text-[22px]" : "text-[24px]"
-                }`}
+                className={`mt-3 break-words text-[23px] font-bold leading-tight tracking-[-0.025em] ${valueClassName}`}
             >
                 {value}
+            </p>
+
+            <p className="mt-1 text-[11px] leading-4 text-[#8A7D90]">
+                {helper}
             </p>
         </div>
     );

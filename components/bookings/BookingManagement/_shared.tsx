@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
     ChevronDown,
     ChevronLeft,
@@ -441,6 +441,64 @@ export function MetricCard({
                         {subValue}
                     </span>
                 </div>
+            )}
+        </div>
+    );
+}
+
+export function BookingOverviewCard({
+                                        title,
+                                        value,
+                                        subLabel,
+                                        subValue,
+                                        icon,
+                                        iconClassName = "bg-[#F0E9FF] text-[#5A35A5]",
+                                        valueClassName = "text-[#1A1220]",
+                                        compactValue = false,
+                                    }: {
+    title: string;
+    value: string;
+    subLabel?: string;
+    subValue?: string;
+    icon: ReactNode;
+    iconClassName?: string;
+    valueClassName?: string;
+    compactValue?: boolean;
+}) {
+    const helperText =
+        subLabel && subValue
+            ? `${subLabel}: ${subValue}`
+            : "";
+
+    return (
+        <div className="flex h-[132px] flex-col rounded-[18px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <p className="pt-1 text-sm font-semibold text-[#1A1220]">
+                    {title}
+                </p>
+
+                <span
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
+                >
+                    {icon}
+                </span>
+            </div>
+
+            <p
+                className={[
+                    "mt-3 break-words font-bold leading-tight tracking-[-0.025em]",
+                    compactValue ? "line-clamp-2 text-[19px]" : "text-[23px]",
+                    valueClassName,
+                ].join(" ")}
+                title={value}
+            >
+                {value}
+            </p>
+
+            {helperText && (
+                <p className="mt-1 text-[11px] leading-4 text-[#8A7D90]">
+                    {helperText}
+                </p>
             )}
         </div>
     );

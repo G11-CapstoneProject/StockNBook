@@ -7,6 +7,8 @@ const tls = require("tls");
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 
 const OTP_EXPIRY_SECONDS = 90;
+const MANAGER_INVITE_OTP_EXPIRY_SECONDS = 300;
+const STAFF_INVITE_OTP_EXPIRY_SECONDS = 300;
 
 const SMTP_USER = "noreplystocknbook@gmail.com";
 
@@ -62,6 +64,282 @@ async function ensureSignupOtpsTable(connection) {
                                          )
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+}
+
+
+function hashInviteToken(inviteToken) {
+    return crypto
+        .createHash("sha256")
+        .update(String(inviteToken))
+        .digest("hex");
+}
+
+async function ensureManagerInviteOtpsTable(connection) {
+    await connection.execute(`
+        CREATE TABLE IF NOT EXISTS manager_invite_otps (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            invite_token_hash CHAR(64) NOT NULL,
+            email VARCHAR(255) NOT NULL,
+            otp_hash CHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            verified_at DATETIME NULL,
+            used TINYINT(1) NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_manager_invite_otp_email (email),
+            INDEX idx_manager_invite_otp_lookup (
+                invite_token_hash,
+                email,
+                used,
+                expires_at
+            ),
+            INDEX idx_manager_invite_otp_verified (
+                invite_token_hash,
+                email,
+                verified_at
+            )
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+}
+
+async function getManagerInviteRecord(connection, inviteToken) {
+    if (!inviteToken) {
+        const error = new Error("Missing invitation token.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    let decoded;
+
+    try {
+        decoded = jwt.verify(inviteToken, JWT_SECRET);
+    } catch {
+        const error = new Error("Invalid or expired invitation.");
+        error.statusCode = 401;
+        throw error;
+    }
+
+    if (decoded.type !== "manager_invite") {
+        const error = new Error("Invalid invitation type.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const [rows] = await connection.execute(
+        `SELECT
+             managers.id AS manager_id,
+             managers.manager_name,
+             managers.manager_email,
+             managers.permissions,
+             managers.status,
+             managers.store_id,
+             managers.branch_id,
+             branches.branch_name,
+             stores.store_name
+         FROM managers
+         JOIN branches ON managers.branch_id = branches.id
+         JOIN stores ON managers.store_id = stores.id
+         WHERE managers.invite_token = ?
+           AND managers.manager_email = ?
+           AND managers.store_id = ?
+           AND managers.branch_id = ?
+         LIMIT 1`,
+        [
+            inviteToken,
+            String(decoded.email || "").toLowerCase(),
+            decoded.store_id,
+            decoded.branch_id,
+        ]
+    );
+
+    if (rows.length === 0) {
+        const error = new Error("Invitation not found or already used.");
+        error.statusCode = 404;
+        throw error;
+    }
+
+    const manager = rows[0];
+
+    return {
+        decoded,
+        manager: {
+            manager_id: manager.manager_id,
+            manager_name: manager.manager_name || "",
+            manager_email: manager.manager_email || "",
+            store_id: manager.store_id,
+            store_name: manager.store_name || "",
+            branch_id: manager.branch_id,
+            branch_name: manager.branch_name || "",
+            role: "manager",
+            status: manager.status || "pending",
+            permissions:
+                typeof manager.permissions === "string"
+                    ? JSON.parse(manager.permissions || "{}")
+                    : manager.permissions || {},
+        },
+    };
+}
+
+async function requireVerifiedManagerInvite(connection, inviteToken, email) {
+    await ensureManagerInviteOtpsTable(connection);
+
+    const inviteTokenHash = hashInviteToken(inviteToken);
+    const [rows] = await connection.execute(
+        `SELECT id
+         FROM manager_invite_otps
+         WHERE invite_token_hash = ?
+           AND email = ?
+           AND verified_at IS NOT NULL
+           AND verified_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 MINUTE)
+         ORDER BY id DESC
+         LIMIT 1`,
+        [inviteTokenHash, String(email || "").toLowerCase()]
+    );
+
+    if (rows.length === 0) {
+        const error = new Error(
+            "Verify the invited email before continuing."
+        );
+        error.statusCode = 403;
+        throw error;
+    }
+}
+
+
+async function ensureStaffInviteOtpsTable(connection) {
+    await connection.execute(`
+        CREATE TABLE IF NOT EXISTS staff_invite_otps (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            invite_token_hash CHAR(64) NOT NULL,
+            email VARCHAR(255) NOT NULL,
+            otp_hash CHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            verified_at DATETIME NULL,
+            used TINYINT(1) NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_staff_invite_otp_email (email),
+            INDEX idx_staff_invite_otp_lookup (
+                invite_token_hash,
+                email,
+                used,
+                expires_at
+            ),
+            INDEX idx_staff_invite_otp_verified (
+                invite_token_hash,
+                email,
+                verified_at
+            )
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+}
+
+async function getStaffInviteRecord(connection, inviteToken) {
+    if (!inviteToken) {
+        const error = new Error("Missing invitation token.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    let decoded;
+
+    try {
+        decoded = jwt.verify(inviteToken, JWT_SECRET);
+    } catch {
+        const error = new Error("Invalid or expired invitation.");
+        error.statusCode = 401;
+        throw error;
+    }
+
+    if (decoded.type !== "staff_invite") {
+        const error = new Error("Invalid invitation type.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const [rows] = await connection.execute(
+        `SELECT
+             staff.id AS staff_id,
+             staff.staff_name,
+             staff.staff_email,
+             staff.permissions,
+             staff.status,
+             staff.store_id,
+             staff.branch_id,
+             staff.manager_id,
+             branches.branch_name,
+             stores.store_name,
+             COALESCE(managers.manager_name, '') AS manager_name
+         FROM staff
+         JOIN branches ON staff.branch_id = branches.id
+         JOIN stores ON staff.store_id = stores.id
+         LEFT JOIN managers ON staff.manager_id = managers.id
+         WHERE staff.invite_token = ?
+           AND staff.staff_email = ?
+           AND staff.store_id = ?
+           AND staff.branch_id = ?
+           AND staff.manager_id = ?
+         LIMIT 1`,
+        [
+            inviteToken,
+            String(decoded.email || "").toLowerCase(),
+            decoded.store_id,
+            decoded.branch_id,
+            decoded.manager_id,
+        ]
+    );
+
+    if (rows.length === 0) {
+        const error = new Error("Invitation not found or already used.");
+        error.statusCode = 404;
+        throw error;
+    }
+
+    const staffMember = rows[0];
+
+    return {
+        decoded,
+        staff: {
+            staff_id: staffMember.staff_id,
+            staff_name: staffMember.staff_name || "",
+            staff_email: staffMember.staff_email || "",
+            manager_id: staffMember.manager_id,
+            manager_name: staffMember.manager_name || "",
+            store_id: staffMember.store_id,
+            store_name: staffMember.store_name || "",
+            branch_id: staffMember.branch_id,
+            branch_name: staffMember.branch_name || "",
+            role: "staff",
+            status: staffMember.status || "pending",
+            permissions:
+                typeof staffMember.permissions === "string"
+                    ? JSON.parse(staffMember.permissions || "{}")
+                    : staffMember.permissions || {},
+        },
+    };
+}
+
+async function requireVerifiedStaffInvite(connection, inviteToken, email) {
+    await ensureStaffInviteOtpsTable(connection);
+
+    const inviteTokenHash = hashInviteToken(inviteToken);
+    const [rows] = await connection.execute(
+        `SELECT id
+         FROM staff_invite_otps
+         WHERE invite_token_hash = ?
+           AND email = ?
+           AND verified_at IS NOT NULL
+           AND verified_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 MINUTE)
+         ORDER BY id DESC
+         LIMIT 1`,
+        [inviteTokenHash, String(email || "").toLowerCase()]
+    );
+
+    if (rows.length === 0) {
+        const error = new Error(
+            "Verify the invited email before continuing."
+        );
+        error.statusCode = 403;
+        throw error;
+    }
 }
 
 function createSmtpResponseReader(socket) {
@@ -233,6 +511,94 @@ function permissionLabel(permission) {
     };
 
     return labels[permission] || permission;
+}
+
+
+function buildManagerInviteOtpEmail(toEmail, otp, managerName) {
+    const safeName = escapeHtml(managerName || "Manager");
+    const safeOtp = escapeHtml(otp);
+
+    const html = `
+        <div style="font-family:Arial,Helvetica,sans-serif;background:#F7F4FB;padding:28px 14px;color:#21172C;">
+            <div style="max-width:560px;margin:auto;overflow:hidden;border:1px solid #E7DFEA;border-radius:20px;background:#FFFFFF;box-shadow:0 18px 50px rgba(45,27,78,.12);">
+                <div style="background:linear-gradient(135deg,#2D1B4E,#4B2B75);padding:26px 30px;color:#FFFFFF;">
+                    <div style="font-size:22px;font-weight:800;">Stock<span style="color:#D4A126;">N</span>Book</div>
+                    <div style="margin-top:7px;font-size:13px;color:rgba(255,255,255,.72);">Manager invitation verification</div>
+                </div>
+                <div style="padding:30px;">
+                    <h1 style="margin:0;font-size:25px;color:#21172C;">Verify your invited email</h1>
+                    <p style="margin:16px 0 0;font-size:15px;line-height:1.7;color:#6F6577;">
+                        Hello <strong style="color:#2D1B4E;">${safeName}</strong>, use the code below to continue accepting your StockNBook manager invitation.
+                    </p>
+                    <div style="margin:24px 0;padding:20px;text-align:center;border-radius:14px;background:#F3ECFF;">
+                        <div style="font-size:34px;font-weight:800;letter-spacing:8px;color:#4B2380;">${safeOtp}</div>
+                    </div>
+                    <p style="margin:0;font-size:13px;line-height:1.6;color:#7A6E88;">
+                        This code expires in 5 minutes. Do not share it with anyone.
+                    </p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const message = [
+        `From: ${EMAIL_FROM}`,
+        `Reply-To: ${EMAIL_REPLY_TO}`,
+        `To: ${sanitizeEmailHeader(toEmail)}`,
+        "Subject: StockNBook Manager Invitation Verification Code",
+        `Date: ${new Date().toUTCString()}`,
+        "MIME-Version: 1.0",
+        'Content-Type: text/html; charset="UTF-8"',
+        "Content-Transfer-Encoding: 8bit",
+        "",
+        html,
+    ].join("\r\n");
+
+    return message.replace(/^\./gm, "..");
+}
+
+
+function buildStaffInviteOtpEmail(toEmail, otp, staffName) {
+    const safeName = escapeHtml(staffName || "Staff member");
+    const safeOtp = escapeHtml(otp);
+
+    const html = `
+        <div style="font-family:Arial,Helvetica,sans-serif;background:#F7F4FB;padding:28px 14px;color:#21172C;">
+            <div style="max-width:560px;margin:auto;overflow:hidden;border:1px solid #E7DFEA;border-radius:20px;background:#FFFFFF;box-shadow:0 18px 50px rgba(45,27,78,.12);">
+                <div style="background:linear-gradient(135deg,#2D1B4E,#4B2B75);padding:26px 30px;color:#FFFFFF;">
+                    <div style="font-size:22px;font-weight:800;">Stock<span style="color:#D4A126;">N</span>Book</div>
+                    <div style="margin-top:7px;font-size:13px;color:rgba(255,255,255,.72);">Staff invitation verification</div>
+                </div>
+                <div style="padding:30px;">
+                    <h1 style="margin:0;font-size:25px;color:#21172C;">Verify your invited email</h1>
+                    <p style="margin:16px 0 0;font-size:15px;line-height:1.7;color:#6F6577;">
+                        Hello <strong style="color:#2D1B4E;">${safeName}</strong>, use the code below to continue accepting your StockNBook staff invitation.
+                    </p>
+                    <div style="margin:24px 0;padding:20px;text-align:center;border-radius:14px;background:#F3ECFF;">
+                        <div style="font-size:34px;font-weight:800;letter-spacing:8px;color:#4B2380;">${safeOtp}</div>
+                    </div>
+                    <p style="margin:0;font-size:13px;line-height:1.6;color:#7A6E88;">
+                        This code expires in 5 minutes. Do not share it with anyone.
+                    </p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const message = [
+        `From: ${EMAIL_FROM}`,
+        `Reply-To: ${EMAIL_REPLY_TO}`,
+        `To: ${sanitizeEmailHeader(toEmail)}`,
+        "Subject: StockNBook Staff Invitation Verification Code",
+        `Date: ${new Date().toUTCString()}`,
+        "MIME-Version: 1.0",
+        'Content-Type: text/html; charset="UTF-8"',
+        "Content-Transfer-Encoding: 8bit",
+        "",
+        html,
+    ].join("\r\n");
+
+    return message.replace(/^\./gm, "..");
 }
 
 function buildManagerInvitationEmail({
@@ -500,6 +866,24 @@ async function sendManagerInvitationEmail(invite) {
     );
 }
 
+
+async function sendManagerInviteOtpEmail(toEmail, otp, managerName) {
+    return sendGmailHtmlEmail(
+        toEmail,
+        buildManagerInviteOtpEmail(toEmail, otp, managerName),
+        "manager invitation OTP"
+    );
+}
+
+
+async function sendStaffInviteOtpEmail(toEmail, otp, staffName) {
+    return sendGmailHtmlEmail(
+        toEmail,
+        buildStaffInviteOtpEmail(toEmail, otp, staffName),
+        "staff invitation OTP"
+    );
+}
+
 function generateSlug(storeName) {
     return storeName
         .toLowerCase()
@@ -508,6 +892,13 @@ function generateSlug(storeName) {
         .replace(/\s+/g, "-")
         .replace(/-+/g, "-");
 }
+
+/*
+ * MySQL connection stored directly in this Lambda code.
+ *
+ * The previous error said "using password: NO" because
+ * password: process.env.DB_PASSWORD was undefined.
+ */
 
 const dbConfig = {
     host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",
@@ -999,7 +1390,7 @@ exports.handler = async (event) => {
                 `SELECT store_name
                  FROM stores
                  WHERE id = ?
-                     LIMIT 1`,
+                 LIMIT 1`,
                 [storeId]
             );
 
@@ -1074,7 +1465,7 @@ exports.handler = async (event) => {
                                  FROM managers
                                  WHERE manager_email = ?
                                    AND store_id = ?
-                                     LIMIT 1`,
+                                 LIMIT 1`,
                                 [managerEmail, storeId]
                             );
 
@@ -1102,15 +1493,15 @@ exports.handler = async (event) => {
 
                         await connection.execute(
                             `INSERT INTO managers
-                             (
-                                 store_id,
-                                 branch_id,
-                                 manager_name,
-                                 manager_email,
-                                 invite_token,
-                                 permissions,
-                                 status
-                             )
+                                 (
+                                     store_id,
+                                     branch_id,
+                                     manager_name,
+                                     manager_email,
+                                     invite_token,
+                                     permissions,
+                                     status
+                                 )
                              VALUES (?, ?, ?, ?, ?, ?, ?)`,
                             [
                                 storeId,
@@ -1185,62 +1576,386 @@ exports.handler = async (event) => {
             };
         }
 
+        // GET MANAGER INVITATION DETAILS
+        if (action === "get_manager_invite") {
+            try {
+                const { manager } = await getManagerInviteRecord(
+                    connection,
+                    body.invite_token
+                );
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify(manager),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to load the invitation.",
+                    }),
+                };
+            }
+        }
+
+        // SEND MANAGER INVITATION OTP
+        if (action === "send_manager_invite_otp") {
+            try {
+                await ensureManagerInviteOtpsTable(connection);
+
+                const inviteToken = String(body.invite_token || "");
+                const { manager } = await getManagerInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                if (manager.status !== "pending") {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error: "This invitation is no longer pending.",
+                        }),
+                    };
+                }
+
+                const otp = generateOtp();
+                const otpHash = hashOtp(otp);
+                const inviteTokenHash = hashInviteToken(inviteToken);
+
+                await connection.execute(
+                    `UPDATE manager_invite_otps
+                     SET used = 1
+                     WHERE invite_token_hash = ?
+                       AND email = ?
+                       AND used = 0`,
+                    [inviteTokenHash, manager.manager_email]
+                );
+
+                await connection.execute(
+                    `INSERT INTO manager_invite_otps
+                         (
+                             invite_token_hash,
+                             email,
+                             otp_hash,
+                             expires_at,
+                             used
+                         )
+                     VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
+                    [
+                        inviteTokenHash,
+                        manager.manager_email,
+                        otpHash,
+                        MANAGER_INVITE_OTP_EXPIRY_SECONDS,
+                    ]
+                );
+
+                try {
+                    await sendManagerInviteOtpEmail(
+                        manager.manager_email,
+                        otp,
+                        manager.manager_name
+                    );
+                } catch (emailError) {
+                    await connection.execute(
+                        `UPDATE manager_invite_otps
+                         SET used = 1
+                         WHERE invite_token_hash = ?
+                           AND email = ?
+                           AND otp_hash = ?
+                           AND used = 0`,
+                        [inviteTokenHash, manager.manager_email, otpHash]
+                    );
+                    throw emailError;
+                }
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        message: "Verification code sent successfully.",
+                        expires_in: MANAGER_INVITE_OTP_EXPIRY_SECONDS,
+                    }),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to send the verification code.",
+                    }),
+                };
+            }
+        }
+
+        // VERIFY MANAGER INVITATION OTP
+        if (action === "verify_manager_invite_otp") {
+            try {
+                await ensureManagerInviteOtpsTable(connection);
+
+                const inviteToken = String(body.invite_token || "");
+                const otp = String(body.otp || "").replace(/\D/g, "");
+                const { manager } = await getManagerInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                if (!/^\d{6}$/.test(otp)) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Enter the complete 6-digit verification code.",
+                        }),
+                    };
+                }
+
+                const inviteTokenHash = hashInviteToken(inviteToken);
+                const otpHash = hashOtp(otp);
+
+                await connection.execute(
+                    `UPDATE manager_invite_otps
+                     SET used = 1
+                     WHERE invite_token_hash = ?
+                       AND email = ?
+                       AND used = 0
+                       AND expires_at <= UTC_TIMESTAMP()`,
+                    [inviteTokenHash, manager.manager_email]
+                );
+
+                const [otpRows] = await connection.execute(
+                    `SELECT id
+                     FROM manager_invite_otps
+                     WHERE invite_token_hash = ?
+                       AND email = ?
+                       AND otp_hash = ?
+                       AND used = 0
+                       AND expires_at > UTC_TIMESTAMP()
+                     ORDER BY id DESC
+                     LIMIT 1`,
+                    [
+                        inviteTokenHash,
+                        manager.manager_email,
+                        otpHash,
+                    ]
+                );
+
+                if (otpRows.length === 0) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Invalid or expired verification code.",
+                        }),
+                    };
+                }
+
+                await connection.execute(
+                    `UPDATE manager_invite_otps
+                     SET used = 1,
+                         verified_at = UTC_TIMESTAMP()
+                     WHERE id = ?`,
+                    [otpRows[0].id]
+                );
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        message: "Invited email verified successfully.",
+                    }),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to verify the invitation code.",
+                    }),
+                };
+            }
+        }
+
+        // UPDATE MANAGER INVITATION DETAILS
+        if (action === "update_manager_invite_details") {
+            try {
+                const inviteToken = String(body.invite_token || "");
+                const managerName = String(body.manager_name || "").trim();
+                const { manager } = await getManagerInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                await requireVerifiedManagerInvite(
+                    connection,
+                    inviteToken,
+                    manager.manager_email
+                );
+
+                if (managerName.length < 2 || managerName.length > 120) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Enter a valid manager name.",
+                        }),
+                    };
+                }
+
+                await connection.execute(
+                    `UPDATE managers
+                     SET manager_name = ?
+                     WHERE id = ?
+                       AND invite_token = ?
+                       AND status = 'pending'`,
+                    [managerName, manager.manager_id, inviteToken]
+                );
+
+                const refreshed = await getManagerInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify(refreshed.manager),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to update the manager details.",
+                    }),
+                };
+            }
+        }
+
         // ACCEPT MANAGER INVITE
         if (action === "accept_manager_invite") {
-            const { invite_token, password } = body;
-
-            if (!invite_token || !password) {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({ error: "Missing invite token or password" }),
-                };
-            }
-
-            let decoded;
-
             try {
-                decoded = jwt.verify(invite_token, JWT_SECRET);
-            } catch (err) {
+                const inviteToken = String(body.invite_token || "");
+                const accountPassword = String(body.password || "");
+                const requestedManagerName = String(
+                    body.manager_name || ""
+                ).trim();
+
+                const { manager } = await getManagerInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                await requireVerifiedManagerInvite(
+                    connection,
+                    inviteToken,
+                    manager.manager_email
+                );
+
+                const passwordValid =
+                    accountPassword.length >= 8 &&
+                    /[A-Z]/.test(accountPassword) &&
+                    /\d/.test(accountPassword) &&
+                    /[^A-Za-z0-9]/.test(accountPassword);
+
+                if (!passwordValid) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error:
+                                "Password must contain at least 8 characters, one uppercase letter, one number, and one special character.",
+                        }),
+                    };
+                }
+
+                const finalManagerName =
+                    requestedManagerName || manager.manager_name || "Manager";
+                const hashedPassword = await bcrypt.hash(
+                    accountPassword,
+                    10
+                );
+
+                const [result] = await connection.execute(
+                    `UPDATE managers
+                     SET manager_name = ?,
+                         password = ?,
+                         status = 'active',
+                         invite_token = NULL
+                     WHERE id = ?
+                       AND invite_token = ?
+                       AND manager_email = ?
+                       AND status = 'pending'`,
+                    [
+                        finalManagerName,
+                        hashedPassword,
+                        manager.manager_id,
+                        inviteToken,
+                        manager.manager_email,
+                    ]
+                );
+
+                if (result.affectedRows === 0) {
+                    return {
+                        statusCode: 404,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Invitation not found or already accepted.",
+                        }),
+                    };
+                }
+
+                const sessionToken = jwt.sign(
+                    {
+                        manager_id: manager.manager_id,
+                        store_id: manager.store_id,
+                        branch_id: manager.branch_id,
+                        email: manager.manager_email,
+                        role: "manager",
+                    },
+                    JWT_SECRET,
+                    { expiresIn: "7d" }
+                );
+
                 return {
-                    statusCode: 401,
+                    statusCode: 200,
                     headers,
-                    body: JSON.stringify({ error: "Invalid or expired invitation" }),
+                    body: JSON.stringify({
+                        message: "Manager account activated successfully.",
+                        token: sessionToken,
+                        manager_id: manager.manager_id,
+                        manager_name: finalManagerName,
+                        manager_email: manager.manager_email,
+                        store_id: manager.store_id,
+                        store_name: manager.store_name,
+                        branch_id: manager.branch_id,
+                        branch_name: manager.branch_name,
+                        role: "manager",
+                        status: "active",
+                        permissions: manager.permissions,
+                    }),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to activate the manager account.",
+                    }),
                 };
             }
-
-            if (decoded.type !== "manager_invite") {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({ error: "Invalid invitation type" }),
-                };
-            }
-
-            const hashed = await bcrypt.hash(password, 10);
-
-            const [result] = await connection.execute(
-                `UPDATE managers
-                 SET password = ?, status = 'active'
-                 WHERE invite_token = ? AND manager_email = ?`,
-                [hashed, invite_token, decoded.email]
-            );
-
-            if (result.affectedRows === 0) {
-                return {
-                    statusCode: 404,
-                    headers,
-                    body: JSON.stringify({ error: "Invitation not found" }),
-                };
-            }
-
-            return {
-                statusCode: 200,
-                headers,
-                body: JSON.stringify({
-                    message: "Manager account activated successfully",
-                }),
-            };
         }
 
         // INVITE STAFF
@@ -1589,74 +2304,389 @@ exports.handler = async (event) => {
             };
         }
 
+        // GET STAFF INVITATION DETAILS
+        if (action === "get_staff_invite") {
+            try {
+                const { staff } = await getStaffInviteRecord(
+                    connection,
+                    body.invite_token
+                );
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify(staff),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to load the invitation.",
+                    }),
+                };
+            }
+        }
+
+        // SEND STAFF INVITATION OTP
+        if (action === "send_staff_invite_otp") {
+            try {
+                await ensureStaffInviteOtpsTable(connection);
+
+                const inviteToken = String(body.invite_token || "");
+                const { staff } = await getStaffInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                if (staff.status !== "pending") {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error: "This invitation is no longer pending.",
+                        }),
+                    };
+                }
+
+                const otp = generateOtp();
+                const otpHash = hashOtp(otp);
+                const inviteTokenHash = hashInviteToken(inviteToken);
+
+                await connection.execute(
+                    `UPDATE staff_invite_otps
+                     SET used = 1
+                     WHERE invite_token_hash = ?
+                       AND email = ?
+                       AND used = 0`,
+                    [inviteTokenHash, staff.staff_email]
+                );
+
+                await connection.execute(
+                    `INSERT INTO staff_invite_otps
+                         (
+                             invite_token_hash,
+                             email,
+                             otp_hash,
+                             expires_at,
+                             used
+                         )
+                     VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
+                    [
+                        inviteTokenHash,
+                        staff.staff_email,
+                        otpHash,
+                        STAFF_INVITE_OTP_EXPIRY_SECONDS,
+                    ]
+                );
+
+                try {
+                    await sendStaffInviteOtpEmail(
+                        staff.staff_email,
+                        otp,
+                        staff.staff_name
+                    );
+                } catch (emailError) {
+                    await connection.execute(
+                        `UPDATE staff_invite_otps
+                         SET used = 1
+                         WHERE invite_token_hash = ?
+                           AND email = ?
+                           AND otp_hash = ?
+                           AND used = 0`,
+                        [inviteTokenHash, staff.staff_email, otpHash]
+                    );
+                    throw emailError;
+                }
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        message: "Verification code sent successfully.",
+                        expires_in: STAFF_INVITE_OTP_EXPIRY_SECONDS,
+                    }),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to send the verification code.",
+                    }),
+                };
+            }
+        }
+
+        // VERIFY STAFF INVITATION OTP
+        if (action === "verify_staff_invite_otp") {
+            try {
+                await ensureStaffInviteOtpsTable(connection);
+
+                const inviteToken = String(body.invite_token || "");
+                const otp = String(body.otp || "").replace(/\D/g, "");
+                const { staff } = await getStaffInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                if (!/^\d{6}$/.test(otp)) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Enter the complete 6-digit verification code.",
+                        }),
+                    };
+                }
+
+                const inviteTokenHash = hashInviteToken(inviteToken);
+                const otpHash = hashOtp(otp);
+
+                await connection.execute(
+                    `UPDATE staff_invite_otps
+                     SET used = 1
+                     WHERE invite_token_hash = ?
+                       AND email = ?
+                       AND used = 0
+                       AND expires_at <= UTC_TIMESTAMP()`,
+                    [inviteTokenHash, staff.staff_email]
+                );
+
+                const [otpRows] = await connection.execute(
+                    `SELECT id
+                     FROM staff_invite_otps
+                     WHERE invite_token_hash = ?
+                       AND email = ?
+                       AND otp_hash = ?
+                       AND used = 0
+                       AND expires_at > UTC_TIMESTAMP()
+                     ORDER BY id DESC
+                     LIMIT 1`,
+                    [
+                        inviteTokenHash,
+                        staff.staff_email,
+                        otpHash,
+                    ]
+                );
+
+                if (otpRows.length === 0) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Invalid or expired verification code.",
+                        }),
+                    };
+                }
+
+                await connection.execute(
+                    `UPDATE staff_invite_otps
+                     SET used = 1,
+                         verified_at = UTC_TIMESTAMP()
+                     WHERE id = ?`,
+                    [otpRows[0].id]
+                );
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        message: "Invited email verified successfully.",
+                    }),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to verify the invitation code.",
+                    }),
+                };
+            }
+        }
+
+        // UPDATE STAFF INVITATION DETAILS
+        if (action === "update_staff_invite_details") {
+            try {
+                const inviteToken = String(body.invite_token || "");
+                const staffName = String(body.staff_name || "").trim();
+                const { staff } = await getStaffInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                await requireVerifiedStaffInvite(
+                    connection,
+                    inviteToken,
+                    staff.staff_email
+                );
+
+                if (staffName.length < 2 || staffName.length > 120) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Enter a valid staff name.",
+                        }),
+                    };
+                }
+
+                await connection.execute(
+                    `UPDATE staff
+                     SET staff_name = ?
+                     WHERE id = ?
+                       AND invite_token = ?
+                       AND status = 'pending'`,
+                    [staffName, staff.staff_id, inviteToken]
+                );
+
+                const refreshed = await getStaffInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify(refreshed.staff),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to update the staff details.",
+                    }),
+                };
+            }
+        }
+
         // ACCEPT STAFF INVITE
         if (action === "accept_staff_invite") {
-            const { token, password } = body;
-
-            if (!token || !password) {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({ error: "Missing token or password" }),
-                };
-            }
-
-            let decoded;
-
             try {
-                decoded = jwt.verify(token, JWT_SECRET);
-            } catch (err) {
+                const inviteToken = String(body.invite_token || "");
+                const accountPassword = String(body.password || "");
+                const requestedStaffName = String(
+                    body.staff_name || ""
+                ).trim();
+
+                const { staff } = await getStaffInviteRecord(
+                    connection,
+                    inviteToken
+                );
+
+                await requireVerifiedStaffInvite(
+                    connection,
+                    inviteToken,
+                    staff.staff_email
+                );
+
+                const passwordValid =
+                    accountPassword.length >= 8 &&
+                    /[A-Z]/.test(accountPassword) &&
+                    /\d/.test(accountPassword) &&
+                    /[^A-Za-z0-9]/.test(accountPassword);
+
+                if (!passwordValid) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({
+                            error:
+                                "Password must contain at least 8 characters, one uppercase letter, one number, and one special character.",
+                        }),
+                    };
+                }
+
+                const finalStaffName =
+                    requestedStaffName || staff.staff_name || "Staff";
+                const hashedPassword = await bcrypt.hash(
+                    accountPassword,
+                    10
+                );
+
+                const [result] = await connection.execute(
+                    `UPDATE staff
+                     SET staff_name = ?,
+                         password = ?,
+                         status = 'active',
+                         invite_token = NULL
+                     WHERE id = ?
+                       AND invite_token = ?
+                       AND staff_email = ?
+                       AND status = 'pending'`,
+                    [
+                        finalStaffName,
+                        hashedPassword,
+                        staff.staff_id,
+                        inviteToken,
+                        staff.staff_email,
+                    ]
+                );
+
+                if (result.affectedRows === 0) {
+                    return {
+                        statusCode: 404,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Invitation not found or already accepted.",
+                        }),
+                    };
+                }
+
+                const sessionToken = jwt.sign(
+                    {
+                        staff_id: staff.staff_id,
+                        manager_id: staff.manager_id,
+                        store_id: staff.store_id,
+                        branch_id: staff.branch_id,
+                        email: staff.staff_email,
+                        role: "staff",
+                    },
+                    JWT_SECRET,
+                    { expiresIn: "7d" }
+                );
+
                 return {
-                    statusCode: 401,
+                    statusCode: 200,
                     headers,
-                    body: JSON.stringify({ error: "Invalid or expired invitation" }),
+                    body: JSON.stringify({
+                        message: "Staff account activated successfully.",
+                        token: sessionToken,
+                        staff_id: staff.staff_id,
+                        staff_name: finalStaffName,
+                        staff_email: staff.staff_email,
+                        manager_id: staff.manager_id,
+                        manager_name: staff.manager_name,
+                        store_id: staff.store_id,
+                        store_name: staff.store_name,
+                        branch_id: staff.branch_id,
+                        branch_name: staff.branch_name,
+                        role: "staff",
+                        status: "active",
+                        permissions: staff.permissions,
+                    }),
+                };
+            } catch (inviteError) {
+                return {
+                    statusCode: inviteError?.statusCode || 500,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            inviteError?.message ||
+                            "Unable to activate the staff account.",
+                    }),
                 };
             }
-
-            if (decoded.type !== "staff_invite") {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({ error: "Invalid invitation type" }),
-                };
-            }
-
-            const [staffRows] = await connection.execute(
-                `SELECT id, staff_email, status
-                 FROM staff
-                 WHERE invite_token = ?
-                   AND staff_email = ?
-                   AND status = 'pending'
-                     LIMIT 1`,
-                [token, decoded.email]
-            );
-
-            if (staffRows.length === 0) {
-                return {
-                    statusCode: 404,
-                    headers,
-                    body: JSON.stringify({ error: "Invalid or expired invitation" }),
-                };
-            }
-
-            const hashedPassword = await bcrypt.hash(password, 10);
-
-            await connection.execute(
-                `UPDATE staff
-                 SET password = ?,
-                     status = 'active',
-                     invite_token = NULL
-                 WHERE id = ?`,
-                [hashedPassword, staffRows[0].id]
-            );
-
-            return {
-                statusCode: 200,
-                headers,
-                body: JSON.stringify({
-                    message: "Staff account activated successfully",
-                }),
-            };
         }
 
         // GET STAFF BY MANAGER BRANCH

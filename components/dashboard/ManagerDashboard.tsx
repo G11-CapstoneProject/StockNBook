@@ -84,6 +84,17 @@ type Order = {
     orderType?: string;
 };
 
+type ProductVariant = {
+    id?: number;
+    variantValues?: Record<string, string>;
+    variant_values?: Record<string, string>;
+    stock?: number;
+    alertLevel?: number;
+    alert_level?: number;
+    expirationDate?: string | null;
+    expiration_date?: string | null;
+};
+
 type Product = {
     id: number;
     branchId?: number | null;
@@ -103,7 +114,33 @@ type Product = {
     original_price?: number;
     costPrice?: number;
     cost_price?: number;
+    expirationDate?: string | null;
+    expiration_date?: string | null;
+    variants?: ProductVariant[];
 };
+
+type ExpiringSoonItem = {
+    id: string;
+    productName: string;
+    branchName: string;
+    variantName: string;
+    stock: number;
+    expirationDate: string;
+    daysRemaining: number;
+};
+
+type StockAlertStatus = "Low Stock" | "Out of Stock";
+
+type StockAlertItem = {
+    id: string;
+    productName: string;
+    branchName: string;
+    variantName: string;
+    currentStock: number;
+    alertLevel: number;
+    status: StockAlertStatus;
+};
+
 
 
 function getSavedItem(key: string) {
@@ -586,6 +623,90 @@ function normalizeProduct(value: unknown): Product {
         "orig_price",
     ]);
 
+    const rawVariants = firstDefined(raw, [
+        "variants",
+        "productVariants",
+        "product_variants",
+    ]);
+
+    const variants: ProductVariant[] = Array.isArray(rawVariants)
+        ? rawVariants.map((value) => {
+            const variant = toRecord(value);
+            const rawVariantValues = firstDefined(variant, [
+                "variantValues",
+                "variant_values",
+                "values",
+            ]);
+
+            let parsedVariantValues: Record<string, string> = {};
+
+            if (
+                rawVariantValues &&
+                typeof rawVariantValues === "object" &&
+                !Array.isArray(rawVariantValues)
+            ) {
+                parsedVariantValues =
+                    rawVariantValues as Record<string, string>;
+            } else if (typeof rawVariantValues === "string") {
+                try {
+                    const parsed = JSON.parse(rawVariantValues);
+
+                    if (
+                        parsed &&
+                        typeof parsed === "object" &&
+                        !Array.isArray(parsed)
+                    ) {
+                        parsedVariantValues =
+                            parsed as Record<string, string>;
+                    }
+                } catch {
+                    parsedVariantValues = {};
+                }
+            }
+
+            const variantAlertLevel = readNumber(variant, [
+                "alertLevel",
+                "alert_level",
+                "alert",
+            ]);
+
+            return {
+                id: readNumber(variant, ["id"]),
+                variantValues: parsedVariantValues,
+                variant_values: parsedVariantValues,
+                stock: readNumber(variant, [
+                    "stock",
+                    "quantity",
+                    "qty",
+                ]),
+                alertLevel: variantAlertLevel,
+                alert_level: variantAlertLevel,
+                expirationDate:
+                    readText(variant, [
+                        "expirationDate",
+                        "expiration_date",
+                        "expiryDate",
+                        "expiry_date",
+                    ]) || null,
+                expiration_date:
+                    readText(variant, [
+                        "expiration_date",
+                        "expirationDate",
+                        "expiry_date",
+                        "expiryDate",
+                    ]) || null,
+            };
+        })
+        : [];
+
+    const expirationDate =
+        readText(raw, [
+            "expirationDate",
+            "expiration_date",
+            "expiryDate",
+            "expiry_date",
+        ]) || null;
+
     return {
         id: readNumber(raw, ["id"]),
         branchId: rawBranchId,
@@ -605,7 +726,233 @@ function normalizeProduct(value: unknown): Product {
         original_price: originalPrice,
         costPrice: originalPrice,
         cost_price: originalPrice,
+        expirationDate,
+        expiration_date: expirationDate,
+        variants,
     };
+}
+
+const EXPIRING_SOON_DAYS = 30;
+const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
+
+function parseDashboardExpirationDate(value?: string | null) {
+    const rawValue = String(value || "").trim();
+
+    if (!rawValue) return null;
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(rawValue)) {
+        const [year, month, day] = rawValue.split("-").map(Number);
+        const date = new Date(year, month - 1, day);
+        date.setHours(0, 0, 0, 0);
+        return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    const parsedDate = new Date(rawValue);
+
+    if (Number.isNaN(parsedDate.getTime())) return null;
+
+    parsedDate.setHours(0, 0, 0, 0);
+    return parsedDate;
+}
+
+function getDashboardDaysUntilExpiration(value?: string | null) {
+    const expirationDate = parseDashboardExpirationDate(value);
+
+    if (!expirationDate) return null;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    return Math.round(
+        (expirationDate.getTime() - today.getTime()) /
+        DAY_IN_MILLISECONDS,
+    );
+}
+
+function formatDashboardExpirationDate(value: string) {
+    const expirationDate = parseDashboardExpirationDate(value);
+
+    if (!expirationDate) return value || "";
+
+    return expirationDate.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+    });
+}
+
+function getDashboardVariantName(variant: ProductVariant) {
+    const values =
+        variant.variantValues ||
+        variant.variant_values ||
+        {};
+
+    return (
+        Object.values(values)
+            .map((value) => String(value || "").trim())
+            .filter(Boolean)
+            .join(" / ") || "Variant"
+    );
+}
+
+function getDashboardStockAlertItems(
+    products: Product[],
+): StockAlertItem[] {
+    return products
+        .flatMap((product) => {
+            const variants = Array.isArray(product.variants)
+                ? product.variants
+                : [];
+
+            if (variants.length > 0) {
+                return variants.flatMap((variant, index) => {
+                    const currentStock = Number(variant.stock || 0);
+                    const alertLevel = Number(
+                        variant.alertLevel ??
+                        variant.alert_level ??
+                        0,
+                    );
+
+                    const status: StockAlertStatus | null =
+                        currentStock <= 0
+                            ? "Out of Stock"
+                            : currentStock <= alertLevel
+                                ? "Low Stock"
+                                : null;
+
+                    if (!status) return [];
+
+                    return [
+                        {
+                            id: `${product.id}-variant-${variant.id || index}`,
+                            productName: product.name,
+                            branchName:
+                                product.branchName ||
+                                product.branch_name ||
+                                "Branch",
+                            variantName:
+                                getDashboardVariantName(variant),
+                            currentStock,
+                            alertLevel,
+                            status,
+                        },
+                    ];
+                });
+            }
+
+            const currentStock = Number(product.stock || 0);
+            const alertLevel = Number(product.alertLevel || 0);
+
+            const status: StockAlertStatus | null =
+                currentStock <= 0
+                    ? "Out of Stock"
+                    : currentStock <= alertLevel
+                        ? "Low Stock"
+                        : null;
+
+            if (!status) return [];
+
+            return [
+                {
+                    id: `${product.id}-regular`,
+                    productName: product.name,
+                    branchName:
+                        product.branchName ||
+                        product.branch_name ||
+                        "Branch",
+                    variantName: "",
+                    currentStock,
+                    alertLevel,
+                    status,
+                },
+            ];
+        })
+        .sort(
+            (first, second) =>
+                first.currentStock - second.currentStock,
+        );
+}
+
+
+function getExpiringSoonItems(products: Product[]): ExpiringSoonItem[] {
+    return products
+        .flatMap((product) => {
+            const variants = Array.isArray(product.variants)
+                ? product.variants
+                : [];
+
+            const variantItems = variants.flatMap((variant, index) => {
+                const expirationDate =
+                    variant.expirationDate ||
+                    variant.expiration_date ||
+                    "";
+
+                const daysRemaining =
+                    getDashboardDaysUntilExpiration(expirationDate);
+
+                if (
+                    daysRemaining === null ||
+                    daysRemaining < 0 ||
+                    daysRemaining > EXPIRING_SOON_DAYS
+                ) {
+                    return [];
+                }
+
+                return [
+                    {
+                        id: `${product.id}-variant-${variant.id || index}`,
+                        productName: product.name,
+                        branchName:
+                            product.branchName ||
+                            product.branch_name ||
+                            "Branch",
+                        variantName: getDashboardVariantName(variant),
+                        stock: Number(variant.stock || 0),
+                        expirationDate,
+                        daysRemaining,
+                    },
+                ];
+            });
+
+            if (variantItems.length > 0) {
+                return variantItems;
+            }
+
+            const expirationDate =
+                product.expirationDate ||
+                product.expiration_date ||
+                "";
+
+            const daysRemaining =
+                getDashboardDaysUntilExpiration(expirationDate);
+
+            if (
+                daysRemaining === null ||
+                daysRemaining < 0 ||
+                daysRemaining > EXPIRING_SOON_DAYS
+            ) {
+                return [];
+            }
+
+            return [
+                {
+                    id: `${product.id}-regular`,
+                    productName: product.name,
+                    branchName:
+                        product.branchName ||
+                        product.branch_name ||
+                        "Branch",
+                    variantName: "",
+                    stock: Number(product.stock || 0),
+                    expirationDate,
+                    daysRemaining,
+                },
+            ];
+        })
+        .sort(
+            (first, second) =>
+                first.daysRemaining - second.daysRemaining,
+        );
 }
 
 function compactDashboardReference(
@@ -672,10 +1019,10 @@ function formatDashboardTime(dateValue?: string, explicitTime?: string) {
     const rawDate = String(dateValue || "").trim();
     const containsTime = /(?:T|\s)\d{1,2}:\d{2}/.test(rawDate);
 
-    if (!containsTime) return "—";
+    if (!containsTime) return "";
 
     const parsedDate = new Date(rawDate);
-    return Number.isNaN(parsedDate.getTime()) ? "—" : format(parsedDate);
+    return Number.isNaN(parsedDate.getTime()) ? "" : format(parsedDate);
 }
 
 export default function ManagerDashboard() {
@@ -690,6 +1037,7 @@ export default function ManagerDashboard() {
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
+    const [showExpiringSoonModal, setShowExpiringSoonModal] = useState(false);
     const [stockAlertFilter, setStockAlertFilter] = useState<
         "all" | "low" | "out"
     >("all");
@@ -996,31 +1344,34 @@ export default function ManagerDashboard() {
 
 
     const allInventoryAlerts = useMemo(
-        () =>
-            products
-                .filter(
-                    (product) =>
-                        Number(product.stock || 0) <= Number(product.alertLevel || 0),
-                )
-                .sort(
-                    (first, second) =>
-                        Number(first.stock || 0) - Number(second.stock || 0),
-                ),
+        () => getDashboardStockAlertItems(products),
         [products],
     );
 
     const inventoryAlerts = allInventoryAlerts.slice(0, 3);
     const lowStockAlertCount = allInventoryAlerts.filter(
-        (product) => Number(product.stock || 0) > 0,
+        (item) => item.status === "Low Stock",
     ).length;
     const outOfStockAlertCount = allInventoryAlerts.filter(
-        (product) => Number(product.stock || 0) <= 0,
+        (item) => item.status === "Out of Stock",
     ).length;
-    const visibleStockAlerts = allInventoryAlerts.filter((product) => {
-        if (stockAlertFilter === "low") return Number(product.stock || 0) > 0;
-        if (stockAlertFilter === "out") return Number(product.stock || 0) <= 0;
+    const visibleStockAlerts = allInventoryAlerts.filter((item) => {
+        if (stockAlertFilter === "low") {
+            return item.status === "Low Stock";
+        }
+
+        if (stockAlertFilter === "out") {
+            return item.status === "Out of Stock";
+        }
+
         return true;
     });
+
+    const allExpiringSoonItems = useMemo(
+        () => getExpiringSoonItems(products),
+        [products],
+    );
+    const expiringSoonItems = allExpiringSoonItems.slice(0, 3);
 
     const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", {
         month: "long",
@@ -1089,7 +1440,7 @@ export default function ManagerDashboard() {
                         />
                     </div>
 
-                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-5">
                         <GlanceCard
                             title="Out of Stock"
                             value={outOfStockAlertCount}
@@ -1103,6 +1454,13 @@ export default function ManagerDashboard() {
                             label="Products"
                             icon={<AlertTriangle size={22} />}
                             tone="orange"
+                        />
+                        <GlanceCard
+                            title="Expiring Soon"
+                            value={allExpiringSoonItems.length}
+                            label="Items"
+                            icon={<CalendarClock size={22} />}
+                            tone="violet"
                         />
                         <GlanceCard
                             title="Pending Bookings"
@@ -1120,7 +1478,7 @@ export default function ManagerDashboard() {
                         />
                     </div>
 
-                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
+                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
                         <CompactDashboardTable
                             title="Upcoming Bookings"
                             subtitle="Next 3 upcoming bookings"
@@ -1162,13 +1520,19 @@ export default function ManagerDashboard() {
                                 downloadExcel(
                                     "inventory-alerts.xlsx",
                                     "Inventory Alerts",
-                                    ["Product", "Stock Level", "Stock Alert"],
-                                    allInventoryAlerts.map((product) => [
-                                        product.name,
-                                        Number(product.stock || 0),
-                                        Number(product.stock || 0) <= 0
-                                            ? "Out of Stock"
-                                            : "Low Stock",
+                                    [
+                                        "Product",
+                                        "Variant",
+                                        "Stock Level",
+                                        "Alert Level",
+                                        "Status",
+                                    ],
+                                    allInventoryAlerts.map((item) => [
+                                        item.productName,
+                                        item.variantName,
+                                        item.currentStock,
+                                        item.alertLevel,
+                                        item.status,
                                     ]),
                                 )
                             }
@@ -1176,6 +1540,34 @@ export default function ManagerDashboard() {
                                 setStockAlertFilter("all");
                                 setShowStockAlertsModal(true);
                             }}
+                        />
+
+                        <ExpiringSoonPanel
+                            items={expiringSoonItems}
+                            totalItems={allExpiringSoonItems.length}
+                            onDownload={() =>
+                                downloadExcel(
+                                    "expiring-soon.xlsx",
+                                    "Expiring Soon",
+                                    [
+                                        "Product",
+                                        "Stock Level",
+                                        "Expiration Date",
+                                    ],
+                                    allExpiringSoonItems.map((item) => [
+                                        item.variantName
+                                            ? `${item.productName} - ${item.variantName}`
+                                            : item.productName,
+                                        item.stock,
+                                        formatDashboardExpirationDate(
+                                            item.expirationDate,
+                                        ),
+                                    ]),
+                                )
+                            }
+                            onViewAll={() =>
+                                setShowExpiringSoonModal(true)
+                            }
                         />
                     </div>
                 </div>
@@ -1192,6 +1584,13 @@ export default function ManagerDashboard() {
                     onClose={() => setShowStockAlertsModal(false)}
                 />
             )}
+            {showExpiringSoonModal && (
+                <ExpiringSoonModal
+                    items={allExpiringSoonItems}
+                    onClose={() => setShowExpiringSoonModal(false)}
+                />
+            )}
+
         </>
     );
 }
@@ -1349,11 +1748,11 @@ function CompactDashboardTable({
                     <col className="w-[25%]" />
                 </colgroup>
                 <thead className="bg-[#FBFAFD]">
-                <tr className="border-b border-[#EEE8F2]">
+                <tr className="h-[46px] border-b border-[#EEE8F2]">
                     {headers.map((header) => (
                         <th
                             key={header}
-                            className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C]"
+                            className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]"
                         >
                             {header}
                         </th>
@@ -1393,8 +1792,8 @@ function CompactDashboardRow({ row }: { row: CompactTableRow }) {
     const validDate = !Number.isNaN(parsed.getTime());
     const month = validDate
         ? parsed.toLocaleDateString("en-US", { month: "short" }).toUpperCase()
-        : "—";
-    const day = validDate ? parsed.getDate() : "—";
+        : "";
+    const day = validDate ? parsed.getDate() : "";
     const normalized = row.status.toLowerCase();
     const statusClass =
         normalized.includes("confirm") || normalized.includes("complete")
@@ -1443,7 +1842,7 @@ function InventoryAlertPanel({
                                  onDownload,
                                  onViewAll,
                              }: {
-    items: Product[];
+    items: StockAlertItem[];
     totalAlerts: number;
     onDownload: () => void;
     onViewAll: () => void;
@@ -1452,7 +1851,10 @@ function InventoryAlertPanel({
         <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
             <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
                 <div className="flex min-w-0 items-start gap-2">
-                    <TriangleAlert size={18} className="mt-0.5 shrink-0 text-[#EF4444]" />
+                    <TriangleAlert
+                        size={18}
+                        className="mt-0.5 shrink-0 text-[#EF4444]"
+                    />
                     <div className="min-w-0">
                         <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
                             Inventory Alerts
@@ -1462,6 +1864,7 @@ function InventoryAlertPanel({
                         </p>
                     </div>
                 </div>
+
                 <div className="flex shrink-0 items-center gap-2">
                     <button
                         type="button"
@@ -1489,19 +1892,21 @@ function InventoryAlertPanel({
                     <col className="w-[18%]" />
                     <col className="w-[24%]" />
                 </colgroup>
+
                 <thead className="bg-[#FBFAFD]">
-                <tr className="border-b border-[#EEE8F2]">
-                    <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C]">
+                <tr className="h-[46px] border-b border-[#EEE8F2]">
+                    <th className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
                         Product
                     </th>
-                    <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C]">
+                    <th className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
                         Stock Level
                     </th>
-                    <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C]">
+                    <th className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
                         Stock Alert
                     </th>
                 </tr>
                 </thead>
+
                 <tbody>
                 {items.length === 0 ? (
                     <tr>
@@ -1509,39 +1914,55 @@ function InventoryAlertPanel({
                             colSpan={3}
                             className="h-[170px] px-4 text-center text-[13px] text-[#8A7D92]"
                         >
-                            All products are well stocked.
+                            All products and variants are well stocked.
                         </td>
                     </tr>
                 ) : (
-                    items.map((product) => {
-                        const stock = Number(product.stock || 0);
-                        const isOutOfStock = stock <= 0;
+                    items.map((item) => {
+                        const isOutOfStock =
+                            item.status === "Out of Stock";
 
                         return (
                             <tr
-                                key={product.id}
+                                key={item.id}
                                 className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FFFCFC]"
                             >
                                 <td className="px-3 py-2">
                                     <p
-                                        title={product.name}
-                                        className="line-clamp-2 text-[13px] font-semibold leading-6 text-[#30243A]"
+                                        title={item.productName}
+                                        className="line-clamp-1 text-[13px] font-semibold leading-5 text-[#30243A]"
                                     >
-                                        {product.name}
+                                        {item.productName}
+                                    </p>
+                                    <p
+                                        title={item.variantName}
+                                        className="truncate text-[10px] font-medium text-[#806A8C]"
+                                    >
+                                        {item.variantName}
                                     </p>
                                 </td>
+
                                 <td className="px-3 py-2">
                                     <span
-                                        className={`whitespace-nowrap text-[13px] font-semibold ${isOutOfStock ? "text-[#DC2626]" : "text-[#B7791F]"}`}
+                                        className={`whitespace-nowrap text-[13px] font-semibold ${
+                                            isOutOfStock
+                                                ? "text-[#DC2626]"
+                                                : "text-[#B7791F]"
+                                        }`}
                                     >
-                                        {stock} left
+                                        {item.currentStock} left
                                     </span>
                                 </td>
+
                                 <td className="px-3 py-2">
                                     <span
-                                        className={`whitespace-nowrap text-[13px] font-semibold ${isOutOfStock ? "text-[#DC2626]" : "text-[#B7791F]"}`}
+                                        className={`whitespace-nowrap text-[13px] font-semibold ${
+                                            isOutOfStock
+                                                ? "text-[#DC2626]"
+                                                : "text-[#B7791F]"
+                                        }`}
                                     >
-                                        {isOutOfStock ? "Out of Stock" : "Low Stock"}
+                                        {item.status}
                                     </span>
                                 </td>
                             </tr>
@@ -1550,11 +1971,326 @@ function InventoryAlertPanel({
                 )}
                 </tbody>
             </table>
+
             <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
                 Showing {items.length} of {totalAlerts} alert
                 {totalAlerts === 1 ? "" : "s"}
             </div>
         </section>
+    );
+}
+function ExpiringSoonPanel({
+                               items,
+                               totalItems,
+                               showBranch = false,
+                               onDownload,
+                               onViewAll,
+                           }: {
+    items: ExpiringSoonItem[];
+    totalItems: number;
+    showBranch?: boolean;
+    onDownload: () => void;
+    onViewAll: () => void;
+}) {
+    const columnCount = showBranch ? 4 : 3;
+
+    return (
+        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+            <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
+                <div className="flex min-w-0 items-start gap-2">
+                    <CalendarClock
+                        size={18}
+                        className="mt-0.5 shrink-0 text-[#7C3AED]"
+                    />
+                    <div className="min-w-0">
+                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                            Expiring Soon
+                        </h2>
+                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
+                            Items expiring within 30 days
+                        </p>
+                    </div>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={onDownload}
+                        aria-label="Download Expiring Soon"
+                        title="Download Expiring Soon"
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
+                    >
+                        <Download size={16} strokeWidth={2} />
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={onViewAll}
+                        className="rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4]"
+                    >
+                        View all
+                    </button>
+                </div>
+            </div>
+
+            <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+                <table className="h-full w-full table-fixed border-collapse">
+                    <colgroup>
+                        <col className={showBranch ? "w-[23%]" : "w-[48%]"} />
+                        {showBranch ? <col className="w-[33%]" /> : null}
+                        <col className={showBranch ? "w-[18%]" : "w-[20%]"} />
+                        <col className={showBranch ? "w-[26%]" : "w-[32%]"} />
+                    </colgroup>
+
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[46px] border-b border-[#EEE8F2]">
+                        <th className="whitespace-nowrap px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
+                            Product
+                        </th>
+                        {showBranch ? (
+                            <th className="whitespace-nowrap px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
+                                Branch
+                            </th>
+                        ) : null}
+                        <th className="whitespace-nowrap px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
+                            Stock Level
+                        </th>
+                        <th className="whitespace-nowrap px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
+                            Expiration Date
+                        </th>
+                    </tr>
+                    </thead>
+
+                    <tbody className={items.length > 0 ? "h-full" : ""}>
+                    {items.length === 0 ? (
+                        <tr>
+                            <td
+                                colSpan={columnCount}
+                                className="h-[170px] px-4 text-center text-[13px] text-[#8A7D92]"
+                            >
+                                No products are expiring within 30 days.
+                            </td>
+                        </tr>
+                    ) : (
+                        items.map((item) => (
+                            <tr
+                                key={item.id}
+                                style={{
+                                    height: `${100 / items.length}%`,
+                                }}
+                                className="border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FCFAFF]"
+                            >
+                                <td className="px-2 py-2 align-middle">
+                                    <p
+                                        title={item.productName}
+                                        className="line-clamp-2 text-[13px] font-semibold leading-5 text-[#30243A]"
+                                    >
+                                        {item.productName}
+                                    </p>
+                                    {item.variantName ? (
+                                        <p
+                                            title={item.variantName}
+                                            className="truncate text-[10px] font-medium text-[#806A8C]"
+                                        >
+                                            {item.variantName}
+                                        </p>
+                                    ) : null}
+                                </td>
+
+                                {showBranch ? (
+                                    <td className="px-2 py-2 align-middle">
+                                        <p
+                                            title={item.branchName}
+                                            className="whitespace-nowrap text-[12px] font-semibold tracking-[-0.04em] text-[#6D35D4]"
+                                        >
+                                            {item.branchName}
+                                        </p>
+                                    </td>
+                                ) : null}
+
+                                <td className="px-2 py-2 align-middle">
+                                    <span className="whitespace-nowrap text-[12px] font-semibold text-[#30243A]">
+                                        {item.stock} left
+                                    </span>
+                                </td>
+
+                                <td className="px-2 py-2 align-middle">
+                                    <p className="whitespace-nowrap text-[12px] font-semibold tracking-[-0.01em] text-[#6D35D4]">
+                                        {formatDashboardExpirationDate(
+                                            item.expirationDate,
+                                        )}
+                                    </p>
+                                    <p
+                                        className={`whitespace-nowrap text-[10px] font-semibold ${
+                                            item.daysRemaining <= 7
+                                                ? "text-[#DC2626]"
+                                                : "text-[#806A8C]"
+                                        }`}
+                                    >
+                                        {item.daysRemaining === 0
+                                            ? "Expires today"
+                                            : `${item.daysRemaining} day${
+                                                item.daysRemaining === 1
+                                                    ? ""
+                                                    : "s"
+                                            } left`}
+                                    </p>
+                                </td>
+                            </tr>
+                        ))
+                    )}
+                    </tbody>
+                </table>
+            </div>
+
+            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
+                Showing {items.length} of {totalItems} item
+                {totalItems === 1 ? "" : "s"}
+            </div>
+        </section>
+    );
+}
+
+function ExpiringSoonModal({
+                               items,
+                               showBranch = false,
+                               onClose,
+                           }: {
+    items: ExpiringSoonItem[];
+    showBranch?: boolean;
+    onClose: () => void;
+}) {
+    const columnCount = showBranch ? 4 : 3;
+
+    return (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/45 px-4 py-6 font-sans text-[#1A1220] backdrop-blur-[2px]">
+            <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="dashboard-expiring-soon-title"
+                className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
+            >
+                <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
+                    <div className="flex min-w-0 items-start gap-3">
+                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
+                            <CalendarClock size={21} strokeWidth={2} />
+                        </span>
+
+                        <div>
+                            <h2
+                                id="dashboard-expiring-soon-title"
+                                className="text-[20px] font-bold leading-6 text-[#1A1220]"
+                            >
+                                Expiring Soon
+                            </h2>
+                            <p className="mt-1 text-sm leading-5 text-[#7A6A84]">
+                                Products and variants expiring within the next 30 days.
+                            </p>
+                        </div>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        aria-label="Close expiring soon"
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[22px] leading-none text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C]"
+                    >
+                        ×
+                    </button>
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-auto">
+                    <table className="w-full min-w-[720px] border-collapse">
+                        <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
+                        <tr className="border-b border-[#E9E0EF]">
+                            <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Product
+                            </th>
+                            {showBranch ? (
+                                <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                    Branch
+                                </th>
+                            ) : null}
+                            <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Stock Level
+                            </th>
+                            <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Expiration Date
+                            </th>
+                        </tr>
+                        </thead>
+
+                        <tbody>
+                        {items.length === 0 ? (
+                            <tr>
+                                <td
+                                    colSpan={columnCount}
+                                    className="px-5 py-14 text-center text-sm text-[#7A6A84]"
+                                >
+                                    No products are expiring within 30 days.
+                                </td>
+                            </tr>
+                        ) : (
+                            items.map((item) => (
+                                <tr
+                                    key={item.id}
+                                    className="border-b border-[#EEE7F2] transition hover:bg-[#FFFCF7] last:border-b-0"
+                                >
+                                    <td className="px-5 py-3.5">
+                                        <p className="text-sm font-semibold leading-5 text-[#1A1220]">
+                                            {item.productName}
+                                        </p>
+                                        {item.variantName ? (
+                                            <p className="mt-0.5 text-xs font-medium text-[#806A8C]">
+                                                {item.variantName}
+                                            </p>
+                                        ) : null}
+                                    </td>
+
+                                    {showBranch ? (
+                                        <td className="px-5 py-3.5 text-sm font-medium text-[#6D35D4]">
+                                            {item.branchName}
+                                        </td>
+                                    ) : null}
+
+                                    <td className="px-5 py-3.5 text-sm font-semibold text-[#30243A]">
+                                        {item.stock} left
+                                    </td>
+
+                                    <td className="px-5 py-3.5">
+                                        <p className="text-sm font-semibold text-[#2B174C]">
+                                            {formatDashboardExpirationDate(
+                                                item.expirationDate,
+                                            )}
+                                        </p>
+                                        <p
+                                            className={`mt-0.5 text-xs font-semibold ${
+                                                item.daysRemaining <= 7
+                                                    ? "text-[#DC2626]"
+                                                    : "text-[#806A8C]"
+                                            }`}
+                                        >
+                                            {item.daysRemaining === 0
+                                                ? "Expires today"
+                                                : `${item.daysRemaining} day${
+                                                    item.daysRemaining === 1
+                                                        ? ""
+                                                        : "s"
+                                                } left`}
+                                        </p>
+                                    </td>
+                                </tr>
+                            ))
+                        )}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div className="border-t border-[#E9E0EF] bg-[#FFFCF7] px-6 py-3 text-xs leading-5 text-[#7A6A84]">
+                    Expiring Soon includes items with expiration dates from today through the next 30 days.
+                </div>
+            </div>
+        </div>
     );
 }
 
@@ -1567,7 +2303,7 @@ function ManagerStockAlertsModal({
                                      onChangeFilter,
                                      onClose,
                                  }: {
-    items: Product[];
+    items: StockAlertItem[];
     activeFilter: "all" | "low" | "out";
     totalCount: number;
     lowStockCount: number;
@@ -1601,9 +2337,9 @@ function ManagerStockAlertsModal({
             >
                 <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
                     <div className="flex min-w-0 items-start gap-3">
-            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#FFF4D8] text-[#B7791F]">
-              <TriangleAlert size={21} strokeWidth={2} />
-            </span>
+                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#FFF4D8] text-[#B7791F]">
+                            <TriangleAlert size={21} strokeWidth={2} />
+                        </span>
 
                         <div className="min-w-0">
                             <h2
@@ -1613,7 +2349,7 @@ function ManagerStockAlertsModal({
                                 Stock Alerts
                             </h2>
                             <p className="mt-1 !text-sm !font-normal !leading-5 text-[#7A6A84]">
-                                Low-stock and out-of-stock items for the current inventory view.
+                                Low-stock and out-of-stock products and variants.
                             </p>
                         </div>
                     </div>
@@ -1665,29 +2401,36 @@ function ManagerStockAlertsModal({
                     </div>
 
                     <span className="!text-xs !font-semibold text-[#806A8C]">
-            View only
-          </span>
+                        View only
+                    </span>
                 </div>
 
                 <div className="min-h-0 flex-1 overflow-auto">
-                    <table className="w-full min-w-[700px] border-collapse">
+                    <table className="w-full min-w-[760px] table-fixed border-collapse">
+                        <colgroup>
+                            <col className="w-[34%]" />
+                            <col className="w-[28%]" />
+                            <col className="w-[14%]" />
+                            <col className="w-[12%]" />
+                            <col className="w-[12%]" />
+                        </colgroup>
+
                         <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
                         <tr className="border-b border-[#E9E0EF]">
-                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Product
-                            </th>
-                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Variant
-                            </th>
-                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Current Stock
-                            </th>
-                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Alert Level
-                            </th>
-                            <th className="px-5 py-3 text-left !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Status
-                            </th>
+                            {[
+                                "Product",
+                                "Variant",
+                                "Current Stock",
+                                "Alert Level",
+                                "Status",
+                            ].map((header) => (
+                                <th
+                                    key={header}
+                                    className={`${header === "Product" ? "text-left" : "text-center"} px-4 py-3 !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]`}
+                                >
+                                    {header}
+                                </th>
+                            ))}
                         </tr>
                         </thead>
 
@@ -1702,50 +2445,60 @@ function ManagerStockAlertsModal({
                                 </td>
                             </tr>
                         ) : (
-                            items.map((product) => {
-                                const stock = Number(product.stock || 0);
-                                const isOut = stock <= 0;
+                            items.map((item) => {
+                                const isOut =
+                                    item.status === "Out of Stock";
 
                                 return (
                                     <tr
-                                        key={product.id}
+                                        key={item.id}
                                         className="border-b border-[#EEE7F2] transition hover:bg-[#FFFCF7] last:border-b-0"
                                     >
-                                        <td className="px-5 py-3.5">
-                                            <p className="!text-sm !font-semibold !leading-5 text-[#1A1220]">
-                                                {product.name}
+                                        <td className="px-4 py-3.5">
+                                            <p className="line-clamp-2 !text-sm !font-semibold !leading-5 text-[#1A1220]">
+                                                {item.productName}
                                             </p>
                                             <p
                                                 className={`mt-0.5 !text-xs !font-medium !leading-4 ${
-                                                    isOut ? "text-[#D92D20]" : "text-[#A56607]"
+                                                    isOut
+                                                        ? "text-[#D92D20]"
+                                                        : "text-[#A56607]"
                                                 }`}
                                             >
-                                                {isOut ? "Out of Stock" : "Low Stock"}
+                                                {item.status}
                                             </p>
                                         </td>
-                                        <td className="px-5 py-3.5 !text-sm !font-normal !leading-5 text-[#806A8C]">
-                                            —
+
+                                        <td className="px-4 py-3.5 text-center !text-sm !font-normal !leading-5 text-[#806A8C]">
+                                            <span className="block truncate">
+                                                {item.variantName}
+                                            </span>
                                         </td>
+
                                         <td
-                                            className={`px-5 py-3.5 !text-sm !font-semibold !leading-5 ${
-                                                isOut ? "text-[#D92D20]" : "text-[#A56607]"
+                                            className={`px-4 py-3.5 text-center !text-sm !font-semibold !leading-5 ${
+                                                isOut
+                                                    ? "text-[#D92D20]"
+                                                    : "text-[#A56607]"
                                             }`}
                                         >
-                                            {stock}
+                                            {item.currentStock}
                                         </td>
-                                        <td className="px-5 py-3.5 !text-sm !font-normal !leading-5 text-[#665875]">
-                                            {Number(product.alertLevel || 0)}
+
+                                        <td className="px-4 py-3.5 text-center !text-sm !font-normal !leading-5 text-[#665875]">
+                                            {item.alertLevel}
                                         </td>
-                                        <td className="px-5 py-3.5">
-                        <span
-                            className={`inline-flex rounded-full border px-3 py-1 !text-xs !font-semibold !leading-4 ${
-                                isOut
-                                    ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
-                                    : "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]"
-                            }`}
-                        >
-                          {isOut ? "Out of Stock" : "Low Stock"}
-                        </span>
+
+                                        <td className="px-4 py-3.5 text-center">
+                                            <span
+                                                className={`inline-flex rounded-full border px-3 py-1 !text-xs !font-semibold !leading-4 ${
+                                                    isOut
+                                                        ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
+                                                        : "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]"
+                                                }`}
+                                            >
+                                                {item.status}
+                                            </span>
                                         </td>
                                     </tr>
                                 );
@@ -1756,8 +2509,7 @@ function ManagerStockAlertsModal({
                 </div>
 
                 <div className="border-t border-[#E9E0EF] bg-[#FFFCF7] px-6 py-3 text-xs leading-5 text-[#7A6A84]">
-                    Manager accounts can review stock alerts for their assigned branch here. Restocking and inventory
-                    changes are managed by authorized branch users.
+                    Manager accounts can review stock alerts for their assigned branch here.
                 </div>
             </div>
         </div>

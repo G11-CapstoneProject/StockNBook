@@ -77,8 +77,8 @@ function hashInviteToken(inviteToken) {
 async function ensureManagerInviteOtpsTable(connection) {
     await connection.execute(`
         CREATE TABLE IF NOT EXISTS manager_invite_otps (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            invite_token_hash CHAR(64) NOT NULL,
+                                                           id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                           invite_token_hash CHAR(64) NOT NULL,
             email VARCHAR(255) NOT NULL,
             otp_hash CHAR(64) NOT NULL,
             expires_at DATETIME NOT NULL,
@@ -87,17 +87,17 @@ async function ensureManagerInviteOtpsTable(connection) {
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_manager_invite_otp_email (email),
             INDEX idx_manager_invite_otp_lookup (
-                invite_token_hash,
-                email,
-                used,
-                expires_at
-            ),
+                                                    invite_token_hash,
+                                                    email,
+                                                    used,
+                                                    expires_at
+                                                ),
             INDEX idx_manager_invite_otp_verified (
-                invite_token_hash,
-                email,
-                verified_at
-            )
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                                                      invite_token_hash,
+                                                      email,
+                                                      verified_at
+                                                  )
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 }
 
@@ -136,13 +136,13 @@ async function getManagerInviteRecord(connection, inviteToken) {
              branches.branch_name,
              stores.store_name
          FROM managers
-         JOIN branches ON managers.branch_id = branches.id
-         JOIN stores ON managers.store_id = stores.id
+                  JOIN branches ON managers.branch_id = branches.id
+                  JOIN stores ON managers.store_id = stores.id
          WHERE managers.invite_token = ?
            AND managers.manager_email = ?
            AND managers.store_id = ?
            AND managers.branch_id = ?
-         LIMIT 1`,
+             LIMIT 1`,
         [
             inviteToken,
             String(decoded.email || "").toLowerCase(),
@@ -191,7 +191,7 @@ async function requireVerifiedManagerInvite(connection, inviteToken, email) {
            AND verified_at IS NOT NULL
            AND verified_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 MINUTE)
          ORDER BY id DESC
-         LIMIT 1`,
+             LIMIT 1`,
         [inviteTokenHash, String(email || "").toLowerCase()]
     );
 
@@ -208,8 +208,8 @@ async function requireVerifiedManagerInvite(connection, inviteToken, email) {
 async function ensureStaffInviteOtpsTable(connection) {
     await connection.execute(`
         CREATE TABLE IF NOT EXISTS staff_invite_otps (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            invite_token_hash CHAR(64) NOT NULL,
+                                                         id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                         invite_token_hash CHAR(64) NOT NULL,
             email VARCHAR(255) NOT NULL,
             otp_hash CHAR(64) NOT NULL,
             expires_at DATETIME NOT NULL,
@@ -218,17 +218,17 @@ async function ensureStaffInviteOtpsTable(connection) {
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_staff_invite_otp_email (email),
             INDEX idx_staff_invite_otp_lookup (
-                invite_token_hash,
-                email,
-                used,
-                expires_at
-            ),
+                                                  invite_token_hash,
+                                                  email,
+                                                  used,
+                                                  expires_at
+                                              ),
             INDEX idx_staff_invite_otp_verified (
-                invite_token_hash,
-                email,
-                verified_at
-            )
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                                                    invite_token_hash,
+                                                    email,
+                                                    verified_at
+                                                )
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 }
 
@@ -269,15 +269,15 @@ async function getStaffInviteRecord(connection, inviteToken) {
              stores.store_name,
              COALESCE(managers.manager_name, '') AS manager_name
          FROM staff
-         JOIN branches ON staff.branch_id = branches.id
-         JOIN stores ON staff.store_id = stores.id
-         LEFT JOIN managers ON staff.manager_id = managers.id
+                  JOIN branches ON staff.branch_id = branches.id
+                  JOIN stores ON staff.store_id = stores.id
+                  LEFT JOIN managers ON staff.manager_id = managers.id
          WHERE staff.invite_token = ?
            AND staff.staff_email = ?
            AND staff.store_id = ?
            AND staff.branch_id = ?
            AND staff.manager_id = ?
-         LIMIT 1`,
+             LIMIT 1`,
         [
             inviteToken,
             String(decoded.email || "").toLowerCase(),
@@ -329,7 +329,7 @@ async function requireVerifiedStaffInvite(connection, inviteToken, email) {
            AND verified_at IS NOT NULL
            AND verified_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 MINUTE)
          ORDER BY id DESC
-         LIMIT 1`,
+             LIMIT 1`,
         [inviteTokenHash, String(email || "").toLowerCase()]
     );
 
@@ -712,6 +712,121 @@ function buildManagerInvitationEmail({
     return message.replace(/^\./gm, "..");
 }
 
+
+function buildStaffInvitationEmail({
+                                       toEmail,
+                                       staffName,
+                                       managerName,
+                                       storeName,
+                                       branchName,
+                                       inviteLink,
+                                       permissions,
+                                   }) {
+    const safeStaffName = escapeHtml(staffName || "Staff member");
+    const safeManagerName = escapeHtml(managerName || "Branch Manager");
+    const safeStoreName = escapeHtml(storeName || "StockNBook Store");
+    const safeBranchName = escapeHtml(branchName || "Assigned Branch");
+    const safeInviteLink = escapeHtml(inviteLink);
+    const safeRecipient = escapeHtml(toEmail);
+
+    const enabledPermissions = Object.entries(permissions || {})
+        .filter(([, enabled]) => Boolean(enabled))
+        .map(([permission]) => permissionLabel(permission));
+
+    const permissionItems =
+        enabledPermissions.length > 0
+            ? enabledPermissions
+                .map(
+                    (permission) =>
+                        `<span style="display:inline-block;margin:4px 6px 4px 0;padding:7px 10px;border-radius:999px;background:#F1E9FF;color:#4B2380;font-size:12px;font-weight:700;">✓ ${escapeHtml(permission)}</span>`
+                )
+                .join("")
+            : `<span style="color:#7A6E88;font-size:13px;">Your access will be configured by your branch manager.</span>`;
+
+    const subject = "StockNBook Staff Invitation";
+
+    const html = `
+        <div style="margin:0;background:#F7F4FB;padding:30px 14px;font-family:Arial,Helvetica,sans-serif;color:#21172C;">
+            <div style="max-width:620px;margin:0 auto;overflow:hidden;border:1px solid #E7DFEA;border-radius:22px;background:#FFFFFF;box-shadow:0 18px 50px rgba(45,27,78,.12);">
+                <div style="background:linear-gradient(135deg,#2D1B4E,#4B2B75);padding:28px 30px;color:#FFFFFF;">
+                    <div style="font-size:23px;font-weight:800;letter-spacing:-.6px;">
+                        Stock<span style="color:#D4A126;">N</span>Book
+                    </div>
+                    <div style="margin-top:7px;font-size:13px;color:rgba(255,255,255,.72);">
+                        Secure staff invitation
+                    </div>
+                </div>
+
+                <div style="padding:30px;">
+                    <h1 style="margin:0;font-size:27px;line-height:1.25;color:#21172C;">
+                        You have been invited
+                    </h1>
+
+                    <p style="margin:16px 0 0;font-size:15px;line-height:1.75;color:#6F6577;">
+                        Hello <strong style="color:#2D1B4E;">${safeStaffName}</strong>,
+                        <strong style="color:#2D1B4E;">${safeManagerName}</strong>
+                        invited you to join
+                        <strong style="color:#2D1B4E;">${safeStoreName}</strong>
+                        at the <strong style="color:#2D1B4E;">${safeBranchName}</strong> branch.
+                    </p>
+
+                    <div style="margin:24px 0;padding:18px;border:1px solid #E8DFF0;border-radius:16px;background:#FCFAFD;">
+                        <table role="presentation" style="width:100%;border-collapse:collapse;">
+                            <tr>
+                                <td style="padding:4px 10px 10px 0;color:#8A7896;font-size:12px;text-transform:uppercase;letter-spacing:.1em;">Store</td>
+                                <td style="padding:4px 0 10px;color:#2D1B4E;font-size:14px;font-weight:700;">${safeStoreName}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding:4px 10px 10px 0;color:#8A7896;font-size:12px;text-transform:uppercase;letter-spacing:.1em;">Branch</td>
+                                <td style="padding:4px 0 10px;color:#2D1B4E;font-size:14px;font-weight:700;">${safeBranchName}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding:4px 10px 0 0;color:#8A7896;font-size:12px;text-transform:uppercase;letter-spacing:.1em;">Role</td>
+                                <td style="padding:4px 0 0;color:#2D1B4E;font-size:14px;font-weight:700;">Staff Member</td>
+                            </tr>
+                        </table>
+                    </div>
+
+                    <div style="margin:0 0 22px;">
+                        <div style="margin-bottom:9px;color:#2D1B4E;font-size:13px;font-weight:800;">Access assigned to you</div>
+                        <div>${permissionItems}</div>
+                    </div>
+
+                    <a href="${safeInviteLink}"
+                       style="display:block;border-radius:12px;background:#2D1B4E;padding:15px 20px;text-align:center;font-size:15px;font-weight:800;color:#FFFFFF;text-decoration:none;">
+                        Review and accept invitation
+                    </a>
+
+                    <p style="margin:20px 0 0;font-size:12px;line-height:1.65;color:#8A8091;">
+                        This invitation is intended only for <strong>${safeRecipient}</strong>.
+                        Do not forward this email or share the invitation link.
+                    </p>
+
+                    <p style="margin:14px 0 0;font-size:12px;line-height:1.65;color:#8A8091;">
+                        The invitation expires after 7 days. If you were not expecting this invitation,
+                        you may safely ignore this email.
+                    </p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const message = [
+        `From: ${EMAIL_FROM}`,
+        `Reply-To: ${EMAIL_REPLY_TO}`,
+        `To: ${sanitizeEmailHeader(toEmail)}`,
+        `Subject: ${subject}`,
+        `Date: ${new Date().toUTCString()}`,
+        "MIME-Version: 1.0",
+        'Content-Type: text/html; charset="UTF-8"',
+        "Content-Transfer-Encoding: 8bit",
+        "",
+        html,
+    ].join("\r\n");
+
+    return message.replace(/^\./gm, "..");
+}
+
 async function sendGmailHtmlEmail(toEmail, rawMessage, logLabel) {
     if (!SMTP_USER || !SMTP_PASS) {
         const configError = new Error(
@@ -863,6 +978,23 @@ async function sendManagerInvitationEmail(invite) {
             permissions: invite.permissions,
         }),
         "manager invitation"
+    );
+}
+
+
+async function sendStaffInvitationEmail(invite) {
+    return sendGmailHtmlEmail(
+        invite.staff_email,
+        buildStaffInvitationEmail({
+            toEmail: invite.staff_email,
+            staffName: invite.staff_name,
+            managerName: invite.manager_name,
+            storeName: invite.store_name,
+            branchName: invite.branch_name,
+            inviteLink: invite.invite_link,
+            permissions: invite.permissions,
+        }),
+        "staff invitation"
     );
 }
 
@@ -1390,7 +1522,7 @@ exports.handler = async (event) => {
                 `SELECT store_name
                  FROM stores
                  WHERE id = ?
-                 LIMIT 1`,
+                     LIMIT 1`,
                 [storeId]
             );
 
@@ -1465,7 +1597,7 @@ exports.handler = async (event) => {
                                  FROM managers
                                  WHERE manager_email = ?
                                    AND store_id = ?
-                                 LIMIT 1`,
+                                     LIMIT 1`,
                                 [managerEmail, storeId]
                             );
 
@@ -1493,15 +1625,15 @@ exports.handler = async (event) => {
 
                         await connection.execute(
                             `INSERT INTO managers
-                                 (
-                                     store_id,
-                                     branch_id,
-                                     manager_name,
-                                     manager_email,
-                                     invite_token,
-                                     permissions,
-                                     status
-                                 )
+                             (
+                                 store_id,
+                                 branch_id,
+                                 manager_name,
+                                 manager_email,
+                                 invite_token,
+                                 permissions,
+                                 status
+                             )
                              VALUES (?, ?, ?, ?, ?, ?, ?)`,
                             [
                                 storeId,
@@ -1638,13 +1770,13 @@ exports.handler = async (event) => {
 
                 await connection.execute(
                     `INSERT INTO manager_invite_otps
-                         (
-                             invite_token_hash,
-                             email,
-                             otp_hash,
-                             expires_at,
-                             used
-                         )
+                     (
+                         invite_token_hash,
+                         email,
+                         otp_hash,
+                         expires_at,
+                         used
+                     )
                      VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
                     [
                         inviteTokenHash,
@@ -1738,7 +1870,7 @@ exports.handler = async (event) => {
                        AND used = 0
                        AND expires_at > UTC_TIMESTAMP()
                      ORDER BY id DESC
-                     LIMIT 1`,
+                         LIMIT 1`,
                     [
                         inviteTokenHash,
                         manager.manager_email,
@@ -1977,7 +2109,7 @@ exports.handler = async (event) => {
 
             try {
                 decoded = jwt.verify(token, JWT_SECRET);
-            } catch (err) {
+            } catch {
                 return {
                     statusCode: 401,
                     headers,
@@ -1989,17 +2121,35 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 403,
                     headers,
-                    body: JSON.stringify({ error: "Only branch-directory can invite staff" }),
+                    body: JSON.stringify({
+                        error: "Only branch managers can invite staff",
+                    }),
                 };
             }
 
-            const { staff_name, staff_email, permissions = {} } = body;
+            const staffName = String(body.staff_name || "").trim();
+            const staffEmail = String(body.staff_email || "")
+                .trim()
+                .toLowerCase();
+            const permissions = body.permissions || {};
 
-            if (!staff_name || !staff_email) {
+            if (!staffName || !staffEmail) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "Missing staff name or email" }),
+                    body: JSON.stringify({
+                        error: "Missing staff name or email",
+                    }),
+                };
+            }
+
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(staffEmail)) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Enter a valid staff email address",
+                    }),
                 };
             }
 
@@ -2008,13 +2158,22 @@ exports.handler = async (event) => {
             const branchId = decoded.branch_id;
 
             const [managerRows] = await connection.execute(
-                `SELECT permissions
+                `SELECT
+                     managers.permissions,
+                     managers.manager_name,
+                     branches.branch_name,
+                     stores.store_name
                  FROM managers
-                 WHERE id = ?
-                   AND store_id = ?
-                   AND branch_id = ?
-                   AND status = 'active'
-                     LIMIT 1`,
+                 JOIN branches
+                   ON branches.id = managers.branch_id
+                  AND branches.store_id = managers.store_id
+                 JOIN stores
+                   ON stores.id = managers.store_id
+                 WHERE managers.id = ?
+                   AND managers.store_id = ?
+                   AND managers.branch_id = ?
+                   AND managers.status = 'active'
+                 LIMIT 1`,
                 [managerId, storeId, branchId]
             );
 
@@ -2026,10 +2185,12 @@ exports.handler = async (event) => {
                 };
             }
 
+            const manager = managerRows[0];
+
             const managerPermissions =
-                typeof managerRows[0].permissions === "string"
-                    ? JSON.parse(managerRows[0].permissions || "{}")
-                    : managerRows[0].permissions || {};
+                typeof manager.permissions === "string"
+                    ? JSON.parse(manager.permissions || "{}")
+                    : manager.permissions || {};
 
             if (!managerPermissions.staff_management) {
                 return {
@@ -2045,9 +2206,10 @@ exports.handler = async (event) => {
                 `SELECT id
                  FROM staff
                  WHERE staff_email = ?
+                   AND store_id = ?
                    AND branch_id = ?
-                     LIMIT 1`,
-                [staff_email, branchId]
+                 LIMIT 1`,
+                [staffEmail, storeId, branchId]
             );
 
             if (existingStaff.length > 0) {
@@ -2065,39 +2227,84 @@ exports.handler = async (event) => {
                     store_id: storeId,
                     branch_id: branchId,
                     manager_id: managerId,
-                    email: staff_email,
+                    email: staffEmail,
                     type: "staff_invite",
                 },
                 JWT_SECRET,
                 { expiresIn: "7d" }
             );
 
+            const inviteLink =
+                `${APP_BASE_URL}/accept-staff-invite?token=${encodeURIComponent(inviteToken)}`;
+
             await connection.execute(
                 `INSERT INTO staff
-                 (store_id, branch_id, manager_id, staff_name, staff_email, invite_token, status, permissions)
+                     (
+                         store_id,
+                         branch_id,
+                         manager_id,
+                         staff_name,
+                         staff_email,
+                         invite_token,
+                         status,
+                         permissions
+                     )
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     storeId,
                     branchId,
                     managerId,
-                    staff_name,
-                    staff_email,
+                    staffName,
+                    staffEmail,
                     inviteToken,
                     "pending",
-                    JSON.stringify(permissions || {}),
+                    JSON.stringify(permissions),
                 ]
             );
 
-            const inviteLink = `http://localhost:3000/accept-staff-invite?token=${inviteToken}`;
+            const invitation = {
+                staff_email: staffEmail,
+                staff_name: staffName,
+                manager_name: manager.manager_name || "Branch Manager",
+                store_name: manager.store_name || "StockNBook Store",
+                branch_name: manager.branch_name || "Assigned Branch",
+                invite_link: inviteLink,
+                permissions,
+            };
+
+            let emailSent = false;
+            let emailError = "";
+
+            try {
+                await sendStaffInvitationEmail(invitation);
+                emailSent = true;
+            } catch (sendError) {
+                emailError =
+                    sendError?.message ||
+                    "Unable to send the staff invitation email.";
+
+                console.error(
+                    "[stocknbook-auth] Staff invitation was saved but email delivery failed:",
+                    {
+                        to: staffEmail,
+                        error: emailError,
+                    }
+                );
+            }
 
             return {
                 statusCode: 201,
                 headers,
                 body: JSON.stringify({
-                    message: "Staff invitation created successfully",
+                    message: emailSent
+                        ? "Staff invitation created and emailed successfully."
+                        : "Staff invitation was created, but the email could not be sent. Use Resend after checking the SMTP configuration.",
                     invite_link: inviteLink,
-                    staff_email,
-                    staff_name,
+                    staff_email: staffEmail,
+                    staff_name: staffName,
+                    email_sent: emailSent,
+                    email_status: emailSent ? "sent" : "failed",
+                    email_error: emailError,
                 }),
             };
         }
@@ -2366,13 +2573,13 @@ exports.handler = async (event) => {
 
                 await connection.execute(
                     `INSERT INTO staff_invite_otps
-                         (
-                             invite_token_hash,
-                             email,
-                             otp_hash,
-                             expires_at,
-                             used
-                         )
+                     (
+                         invite_token_hash,
+                         email,
+                         otp_hash,
+                         expires_at,
+                         used
+                     )
                      VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
                     [
                         inviteTokenHash,
@@ -2466,7 +2673,7 @@ exports.handler = async (event) => {
                        AND used = 0
                        AND expires_at > UTC_TIMESTAMP()
                      ORDER BY id DESC
-                     LIMIT 1`,
+                         LIMIT 1`,
                     [
                         inviteTokenHash,
                         staff.staff_email,
@@ -2973,7 +3180,7 @@ exports.handler = async (event) => {
 
             try {
                 decoded = jwt.verify(token, JWT_SECRET);
-            } catch (err) {
+            } catch {
                 return {
                     statusCode: 401,
                     headers,
@@ -2985,16 +3192,20 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 403,
                     headers,
-                    body: JSON.stringify({ error: "Only managers can resend staff invites" }),
+                    body: JSON.stringify({
+                        error: "Only managers can resend staff invites",
+                    }),
                 };
             }
 
             const managerId = decoded.manager_id;
             const storeId = decoded.store_id;
             const branchId = decoded.branch_id;
-            const { staff_email } = body;
+            const staffEmail = String(body.staff_email || "")
+                .trim()
+                .toLowerCase();
 
-            if (!staff_email) {
+            if (!staffEmail) {
                 return {
                     statusCode: 400,
                     headers,
@@ -3003,12 +3214,21 @@ exports.handler = async (event) => {
             }
 
             const [managerRows] = await connection.execute(
-                `SELECT permissions
+                `SELECT
+                     managers.permissions,
+                     managers.manager_name,
+                     branches.branch_name,
+                     stores.store_name
                  FROM managers
-                 WHERE id = ?
-                   AND store_id = ?
-                   AND branch_id = ?
-                   AND status = 'active'
+                          JOIN branches
+                               ON branches.id = managers.branch_id
+                                   AND branches.store_id = managers.store_id
+                          JOIN stores
+                               ON stores.id = managers.store_id
+                 WHERE managers.id = ?
+                   AND managers.store_id = ?
+                   AND managers.branch_id = ?
+                   AND managers.status = 'active'
                      LIMIT 1`,
                 [managerId, storeId, branchId]
             );
@@ -3021,10 +3241,12 @@ exports.handler = async (event) => {
                 };
             }
 
+            const manager = managerRows[0];
+
             const managerPermissions =
-                typeof managerRows[0].permissions === "string"
-                    ? JSON.parse(managerRows[0].permissions || "{}")
-                    : managerRows[0].permissions || {};
+                typeof manager.permissions === "string"
+                    ? JSON.parse(manager.permissions || "{}")
+                    : manager.permissions || {};
 
             if (!managerPermissions.staff_management) {
                 return {
@@ -3037,21 +3259,28 @@ exports.handler = async (event) => {
             }
 
             const [staffRows] = await connection.execute(
-                `SELECT id, staff_name, staff_email, status
+                `SELECT
+                     id,
+                     staff_name,
+                     staff_email,
+                     status,
+                     permissions
                  FROM staff
                  WHERE staff_email = ?
                    AND store_id = ?
                    AND branch_id = ?
                    AND manager_id = ?
                      LIMIT 1`,
-                [staff_email, storeId, branchId, managerId]
+                [staffEmail, storeId, branchId, managerId]
             );
 
             if (staffRows.length === 0) {
                 return {
                     statusCode: 404,
                     headers,
-                    body: JSON.stringify({ error: "Pending staff invite not found" }),
+                    body: JSON.stringify({
+                        error: "Pending staff invite not found",
+                    }),
                 };
             }
 
@@ -3061,7 +3290,9 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "This staff account is already accepted or inactive" }),
+                    body: JSON.stringify({
+                        error: "This staff account is already accepted or inactive",
+                    }),
                 };
             }
 
@@ -3077,6 +3308,9 @@ exports.handler = async (event) => {
                 { expiresIn: "7d" }
             );
 
+            const inviteLink =
+                `${APP_BASE_URL}/accept-staff-invite?token=${encodeURIComponent(inviteToken)}`;
+
             await connection.execute(
                 `UPDATE staff
                  SET invite_token = ?
@@ -3087,16 +3321,54 @@ exports.handler = async (event) => {
                 [inviteToken, staff.id, storeId, branchId, managerId]
             );
 
-            const inviteLink = `http://localhost:3000/accept-staff-invite?token=${inviteToken}`;
+            const staffPermissions =
+                typeof staff.permissions === "string"
+                    ? JSON.parse(staff.permissions || "{}")
+                    : staff.permissions || {};
+
+            try {
+                await sendStaffInvitationEmail({
+                    staff_email: staff.staff_email,
+                    staff_name: staff.staff_name,
+                    manager_name: manager.manager_name || "Branch Manager",
+                    store_name: manager.store_name || "StockNBook Store",
+                    branch_name: manager.branch_name || "Assigned Branch",
+                    invite_link: inviteLink,
+                    permissions: staffPermissions,
+                });
+            } catch (sendError) {
+                const emailError =
+                    sendError?.message ||
+                    "Unable to resend the staff invitation email.";
+
+                return {
+                    statusCode: 502,
+                    headers,
+                    body: JSON.stringify({
+                        error: emailError,
+                        message:
+                            "The invitation link was refreshed, but Gmail did not accept the email.",
+                        invite_link: inviteLink,
+                        staff_email: staff.staff_email,
+                        staff_name: staff.staff_name,
+                        email_sent: false,
+                        email_status: "failed",
+                        email_error: emailError,
+                    }),
+                };
+            }
 
             return {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
-                    message: "Staff invite resent successfully",
+                    message: "Staff invitation emailed successfully.",
                     invite_link: inviteLink,
                     staff_email: staff.staff_email,
                     staff_name: staff.staff_name,
+                    email_sent: true,
+                    email_status: "sent",
+                    email_error: "",
                 }),
             };
         }

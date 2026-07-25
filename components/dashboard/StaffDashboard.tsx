@@ -8,9 +8,7 @@ import {
     AlertTriangle,
     CalendarClock,
     CalendarDays,
-    ClipboardList,
     Download,
-    PackageCheck,
     PackageX,
     RefreshCw,
     ShoppingCart,
@@ -996,36 +994,6 @@ export default function StaffDashboard() {
         return status.includes("pending") || status === "new";
     }).length;
 
-    const allUpcomingOrders = useMemo(() => {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        return [...scheduledOrders]
-            .filter((order) => {
-                const status = String(order.status || "").toLowerCase();
-                const schedule = new Date(
-                    order.orderDate || order.date || order.createdAt || "",
-                );
-
-                return (
-                    !["completed", "cancelled", "canceled"].includes(status) &&
-                    !Number.isNaN(schedule.getTime()) &&
-                    schedule.getTime() >= today.getTime()
-                );
-            })
-            .sort(
-                (first, second) =>
-                    new Date(first.orderDate || first.date || 0).getTime() -
-                    new Date(second.orderDate || second.date || 0).getTime(),
-            );
-    }, [scheduledOrders]);
-
-    const upcomingOrders = allUpcomingOrders.slice(0, 3);
-
-    const pendingOrderCount = scheduledOrders.filter((order) => {
-        const status = String(order.status || "").toLowerCase();
-        return status.includes("pending") || status === "new";
-    }).length;
 
     const allInventoryAlerts = useMemo(
         () =>
@@ -1097,7 +1065,7 @@ export default function StaffDashboard() {
 
             <section className="px-6 py-5 font-sans">
                 <div className="mx-auto max-w-none space-y-3.5">
-                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                         <SalesSummaryCard
                             title="Total Branch Sales"
                             value={peso(totalBusinessSales)}
@@ -1119,16 +1087,9 @@ export default function StaffDashboard() {
                             icon={<CalendarDays size={25} />}
                             tone="blue"
                         />
-                        <SalesSummaryCard
-                            title="Total Scheduled Order Sales"
-                            value={peso(scheduledOrderSales)}
-                            subtitle="Sales from scheduled orders"
-                            icon={<ClipboardList size={25} />}
-                            tone="orange"
-                        />
                     </div>
 
-                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
                         <GlanceCard
                             title="Out of Stock"
                             value={outOfStockAlertCount}
@@ -1157,23 +1118,9 @@ export default function StaffDashboard() {
                             icon={<CalendarDays size={22} />}
                             tone="green"
                         />
-                        <GlanceCard
-                            title="Pending Orders"
-                            value={pendingOrderCount}
-                            label="Orders"
-                            icon={<ClipboardList size={22} />}
-                            tone="violet"
-                        />
-                        <GlanceCard
-                            title="Upcoming Orders"
-                            value={upcomingOrders.length}
-                            label="Orders"
-                            icon={<PackageCheck size={22} />}
-                            tone="cyan"
-                        />
                     </div>
 
-                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
+                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
                         <CompactDashboardTable
                             title="Upcoming Bookings"
                             subtitle="Next 3 upcoming bookings"
@@ -1208,53 +1155,6 @@ export default function StaffDashboard() {
                             }))}
                         />
 
-                        <CompactDashboardTable
-                            title="Upcoming Orders"
-                            subtitle="Next 3 scheduled orders"
-                            icon={<ClipboardList size={18} />}
-                            action={() => router.push("/orders")}
-                            onDownload={() =>
-                                downloadExcel(
-                                    "upcoming-orders.xlsx",
-                                    "Upcoming Orders",
-                                    ["Date", "Order Number", "Time", "Status"],
-                                    allUpcomingOrders.map((order, index) => {
-                                        const orderDate =
-                                            order.orderDate || order.date || order.createdAt || "";
-
-                                        return [
-                                            orderDate,
-                                            compactDashboardReference(
-                                                "SO",
-                                                order.orderNumber || order.orderId || order.id,
-                                                index + 1,
-                                            ),
-                                            formatDashboardTime(orderDate, order.time),
-                                            order.status || "Pending",
-                                        ];
-                                    }),
-                                )
-                            }
-                            totalRecords={allUpcomingOrders.length}
-                            headers={["Date", "Order #", "Time", "Status"]}
-                            emptyText="No upcoming scheduled orders yet."
-                            rows={upcomingOrders.map((order, index) => {
-                                const orderDate =
-                                    order.orderDate || order.date || order.createdAt;
-
-                                return {
-                                    date: orderDate,
-                                    reference: compactDashboardReference(
-                                        "SO",
-                                        order.orderNumber || order.orderId || order.id,
-                                        index + 1,
-                                    ),
-                                    time: formatDashboardTime(orderDate, order.time),
-                                    status: order.status || "Pending",
-                                };
-                            })}
-                        />
-
                         <InventoryAlertPanel
                             items={inventoryAlerts}
                             totalAlerts={allInventoryAlerts.length}
@@ -1262,7 +1162,7 @@ export default function StaffDashboard() {
                                 downloadExcel(
                                     "inventory-alerts.xlsx",
                                     "Inventory Alerts",
-                                    ["Product", "Stock Level", "Status"],
+                                    ["Product", "Stock Level", "Stock Alert"],
                                     allInventoryAlerts.map((product) => [
                                         product.name,
                                         Number(product.stock || 0),
@@ -1585,8 +1485,9 @@ function InventoryAlertPanel({
 
             <table className="w-full flex-1 table-fixed border-collapse">
                 <colgroup>
-                    <col className="w-[72%]" />
-                    <col className="w-[28%]" />
+                    <col className="w-[58%]" />
+                    <col className="w-[18%]" />
+                    <col className="w-[24%]" />
                 </colgroup>
                 <thead className="bg-[#FBFAFD]">
                 <tr className="border-b border-[#EEE8F2]">
@@ -1596,13 +1497,16 @@ function InventoryAlertPanel({
                     <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C]">
                         Stock Level
                     </th>
+                    <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-[#806A8C]">
+                        Stock Alert
+                    </th>
                 </tr>
                 </thead>
                 <tbody>
                 {items.length === 0 ? (
                     <tr>
                         <td
-                            colSpan={2}
+                            colSpan={3}
                             className="h-[170px] px-4 text-center text-[13px] text-[#8A7D92]"
                         >
                             All products are well stocked.
@@ -1611,6 +1515,7 @@ function InventoryAlertPanel({
                 ) : (
                     items.map((product) => {
                         const stock = Number(product.stock || 0);
+                        const isOutOfStock = stock <= 0;
 
                         return (
                             <tr
@@ -1627,9 +1532,16 @@ function InventoryAlertPanel({
                                 </td>
                                 <td className="px-3 py-2">
                                     <span
-                                        className={`whitespace-nowrap text-[13px] font-semibold ${stock <= 0 ? "text-[#DC2626]" : "text-[#B7791F]"}`}
+                                        className={`whitespace-nowrap text-[13px] font-semibold ${isOutOfStock ? "text-[#DC2626]" : "text-[#B7791F]"}`}
                                     >
                                         {stock} left
+                                    </span>
+                                </td>
+                                <td className="px-3 py-2">
+                                    <span
+                                        className={`whitespace-nowrap text-[13px] font-semibold ${isOutOfStock ? "text-[#DC2626]" : "text-[#B7791F]"}`}
+                                    >
+                                        {isOutOfStock ? "Out of Stock" : "Low Stock"}
                                     </span>
                                 </td>
                             </tr>

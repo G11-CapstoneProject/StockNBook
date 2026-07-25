@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import { Lora } from "next/font/google";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
     ArrowLeft,
@@ -32,6 +33,12 @@ import {
 } from "react";
 
 import LandingPage from "../../components/landing/LandingPage";
+
+const lora = Lora({
+    subsets: ["latin"],
+    weight: ["600", "700"],
+    display: "swap",
+});
 
 type InviteDetails = {
     staff_id: number;
@@ -145,7 +152,7 @@ function PermissionChips({ permissions }: { permissions: Record<string, boolean>
                 return (
                     <div
                         key={permission}
-                        className="inline-flex items-center gap-2 rounded-xl bg-[#F2EBFF] px-3.5 py-2 text-sm font-semibold text-[#4A1D96]"
+                        className="inline-flex items-center gap-2 rounded-xl bg-[#F0E8FA] px-3.5 py-2 text-sm font-semibold text-[#2D1B4E]"
                     >
                         <Icon className="h-4 w-4" />
                         {meta.label}
@@ -170,7 +177,7 @@ function ProgressSteps({ currentStep }: { currentStep: number }) {
                             <div
                                 className={`absolute right-1/2 top-5 h-0.5 w-full -translate-y-1/2 ${
                                     stepNumber <= currentStep
-                                        ? "bg-[#5520AE]"
+                                        ? "bg-[#2D1B4E]"
                                         : "bg-[#DDD3EC]"
                                 }`}
                             />
@@ -179,7 +186,7 @@ function ProgressSteps({ currentStep }: { currentStep: number }) {
                         <div
                             className={`relative z-10 flex h-10 w-10 items-center justify-center rounded-full border text-sm font-bold transition sm:h-11 sm:w-11 ${
                                 complete || active
-                                    ? "border-[#5520AE] bg-[#5520AE] text-white"
+                                    ? "border-[#2D1B4E] bg-[#2D1B4E] text-white"
                                     : "border-[#D8CEE8] bg-white text-[#432570]"
                             }`}
                         >
@@ -189,7 +196,7 @@ function ProgressSteps({ currentStep }: { currentStep: number }) {
                         <span
                             className={`mt-2 hidden text-center text-xs font-medium sm:block ${
                                 active || complete
-                                    ? "text-[#5120A8]"
+                                    ? "text-[#2D1B4E]"
                                     : "text-[#756A82]"
                             }`}
                         >
@@ -218,7 +225,7 @@ function DetailGrid({ details }: { details: InviteDetails }) {
         <div className="mt-6 grid gap-3 rounded-2xl border border-[#E3DAEC] bg-white p-4 sm:grid-cols-2 sm:p-5">
             {items.map(({ label, value, icon: Icon }) => (
                 <div key={label} className="flex min-w-0 items-center gap-3 rounded-xl p-1">
-                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F2EBFF] text-[#5520AE]">
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F0E8FA] text-[#2D1B4E]">
                         <Icon className="h-5 w-5" />
                     </div>
                     <div className="min-w-0">
@@ -248,6 +255,11 @@ function AcceptStaffInviteContent() {
     const [showPassword, setShowPassword] = useState(false);
     const [showConfirmPassword, setShowConfirmPassword] = useState(false);
     const [acceptedTerms, setAcceptedTerms] = useState(false);
+    const [legalDocument, setLegalDocument] = useState<
+        "terms" | "privacy" | null
+    >(null);
+    const [hasViewedTerms, setHasViewedTerms] = useState(false);
+    const [hasViewedPrivacy, setHasViewedPrivacy] = useState(false);
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState("");
@@ -441,8 +453,15 @@ function AcceptStaffInviteContent() {
             return;
         }
 
+        if (!hasViewedTerms || !hasViewedPrivacy) {
+            setError(
+                "Please view both the Terms of Service and Privacy Policy before continuing."
+            );
+            return;
+        }
+
         if (!acceptedTerms) {
-            setError("Agree to the invitation terms and account activation.");
+            setError("Please agree to the Terms of Service and Privacy Policy.");
             return;
         }
 
@@ -489,7 +508,7 @@ function AcceptStaffInviteContent() {
         if (loading) {
             return (
                 <div className="flex min-h-[420px] flex-col items-center justify-center gap-3 text-[#5D4D69]">
-                    <Loader2 className="h-9 w-9 animate-spin text-[#5520AE]" />
+                    <Loader2 className="h-9 w-9 animate-spin text-[#2D1B4E]" />
                     <p className="font-medium">Opening your secure invitation…</p>
                 </div>
             );
@@ -510,7 +529,7 @@ function AcceptStaffInviteContent() {
                     <button
                         type="button"
                         onClick={handleClose}
-                        className="mt-6 rounded-xl bg-[#32185B] px-6 py-3 font-semibold text-white"
+                        className="mt-6 rounded-xl bg-[#2D1B4E] px-6 py-3 font-semibold text-white"
                     >
                         Return to landing page
                     </button>
@@ -533,14 +552,14 @@ function AcceptStaffInviteContent() {
                     <ProgressSteps currentStep={5} />
 
                     <div className="mt-8 flex justify-center">
-                        <div className="relative flex h-28 w-28 items-center justify-center rounded-full border-8 border-[#E7DBFF] bg-[#F7F2FF] text-[#5520AE] shadow-[0_16px_45px_rgba(85,32,174,.18)]">
+                        <div className="relative flex h-28 w-28 items-center justify-center rounded-full border-8 border-[#E5DCF0] bg-[#F8F5FF] text-[#2D1B4E] shadow-[0_16px_45px_rgba(45,27,78,.18)]">
                             <Check className="h-14 w-14" strokeWidth={2.5} />
                         </div>
                     </div>
 
                     <p className="mt-6 text-center text-base leading-7 text-[#594B65]">
                         You now have access to<br />
-                        <strong className="text-[#4D1FA5]">
+                        <strong className="text-[#2D1B4E]">
                             {details.store_name} • {details.branch_name}
                         </strong>{" "}
                         as Staff Member.
@@ -550,18 +569,18 @@ function AcceptStaffInviteContent() {
                         <div className="rounded-2xl border border-[#E3DAEC] bg-[#FCFAFD] p-5">
                             <h3 className="font-bold text-[#2A1748]">What you can do now</h3>
                             <div className="mt-4 space-y-3 text-sm text-[#4D4058]">
-                                <p className="flex items-center gap-2"><CalendarDays className="h-4 w-4 text-[#5520AE]" /> Review bookings and schedules</p>
-                                <p className="flex items-center gap-2"><Package className="h-4 w-4 text-[#5520AE]" /> Manage packages and inventory</p>
-                                <p className="flex items-center gap-2"><ShoppingCart className="h-4 w-4 text-[#5520AE]" /> Track sales and POS activity</p>
-                                <p className="flex items-center gap-2"><LayoutDashboard className="h-4 w-4 text-[#5520AE]" /> Work with your branch dashboard</p>
+                                <p className="flex items-center gap-2"><CalendarDays className="h-4 w-4 text-[#2D1B4E]" /> Review bookings and schedules</p>
+                                <p className="flex items-center gap-2"><Package className="h-4 w-4 text-[#2D1B4E]" /> Manage packages and inventory</p>
+                                <p className="flex items-center gap-2"><ShoppingCart className="h-4 w-4 text-[#2D1B4E]" /> Track sales and POS activity</p>
+                                <p className="flex items-center gap-2"><LayoutDashboard className="h-4 w-4 text-[#2D1B4E]" /> Work with your branch dashboard</p>
                             </div>
                         </div>
 
                         <div className="rounded-2xl border border-[#E3DAEC] bg-white p-5">
                             <div className="space-y-4">
-                                <div className="flex items-center gap-3"><MapPin className="h-5 w-5 text-[#5520AE]" /><div><p className="text-xs text-[#7D7188]">Branch</p><p className="font-bold text-[#281546]">{details.branch_name}</p></div></div>
-                                <div className="flex items-center gap-3"><Store className="h-5 w-5 text-[#5520AE]" /><div><p className="text-xs text-[#7D7188]">Store</p><p className="font-bold text-[#281546]">{details.store_name}</p></div></div>
-                                <div className="flex items-center gap-3"><UserRound className="h-5 w-5 text-[#5520AE]" /><div><p className="text-xs text-[#7D7188]">Role</p><p className="font-bold text-[#281546]">Staff Member</p></div></div>
+                                <div className="flex items-center gap-3"><MapPin className="h-5 w-5 text-[#2D1B4E]" /><div><p className="text-xs text-[#7D7188]">Branch</p><p className="font-bold text-[#281546]">{details.branch_name}</p></div></div>
+                                <div className="flex items-center gap-3"><Store className="h-5 w-5 text-[#2D1B4E]" /><div><p className="text-xs text-[#7D7188]">Store</p><p className="font-bold text-[#281546]">{details.store_name}</p></div></div>
+                                <div className="flex items-center gap-3"><UserRound className="h-5 w-5 text-[#2D1B4E]" /><div><p className="text-xs text-[#7D7188]">Role</p><p className="font-bold text-[#281546]">Staff Member</p></div></div>
                             </div>
                         </div>
                     </div>
@@ -569,7 +588,7 @@ function AcceptStaffInviteContent() {
                     <button
                         type="button"
                         onClick={() => router.replace("/dashboard")}
-                        className="mt-6 flex w-full items-center justify-center gap-3 rounded-xl bg-gradient-to-r from-[#32185B] to-[#5A1CC8] px-5 py-4 font-bold text-white shadow-lg shadow-purple-200"
+                        className="mt-6 flex w-full items-center justify-center gap-3 rounded-xl bg-gradient-to-r from-[#2D1B4E] to-[#3D2560] px-5 py-4 font-bold text-white shadow-lg shadow-[#2D1B4E]/20"
                     >
                         <LayoutDashboard className="h-5 w-5" />
                         Go to Dashboard
@@ -593,9 +612,9 @@ function AcceptStaffInviteContent() {
                     </h1>
                     <p className="mt-2 text-sm leading-6 text-[#65596F] sm:text-base">
                         You were invited to join{" "}
-                        <strong className="text-[#48208E]">{details.store_name}</strong>
+                        <strong className="text-[#2D1B4E]">{details.store_name}</strong>
                         {" • "}
-                        <strong className="text-[#48208E]">{details.branch_name}</strong>
+                        <strong className="text-[#2D1B4E]">{details.branch_name}</strong>
                         {" "}as Staff Member.
                     </p>
                 </div>
@@ -611,8 +630,8 @@ function AcceptStaffInviteContent() {
 
                 {currentStep === 1 && (
                     <div className="mt-6">
-                        <div className="flex items-start gap-3 rounded-2xl border border-[#D9C7F5] bg-[#F8F3FF] p-4 text-sm leading-6 text-[#44226F]">
-                            <ShieldCheck className="mt-0.5 h-6 w-6 shrink-0 text-[#5A22B0]" />
+                        <div className="flex items-start gap-3 rounded-2xl border border-[#D9D0E2] bg-[#F8F5FF] p-4 text-sm leading-6 text-[#3D2560]">
+                            <ShieldCheck className="mt-0.5 h-6 w-6 shrink-0 text-[#2D1B4E]" />
                             <p>
                                 Review the invitation details before continuing. You’ll verify your email and create your password in the next steps.
                             </p>
@@ -640,7 +659,7 @@ function AcceptStaffInviteContent() {
                                 type="button"
                                 disabled={submitting || otpTimer > 0}
                                 onClick={sendVerificationCode}
-                                className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#5520AE] px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                                className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
                             >
                                 <Mail className="h-4 w-4" />
                                 Resend code
@@ -661,17 +680,17 @@ function AcceptStaffInviteContent() {
                                     inputMode="numeric"
                                     maxLength={1}
                                     aria-label={`Verification digit ${index + 1}`}
-                                    className="h-12 min-w-0 rounded-xl border border-[#DCD2E8] bg-white text-center text-lg font-bold text-[#2F1752] outline-none transition focus:border-[#5520AE] focus:ring-4 focus:ring-purple-100 sm:h-14 sm:text-xl"
+                                    className="h-12 min-w-0 rounded-xl border border-[#DCD2E8] bg-white text-center text-lg font-bold text-[#2F1752] outline-none transition focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10 sm:h-14 sm:text-xl"
                                 />
                             ))}
                         </div>
 
                         <div className="mt-3 flex items-center justify-between text-sm">
-                            <span className="rounded-full bg-[#F2EBFF] px-3 py-1.5 font-medium text-[#5A2A9E]">
+                            <span className="rounded-full bg-[#F0E8FA] px-3 py-1.5 font-medium text-[#3D2560]">
                                 Code expires in {formatTimer(otpTimer)}
                             </span>
                             {otpTimer === 0 && (
-                                <button type="button" onClick={sendVerificationCode} className="font-semibold text-[#5520AE]">
+                                <button type="button" onClick={sendVerificationCode} className="font-semibold text-[#2D1B4E]">
                                     Send a new code
                                 </button>
                             )}
@@ -692,7 +711,7 @@ function AcceptStaffInviteContent() {
                                 <input
                                     value={staffName}
                                     onChange={(event) => setStaffName(event.target.value)}
-                                    className="mt-2 h-12 w-full rounded-xl border border-[#DCD2E8] px-4 text-[#261641] outline-none focus:border-[#5520AE] focus:ring-4 focus:ring-purple-100"
+                                    className="mt-2 h-12 w-full rounded-xl border border-[#DCD2E8] px-4 text-[#261641] outline-none focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10"
                                 />
                             </label>
 
@@ -730,7 +749,7 @@ function AcceptStaffInviteContent() {
                                             type={showPassword ? "text" : "password"}
                                             value={password}
                                             onChange={(event) => setPassword(event.target.value)}
-                                            className="h-12 w-full rounded-xl border border-[#DCD2E8] pl-12 pr-12 text-[#261641] outline-none focus:border-[#5520AE] focus:ring-4 focus:ring-purple-100"
+                                            className="h-12 w-full rounded-xl border border-[#DCD2E8] pl-12 pr-12 text-[#261641] outline-none focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10"
                                         />
                                         <button type="button" onClick={() => setShowPassword((value) => !value)} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#756A82]">
                                             {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
@@ -746,7 +765,7 @@ function AcceptStaffInviteContent() {
                                             type={showConfirmPassword ? "text" : "password"}
                                             value={confirmPassword}
                                             onChange={(event) => setConfirmPassword(event.target.value)}
-                                            className="h-12 w-full rounded-xl border border-[#DCD2E8] pl-12 pr-12 text-[#261641] outline-none focus:border-[#5520AE] focus:ring-4 focus:ring-purple-100"
+                                            className="h-12 w-full rounded-xl border border-[#DCD2E8] pl-12 pr-12 text-[#261641] outline-none focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10"
                                         />
                                         <button type="button" onClick={() => setShowConfirmPassword((value) => !value)} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#756A82]">
                                             {showConfirmPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
@@ -754,15 +773,57 @@ function AcceptStaffInviteContent() {
                                     </div>
                                 </label>
 
-                                <label className="flex cursor-pointer items-start gap-3 text-sm text-[#5C5066]">
+                                <div className="flex items-start gap-3 text-sm">
                                     <input
                                         type="checkbox"
                                         checked={acceptedTerms}
-                                        onChange={(event) => setAcceptedTerms(event.target.checked)}
-                                        className="mt-0.5 h-5 w-5 accent-[#5520AE]"
+                                        disabled={
+                                            !hasViewedTerms ||
+                                            !hasViewedPrivacy ||
+                                            submitting
+                                        }
+                                        onChange={(event) =>
+                                            setAcceptedTerms(event.target.checked)
+                                        }
+                                        aria-label="Agree to the Terms of Service and Privacy Policy"
+                                        className="mt-0.5 h-5 w-5 shrink-0 accent-[#2D1B4E] disabled:cursor-not-allowed"
                                     />
-                                    <span>I agree to the invitation terms and account activation.</span>
-                                </label>
+
+                                    <p
+                                        className={
+                                            hasViewedTerms && hasViewedPrivacy
+                                                ? "text-[#5C5066]"
+                                                : "text-[#A39AA9]"
+                                        }
+                                    >
+                                        I agree to the{" "}
+                                        <button
+                                            type="button"
+                                            onClick={() => setLegalDocument("terms")}
+                                            className={[
+                                                "text-[#2D1B4E] underline underline-offset-2 transition hover:text-[#5B35A5]",
+                                                hasViewedTerms
+                                                    ? "font-normal"
+                                                    : "font-semibold",
+                                            ].join(" ")}
+                                        >
+                                            Terms of Service
+                                        </button>{" "}
+                                        and{" "}
+                                        <button
+                                            type="button"
+                                            onClick={() => setLegalDocument("privacy")}
+                                            className={[
+                                                "text-[#2D1B4E] underline underline-offset-2 transition hover:text-[#5B35A5]",
+                                                hasViewedPrivacy
+                                                    ? "font-normal"
+                                                    : "font-semibold",
+                                            ].join(" ")}
+                                        >
+                                            Privacy Policy
+                                        </button>
+                                    </p>
+                                </div>
                             </div>
 
                             <div className="rounded-2xl border border-[#E1D8EC] bg-[#F8F4FF] p-4">
@@ -808,7 +869,7 @@ function AcceptStaffInviteContent() {
                             if (currentStep === 3) void saveStaffDetails();
                             if (currentStep === 4) void activateAccount();
                         }}
-                        className="inline-flex h-12 min-w-[180px] items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#35175F] to-[#5B1BC7] px-6 font-bold text-white shadow-lg shadow-purple-200 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+                        className="inline-flex h-12 min-w-[180px] items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#2D1B4E] to-[#3D2560] px-6 font-bold text-white shadow-lg shadow-[#2D1B4E]/20 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                         {submitting ? <Loader2 className="h-5 w-5 animate-spin" /> : null}
                         {currentStep === 1 && "Continue"}
@@ -823,7 +884,7 @@ function AcceptStaffInviteContent() {
     };
 
     return (
-        <main className="relative min-h-screen overflow-hidden bg-[#F7F4FB]">
+        <main className="relative min-h-screen overflow-hidden bg-[#F7F4FB] font-sans">
             <div aria-hidden="true" className="pointer-events-none fixed inset-0 overflow-hidden">
                 <LandingPage onSignupSuccess={() => undefined} />
             </div>
@@ -837,25 +898,26 @@ function AcceptStaffInviteContent() {
                     aria-label="Accept staff invitation"
                     className="flex max-h-[94vh] w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/80 bg-white shadow-2xl md:h-[min(760px,94vh)] md:min-h-[680px]"
                 >
-                    <header className="relative z-20 shrink-0 overflow-hidden border-b border-white/10 bg-[linear-gradient(135deg,_#2D1B4E_0%,_#43206F_52%,_#5A2A91_100%)] px-5 py-4 sm:px-7 lg:px-8">
+                    <header className="relative z-20 shrink-0 overflow-hidden border-b border-white/10 bg-[linear-gradient(135deg,_#3D2468_0%,_#2D1B4E_52%,_#24143D_100%)] px-5 py-4 sm:px-6">
                         <div className="pointer-events-none absolute -left-16 -top-20 h-40 w-40 rounded-full bg-white/10 blur-2xl" />
                         <div className="pointer-events-none absolute -right-10 -top-16 h-36 w-36 rounded-full bg-[#C9951A]/15 blur-2xl" />
 
-                        <div className="relative mx-auto flex w-full max-w-[820px] items-center justify-between gap-4">
-                            <div className="flex min-w-0 items-center gap-3">
-                                <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-white/25 bg-white/95 p-2 shadow-sm">
-                                    <Image
-                                        src="/logo.png"
-                                        alt="StockNBook"
-                                        width={40}
-                                        height={40}
-                                        className="h-full w-full object-contain"
-                                    />
-                                </div>
+                        <div className="relative flex w-full items-center justify-between gap-4">
+                            <div className="flex min-w-0 items-center gap-2.5">
+                                <Image
+                                    src="/logo.png"
+                                    alt="StockNBook logo"
+                                    width={52}
+                                    height={52}
+                                    priority
+                                    className="h-9 w-9 shrink-0 object-contain"
+                                />
 
                                 <div className="min-w-0">
-                                    <span className="block truncate text-xl font-bold tracking-tight text-white sm:text-2xl">
-                                        Stock<span className="text-[#F1C85C]">N</span>Book
+                                    <span
+                                        className={`${lora.className} block truncate text-xl font-bold tracking-[-0.04em] text-white`}
+                                    >
+                                        Stock<span className="text-[#D4A126]">N</span>Book
                                     </span>
                                     <span className="mt-0.5 block text-xs font-medium text-white/65">
                                         Secure staff invitation
@@ -867,9 +929,9 @@ function AcceptStaffInviteContent() {
                                 type="button"
                                 onClick={handleClose}
                                 aria-label="Close invitation"
-                                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-white/75 transition hover:bg-white/10 hover:text-white"
+                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white/75 transition hover:bg-white/10 hover:text-white"
                             >
-                                <X className="h-6 w-6" />
+                                <X className="h-5 w-5" />
                             </button>
                         </div>
                     </header>
@@ -881,6 +943,136 @@ function AcceptStaffInviteContent() {
                     </div>
                 </section>
             </div>
+
+            {legalDocument && (
+                <div
+                    className="fixed inset-0 z-[70] flex items-center justify-center bg-[#160C27]/65 px-4 backdrop-blur-sm"
+                    onMouseDown={() => setLegalDocument(null)}
+                >
+                    <div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="invitation-legal-document-title"
+                        className="w-full max-w-2xl overflow-hidden rounded-3xl border border-white/60 bg-white shadow-2xl"
+                        onMouseDown={(event) => event.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between gap-4 border-b border-[#EBE4F0] px-6 py-5">
+                            <div>
+                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#C9951A]">
+                                    StockNBook
+                                </p>
+
+                                <h2
+                                    id="invitation-legal-document-title"
+                                    className="mt-2 text-2xl font-semibold tracking-[-0.025em] text-[#1A1220]"
+                                >
+                                    {legalDocument === "terms"
+                                        ? "Terms of Service"
+                                        : "Privacy Policy"}
+                                </h2>
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={() => setLegalDocument(null)}
+                                aria-label="Close legal document"
+                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E]"
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        <div className="max-h-[55vh] overflow-y-auto px-6 py-5 text-sm leading-7 text-[#6F6577]">
+                            {legalDocument === "terms" ? (
+                                <div className="space-y-4">
+                                    <p>
+                                        By creating and using a StockNBook account,
+                                        you agree to provide accurate registration
+                                        and business information and to keep your
+                                        login credentials secure.
+                                    </p>
+
+                                    <p>
+                                        You are responsible for the bookings,
+                                        inventory, sales, scheduled orders, customer
+                                        details, staff permissions, and other
+                                        records entered through your account.
+                                    </p>
+
+                                    <p>
+                                        StockNBook is a business-management and
+                                        record-keeping platform. It does not replace
+                                        professional legal, tax, accounting, or
+                                        regulatory advice.
+                                    </p>
+
+                                    <p>
+                                        Access may be limited or suspended when the
+                                        platform is misused, security is threatened,
+                                        or applicable rules are violated.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="space-y-4">
+                                    <p>
+                                        StockNBook processes account and business
+                                        information needed to provide login,
+                                        bookings, inventory, sales, scheduled
+                                        orders, staff access, reports, and
+                                        subscription services.
+                                    </p>
+
+                                    <p>
+                                        Information should only be accessed by
+                                        authorized account owners, managers, and
+                                        staff members according to their assigned
+                                        permissions.
+                                    </p>
+
+                                    <p>
+                                        Users are responsible for entering customer
+                                        and business information only when they have
+                                        an appropriate reason and permission to do
+                                        so.
+                                    </p>
+
+                                    <p>
+                                        Account and business information is used to
+                                        operate, secure, maintain, and improve the
+                                        StockNBook service.
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="flex flex-col-reverse gap-3 border-t border-[#EBE4F0] px-6 py-5 sm:flex-row sm:justify-end">
+                            <button
+                                type="button"
+                                onClick={() => setLegalDocument(null)}
+                                className="h-11 rounded-xl border border-[#D4CBDD] bg-white px-5 text-sm font-semibold text-[#2D1B4E] transition hover:bg-[#F8F5FF]"
+                            >
+                                Close
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    if (legalDocument === "terms") {
+                                        setHasViewedTerms(true);
+                                    } else {
+                                        setHasViewedPrivacy(true);
+                                    }
+
+                                    setLegalDocument(null);
+                                }}
+                                className="h-11 rounded-xl bg-[#2D1B4E] px-5 text-sm font-semibold text-white transition hover:bg-[#3D2560]"
+                            >
+                                I have read this document
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </main>
     );
 }
@@ -890,7 +1082,7 @@ export default function AcceptStaffInvitePage() {
         <Suspense
             fallback={
                 <main className="flex min-h-screen items-center justify-center bg-[#F7F4FB]">
-                    <Loader2 className="h-9 w-9 animate-spin text-[#5520AE]" />
+                    <Loader2 className="h-9 w-9 animate-spin text-[#2D1B4E]" />
                 </main>
             }
         >

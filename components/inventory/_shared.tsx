@@ -4,6 +4,7 @@ import * as React from "react";
 import {
     AlertTriangle,
     Boxes,
+    CalendarClock,
     CheckCircle2,
     ChevronDown,
     DollarSign,
@@ -26,6 +27,7 @@ export type ProductVariant = {
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
+    expirationDate?: string | null;
     createdAt?: string;
 };
 
@@ -36,6 +38,7 @@ export type ProductVariantSave = {
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
+    expirationDate?: string | null;
 };
 
 export type Product = {
@@ -51,6 +54,7 @@ export type Product = {
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
+    expirationDate?: string | null;
     createdAt?: string;
     hasVariants: boolean;
     variants?: ProductVariant[];
@@ -68,6 +72,7 @@ export type ProductSaveData = {
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
+    expirationDate?: string | null;
     hasVariants: boolean;
     variants?: ProductVariantSave[];
 };
@@ -132,6 +137,24 @@ function money(value: number | string) {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     })}`;
+}
+
+function formatExpirationDate(value?: string | null) {
+    const rawValue = String(value || "").trim();
+
+    if (!rawValue) return "";
+
+    const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(rawValue)
+        ? new Date(`${rawValue}T00:00:00`)
+        : new Date(rawValue);
+
+    if (Number.isNaN(parsedDate.getTime())) return rawValue;
+
+    return parsedDate.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+    });
 }
 
 
@@ -200,6 +223,12 @@ export function normalizeProductVariant(raw: any): ProductVariant {
         alertLevel: Number(raw.alertLevel ?? raw.alert_level ?? 0),
         originalPrice: Number(raw.originalPrice ?? raw.original_price ?? 0),
         salesPrice: Number(raw.salesPrice ?? raw.sales_price ?? 0),
+        expirationDate:
+            raw.expirationDate ??
+            raw.expiration_date ??
+            raw.expiryDate ??
+            raw.expiry_date ??
+            null,
         createdAt: raw.createdAt ?? raw.created_at ?? "",
     };
 }
@@ -218,6 +247,12 @@ export function normalizeProduct(raw: any): Product {
         alertLevel: Number(raw.alertLevel ?? raw.alert_level ?? 0),
         originalPrice: Number(raw.originalPrice ?? raw.original_price ?? 0),
         salesPrice: Number(raw.salesPrice ?? raw.sales_price ?? 0),
+        expirationDate:
+            raw.expirationDate ??
+            raw.expiration_date ??
+            raw.expiryDate ??
+            raw.expiry_date ??
+            null,
         createdAt: raw.createdAt ?? raw.created_at ?? "",
         hasVariants: Boolean(raw.hasVariants ?? raw.has_variants ?? false),
         variants: Array.isArray(raw.variants)
@@ -255,9 +290,11 @@ function rememberSelectedBranch(branch: Branch) {
 function PesoPriceInput({
                             value,
                             onChange,
+                            compact = false,
                         }: {
     value: string | number;
     onChange: (value: string) => void;
+    compact?: boolean;
 }) {
     return (
         <div className="relative w-full">
@@ -273,7 +310,11 @@ function PesoPriceInput({
                 placeholder="0.00"
                 step="0.01"
                 min="0"
-                className="w-full rounded-xl border border-[#E3D8EA] bg-white p-3 pl-8 text-sm text-[#1A1220] placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:outline-none focus:ring-1 focus:ring-[#2B174C]"
+                className={
+                    compact
+                        ? "h-10 w-full min-w-0 rounded-lg border border-[#E3D8EA] bg-white px-3 py-2 pl-8 text-sm text-[#1A1220] placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:outline-none focus:ring-1 focus:ring-[#2B174C]"
+                        : "w-full rounded-xl border border-[#E3D8EA] bg-white p-3 pl-8 text-sm text-[#1A1220] placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:outline-none focus:ring-1 focus:ring-[#2B174C]"
+                }
             />
         </div>
     );
@@ -549,6 +590,115 @@ function getStockAlertItems(products: Product[]): StockAlertItem[] {
             },
         ];
     });
+}
+
+
+const EXPIRING_SOON_DAYS = 30;
+const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
+
+type ExpiringSoonItem = {
+    id: string;
+    product: Product;
+    productName: string;
+    variantName: string;
+    expirationDate: string;
+    daysRemaining: number;
+};
+
+function parseInventoryExpirationDate(value?: string | null) {
+    const rawValue = String(value || "").trim();
+
+    if (!rawValue) return null;
+
+    const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(rawValue)
+        ? new Date(`${rawValue}T00:00:00`)
+        : new Date(rawValue);
+
+    if (Number.isNaN(parsedDate.getTime())) return null;
+
+    parsedDate.setHours(0, 0, 0, 0);
+    return parsedDate;
+}
+
+function getDaysUntilExpiration(value?: string | null) {
+    const expirationDate = parseInventoryExpirationDate(value);
+
+    if (!expirationDate) return null;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    return Math.round(
+        (expirationDate.getTime() - today.getTime()) / DAY_IN_MILLISECONDS
+    );
+}
+
+function getExpiringSoonItems(products: Product[]): ExpiringSoonItem[] {
+    return products
+        .flatMap((product) => {
+            const variants = Array.isArray(product.variants)
+                ? product.variants
+                : [];
+
+            if (product.hasVariants && variants.length > 0) {
+                return variants.flatMap((variant, index) => {
+                    const daysRemaining = getDaysUntilExpiration(
+                        variant.expirationDate
+                    );
+
+                    if (
+                        daysRemaining === null ||
+                        daysRemaining < 0 ||
+                        daysRemaining > EXPIRING_SOON_DAYS
+                    ) {
+                        return [];
+                    }
+
+                    return [
+                        {
+                            id: `${product.id}-variant-${variant.id || index}`,
+                            product,
+                            productName: product.name,
+                            variantName: getVariantName(variant),
+                            expirationDate: String(
+                                variant.expirationDate || ""
+                            ),
+                            daysRemaining,
+                        },
+                    ];
+                });
+            }
+
+            const daysRemaining = getDaysUntilExpiration(
+                product.expirationDate
+            );
+
+            if (
+                daysRemaining === null ||
+                daysRemaining < 0 ||
+                daysRemaining > EXPIRING_SOON_DAYS
+            ) {
+                return [];
+            }
+
+            return [
+                {
+                    id: `${product.id}-regular`,
+                    product,
+                    productName: product.name,
+                    variantName: "—",
+                    expirationDate: String(product.expirationDate || ""),
+                    daysRemaining,
+                },
+            ];
+        })
+        .sort((first, second) => first.daysRemaining - second.daysRemaining);
+}
+
+function getExpirationStatusLabel(daysRemaining: number) {
+    if (daysRemaining === 0) return "Expires today";
+    if (daysRemaining === 1) return "1 day left";
+    return `${daysRemaining} days left`;
 }
 
 export function StatCard({
@@ -842,6 +992,179 @@ function StockAlertsDialog({
     );
 }
 
+
+function ExpiringSoonCard({
+                              count,
+                              onClick,
+                          }: {
+    count: number;
+    onClick: () => void;
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            aria-label={`View ${count} item${count === 1 ? "" : "s"} expiring within 30 days`}
+            className="group h-[132px] rounded-[18px] border border-[#E6DDF0] bg-white p-3 text-left shadow-sm transition-all duration-200 ease-out hover:-translate-y-1 hover:border-[#CDB9E1] hover:shadow-lg focus:outline-none focus:ring-4 focus:ring-[#2B174C]/10"
+        >
+            <div className="flex items-start justify-between gap-3">
+                <p className="pt-1 text-sm font-semibold text-[#1A1220]">
+                    Expiring Soon
+                </p>
+
+                <span className="inline-flex h-9 min-w-9 items-center justify-center gap-1 rounded-full bg-[#F3ECFF] px-2 text-xs font-semibold text-[#6D35D4] transition-all duration-200 group-hover:min-w-[72px]">
+                    <span className="max-w-0 translate-x-1 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 group-hover:max-w-[34px] group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:max-w-[34px] group-focus-visible:translate-x-0 group-focus-visible:opacity-100">
+                        View
+                    </span>
+
+                    <CalendarClock
+                        size={18}
+                        strokeWidth={1.9}
+                        className="shrink-0 transition-transform duration-200 group-hover:scale-110"
+                        aria-hidden="true"
+                    />
+                </span>
+            </div>
+
+            <p className="mt-3 text-[27px] font-bold leading-none text-[#6D35D4]">
+                {formatNumber(count)}
+            </p>
+
+            <p className="mt-2 text-[11px] leading-4 text-[#8A7D90]">
+                Items expiring within 30 days
+            </p>
+        </button>
+    );
+}
+
+function ExpiringSoonDialog({
+                                open,
+                                onClose,
+                                items,
+                            }: {
+    open: boolean;
+    onClose: () => void;
+    items: ExpiringSoonItem[];
+}) {
+    if (!open) return null;
+
+    return (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 px-4 py-6 backdrop-blur-sm">
+            <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-xl">
+                <div className="flex items-start justify-between gap-4 border-b border-[#E6DDF0] px-5 py-4 sm:px-6">
+                    <div className="flex items-start gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#F3ECFF] text-[#6D35D4]">
+                            <CalendarClock size={20} />
+                        </div>
+
+                        <div>
+                            <h3 className="text-[19px] font-bold text-[#1A1220]">
+                                Expiring Soon
+                            </h3>
+
+                            <p className="mt-1 text-sm text-[#6A5D6F]">
+                                Products and variants expiring within the next 30 days.
+                            </p>
+                        </div>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        aria-label="Close expiring soon items"
+                        className="text-xl text-[#9B8AAA] hover:text-[#1A1220]"
+                    >
+                        ×
+                    </button>
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-auto">
+                    <table className="w-full min-w-[680px] table-fixed text-sm">
+                        <colgroup>
+                            <col className="w-[34%]" />
+                            <col className="w-[28%]" />
+                            <col className="w-[20%]" />
+                            <col className="w-[18%]" />
+                        </colgroup>
+
+                        <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
+                        <tr className="border-b border-[#E6DDF0]">
+                            {[
+                                "Product",
+                                "Variant",
+                                "Expiration Date",
+                                "Remaining",
+                            ].map((head) => (
+                                <th
+                                    key={head}
+                                    className={`${head === "Product" ? "text-left" : "text-center"} px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]`}
+                                >
+                                    {head}
+                                </th>
+                            ))}
+                        </tr>
+                        </thead>
+
+                        <tbody>
+                        {items.length === 0 ? (
+                            <tr>
+                                <td
+                                    colSpan={4}
+                                    className="px-4 py-12 text-center text-sm text-[#9B8AAA]"
+                                >
+                                    No products are expiring within the next 30 days.
+                                </td>
+                            </tr>
+                        ) : (
+                            items.map((item) => (
+                                <tr
+                                    key={item.id}
+                                    className="border-b border-[#EFE7F4] last:border-0"
+                                >
+                                    <td className="px-4 py-3 text-left">
+                                        <p className="text-[15px] font-semibold leading-5 text-[#1A1220]">
+                                            {item.productName}
+                                        </p>
+                                    </td>
+
+                                    <td className="px-4 py-3 text-center text-[#6A5D6F]">
+                                        {item.variantName}
+                                    </td>
+
+                                    <td className="px-4 py-3 text-center font-medium text-[#2B174C]">
+                                        {formatExpirationDate(
+                                            item.expirationDate
+                                        )}
+                                    </td>
+
+                                    <td className="px-4 py-3 text-center">
+                                        <span
+                                            className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                                                item.daysRemaining <= 7
+                                                    ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
+                                                    : "border-[#D8C5F3] bg-[#F7F1FF] text-[#6D35D4]"
+                                            }`}
+                                        >
+                                            {getExpirationStatusLabel(
+                                                item.daysRemaining
+                                            )}
+                                        </span>
+                                    </td>
+                                </tr>
+                            ))
+                        )}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div className="border-t border-[#E6DDF0] bg-[#FFFDF8] px-5 py-3 text-xs text-[#7A6A84] sm:px-6">
+                    Expiring soon includes items with dates from today through the next 30 days.
+                </div>
+            </div>
+        </div>
+    );
+}
+
 export function InventoryStats({
                                    products,
                                    onRestock,
@@ -851,9 +1174,12 @@ export function InventoryStats({
 }) {
     const [showStockAlertsDialog, setShowStockAlertsDialog] =
         React.useState(false);
+    const [showExpiringSoonDialog, setShowExpiringSoonDialog] =
+        React.useState(false);
 
     const stockItems = getProductStockSummaryItems(products);
     const alertItems = getStockAlertItems(products);
+    const expiringSoonItems = getExpiringSoonItems(products);
 
     const totalStock = stockItems.reduce(
         (sum, item) => sum + Math.max(0, Number(item.stock || 0)),
@@ -888,7 +1214,7 @@ export function InventoryStats({
 
     return (
         <>
-            <div className="mb-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            <div className="mb-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                 <StatCard
                     label="Total Stock"
                     value={formatNumber(totalStock)}
@@ -901,6 +1227,11 @@ export function InventoryStats({
                     lowStock={lowStock}
                     outStock={outStock}
                     onClick={() => setShowStockAlertsDialog(true)}
+                />
+
+                <ExpiringSoonCard
+                    count={expiringSoonItems.length}
+                    onClick={() => setShowExpiringSoonDialog(true)}
                 />
 
                 <StatCard
@@ -935,6 +1266,12 @@ export function InventoryStats({
                 onClose={() => setShowStockAlertsDialog(false)}
                 items={alertItems}
                 onRestock={onRestock}
+            />
+
+            <ExpiringSoonDialog
+                open={showExpiringSoonDialog}
+                onClose={() => setShowExpiringSoonDialog(false)}
+                items={expiringSoonItems}
             />
         </>
     );
@@ -1101,6 +1438,48 @@ export function ProductTable({
         return variants.reduce((sum, variant) => sum + Number(variant.stock || 0), 0);
     };
 
+    const getNearestVariantExpiration = (
+        variants: ProductVariant[]
+    ) => {
+        const datedVariants = variants
+            .map((variant) => {
+                const rawDate = String(
+                    variant.expirationDate || ""
+                ).trim();
+
+                if (!rawDate) return null;
+
+                const parsedDate = new Date(
+                    /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
+                        ? `${rawDate}T00:00:00`
+                        : rawDate
+                );
+
+                if (Number.isNaN(parsedDate.getTime())) {
+                    return null;
+                }
+
+                return {
+                    rawDate,
+                    time: parsedDate.getTime(),
+                };
+            })
+            .filter(
+                (
+                    item
+                ): item is {
+                    rawDate: string;
+                    time: number;
+                } => Boolean(item)
+            )
+            .sort(
+                (first, second) =>
+                    first.time - second.time
+            );
+
+        return datedVariants[0]?.rawDate || "";
+    };
+
     const getVariantPriceRangeValues = (
         variants: ProductVariant[],
         field: "originalPrice" | "salesPrice"
@@ -1204,19 +1583,19 @@ export function ProductTable({
     };
 
     return (
-        <div className="w-full overflow-hidden">
-            <table className="w-full table-fixed text-xs sm:text-sm">
+        <div className="w-full overflow-x-auto">
+            <table className="w-full min-w-[1040px] table-fixed text-[14px]">
                 <colgroup>
-                    <col className={isOwner ? "w-[19%]" : "w-[23%]"} />
-                    {isOwner ? <col className="w-[10%]" /> : null}
-                    <col className={isOwner ? "w-[12%]" : "w-[15%]"} />
-                    <col className="w-[9%]" />
-                    <col className="w-[7%]" />
-                    <col className="w-[7%]" />
-                    <col className="w-[12%]" />
-                    <col className="w-[13%]" />
-                    <col className="w-[10%]" />
-                    <col className="w-[9%]" />
+                    <col className={isOwner ? "w-[18%]" : "w-[22%]"} />
+                    {isOwner ? <col className="w-[11%]" /> : null}
+                    <col className={isOwner ? "w-[11%]" : "w-[15%]"} />
+                    <col className="w-[8%]" />
+                    <col className={isOwner ? "w-[6%]" : "w-[7%]"} />
+                    <col className={isOwner ? "w-[6%]" : "w-[7%]"} />
+                    <col className={isOwner ? "w-[10%]" : "w-[11%]"} />
+                    <col className={isOwner ? "w-[11%]" : "w-[12%]"} />
+                    <col className={isOwner ? "w-[9%]" : "w-[9%]"} />
+                    <col className={isOwner ? "w-[10%]" : "w-[9%]"} />
                 </colgroup>
                 <thead>
                 <tr className="border-b border-[#E6DDF0]">
@@ -1234,7 +1613,7 @@ export function ProductTable({
                     ].map((head: string) => (
                         <th
                             key={head}
-                            className={`${head === "Product" ? "text-left" : "text-center"} pb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#806A8C]`}
+                            className={`${head === "Product" ? "text-left" : "text-center"} px-2 pb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]`}
                         >
                             {head}
                         </th>
@@ -1262,7 +1641,7 @@ export function ProductTable({
                                         : ""
                                 } ${isExpanded ? "bg-[#F9F4FF]" : "bg-white"}`}
                             >
-                                <td className="py-4 pr-3">
+                                <td className="px-2 py-4 pr-3">
                                     <div className="flex items-start gap-2.5">
                                         {hasExpandableVariants ? (
                                             <ChevronDown
@@ -1276,14 +1655,29 @@ export function ProductTable({
                                         )}
 
                                         <div>
-                                            <p className="font-semibold text-[#1A1220]">
+                                            <p className="text-[14px] font-semibold leading-5 text-[#1A1220]">
                                                 {p.name}
                                             </p>
 
-                                            {hasExpandableVariants && (
-                                                <p className="mt-1 text-[11px] font-medium text-[#806A8C]">
-                                                    Click to view {variants.length} variant
-                                                    {variants.length !== 1 ? "s" : ""}
+                                            {hasExpandableVariants
+                                                ? getNearestVariantExpiration(
+                                                variants
+                                            ) && (
+                                                <p className="mt-1 text-[11px] font-medium leading-4 text-[#806A8C]">
+                                                    Nearest expiration:{" "}
+                                                    {formatExpirationDate(
+                                                        getNearestVariantExpiration(
+                                                            variants
+                                                        )
+                                                    )}
+                                                </p>
+                                            )
+                                                : p.expirationDate && (
+                                                <p className="mt-1 text-[11px] font-medium leading-4 text-[#806A8C]">
+                                                    Expiration:{" "}
+                                                    {formatExpirationDate(
+                                                        p.expirationDate
+                                                    )}
                                                 </p>
                                             )}
                                         </div>
@@ -1291,53 +1685,53 @@ export function ProductTable({
                                 </td>
 
                                 {isOwner && (
-                                    <td className="py-4 text-center text-[#6A5D6F]">
+                                    <td className="px-2 py-4 text-center text-[14px] text-[#6A5D6F]">
                                         {p.branchName || "Unassigned"}
                                     </td>
                                 )}
 
-                                <td className="py-4 text-center text-[#6A5D6F]">
+                                <td className="px-2 py-4 text-center text-[14px] text-[#6A5D6F]">
                                     {p.category}
                                 </td>
 
-                                <td className="py-4 text-center text-[#6A5D6F]">
+                                <td className="px-2 py-4 text-center text-[14px] text-[#6A5D6F]">
                                     {hasExpandableVariants
                                         ? `${variants.length} variant${variants.length !== 1 ? "s" : ""}`
                                         : "Regular"}
                                 </td>
 
-                                <td className="py-4 text-center text-[#1A1220]">
+                                <td className="px-2 py-4 text-center text-[14px] font-medium text-[#1A1220]">
                                     {hasExpandableVariants ? getVariantTotalStock(variants) : p.stock}
                                 </td>
 
-                                <td className="py-4 text-center text-[#6A5D6F]">
+                                <td className="px-2 py-4 text-center text-[14px] text-[#6A5D6F]">
                                     {renderProductAlert(p)}
                                 </td>
 
-                                <td className="py-4 text-center text-[#6A5D6F]">
+                                <td className="px-2 py-4 text-center text-[14px] text-[#6A5D6F]">
                                     {hasExpandableVariants
                                         ? renderPriceRange(variants, "originalPrice")
                                         : money(p.originalPrice)}
                                 </td>
 
-                                <td className="py-4 text-center text-[#1A1220]">
+                                <td className="px-2 py-4 text-center text-[14px] font-medium text-[#1A1220]">
                                     {hasExpandableVariants
                                         ? renderPriceRange(variants, "salesPrice")
                                         : money(p.salesPrice)}
                                 </td>
 
-                                <td className="py-4 text-center">
+                                <td className="px-2 py-4 text-center">
                                     {renderProductStatus(p)}
                                 </td>
 
-                                <td className="py-4 text-center">
+                                <td className="whitespace-nowrap px-2 py-4 text-center">
                                     <button
                                         type="button"
                                         onClick={(event) => {
                                             event.stopPropagation();
                                             onEdit(p);
                                         }}
-                                        className="mr-3 text-xs font-semibold text-[#2B174C] hover:underline"
+                                        className="mr-2 text-[12px] font-semibold text-[#2B174C] hover:underline"
                                     >
                                         Edit
                                     </button>
@@ -1348,7 +1742,7 @@ export function ProductTable({
                                             event.stopPropagation();
                                             onDelete(p);
                                         }}
-                                        className="text-xs font-semibold text-red-500 hover:underline"
+                                        className="text-[12px] font-semibold text-red-500 hover:underline"
                                     >
                                         Delete
                                     </button>
@@ -1365,7 +1759,7 @@ export function ProductTable({
                                         key={variant.id}
                                         className="border-b border-[#EFE7F4] bg-[#FCF9FF]"
                                     >
-                                        <td className="py-3 pr-3">
+                                        <td className="px-2 py-3 pr-3">
                                             <div className="ml-8 flex items-center gap-3">
                                                 <div className="relative flex h-9 w-5 shrink-0 justify-center">
                                                     {!isFirstVariant && (
@@ -1379,41 +1773,54 @@ export function ProductTable({
                                                     <span className="relative z-10 mt-3 h-2.5 w-2.5 rounded-full bg-[#9B6BD3]" />
                                                 </div>
 
-                                                <p className="text-xs font-semibold text-[#2B174C]">
-                                                    {getVariantLabel(variant)}
-                                                </p>
+                                                <div className="min-w-0">
+                                                    <p className="text-[13px] font-semibold leading-5 text-[#2B174C]">
+                                                        {getVariantLabel(
+                                                            variant
+                                                        )}
+                                                    </p>
+
+                                                    {variant.expirationDate && (
+                                                        <p className="mt-1 text-[11px] font-medium text-[#806A8C]">
+                                                            Expiration:{" "}
+                                                            {formatExpirationDate(
+                                                                variant.expirationDate
+                                                            )}
+                                                        </p>
+                                                    )}
+                                                </div>
                                             </div>
                                         </td>
 
                                         {isOwner && (
-                                            <td className="py-3 text-center text-[#9B8AAA]" />
+                                            <td className="px-2 py-3 text-center text-[13px] text-[#9B8AAA]" />
                                         )}
 
-                                        <td className="py-3 text-center text-[#9B8AAA]">
+                                        <td className="px-2 py-3 text-center text-[13px] text-[#9B8AAA]">
                                             —
                                         </td>
 
-                                        <td className="py-3 text-center text-[#6A5D6F]">
+                                        <td className="px-2 py-3 text-center text-[13px] text-[#6A5D6F]">
                                             Variant
                                         </td>
 
-                                        <td className="py-3 text-center text-[#1A1220]">
+                                        <td className="px-2 py-3 text-center text-[13px] font-medium text-[#1A1220]">
                                             {variant.stock}
                                         </td>
 
-                                        <td className="py-3 text-center text-[#6A5D6F]">
+                                        <td className="px-2 py-3 text-center text-[13px] text-[#6A5D6F]">
                                             {variant.alertLevel}
                                         </td>
 
-                                        <td className="py-3 text-center text-[#6A5D6F]">
+                                        <td className="px-2 py-3 text-center text-[13px] text-[#6A5D6F]">
                                             {money(variant.originalPrice)}
                                         </td>
 
-                                        <td className="py-3 text-center text-[#1A1220]">
+                                        <td className="px-2 py-3 text-center text-[13px] font-medium text-[#1A1220]">
                                             {money(variant.salesPrice)}
                                         </td>
 
-                                        <td className="py-3 text-center">
+                                        <td className="px-2 py-3 text-center">
                                             <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${variantStatus.style}`}>
                                                 {variantStatus.label}
                                             </span>
@@ -1618,6 +2025,44 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
         React.useState("");
     const [productToast, setProductToast] =
         React.useState<SuccessToastMessage | null>(null);
+    const [productExpirationDate, setProductExpirationDate] =
+        React.useState("");
+    const [variantExpirationDates, setVariantExpirationDates] =
+        React.useState<string[]>([]);
+
+    React.useEffect(() => {
+        if (!inv.showForm || inv.formMode !== "product") return;
+
+        if (!inv.editingId) {
+            setProductExpirationDate("");
+            setVariantExpirationDates([]);
+            return;
+        }
+
+        const availableProducts = [
+            ...(Array.isArray(inv.products) ? inv.products : []),
+            ...(Array.isArray(inv.baseProducts) ? inv.baseProducts : []),
+        ];
+
+        const editingProduct = availableProducts.find(
+            (product) => Number(product.id) === Number(inv.editingId)
+        ) as Product | undefined;
+
+        setProductExpirationDate(
+            String(editingProduct?.expirationDate || "")
+        );
+        setVariantExpirationDates(
+            (editingProduct?.variants || []).map((variant) =>
+                String(variant.expirationDate || "")
+            )
+        );
+    }, [
+        inv.baseProducts,
+        inv.editingId,
+        inv.formMode,
+        inv.products,
+        inv.showForm,
+    ]);
 
     const closeProductToast = React.useCallback(() => {
         setProductToast(null);
@@ -1635,19 +2080,42 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
             return;
         }
 
-        const productName = (
+        const currentSaveData =
             pendingSave.mode === "edit"
-                ? pendingSave.after.name
-                : pendingSave.data.name
-        ).trim();
+                ? pendingSave.after
+                : pendingSave.data;
+
+        const saveData: ProductSaveData = currentSaveData.hasVariants
+            ? {
+                ...currentSaveData,
+                expirationDate: null,
+                variants: (currentSaveData.variants || []).map(
+                    (variant, index) => ({
+                        ...variant,
+                        expirationDate:
+                            variantExpirationDates[index] || null,
+                    })
+                ),
+            }
+            : {
+                ...currentSaveData,
+                expirationDate:
+                    productExpirationDate || null,
+            };
+
+        const productName = saveData.name.trim();
 
         setPendingProductSuccess({
             action: pendingSave.mode === "edit" ? "update" : "add",
             name: productName,
         });
 
-        await inv.confirmSaveProduct();
-    }, [inv]);
+        await inv.confirmSaveProduct(saveData);
+    }, [
+        inv,
+        productExpirationDate,
+        variantExpirationDates,
+    ]);
 
     const confirmDeleteProduct = React.useCallback(async () => {
         const productName = inv.productToDelete?.name.trim() || "";
@@ -1747,7 +2215,21 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                             {inv.formMode === "category" ? (
                                 <CategoryForm inv={inv} />
                             ) : (
-                                <ProductForm inv={inv} />
+                                <ProductForm
+                                    inv={inv}
+                                    productExpirationDate={
+                                        productExpirationDate
+                                    }
+                                    setProductExpirationDate={
+                                        setProductExpirationDate
+                                    }
+                                    variantExpirationDates={
+                                        variantExpirationDates
+                                    }
+                                    setVariantExpirationDates={
+                                        setVariantExpirationDates
+                                    }
+                                />
                             )}
                         </form>
                     </div>
@@ -2520,7 +3002,21 @@ function CategoryRow({
     );
 }
 
-function ProductForm({ inv }: { inv: InventoryController }) {
+function ProductForm({
+                         inv,
+                         productExpirationDate,
+                         setProductExpirationDate,
+                         variantExpirationDates,
+                         setVariantExpirationDates,
+                     }: {
+    inv: InventoryController;
+    productExpirationDate: string;
+    setProductExpirationDate: (value: string) => void;
+    variantExpirationDates: string[];
+    setVariantExpirationDates: React.Dispatch<
+        React.SetStateAction<string[]>
+    >;
+}) {
     return (
         <>
             {inv.isOwner && (
@@ -2602,14 +3098,46 @@ function ProductForm({ inv }: { inv: InventoryController }) {
                         Product has variants
                     </span>
 
-                    <VariantToggle checked={inv.hasVariants} onChange={inv.setHasVariants} />
+                    <VariantToggle
+                        checked={inv.hasVariants}
+                        onChange={inv.setHasVariants}
+                    />
                 </div>
             </div>
 
             {inv.hasVariants ? (
-                <VariantEditor inv={inv as VariantEditorController} />
+                <VariantEditor
+                    inv={inv as VariantEditorController}
+                    variantExpirationDates={variantExpirationDates}
+                    setVariantExpirationDates={
+                        setVariantExpirationDates
+                    }
+                />
             ) : (
-                <SimpleProductFields inv={inv} />
+                <>
+                    <div className="space-y-1">
+                        <label className={labelClass}>
+                            Expiration Date (Optional)
+                        </label>
+                        <input
+                            type="date"
+                            value={productExpirationDate}
+                            onChange={(
+                                e: React.ChangeEvent<HTMLInputElement>
+                            ) =>
+                                setProductExpirationDate(
+                                    e.target.value
+                                )
+                            }
+                            className={fieldClass}
+                        />
+                        <p className="text-[11px] text-[#9B8AAA]">
+                            Leave blank when the product has no expiration date.
+                        </p>
+                    </div>
+
+                    <SimpleProductFields inv={inv} />
+                </>
             )}
 
             <button
@@ -2621,6 +3149,7 @@ function ProductForm({ inv }: { inv: InventoryController }) {
         </>
     );
 }
+
 
 function SimpleProductFields({ inv }: { inv: InventoryController }) {
     return (
@@ -2672,7 +3201,17 @@ function SimpleProductFields({ inv }: { inv: InventoryController }) {
     );
 }
 
-function VariantEditor({ inv }: { inv: VariantEditorController }) {
+function VariantEditor({
+                           inv,
+                           variantExpirationDates,
+                           setVariantExpirationDates,
+                       }: {
+    inv: VariantEditorController;
+    variantExpirationDates: string[];
+    setVariantExpirationDates: React.Dispatch<
+        React.SetStateAction<string[]>
+    >;
+}) {
     const [variantColumnInput, setVariantColumnInput] = React.useState("");
     const [variantColumns, setVariantColumns] = React.useState<string[]>([]);
     const hasAddedInitialRow = React.useRef(false);
@@ -2681,6 +3220,23 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
     const variants = React.useMemo<ProductVariantSave[]>(() => {
         return Array.isArray(inv.variants) ? inv.variants : [];
     }, [inv.variants]);
+
+    const compactVariantFieldClass =
+        "h-10 w-full min-w-0 rounded-lg border border-[#E3D8EA] bg-white px-3 py-2 text-sm text-[#1A1220] placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:outline-none focus:ring-1 focus:ring-[#2B174C]";
+
+    React.useEffect(() => {
+        setVariantExpirationDates((currentDates) =>
+            variants.map(
+                (variant, index) =>
+                    currentDates[index] ??
+                    String(variant.expirationDate || "")
+            )
+        );
+    }, [
+        setVariantExpirationDates,
+        variants,
+        variants.length,
+    ]);
 
     const getColumnsFromVariants = React.useCallback(
         (rows: ProductVariantSave[]) => {
@@ -2892,7 +3448,13 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
 
                 <button
                     type="button"
-                    onClick={() => inv.addVariantRow()}
+                    onClick={() => {
+                        inv.addVariantRow();
+                        setVariantExpirationDates((currentDates) => [
+                            ...currentDates,
+                            "",
+                        ]);
+                    }}
                     className="shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-semibold text-[#2B174C] hover:bg-[#F7F1FF]"
                 >
                     + Add Variant
@@ -2900,7 +3462,7 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
             </div>
 
             <div className="mt-5 overflow-x-auto">
-                <table className="w-full min-w-225 text-sm">
+                <table className="w-full min-w-[900px] table-fixed text-sm">
                     <thead>
                     <tr className="border-b border-[#E6DDF0]">
                         {variantColumns.map((col: string) => (
@@ -2928,6 +3490,10 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
                             Selling Price
                         </th>
 
+                        <th className="pb-2 pr-2 text-center text-[11px] font-semibold uppercase tracking-[0.12em] text-[#806A8C]">
+                            Expiration Date
+                        </th>
+
                         <th className="pb-2 text-center text-[11px] font-semibold uppercase tracking-[0.12em] text-[#806A8C]">
                             Action
                         </th>
@@ -2938,9 +3504,9 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
                     {variants.map((variant: ProductVariantSave, index: number) => (
                         <tr key={index} className="border-b border-[#EFE7F4]">
                             {variantColumns.map((col: string) => (
-                                <td key={col} className="py-2 pr-2">
+                                <td key={col} className="py-1.5 pr-1.5">
                                     <input
-                                        className={fieldClass}
+                                        className={compactVariantFieldClass}
                                         value={getVariantInputValue(
                                             variant.variantValues,
                                             col
@@ -2959,10 +3525,10 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
                                 </td>
                             ))}
 
-                            <td className="py-2 pr-2">
+                            <td className="py-1.5 pr-1.5">
                                 <input
                                     type="number"
-                                    className={fieldClass}
+                                    className={compactVariantFieldClass}
                                     value={variant.stock}
                                     onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                                         inv.updateVariantField(
@@ -2974,10 +3540,10 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
                                 />
                             </td>
 
-                            <td className="py-2 pr-2">
+                            <td className="py-1.5 pr-1.5">
                                 <input
                                     type="number"
-                                    className={fieldClass}
+                                    className={compactVariantFieldClass}
                                     value={variant.alertLevel}
                                     onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                                         inv.updateVariantField(
@@ -2989,8 +3555,9 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
                                 />
                             </td>
 
-                            <td className="py-2 pr-2">
+                            <td className="py-1.5 pr-1.5">
                                 <PesoPriceInput
+                                    compact
                                     value={variant.originalPrice}
                                     onChange={(value) =>
                                         inv.updateVariantField(
@@ -3002,8 +3569,9 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
                                 />
                             </td>
 
-                            <td className="py-2 pr-2">
+                            <td className="py-1.5 pr-1.5">
                                 <PesoPriceInput
+                                    compact
                                     value={variant.salesPrice}
                                     onChange={(value) =>
                                         inv.updateVariantField(
@@ -3015,10 +3583,47 @@ function VariantEditor({ inv }: { inv: VariantEditorController }) {
                                 />
                             </td>
 
-                            <td className="py-2 text-center">
+                            <td className="py-1.5 pr-1.5">
+                                <input
+                                    type="date"
+                                    value={
+                                        variantExpirationDates[index] ||
+                                        ""
+                                    }
+                                    onChange={(
+                                        e: React.ChangeEvent<HTMLInputElement>
+                                    ) =>
+                                        setVariantExpirationDates(
+                                            (currentDates) => {
+                                                const nextDates = [
+                                                    ...currentDates,
+                                                ];
+                                                nextDates[index] =
+                                                    e.target.value;
+                                                return nextDates;
+                                            }
+                                        )
+                                    }
+                                    aria-label={`Expiration date for variant ${
+                                        index + 1
+                                    }`}
+                                    className={compactVariantFieldClass}
+                                />
+                            </td>
+
+                            <td className="py-1.5 text-center">
                                 <button
                                     type="button"
-                                    onClick={() => inv.removeVariantRow(index)}
+                                    onClick={() => {
+                                        inv.removeVariantRow(index);
+                                        setVariantExpirationDates(
+                                            (currentDates) =>
+                                                currentDates.filter(
+                                                    (_date, dateIndex) =>
+                                                        dateIndex !== index
+                                                )
+                                        );
+                                    }}
                                     className="text-xs font-semibold text-red-500 hover:underline"
                                 >
                                     Remove

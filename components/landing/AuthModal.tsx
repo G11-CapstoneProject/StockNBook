@@ -178,6 +178,15 @@ export default function AuthModal({
     const [hasViewedPrivacy, setHasViewedPrivacy] = useState(false);
     const [hasAcceptedPolicies, setHasAcceptedPolicies] = useState(false);
 
+    const passwordChecks = {
+        length: password.length >= 8,
+        uppercase: /[A-Z]/.test(password),
+        number: /\d/.test(password),
+        special: /[^A-Za-z0-9]/.test(password),
+    };
+
+    const passwordValid = Object.values(passwordChecks).every(Boolean);
+
     useEffect(() => {
         if (!otpDialogOpen || otpTimer <= 0) return;
 
@@ -265,6 +274,11 @@ export default function AuthModal({
         if (mode === "signup") {
             if (!ownerName || !storeName || !phone) {
                 alert("Please fill in all signup fields.");
+                return;
+            }
+
+            if (!passwordValid) {
+                alert("Create a password that meets all requirements.");
                 return;
             }
 
@@ -1028,113 +1042,125 @@ export default function AuthModal({
                                     }
                                 />
 
-                                <TextInput
-                                    label="Password"
-                                    placeholder="Create a password"
-                                    type="password"
-                                    value={password}
-                                    onChange={setPassword}
-                                    disabled={accountVerified}
-                                    icon={
-                                        <Lock className="h-5 w-5 text-[#7A6E88]" />
-                                    }
-                                />
+                                <div className="space-y-4">
+                                    <TextInput
+                                        label="Password"
+                                        placeholder="Create a password"
+                                        type="password"
+                                        value={password}
+                                        onChange={setPassword}
+                                        disabled={accountVerified}
+                                        icon={
+                                            <Lock className="h-5 w-5 text-[#7A6E88]" />
+                                        }
+                                    />
 
-                                <TextInput
-                                    label="Confirm password"
-                                    placeholder="Repeat your password"
-                                    type="password"
-                                    value={confirmPassword}
-                                    onChange={setConfirmPassword}
-                                    disabled={accountVerified}
-                                    icon={
-                                        <Lock className="h-5 w-5 text-[#7A6E88]" />
-                                    }
-                                />
+                                    <TextInput
+                                        label="Confirm password"
+                                        placeholder="Repeat your password"
+                                        type="password"
+                                        value={confirmPassword}
+                                        onChange={setConfirmPassword}
+                                        disabled={accountVerified}
+                                        icon={
+                                            <Lock className="h-5 w-5 text-[#7A6E88]" />
+                                        }
+                                    />
 
-                                <div className="rounded-xl border border-[#E8E0EE] bg-[#FBF9FD] p-4">
-                                    <p className="text-xs leading-5 text-[#7A6E88]">
-                                        View both documents before the agreement
-                                        checkbox becomes available.
-                                    </p>
+                                    <div className="rounded-xl border border-[#DED4E8] bg-[#F8F4FF] p-4 sm:p-5">
+                                        <p className="text-sm font-semibold text-[#2D1B4E]">
+                                            Password must include:
+                                        </p>
 
-                                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                                        <div className="mt-3 grid gap-x-6 gap-y-2.5 text-sm sm:grid-cols-2">
+                                            {[
+                                                [passwordChecks.length, "At least 8 characters"],
+                                                [passwordChecks.uppercase, "One uppercase letter"],
+                                                [passwordChecks.number, "One number"],
+                                                [passwordChecks.special, "One special character"],
+                                            ].map(([valid, requirement]) => (
+                                                <p
+                                                    key={String(requirement)}
+                                                    className={[
+                                                        "flex items-center gap-2",
+                                                        valid
+                                                            ? "font-medium text-[#168A4A]"
+                                                            : "text-[#7A6E88]",
+                                                    ].join(" ")}
+                                                >
+                                                    <CheckCircle2
+                                                        className={[
+                                                            "h-4 w-4 shrink-0",
+                                                            valid
+                                                                ? "text-[#1AA05A]"
+                                                                : "text-[#8E8497]",
+                                                        ].join(" ")}
+                                                    />
+                                                    <span>{String(requirement)}</span>
+                                                </p>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-start gap-2 text-sm">
+                                    <input
+                                        type="checkbox"
+                                        checked={hasAcceptedPolicies}
+                                        disabled={
+                                            !hasViewedTerms ||
+                                            !hasViewedPrivacy ||
+                                            accountVerified
+                                        }
+                                        onChange={(event) =>
+                                            setHasAcceptedPolicies(
+                                                event.target.checked
+                                            )
+                                        }
+                                        aria-label="Agree to the Terms of Service and Privacy Policy"
+                                        className="mt-1 h-4 w-4 shrink-0 accent-[#2D1B4E] disabled:cursor-not-allowed"
+                                    />
+
+                                    <p
+                                        className={
+                                            hasViewedTerms &&
+                                            hasViewedPrivacy &&
+                                            !accountVerified
+                                                ? "text-[#7A6E88]"
+                                                : "text-[#AAA1B0]"
+                                        }
+                                    >
+                                        I agree to the{" "}
                                         <button
                                             type="button"
-                                            disabled={accountVerified}
                                             onClick={() =>
                                                 setLegalDocument("terms")
                                             }
                                             className={[
-                                                "flex items-center justify-between gap-2 rounded-lg border px-3 py-2.5 text-left text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-70",
+                                                "text-[#2D1B4E] underline underline-offset-2 transition hover:text-[#5B35A5]",
                                                 hasViewedTerms
-                                                    ? "border-[#D7E8CE] bg-[#F4FAF1] text-[#466436]"
-                                                    : "border-[#D9D0E2] bg-white text-[#2D1B4E] hover:border-[#C9951A]",
+                                                    ? "font-normal"
+                                                    : "font-semibold",
                                             ].join(" ")}
                                         >
-                                            <span>Terms of Service</span>
-                                            {hasViewedTerms && (
-                                                <CheckCircle2 className="h-4 w-4 shrink-0" />
-                                            )}
-                                        </button>
-
+                                            Terms of Service
+                                        </button>{" "}
+                                        and{" "}
                                         <button
                                             type="button"
-                                            disabled={accountVerified}
                                             onClick={() =>
                                                 setLegalDocument("privacy")
                                             }
                                             className={[
-                                                "flex items-center justify-between gap-2 rounded-lg border px-3 py-2.5 text-left text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-70",
+                                                "text-[#2D1B4E] underline underline-offset-2 transition hover:text-[#5B35A5]",
                                                 hasViewedPrivacy
-                                                    ? "border-[#D7E8CE] bg-[#F4FAF1] text-[#466436]"
-                                                    : "border-[#D9D0E2] bg-white text-[#2D1B4E] hover:border-[#C9951A]",
+                                                    ? "font-normal"
+                                                    : "font-semibold",
                                             ].join(" ")}
                                         >
-                                            <span>Privacy Policy</span>
-                                            {hasViewedPrivacy && (
-                                                <CheckCircle2 className="h-4 w-4 shrink-0" />
-                                            )}
+                                            Privacy Policy
                                         </button>
-                                    </div>
-
-                                    <label
-                                        className={[
-                                            "mt-4 flex items-start gap-2 text-sm",
-                                            hasViewedTerms &&
-                                            hasViewedPrivacy &&
-                                            !accountVerified
-                                                ? "cursor-pointer text-[#7A6E88]"
-                                                : "cursor-not-allowed text-[#AAA1B0]",
-                                        ].join(" ")}
-                                    >
-                                        <input
-                                            type="checkbox"
-                                            checked={hasAcceptedPolicies}
-                                            disabled={
-                                                !hasViewedTerms ||
-                                                !hasViewedPrivacy ||
-                                                accountVerified
-                                            }
-                                            onChange={(event) =>
-                                                setHasAcceptedPolicies(
-                                                    event.target.checked
-                                                )
-                                            }
-                                            className="mt-1 h-4 w-4 accent-[#2D1B4E] disabled:cursor-not-allowed"
-                                        />
-
-                                        <span>
-                                            I agree to the{" "}
-                                            <span className="font-medium text-[#2D1B4E]">
-                                                Terms of Service
-                                            </span>{" "}
-                                            and{" "}
-                                            <span className="font-medium text-[#2D1B4E]">
-                                                Privacy Policy
-                                            </span>
-                                        </span>
-                                    </label>
+                                    </p>
                                 </div>
 
                                 <button

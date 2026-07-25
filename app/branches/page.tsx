@@ -4,12 +4,16 @@ import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+    Building2,
+    CheckCircle2,
     Pencil,
     Plus,
     RefreshCw,
     Search,
     Trash2,
+    UserRoundCheck,
     X,
+    XCircle,
 } from "lucide-react";
 
 type Permissions = {
@@ -36,6 +40,17 @@ type Branch = {
     staff_count: number;
     revenue: number;
     bookings: number;
+
+    // Supported API field names for branch-level sales totals.
+    total_pos_sales?: number | string;
+    pos_sales?: number | string;
+    pos_revenue?: number | string;
+    totalPosSales?: number | string;
+
+    total_booking_sales?: number | string;
+    booking_sales?: number | string;
+    booking_revenue?: number | string;
+    totalBookingSales?: number | string;
 };
 
 type BranchStatus = "active" | "inactive" | "setup";
@@ -72,6 +87,22 @@ function formatCurrency(value: number) {
             maximumFractionDigits: 0,
         }
     )}`;
+}
+
+function getFirstValidNumber(
+    ...values: Array<number | string | null | undefined>
+) {
+    for (const value of values) {
+        if (value === null || value === undefined || value === "") continue;
+
+        const numberValue = Number(value);
+
+        if (Number.isFinite(numberValue)) {
+            return numberValue;
+        }
+    }
+
+    return 0;
 }
 
 function formatCurrentDateTime(value: Date) {
@@ -324,7 +355,7 @@ export default function BranchesPage() {
             <main className="min-w-0 flex-1 overflow-y-auto">
                 <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
                     <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 px-6 py-3">
-                        <h1 className="text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">
+                        <h1 className="text-[27px] font-bold tracking-[-0.025em] text-[#1A1220]">
                             Branches
                         </h1>
 
@@ -358,18 +389,30 @@ export default function BranchesPage() {
                         <SummaryCard
                             title="Total Branches"
                             value={summary.totalBranches}
+                            description="All registered business locations"
+                            icon={<Building2 className="h-5 w-5" />}
+                            iconClassName="bg-[#F0E8FA] text-[#5B35A5]"
                         />
                         <SummaryCard
                             title="Active Branches"
                             value={summary.activeBranches}
+                            description="Branches currently operating"
+                            icon={<CheckCircle2 className="h-5 w-5" />}
+                            iconClassName="bg-[#EAF7EF] text-[#21844A]"
                         />
                         <SummaryCard
                             title="Inactive Branches"
                             value={summary.inactiveBranches}
+                            description="Branches currently inactive"
+                            icon={<XCircle className="h-5 w-5" />}
+                            iconClassName="bg-[#FFF0F0] text-[#C32F2F]"
                         />
                         <SummaryCard
                             title="Total Staff"
                             value={summary.totalStaff}
+                            description="Staff assigned across branches"
+                            icon={<UserRoundCheck className="h-5 w-5" />}
+                            iconClassName="bg-[#EEF4FF] text-[#3367D6]"
                         />
                     </div>
 
@@ -385,7 +428,7 @@ export default function BranchesPage() {
                                     setSearch(event.target.value)
                                 }
                                 placeholder="Search branch, manager, address, or contact..."
-                                className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                             />
 
                             {search && (
@@ -405,7 +448,7 @@ export default function BranchesPage() {
                             onClick={() =>
                                 router.push("/branches/add-branches")
                             }
-                            className="inline-flex h-[42px] shrink-0 items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                            className="inline-flex h-[48px] shrink-0 items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                         >
                             <Plus size={16} />
                             Add branch
@@ -439,13 +482,13 @@ export default function BranchesPage() {
                             onAction={() => setSearch("")}
                         />
                     ) : (
-                        <section className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+                        <section className="overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm">
                             <div className="flex items-center justify-between gap-3 border-b border-[#E6DDF0] px-4 py-3">
                                 <div>
-                                    <h2 className="text-[16px] font-bold text-[#1A1220]">
+                                    <h2 className="text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">
                                         Branch Directory
                                     </h2>
-                                    <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                    <p className="mt-1 text-[13px] text-[#7A6A84]">
                                         View branch performance and assigned manager details.
                                     </p>
                                 </div>
@@ -673,15 +716,36 @@ export default function BranchesPage() {
 function SummaryCard({
                          title,
                          value,
+                         description,
+                         icon,
+                         iconClassName,
                      }: {
     title: string;
     value: number;
+    description: string;
+    icon: React.ReactNode;
+    iconClassName: string;
 }) {
     return (
-        <div className="flex min-h-[112px] flex-col justify-center rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-4 shadow-sm">
-            <p className="text-sm font-semibold text-[#281246]">{title}</p>
-            <p className="mt-2 text-[24px] font-bold leading-none text-[#1A1220]">
+        <div className="min-h-[145px] rounded-[18px] border border-[#E6DDF0] bg-white px-4 py-4 shadow-[0_2px_6px_rgba(45,27,78,0.10)]">
+            <div className="flex items-start justify-between gap-3">
+                <p className="pt-1 text-[15px] font-medium text-[#1A1220]">
+                    {title}
+                </p>
+
+                <span
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
+                >
+                    {icon}
+                </span>
+            </div>
+
+            <p className="mt-4 text-[28px] font-bold leading-none tracking-[-0.02em] text-[#1A1220]">
                 {value}
+            </p>
+
+            <p className="mt-2 text-[12px] leading-5 text-[#8A7A94]">
+                {description}
             </p>
         </div>
     );
@@ -698,6 +762,20 @@ function BranchCard({
 }) {
     const status = getBranchStatus(branch);
 
+    const totalPosSales = getFirstValidNumber(
+        branch.total_pos_sales,
+        branch.pos_sales,
+        branch.pos_revenue,
+        branch.totalPosSales
+    );
+
+    const totalBookingSales = getFirstValidNumber(
+        branch.total_booking_sales,
+        branch.booking_sales,
+        branch.booking_revenue,
+        branch.totalBookingSales
+    );
+
     const statusStyles: Record<BranchStatus, string> = {
         active: "border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]",
         inactive: "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]",
@@ -711,14 +789,14 @@ function BranchCard({
     };
 
     return (
-        <article className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-[#CDB7E1] hover:shadow-md">
+        <article className="overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-[#CDB7E1] hover:shadow-md">
             <div className="flex items-start justify-between gap-3 border-b border-[#E6DDF0] px-4 py-3.5">
                 <div className="min-w-0">
-                    <h3 className="truncate text-[16px] font-bold text-[#1A1220]">
+                    <h3 className="truncate text-[18px] font-bold text-[#1A1220]">
                         {branch.branch_name}
                     </h3>
 
-                    <p className="mt-1 truncate text-xs text-[#7A6A84]">
+                    <p className="mt-1 truncate text-[13px] text-[#7A6A84]">
                         Manager: {branch.manager_name || "Not assigned"}
                     </p>
                 </div>
@@ -732,25 +810,28 @@ function BranchCard({
 
             <div className="grid grid-cols-3 divide-x divide-[#EEE7F2] px-2 py-3.5">
                 <Metric
-                    value={formatCurrency(branch.revenue)}
-                    label="Revenue"
+                    value={formatCurrency(totalPosSales)}
+                    label="Total POS Sales"
                 />
-                <Metric value={Number(branch.bookings || 0)} label="Bookings" />
+                <Metric
+                    value={formatCurrency(totalBookingSales)}
+                    label="Total Booking Sales"
+                />
                 <Metric
                     value={Number(branch.staff_count || 0)}
-                    label="Staff"
+                    label="Total Staff"
                 />
             </div>
 
             <div className="space-y-1.5 border-t border-[#E6DDF0] px-4 py-3">
-                <p className="truncate text-xs text-[#7A6A84]">
+                <p className="truncate text-[13px] text-[#7A6A84]">
                     <span className="mr-2 font-semibold text-[#281246]">
                         Address
                     </span>
                     {branch.address || "No address provided"}
                 </p>
 
-                <p className="truncate text-xs text-[#7A6A84]">
+                <p className="truncate text-[13px] text-[#7A6A84]">
                     <span className="mr-2 font-semibold text-[#281246]">
                         Contact
                     </span>
@@ -789,11 +870,16 @@ function Metric({
     label: string;
 }) {
     return (
-        <div className="px-2 text-center">
-            <p className="truncate text-[16px] font-bold text-[#1A1220]">
+        <div className="min-w-0 px-2 text-center">
+            <p
+                className="truncate text-[17px] font-bold text-[#1A1220]"
+                title={String(value)}
+            >
                 {value}
             </p>
-            <p className="mt-1 text-xs text-[#7A6A84]">{label}</p>
+            <p className="mt-1 text-[11px] font-medium leading-4 text-[#7A6A84] sm:text-xs">
+                {label}
+            </p>
         </div>
     );
 }

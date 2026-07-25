@@ -50,6 +50,39 @@ function toNumber(value) {
     return Number.isFinite(n) ? n : null;
 }
 
+function normalizeOptionalDate(value) {
+    if (value === undefined || value === null || value === "") return null;
+
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        return value.toISOString().slice(0, 10);
+    }
+
+    const text = String(value).trim();
+
+    if (!text) return null;
+
+    const isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+    if (!isoMatch) {
+        throw new Error(`Invalid expiration date "${text}". Use YYYY-MM-DD.`);
+    }
+
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    const candidate = new Date(Date.UTC(year, month - 1, day));
+
+    if (
+        candidate.getUTCFullYear() !== year ||
+        candidate.getUTCMonth() !== month - 1 ||
+        candidate.getUTCDate() !== day
+    ) {
+        throw new Error(`Invalid expiration date "${text}".`);
+    }
+
+    return text;
+}
+
 function firstDefined(...values) {
     return values.find((value) => value !== undefined && value !== null);
 }
@@ -143,6 +176,14 @@ function getIncomingVariants(body) {
                             variant.sales
                         )
                     ) ?? 0,
+                expirationDate: normalizeOptionalDate(
+                    firstDefined(
+                        variant.expirationDate,
+                        variant.expiration_date,
+                        variant.expiryDate,
+                        variant.expiry_date
+                    )
+                ),
             };
         })
         .filter((variant) => Object.keys(variant.variantValues).length > 0);
@@ -208,6 +249,10 @@ function normalizeVariantRow(row) {
         alertLevel: Number(row.alertLevel ?? row.alert_level ?? 0),
         originalPrice: Number(row.originalPrice ?? row.original_price ?? 0),
         salesPrice: Number(row.salesPrice ?? row.sales_price ?? 0),
+        expirationDate:
+            row.expirationDate ??
+            row.expiration_date ??
+            null,
         createdAt: row.createdAt ?? row.created_at ?? "",
     };
 }
@@ -237,6 +282,7 @@ async function attachVariants(connection, products) {
              alert_level AS alertLevel,
              original_price AS originalPrice,
              sales_price AS salesPrice,
+             expiration_date AS expirationDate,
              created_at AS createdAt
          FROM product_variants
          WHERE product_id IN (${placeholders})
@@ -285,6 +331,7 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
             products.alert_level AS alertLevel,
             products.original_price AS originalPrice,
             products.sales_price AS salesPrice,
+            products.expiration_date AS expirationDate,
             products.has_variants AS hasVariants,
             products.created_at AS createdAt
         FROM products
@@ -321,7 +368,7 @@ async function getProductById(connection, storeId, activeBranchId, productId) {
 async function insertProductVariants(connection, productId, variants) {
     if (!Array.isArray(variants) || variants.length === 0) return;
 
-    const placeholders = variants.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
+    const placeholders = variants.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
 
     const params = variants.flatMap((variant) => [
         productId,
@@ -330,11 +377,12 @@ async function insertProductVariants(connection, productId, variants) {
         Number(variant.alertLevel || 0),
         Number(variant.originalPrice || 0),
         Number(variant.salesPrice || 0),
+        variant.expirationDate || null,
     ]);
 
     await connection.execute(
         `INSERT INTO product_variants
-         (product_id, variant_values, stock, alert_level, original_price, sales_price)
+         (product_id, variant_values, stock, alert_level, original_price, sales_price, expiration_date)
          VALUES ${placeholders}`,
         params
     );
@@ -588,12 +636,23 @@ exports.handler = async (event) => {
                 ? getMinVariantPrice(incomingVariants, "salesPrice")
                 : toNumber(firstDefined(body.salesPrice, body.sales_price, body.price)) ?? 0;
 
+            const expirationDate = hasVariants
+                ? null
+                : normalizeOptionalDate(
+                    firstDefined(
+                        body.expirationDate,
+                        body.expiration_date,
+                        body.expiryDate,
+                        body.expiry_date
+                    )
+                );
+
             await connection.beginTransaction();
 
             const [result] = await connection.execute(
                 `INSERT INTO products
-                 (store_id, branch_id, package_id, package_name, name, category, stock, alert_level, original_price, sales_price, has_variants)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 (store_id, branch_id, package_id, package_name, name, category, stock, alert_level, original_price, sales_price, expiration_date, has_variants)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     storeId,
                     activeBranchId,
@@ -605,6 +664,7 @@ exports.handler = async (event) => {
                     alertLevel,
                     originalPrice,
                     salesPrice,
+                    expirationDate,
                     hasVariants ? 1 : 0,
                 ]
             );
@@ -708,6 +768,17 @@ exports.handler = async (event) => {
                 ? getMinVariantPrice(incomingVariants, "salesPrice")
                 : toNumber(firstDefined(body.salesPrice, body.sales_price, body.price)) ?? 0;
 
+            const expirationDate = hasVariants
+                ? null
+                : normalizeOptionalDate(
+                    firstDefined(
+                        body.expirationDate,
+                        body.expiration_date,
+                        body.expiryDate,
+                        body.expiry_date
+                    )
+                );
+
             await connection.beginTransaction();
 
             let query = `
@@ -721,6 +792,7 @@ exports.handler = async (event) => {
                     alert_level = ?,
                     original_price = ?,
                     sales_price = ?,
+                    expiration_date = ?,
                     has_variants = ?
                 WHERE id = ?
                   AND store_id = ?
@@ -735,6 +807,7 @@ exports.handler = async (event) => {
                 alertLevel,
                 originalPrice,
                 salesPrice,
+                expirationDate,
                 hasVariants ? 1 : 0,
                 id,
                 storeId,

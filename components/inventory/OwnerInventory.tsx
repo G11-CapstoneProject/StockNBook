@@ -5,6 +5,7 @@ import {
     AlertTriangle,
     Boxes,
     Building2,
+    CalendarClock,
     Check,
     ChevronDown,
     DollarSign,
@@ -165,6 +166,141 @@ function getInventoryAlertItems(products: Product[]): StockAlertItem[] {
     });
 }
 
+
+const OWNER_EXPIRING_SOON_DAYS = 30;
+const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
+
+type OwnerExpiringSoonItem = {
+    id: string;
+    productName: string;
+    branchName: string;
+    variantName: string;
+    expirationDate: string;
+    daysRemaining: number;
+};
+
+function parseOwnerExpirationDate(value?: string | null) {
+    const rawValue = String(value || "").trim();
+
+    if (!rawValue) return null;
+
+    const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(rawValue)
+        ? new Date(`${rawValue}T00:00:00`)
+        : new Date(rawValue);
+
+    if (Number.isNaN(parsedDate.getTime())) return null;
+
+    parsedDate.setHours(0, 0, 0, 0);
+    return parsedDate;
+}
+
+function getOwnerDaysUntilExpiration(value?: string | null) {
+    const expirationDate = parseOwnerExpirationDate(value);
+
+    if (!expirationDate) return null;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    return Math.round(
+        (expirationDate.getTime() - today.getTime()) /
+        DAY_IN_MILLISECONDS
+    );
+}
+
+function getOwnerExpiringSoonItems(
+    products: Product[]
+): OwnerExpiringSoonItem[] {
+    return products
+        .flatMap((product) => {
+            const variants = Array.isArray(product.variants)
+                ? product.variants
+                : [];
+
+            if (product.hasVariants && variants.length > 0) {
+                return variants.flatMap((variant, index) => {
+                    const daysRemaining =
+                        getOwnerDaysUntilExpiration(
+                            variant.expirationDate
+                        );
+
+                    if (
+                        daysRemaining === null ||
+                        daysRemaining < 0 ||
+                        daysRemaining > OWNER_EXPIRING_SOON_DAYS
+                    ) {
+                        return [];
+                    }
+
+                    const variantName =
+                        Object.values(variant.variantValues || {})
+                            .map((value) => String(value).trim())
+                            .filter(Boolean)
+                            .join(" / ") || "Variant";
+
+                    return [
+                        {
+                            id: `${product.id}-variant-${variant.id || index}`,
+                            productName: product.name,
+                            branchName: product.branchName || "—",
+                            variantName,
+                            expirationDate: String(
+                                variant.expirationDate || ""
+                            ),
+                            daysRemaining,
+                        },
+                    ];
+                });
+            }
+
+            const daysRemaining = getOwnerDaysUntilExpiration(
+                product.expirationDate
+            );
+
+            if (
+                daysRemaining === null ||
+                daysRemaining < 0 ||
+                daysRemaining > OWNER_EXPIRING_SOON_DAYS
+            ) {
+                return [];
+            }
+
+            return [
+                {
+                    id: `${product.id}-regular`,
+                    productName: product.name,
+                    branchName: product.branchName || "—",
+                    variantName: "—",
+                    expirationDate: String(
+                        product.expirationDate || ""
+                    ),
+                    daysRemaining,
+                },
+            ];
+        })
+        .sort((first, second) =>
+            first.daysRemaining - second.daysRemaining
+        );
+}
+
+function formatOwnerExpirationDate(value: string) {
+    const parsedDate = parseOwnerExpirationDate(value);
+
+    if (!parsedDate) return value;
+
+    return parsedDate.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+    });
+}
+
+function getOwnerExpirationStatusLabel(daysRemaining: number) {
+    if (daysRemaining === 0) return "Expires today";
+    if (daysRemaining === 1) return "1 day left";
+    return `${daysRemaining} days left`;
+}
+
 function getInventoryOverview(products: Product[]) {
     return products.reduce(
         (totals, product) => {
@@ -230,6 +366,7 @@ function OwnerInventoryContent() {
     const [branchQuery, setBranchQuery] = React.useState("All Branches");
     const [isBranchMenuOpen, setIsBranchMenuOpen] = React.useState(false);
     const [isStockAlertsOpen, setIsStockAlertsOpen] = React.useState(false);
+    const [isExpiringSoonOpen, setIsExpiringSoonOpen] = React.useState(false);
     const [stockAlertFilter, setStockAlertFilter] =
         React.useState<StockAlertFilter>("all");
 
@@ -294,6 +431,11 @@ function OwnerInventoryContent() {
         [displayedProducts]
     );
 
+    const expiringSoonItems = React.useMemo(
+        () => getOwnerExpiringSoonItems(displayedProducts),
+        [displayedProducts]
+    );
+
     const handleSelectAllBranches = () => {
         setIsAllBranchesView(true);
         inv.setSelectedBranchId("");
@@ -349,10 +491,14 @@ function OwnerInventoryContent() {
                 <div className="space-y-3">
                     <InventoryOverviewCards
                         overview={inventoryOverview}
+                        expiringSoonCount={expiringSoonItems.length}
                         onViewAlerts={() => {
                             setStockAlertFilter("all");
                             setIsStockAlertsOpen(true);
                         }}
+                        onViewExpiringSoon={() =>
+                            setIsExpiringSoonOpen(true)
+                        }
                     />
 
                     <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_290px]">
@@ -611,6 +757,13 @@ function OwnerInventoryContent() {
                 />
             )}
 
+            {isExpiringSoonOpen && (
+                <OwnerExpiringSoonModal
+                    items={expiringSoonItems}
+                    onClose={() => setIsExpiringSoonOpen(false)}
+                />
+            )}
+
             <InventoryDialogs inv={inv} />
         </>
     );
@@ -618,7 +771,9 @@ function OwnerInventoryContent() {
 
 function InventoryOverviewCards({
                                     overview,
+                                    expiringSoonCount,
                                     onViewAlerts,
+                                    onViewExpiringSoon,
                                 }: {
     overview: {
         totalProducts: number;
@@ -629,7 +784,9 @@ function InventoryOverviewCards({
         retailValue: number;
         potentialProfit: number;
     };
+    expiringSoonCount: number;
     onViewAlerts: () => void;
+    onViewExpiringSoon: () => void;
 }) {
     const formatNumber = (value: number) =>
         value.toLocaleString("en-PH", {
@@ -645,7 +802,7 @@ function InventoryOverviewCards({
         });
 
     return (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <InventoryMetricCard
                 label="Total Stock"
                 value={formatNumber(overview.totalStock)}
@@ -702,6 +859,40 @@ function InventoryOverviewCards({
                 </div>
             </button>
 
+            <button
+                type="button"
+                onClick={onViewExpiringSoon}
+                aria-label={`View ${expiringSoonCount} item${expiringSoonCount === 1 ? "" : "s"} expiring within 30 days`}
+                className="group h-[132px] rounded-[18px] border border-[#E6DDF0] bg-white p-3 text-left shadow-sm transition-all duration-200 ease-out hover:-translate-y-1 hover:border-[#CDB9E1] hover:shadow-lg focus:outline-none focus:ring-4 focus:ring-[#2B174C]/10"
+            >
+                <div className="flex items-start justify-between gap-3">
+                    <p className="pt-1 text-sm font-semibold text-[#1A1220]">
+                        Expiring Soon
+                    </p>
+
+                    <span className="inline-flex h-9 min-w-9 items-center justify-center gap-1 rounded-full bg-[#F3ECFF] px-2 text-xs font-semibold text-[#6D35D4] transition-all duration-200 group-hover:min-w-[72px]">
+                        <span className="max-w-0 translate-x-1 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 group-hover:max-w-[34px] group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:max-w-[34px] group-focus-visible:translate-x-0 group-focus-visible:opacity-100">
+                            View
+                        </span>
+
+                        <CalendarClock
+                            size={18}
+                            strokeWidth={1.9}
+                            className="shrink-0 transition-transform duration-200 group-hover:scale-110"
+                            aria-hidden="true"
+                        />
+                    </span>
+                </div>
+
+                <p className="mt-3 text-[27px] font-bold leading-none text-[#6D35D4]">
+                    {formatNumber(expiringSoonCount)}
+                </p>
+
+                <p className="mt-2 text-[11px] leading-4 text-[#8A7D90]">
+                    Items expiring within 30 days
+                </p>
+            </button>
+
             <InventoryMetricCard
                 label="Total cost value"
                 value={formatPeso(overview.totalCostValue)}
@@ -727,6 +918,122 @@ function InventoryOverviewCards({
                 iconClassName="bg-[#EAF8EF] text-[#168A48]"
                 valueClassName="text-[#168A48]"
             />
+        </div>
+    );
+}
+
+function OwnerExpiringSoonModal({
+                                    items,
+                                    onClose,
+                                }: {
+    items: OwnerExpiringSoonItem[];
+    onClose: () => void;
+}) {
+    return (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 px-4 py-6 backdrop-blur-sm">
+            <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="owner-expiring-soon-title"
+                className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
+            >
+                <div className="flex items-start justify-between gap-4 border-b border-[#E6DDF0] px-5 py-4">
+                    <div className="flex min-w-0 items-start gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F3ECFF] text-[#6D35D4]">
+                            <CalendarClock size={19} />
+                        </div>
+
+                        <div>
+                            <h2
+                                id="owner-expiring-soon-title"
+                                className="text-[20px] font-bold text-[#1A1220]"
+                            >
+                                Expiring Soon
+                            </h2>
+                            <p className="mt-1 text-sm text-[#7A6A84]">
+                                Products and variants expiring within the next 30 days.
+                            </p>
+                        </div>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        aria-label="Close expiring soon items"
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C]"
+                    >
+                        <X size={18} />
+                    </button>
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-auto">
+                    <table className="w-full min-w-[820px] border-collapse">
+                        <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
+                        <tr className="border-b border-[#E6DDF0]">
+                            <StockAlertHeader>Product</StockAlertHeader>
+                            <StockAlertHeader>Branch</StockAlertHeader>
+                            <StockAlertHeader>Variant</StockAlertHeader>
+                            <StockAlertHeader>Expiration Date</StockAlertHeader>
+                            <StockAlertHeader>Remaining</StockAlertHeader>
+                        </tr>
+                        </thead>
+
+                        <tbody>
+                        {items.length === 0 ? (
+                            <tr>
+                                <td
+                                    colSpan={5}
+                                    className="px-4 py-12 text-center text-sm text-[#7A6A84]"
+                                >
+                                    No products are expiring within the next 30 days.
+                                </td>
+                            </tr>
+                        ) : (
+                            items.map((item) => (
+                                <tr
+                                    key={item.id}
+                                    className="border-b border-[#EEE7F2] last:border-b-0"
+                                >
+                                    <StockAlertCell strong>
+                                        {item.productName}
+                                    </StockAlertCell>
+                                    <StockAlertCell>
+                                        {item.branchName}
+                                    </StockAlertCell>
+                                    <StockAlertCell>
+                                        {item.variantName}
+                                    </StockAlertCell>
+                                    <StockAlertCell>
+                                        <span className="font-semibold text-[#2B174C]">
+                                            {formatOwnerExpirationDate(
+                                                item.expirationDate
+                                            )}
+                                        </span>
+                                    </StockAlertCell>
+                                    <StockAlertCell>
+                                        <span
+                                            className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                                                item.daysRemaining <= 7
+                                                    ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
+                                                    : "border-[#D8C5F3] bg-[#F7F1FF] text-[#6D35D4]"
+                                            }`}
+                                        >
+                                            {getOwnerExpirationStatusLabel(
+                                                item.daysRemaining
+                                            )}
+                                        </span>
+                                    </StockAlertCell>
+                                </tr>
+                            ))
+                        )}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div className="border-t border-[#E6DDF0] bg-[#FFFDF8] px-5 py-3 text-xs leading-5 text-[#7A6A84]">
+                    Expiring soon includes items with dates from today through the next 30 days.
+                </div>
+            </div>
         </div>
     );
 }
@@ -995,7 +1302,7 @@ function InventoryMetricCard({
                 {value}
             </p>
 
-            <p className="mt-1 text-[11px] leading-4 text-[#8A7D90]">
+            <p className="mt-1 whitespace-nowrap text-[10px] leading-4 tracking-tight text-[#8A7D90]">
                 {helper}
             </p>
         </div>

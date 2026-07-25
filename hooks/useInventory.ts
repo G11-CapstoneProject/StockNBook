@@ -48,6 +48,7 @@ export type ProductFormVariant = {
     alertLevel: string;
     originalPrice: string;
     salesPrice: string;
+    expirationDate?: string | null;
 };
 
 export type ImportPreviewProduct = ProductSaveData & {
@@ -71,13 +72,34 @@ function parseImportNumber(value: unknown) {
 function normalizeImportHeader(value: unknown) {
     const key = cleanImportCell(value).toLowerCase().replace(/[^a-z0-9]/g, "");
 
-    if (["product", "products", "name"].includes(key) || key === "product" + "name") return "product";
+    if (["product", "products", "name", "productname"].includes(key)) return "product";
     if (["category", "categories"].includes(key)) return "category";
-    if (["variant", "variants", "variation", "variations"].includes(key)) return "variants";
+    if (["hasvariants", "hasvariant", "withvariants"].includes(key)) return "hasVariants";
+    if (["variantfields", "variantfield", "variantsfields", "variantsfield", "variationfields", "variationfield"].includes(key)) {
+        return "variantFields";
+    }
+    if (["variantvalues", "variantvalue", "variationvalues", "variationvalue"].includes(key)) {
+        return "variantValues";
+    }
+    if (["variant", "variants", "variation", "variations"].includes(key)) {
+        return "legacyVariants";
+    }
     if (["stock", "stocks", "quantity", "qty"].includes(key)) return "stock";
-    if (["alert"].includes(key) || key === "alert" + "level" || key === "reorder" + "level") return "alert";
-    if (["original", "cost"].includes(key) || key === "original" + "price" || key === "cost" + "price") return "original";
-    if (["sales", "price"].includes(key) || key === "sales" + "price" || key === "selling" + "price") return "sales";
+    if (["alert", "alertlevel", "reorderlevel"].includes(key)) return "alert";
+    if (["original", "cost", "originalprice", "costprice"].includes(key)) return "original";
+    if (["sales", "price", "salesprice", "sellingprice"].includes(key)) return "sales";
+    if (
+        [
+            "expiration",
+            "expirationdate",
+            "expirationdateoptional",
+            "expiry",
+            "expirydate",
+            "expirydateoptional",
+        ].includes(key)
+    ) {
+        return "expiration";
+    }
 
     return "";
 }
@@ -87,22 +109,118 @@ function isImportYes(value: unknown) {
     return ["yes", "y", "true", "1"].includes(text);
 }
 
-function variantTextToValues(value: unknown): Record<string, string> {
-    const text = cleanImportCell(value);
+function splitImportList(value: unknown) {
+    return cleanImportCell(value)
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean);
+}
 
-    if (!text) return {};
+function variantFieldsAndValuesToObject(
+    fieldsValue: unknown,
+    valuesValue: unknown
+): Record<string, string> {
+    const fields = splitImportList(fieldsValue).map((field) =>
+        field.toLowerCase()
+    );
+    const values = splitImportList(valuesValue);
 
-    const parts = text
+    if (fields.length === 0 && values.length === 0) return {};
+
+    if (fields.length !== values.length) {
+        throw new Error(
+            "Variant Fields and Variant Values must have the same number of comma-separated entries."
+        );
+    }
+
+    return Object.fromEntries(
+        fields
+            .map((field, index) => [field, values[index] || ""])
+            .filter(([field, value]) => Boolean(field && value))
+    );
+}
+
+function legacyVariantTextToValues(value: unknown): Record<string, string> {
+    const parts = cleanImportCell(value)
         .split(/[,/|]/g)
         .map((part) => part.trim())
         .filter(Boolean);
 
-    if (parts.length === 0) {
-        return { option1: text };
-    }
-
     return Object.fromEntries(
         parts.map((part, index) => [`option${index + 1}`, part])
+    );
+}
+
+function formatImportDateParts(year: number, month: number, day: number) {
+    const candidate = new Date(year, month - 1, day);
+
+    if (
+        candidate.getFullYear() !== year ||
+        candidate.getMonth() !== month - 1 ||
+        candidate.getDate() !== day
+    ) {
+        return "";
+    }
+
+    return `${String(year).padStart(4, "0")}-${String(month).padStart(
+        2,
+        "0"
+    )}-${String(day).padStart(2, "0")}`;
+}
+
+function parseImportDate(value: unknown) {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        return formatImportDateParts(
+            value.getFullYear(),
+            value.getMonth() + 1,
+            value.getDate()
+        );
+    }
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+        const parsed = XLSX.SSF.parse_date_code(value);
+
+        if (parsed) {
+            return formatImportDateParts(parsed.y, parsed.m, parsed.d);
+        }
+    }
+
+    const text = cleanImportCell(value);
+
+    if (!text) return "";
+
+    const isoMatch = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+
+    if (isoMatch) {
+        return formatImportDateParts(
+            Number(isoMatch[1]),
+            Number(isoMatch[2]),
+            Number(isoMatch[3])
+        );
+    }
+
+    const dayFirstMatch = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+
+    if (dayFirstMatch) {
+        return formatImportDateParts(
+            Number(dayFirstMatch[3]),
+            Number(dayFirstMatch[2]),
+            Number(dayFirstMatch[1])
+        );
+    }
+
+    const parsedDate = new Date(text);
+
+    if (Number.isNaN(parsedDate.getTime())) {
+        throw new Error(
+            `Invalid expiration date "${text}". Use YYYY-MM-DD or DD/MM/YYYY.`
+        );
+    }
+
+    return formatImportDateParts(
+        parsedDate.getFullYear(),
+        parsedDate.getMonth() + 1,
+        parsedDate.getDate()
     );
 }
 
@@ -116,6 +234,7 @@ function recalculateImportProduct(product: ImportPreviewProduct): ImportPreviewP
             alertLevel: Number(product.alertLevel || 0),
             originalPrice: Number(product.originalPrice || 0),
             salesPrice: Number(product.salesPrice || 0),
+            expirationDate: product.expirationDate || null,
             variants: [],
         };
     }
@@ -144,6 +263,7 @@ function recalculateImportProduct(product: ImportPreviewProduct): ImportPreviewP
         alertLevel,
         originalPrice: originalPrices.length ? Math.min(...originalPrices) : 0,
         salesPrice: salesPrices.length ? Math.min(...salesPrices) : 0,
+        expirationDate: null,
         variants,
     };
 }
@@ -160,7 +280,10 @@ async function parseImportFileToPreviewProducts({
     branchName: string | null;
 }): Promise<ImportPreviewProduct[]> {
     const buffer = await file.arrayBuffer();
-    const workbook = XLSX.read(buffer, { type: "array" });
+    const workbook = XLSX.read(buffer, {
+        type: "array",
+        cellDates: true,
+    });
     const firstSheetName = workbook.SheetNames[0];
 
     if (!firstSheetName) {
@@ -171,6 +294,7 @@ async function parseImportFileToPreviewProducts({
 
     const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
         header: 1,
+        raw: true,
         ["def" + "val"]: "",
     });
 
@@ -197,42 +321,48 @@ async function parseImportFileToPreviewProducts({
     };
 
     const products: ImportPreviewProduct[] = [];
-    let currentVariantProduct: ImportPreviewProduct | null = null;
-
-    const pushCurrentVariantProduct = () => {
-        if (!currentVariantProduct) return;
-
-        products.push(recalculateImportProduct(currentVariantProduct));
-        currentVariantProduct = null;
-    };
+    const variantProducts = new Map<string, ImportPreviewProduct>();
 
     rows.slice(headerIndex + 1).forEach((row, rowIndex) => {
+        const excelRowNumber = headerIndex + rowIndex + 2;
         const productName = cleanImportCell(getValue(row, "product"));
         const category = cleanImportCell(getValue(row, "category"));
-        const variantsCell = cleanImportCell(getValue(row, "variants"));
+        const variantFields = cleanImportCell(getValue(row, "variantFields"));
+        const variantValuesText = cleanImportCell(getValue(row, "variantValues"));
+        const legacyVariants = cleanImportCell(getValue(row, "legacyVariants"));
 
         const stock = parseImportNumber(getValue(row, "stock"));
         const alertLevel = parseImportNumber(getValue(row, "alert"));
         const originalPrice = parseImportNumber(getValue(row, "original"));
         const salesPrice = parseImportNumber(getValue(row, "sales"));
+        const expirationDate = parseImportDate(getValue(row, "expiration"));
 
         const rowIsBlank =
             !productName &&
             !category &&
-            !variantsCell &&
+            !variantFields &&
+            !variantValuesText &&
+            !legacyVariants &&
             stock === 0 &&
             alertLevel === 0 &&
             originalPrice === 0 &&
-            salesPrice === 0;
+            salesPrice === 0 &&
+            !expirationDate;
 
         if (rowIsBlank) return;
 
-        if (productName) {
-            pushCurrentVariantProduct();
+        if (!productName || !category) {
+            throw new Error(
+                `Row ${excelRowNumber}: Product and Category are required.`
+            );
+        }
 
-            const hasVariants = isImportYes(variantsCell);
+        const hasVariants =
+            isImportYes(getValue(row, "hasVariants")) ||
+            Boolean(variantFields || variantValuesText || legacyVariants);
 
-            const product: ImportPreviewProduct = {
+        if (!hasVariants) {
+            products.push({
                 tempId: `import-${Date.now()}-${rowIndex}`,
                 storeId: storeId ? Number(storeId) : null,
                 branchId: Number(branchId),
@@ -243,38 +373,84 @@ async function parseImportFileToPreviewProducts({
                 alertLevel,
                 originalPrice,
                 salesPrice,
-                hasVariants,
-                variants: hasVariants ? [] : [],
-            };
-
-            if (hasVariants) {
-                currentVariantProduct = product;
-                return;
-            }
-
-            products.push(product);
+                expirationDate: expirationDate || null,
+                hasVariants: false,
+                variants: [],
+            });
             return;
         }
 
-        if (currentVariantProduct && variantsCell) {
-            currentVariantProduct.variants = [
-                ...(currentVariantProduct.variants || []),
-                {
-                    variantValues: variantTextToValues(variantsCell),
-                    stock,
-                    alertLevel,
-                    originalPrice,
-                    salesPrice,
-                },
-            ];
+        let variantValues: Record<string, string>;
+
+        try {
+            variantValues =
+                variantFields || variantValuesText
+                    ? variantFieldsAndValuesToObject(
+                        variantFields,
+                        variantValuesText
+                    )
+                    : legacyVariantTextToValues(legacyVariants);
+        } catch (error) {
+            throw new Error(
+                `Row ${excelRowNumber}: ${
+                    error instanceof Error
+                        ? error.message
+                        : "Invalid variant information."
+                }`
+            );
         }
+
+        if (Object.keys(variantValues).length === 0) {
+            throw new Error(
+                `Row ${excelRowNumber}: Variant Fields and Variant Values are required for variant products.`
+            );
+        }
+
+        const groupKey = `${productName
+            .toLowerCase()
+            .replace(/\s+/g, " ")}|${category
+            .toLowerCase()
+            .replace(/\s+/g, " ")}`;
+
+        let product = variantProducts.get(groupKey);
+
+        if (!product) {
+            product = {
+                tempId: `import-${Date.now()}-${rowIndex}`,
+                storeId: storeId ? Number(storeId) : null,
+                branchId: Number(branchId),
+                branchName,
+                name: productName,
+                category,
+                stock: 0,
+                alertLevel: 0,
+                originalPrice: 0,
+                salesPrice: 0,
+                expirationDate: null,
+                hasVariants: true,
+                variants: [],
+            };
+
+            variantProducts.set(groupKey, product);
+            products.push(product);
+        }
+
+        product.variants = [
+            ...(product.variants || []),
+            {
+                variantValues,
+                stock,
+                alertLevel,
+                originalPrice,
+                salesPrice,
+                expirationDate: expirationDate || null,
+            },
+        ];
     });
 
-    pushCurrentVariantProduct();
-
-    return products.filter(
-        (product) => product.name.trim() && product.category.trim()
-    );
+    return products
+        .map(recalculateImportProduct)
+        .filter((product) => product.name.trim() && product.category.trim());
 }
 
 function getSessionSnapshot() {
@@ -377,6 +553,7 @@ function normalizeVariantForSave(v: ProductFormVariant): ProductVariantSave {
         alertLevel: Number(v.alertLevel || 0),
         originalPrice: Number(v.originalPrice || 0),
         salesPrice: Number(v.salesPrice || 0),
+        expirationDate: v.expirationDate || null,
     };
 }
 
@@ -1062,6 +1239,8 @@ export function useInventoryController() {
                     original_price: Number(variant.originalPrice || 0),
                     salesPrice: Number(variant.salesPrice || 0),
                     sales_price: Number(variant.salesPrice || 0),
+                    expirationDate: variant.expirationDate || null,
+                    expiration_date: variant.expirationDate || null,
                 }));
 
                 const res = await fetch("/api/products", {
@@ -1085,6 +1264,12 @@ export function useInventoryController() {
                         original_price: Number(productData.originalPrice || 0),
                         salesPrice: Number(productData.salesPrice || 0),
                         sales_price: Number(productData.salesPrice || 0),
+                        expirationDate: productData.hasVariants
+                            ? null
+                            : productData.expirationDate || null,
+                        expiration_date: productData.hasVariants
+                            ? null
+                            : productData.expirationDate || null,
                         hasVariants: productData.hasVariants,
                         has_variants: productData.hasVariants ? 1 : 0,
                         variants: productData.hasVariants ? serializedVariants : [],
@@ -1120,6 +1305,7 @@ export function useInventoryController() {
                 alertLevel: "",
                 originalPrice: "",
                 salesPrice: "",
+                expirationDate: null,
             },
         ]);
     }
@@ -1255,14 +1441,19 @@ export function useInventoryController() {
         setShowConfirmProductSaveDialog(true);
     }
 
-    async function confirmSaveProduct() {
+    async function confirmSaveProduct(
+        productDataOverride?: ProductSaveData
+    ) {
         if (!pendingProductSave) return;
 
         const token = getTokenOrAlert();
         if (!token) return;
 
         const productData =
-            pendingProductSave.mode === "edit" ? pendingProductSave.after : pendingProductSave.data;
+            productDataOverride ??
+            (pendingProductSave.mode === "edit"
+                ? pendingProductSave.after
+                : pendingProductSave.data);
 
         if (!productData.branchId) {
             alert("❌ Missing branch for product.");
@@ -1289,6 +1480,8 @@ export function useInventoryController() {
             original_price: Number(variant.originalPrice || 0),
             salesPrice: Number(variant.salesPrice || 0),
             sales_price: Number(variant.salesPrice || 0),
+            expirationDate: variant.expirationDate || null,
+            expiration_date: variant.expirationDate || null,
         }));
 
         const payload = {
@@ -1307,6 +1500,12 @@ export function useInventoryController() {
             original_price: productData.originalPrice,
             salesPrice: productData.salesPrice,
             sales_price: productData.salesPrice,
+            expirationDate: productData.hasVariants
+                ? null
+                : productData.expirationDate || null,
+            expiration_date: productData.hasVariants
+                ? null
+                : productData.expirationDate || null,
             hasVariants: productData.hasVariants,
             has_variants: productData.hasVariants ? 1 : 0,
             variants: productData.hasVariants ? serializedVariants : [],
@@ -1368,6 +1567,7 @@ export function useInventoryController() {
                     alertLevel: String(v.alertLevel),
                     originalPrice: String(v.originalPrice),
                     salesPrice: String(v.salesPrice),
+                    expirationDate: v.expirationDate || null,
                 }))
                 : []
         );

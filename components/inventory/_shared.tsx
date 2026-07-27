@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import * as React from "react";
 import {
     AlertTriangle,
@@ -8,6 +6,7 @@ import {
     CheckCircle2,
     ChevronDown,
     DollarSign,
+    Download,
     RefreshCw,
     Search,
     Store,
@@ -155,6 +154,30 @@ function formatExpirationDate(value?: string | null) {
         day: "numeric",
         year: "numeric",
     });
+}
+
+function formatExpirationDateInput(value?: string | null) {
+    const rawValue = String(value || "").trim();
+
+    if (!rawValue) return "";
+
+    const datePrefix = rawValue.match(/^(\d{4}-\d{2}-\d{2})/);
+
+    if (datePrefix) {
+        return datePrefix[1];
+    }
+
+    const parsedDate = new Date(rawValue);
+
+    if (Number.isNaN(parsedDate.getTime())) {
+        return "";
+    }
+
+    const year = parsedDate.getFullYear();
+    const month = String(parsedDate.getMonth() + 1).padStart(2, "0");
+    const day = String(parsedDate.getDate()).padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
 }
 
 
@@ -593,16 +616,21 @@ function getStockAlertItems(products: Product[]): StockAlertItem[] {
 }
 
 
+
 const EXPIRING_SOON_DAYS = 30;
 const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
 
-type ExpiringSoonItem = {
+type ExpirationAlertStatus = "Expiring" | "Expired";
+type ExpirationAlertFilter = "all" | "expiring" | "expired";
+
+type ExpirationAlertItem = {
     id: string;
     product: Product;
     productName: string;
     variantName: string;
     expirationDate: string;
     daysRemaining: number;
+    status: ExpirationAlertStatus;
 };
 
 function parseInventoryExpirationDate(value?: string | null) {
@@ -633,7 +661,7 @@ function getDaysUntilExpiration(value?: string | null) {
     );
 }
 
-function getExpiringSoonItems(products: Product[]): ExpiringSoonItem[] {
+function getExpirationAlertItems(products: Product[]): ExpirationAlertItem[] {
     return products
         .flatMap((product) => {
             const variants = Array.isArray(product.variants)
@@ -648,7 +676,6 @@ function getExpiringSoonItems(products: Product[]): ExpiringSoonItem[] {
 
                     if (
                         daysRemaining === null ||
-                        daysRemaining < 0 ||
                         daysRemaining > EXPIRING_SOON_DAYS
                     ) {
                         return [];
@@ -664,7 +691,11 @@ function getExpiringSoonItems(products: Product[]): ExpiringSoonItem[] {
                                 variant.expirationDate || ""
                             ),
                             daysRemaining,
-                        },
+                            status:
+                                daysRemaining < 0
+                                    ? "Expired"
+                                    : "Expiring",
+                        } satisfies ExpirationAlertItem,
                     ];
                 });
             }
@@ -675,7 +706,6 @@ function getExpiringSoonItems(products: Product[]): ExpiringSoonItem[] {
 
             if (
                 daysRemaining === null ||
-                daysRemaining < 0 ||
                 daysRemaining > EXPIRING_SOON_DAYS
             ) {
                 return [];
@@ -689,15 +719,42 @@ function getExpiringSoonItems(products: Product[]): ExpiringSoonItem[] {
                     variantName: "—",
                     expirationDate: String(product.expirationDate || ""),
                     daysRemaining,
-                },
+                    status:
+                        daysRemaining < 0
+                            ? "Expired"
+                            : "Expiring",
+                } satisfies ExpirationAlertItem,
             ];
         })
-        .sort((first, second) => first.daysRemaining - second.daysRemaining);
+        .sort((first, second) => {
+            if (first.status !== second.status) {
+                return first.status === "Expired" ? -1 : 1;
+            }
+
+            return (
+                Math.abs(first.daysRemaining) -
+                Math.abs(second.daysRemaining)
+            );
+        });
 }
 
 function getExpirationStatusLabel(daysRemaining: number) {
-    if (daysRemaining === 0) return "Expires today";
-    if (daysRemaining === 1) return "1 day left";
+    if (daysRemaining < -1) {
+        return `${Math.abs(daysRemaining)} days ago`;
+    }
+
+    if (daysRemaining === -1) {
+        return "1 day ago";
+    }
+
+    if (daysRemaining === 0) {
+        return "Expires today";
+    }
+
+    if (daysRemaining === 1) {
+        return "1 day left";
+    }
+
     return `${daysRemaining} days left`;
 }
 
@@ -993,23 +1050,26 @@ function StockAlertsDialog({
 }
 
 
-function ExpiringSoonCard({
-                              count,
-                              onClick,
-                          }: {
-    count: number;
+
+function ExpirationAlertsCard({
+                                  expiringCount,
+                                  expiredCount,
+                                  onClick,
+                              }: {
+    expiringCount: number;
+    expiredCount: number;
     onClick: () => void;
 }) {
     return (
         <button
             type="button"
             onClick={onClick}
-            aria-label={`View ${count} item${count === 1 ? "" : "s"} expiring within 30 days`}
+            aria-label={`View expiration alerts: ${expiringCount} expiring and ${expiredCount} expired`}
             className="group h-[132px] rounded-[18px] border border-[#E6DDF0] bg-white p-3 text-left shadow-sm transition-all duration-200 ease-out hover:-translate-y-1 hover:border-[#CDB9E1] hover:shadow-lg focus:outline-none focus:ring-4 focus:ring-[#2B174C]/10"
         >
             <div className="flex items-start justify-between gap-3">
                 <p className="pt-1 text-sm font-semibold text-[#1A1220]">
-                    Expiring Soon
+                    Expiration Alerts
                 </p>
 
                 <span className="inline-flex h-9 min-w-9 items-center justify-center gap-1 rounded-full bg-[#F3ECFF] px-2 text-xs font-semibold text-[#6D35D4] transition-all duration-200 group-hover:min-w-[72px]">
@@ -1026,27 +1086,90 @@ function ExpiringSoonCard({
                 </span>
             </div>
 
-            <p className="mt-3 text-[27px] font-bold leading-none text-[#6D35D4]">
-                {formatNumber(count)}
-            </p>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+                <div className="rounded-xl border border-[#D8C5F3] bg-[#F7F1FF] px-2 py-2 text-center transition-transform duration-200 group-hover:-translate-y-0.5">
+                    <p className="text-[10px] font-semibold text-[#6D35D4]">
+                        Expiring
+                    </p>
 
-            <p className="mt-2 text-[11px] leading-4 text-[#8A7D90]">
-                Items expiring within 30 days
-            </p>
+                    <p className="mt-0.5 text-[21px] font-bold leading-none text-[#6D35D4]">
+                        {formatNumber(expiringCount)}
+                    </p>
+                </div>
+
+                <div className="rounded-xl border border-[#F0B6B6] bg-[#FFF0F0] px-2 py-2 text-center transition-transform duration-200 group-hover:-translate-y-0.5">
+                    <p className="text-[10px] font-semibold text-[#B92727]">
+                        Expired
+                    </p>
+
+                    <p className="mt-0.5 text-[21px] font-bold leading-none text-[#C92D2D]">
+                        {formatNumber(expiredCount)}
+                    </p>
+                </div>
+            </div>
         </button>
     );
 }
 
-function ExpiringSoonDialog({
-                                open,
-                                onClose,
-                                items,
-                            }: {
+function ExpirationAlertsDialog({
+                                    open,
+                                    onClose,
+                                    items,
+                                }: {
     open: boolean;
     onClose: () => void;
-    items: ExpiringSoonItem[];
+    items: ExpirationAlertItem[];
 }) {
+    const [filter, setFilter] =
+        React.useState<ExpirationAlertFilter>("all");
+
+    React.useEffect(() => {
+        if (!open) {
+            setFilter("all");
+        }
+    }, [open]);
+
     if (!open) return null;
+
+    const expiringCount = items.filter(
+        (item) => item.status === "Expiring"
+    ).length;
+    const expiredCount = items.filter(
+        (item) => item.status === "Expired"
+    ).length;
+
+    const filteredItems = items.filter((item) => {
+        if (filter === "expiring") {
+            return item.status === "Expiring";
+        }
+
+        if (filter === "expired") {
+            return item.status === "Expired";
+        }
+
+        return true;
+    });
+
+    const tabClass = (
+        active: boolean,
+        tone: ExpirationAlertFilter
+    ) => {
+        if (tone === "expiring") {
+            return active
+                ? "border-[#D8C5F3] bg-[#F7F1FF] text-[#6D35D4]"
+                : "border-[#E6DDF0] bg-white text-[#6D35D4] hover:bg-[#F7F1FF]";
+        }
+
+        if (tone === "expired") {
+            return active
+                ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
+                : "border-[#E6DDF0] bg-white text-[#C32F2F] hover:bg-[#FFF5F5]";
+        }
+
+        return active
+            ? "border-[#2B174C] bg-[#2B174C] text-white"
+            : "border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#F7F1FF]";
+    };
 
     return (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 px-4 py-6 backdrop-blur-sm">
@@ -1059,11 +1182,11 @@ function ExpiringSoonDialog({
 
                         <div>
                             <h3 className="text-[19px] font-bold text-[#1A1220]">
-                                Expiring Soon
+                                Expiration Alerts
                             </h3>
 
                             <p className="mt-1 text-sm text-[#6A5D6F]">
-                                Products and variants expiring within the next 30 days.
+                                Review products and variants that are expiring or already expired.
                             </p>
                         </div>
                     </div>
@@ -1071,10 +1194,45 @@ function ExpiringSoonDialog({
                     <button
                         type="button"
                         onClick={onClose}
-                        aria-label="Close expiring soon items"
+                        aria-label="Close expiration alerts"
                         className="text-xl text-[#9B8AAA] hover:text-[#1A1220]"
                     >
                         ×
+                    </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 border-b border-[#E6DDF0] px-5 py-3.5 sm:px-6">
+                    <button
+                        type="button"
+                        onClick={() => setFilter("all")}
+                        className={`h-9 rounded-xl border px-4 text-xs font-semibold transition ${tabClass(
+                            filter === "all",
+                            "all"
+                        )}`}
+                    >
+                        All ({formatNumber(items.length)})
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={() => setFilter("expiring")}
+                        className={`h-9 rounded-xl border px-4 text-xs font-semibold transition ${tabClass(
+                            filter === "expiring",
+                            "expiring"
+                        )}`}
+                    >
+                        Expiring ({formatNumber(expiringCount)})
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={() => setFilter("expired")}
+                        className={`h-9 rounded-xl border px-4 text-xs font-semibold transition ${tabClass(
+                            filter === "expired",
+                            "expired"
+                        )}`}
+                    >
+                        Expired ({formatNumber(expiredCount)})
                     </button>
                 </div>
 
@@ -1093,7 +1251,7 @@ function ExpiringSoonDialog({
                                 "Product",
                                 "Variant",
                                 "Expiration Date",
-                                "Remaining",
+                                "Status",
                             ].map((head) => (
                                 <th
                                     key={head}
@@ -1106,59 +1264,76 @@ function ExpiringSoonDialog({
                         </thead>
 
                         <tbody>
-                        {items.length === 0 ? (
+                        {filteredItems.length === 0 ? (
                             <tr>
                                 <td
                                     colSpan={4}
                                     className="px-4 py-12 text-center text-sm text-[#9B8AAA]"
                                 >
-                                    No products are expiring within the next 30 days.
+                                    No expiration alerts found for this filter.
                                 </td>
                             </tr>
                         ) : (
-                            items.map((item) => (
-                                <tr
-                                    key={item.id}
-                                    className="border-b border-[#EFE7F4] last:border-0"
-                                >
-                                    <td className="px-4 py-3 text-left">
-                                        <p className="text-[15px] font-semibold leading-5 text-[#1A1220]">
-                                            {item.productName}
-                                        </p>
-                                    </td>
+                            filteredItems.map((item) => {
+                                const isExpired =
+                                    item.status === "Expired";
 
-                                    <td className="px-4 py-3 text-center text-[#6A5D6F]">
-                                        {item.variantName}
-                                    </td>
+                                return (
+                                    <tr
+                                        key={item.id}
+                                        className="border-b border-[#EFE7F4] last:border-0"
+                                    >
+                                        <td className="px-4 py-3 text-left">
+                                            <p className="text-[15px] font-semibold leading-5 text-[#1A1220]">
+                                                {item.productName}
+                                            </p>
+                                        </td>
 
-                                    <td className="px-4 py-3 text-center font-medium text-[#2B174C]">
-                                        {formatExpirationDate(
-                                            item.expirationDate
-                                        )}
-                                    </td>
+                                        <td className="px-4 py-3 text-center text-[#6A5D6F]">
+                                            {item.variantName}
+                                        </td>
 
-                                    <td className="px-4 py-3 text-center">
-                                        <span
-                                            className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${
-                                                item.daysRemaining <= 7
-                                                    ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
-                                                    : "border-[#D8C5F3] bg-[#F7F1FF] text-[#6D35D4]"
-                                            }`}
-                                        >
-                                            {getExpirationStatusLabel(
-                                                item.daysRemaining
+                                        <td className="px-4 py-3 text-center font-medium text-[#2B174C]">
+                                            {formatExpirationDate(
+                                                item.expirationDate
                                             )}
-                                        </span>
-                                    </td>
-                                </tr>
-                            ))
+                                        </td>
+
+                                        <td className="px-4 py-3 text-center">
+                                            <div className="inline-flex flex-col items-center gap-1">
+                                                <span
+                                                    className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                                                        isExpired
+                                                            ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
+                                                            : "border-[#D8C5F3] bg-[#F7F1FF] text-[#6D35D4]"
+                                                    }`}
+                                                >
+                                                    {item.status}
+                                                </span>
+
+                                                <span
+                                                    className={`text-[10px] font-semibold ${
+                                                        isExpired
+                                                            ? "text-[#C32F2F]"
+                                                            : "text-[#6D35D4]"
+                                                    }`}
+                                                >
+                                                    {getExpirationStatusLabel(
+                                                        item.daysRemaining
+                                                    )}
+                                                </span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                );
+                            })
                         )}
                         </tbody>
                     </table>
                 </div>
 
                 <div className="border-t border-[#E6DDF0] bg-[#FFFDF8] px-5 py-3 text-xs text-[#7A6A84] sm:px-6">
-                    Expiring soon includes items with dates from today through the next 30 days.
+                    Expiring includes dates from today through the next 30 days. Expired includes dates before today.
                 </div>
             </div>
         </div>
@@ -1174,12 +1349,20 @@ export function InventoryStats({
 }) {
     const [showStockAlertsDialog, setShowStockAlertsDialog] =
         React.useState(false);
-    const [showExpiringSoonDialog, setShowExpiringSoonDialog] =
+    const [showExpirationAlertsDialog, setShowExpirationAlertsDialog] =
         React.useState(false);
 
     const stockItems = getProductStockSummaryItems(products);
     const alertItems = getStockAlertItems(products);
-    const expiringSoonItems = getExpiringSoonItems(products);
+    const expirationAlertItems = getExpirationAlertItems(products);
+
+    const expiringCount = expirationAlertItems.filter(
+        (item) => item.status === "Expiring"
+    ).length;
+
+    const expiredCount = expirationAlertItems.filter(
+        (item) => item.status === "Expired"
+    ).length;
 
     const totalStock = stockItems.reduce(
         (sum, item) => sum + Math.max(0, Number(item.stock || 0)),
@@ -1229,9 +1412,10 @@ export function InventoryStats({
                     onClick={() => setShowStockAlertsDialog(true)}
                 />
 
-                <ExpiringSoonCard
-                    count={expiringSoonItems.length}
-                    onClick={() => setShowExpiringSoonDialog(true)}
+                <ExpirationAlertsCard
+                    expiringCount={expiringCount}
+                    expiredCount={expiredCount}
+                    onClick={() => setShowExpirationAlertsDialog(true)}
                 />
 
                 <StatCard
@@ -1268,10 +1452,10 @@ export function InventoryStats({
                 onRestock={onRestock}
             />
 
-            <ExpiringSoonDialog
-                open={showExpiringSoonDialog}
-                onClose={() => setShowExpiringSoonDialog(false)}
-                items={expiringSoonItems}
+            <ExpirationAlertsDialog
+                open={showExpirationAlertsDialog}
+                onClose={() => setShowExpirationAlertsDialog(false)}
+                items={expirationAlertItems}
             />
         </>
     );
@@ -1626,6 +1810,15 @@ export function ProductTable({
                     const variants = Array.isArray(p.variants) ? p.variants : [];
                     const hasExpandableVariants = p.hasVariants && variants.length > 0;
                     const isExpanded = Boolean(expandedProductIds[p.id]);
+                    const displayedExpirationDate = hasExpandableVariants
+                        ? getNearestVariantExpiration(variants)
+                        : String(p.expirationDate || "");
+                    const expirationDaysRemaining = getDaysUntilExpiration(
+                        displayedExpirationDate
+                    );
+                    const isProductExpired =
+                        expirationDaysRemaining !== null &&
+                        expirationDaysRemaining < 0;
 
                     return (
                         <React.Fragment key={p.id}>
@@ -1655,28 +1848,38 @@ export function ProductTable({
                                         )}
 
                                         <div>
-                                            <p className="text-[14px] font-semibold leading-5 text-[#1A1220]">
-                                                {p.name}
-                                            </p>
-
-                                            {hasExpandableVariants
-                                                ? getNearestVariantExpiration(
-                                                variants
-                                            ) && (
-                                                <p className="mt-1 text-[11px] font-medium leading-4 text-[#806A8C]">
-                                                    Nearest expiration:{" "}
-                                                    {formatExpirationDate(
-                                                        getNearestVariantExpiration(
-                                                            variants
-                                                        )
-                                                    )}
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <p
+                                                    className={`text-[14px] font-semibold leading-5 ${
+                                                        isProductExpired
+                                                            ? "text-[#C32F2F]"
+                                                            : "text-[#1A1220]"
+                                                    }`}
+                                                >
+                                                    {p.name}
                                                 </p>
-                                            )
-                                                : p.expirationDate && (
-                                                <p className="mt-1 text-[11px] font-medium leading-4 text-[#806A8C]">
-                                                    Expiration:{" "}
+
+                                                {isProductExpired && (
+                                                    <span className="inline-flex rounded-full border border-[#F2C4C4] bg-[#FFF0F0] px-2 py-0.5 text-[10px] font-semibold text-[#C32F2F]">
+                                                        Expired
+                                                    </span>
+                                                )}
+                                            </div>
+
+                                            {displayedExpirationDate && (
+                                                <p
+                                                    className={`mt-1 text-[11px] font-medium leading-4 ${
+                                                        isProductExpired
+                                                            ? "text-[#C32F2F]"
+                                                            : "text-[#806A8C]"
+                                                    }`}
+                                                >
+                                                    {hasExpandableVariants
+                                                        ? "Nearest expiration"
+                                                        : "Expiration"}
+                                                    :{" "}
                                                     {formatExpirationDate(
-                                                        p.expirationDate
+                                                        displayedExpirationDate
                                                     )}
                                                 </p>
                                             )}
@@ -2049,11 +2252,11 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
         ) as Product | undefined;
 
         setProductExpirationDate(
-            String(editingProduct?.expirationDate || "")
+            formatExpirationDateInput(editingProduct?.expirationDate)
         );
         setVariantExpirationDates(
             (editingProduct?.variants || []).map((variant) =>
-                String(variant.expirationDate || "")
+                formatExpirationDateInput(variant.expirationDate)
             )
         );
     }, [
@@ -2318,23 +2521,34 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                             </p>
                         )}
 
-                        <div className="mt-5 flex justify-end gap-2">
-                            <button
-                                type="button"
-                                onClick={inv.closeImportDialog}
-                                className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]"
+                        <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <a
+                                href="/templates/StockNBook_Inventory_Import_Template.xlsx"
+                                download="StockNBook_Inventory_Import_Template.xlsx"
+                                className="inline-flex items-center justify-center gap-2 rounded-xl border border-[#CDB9E1] bg-[#F7F1FF] px-4 py-2 text-sm font-semibold text-[#2B174C] transition hover:bg-[#EFE5FA]"
                             >
-                                Cancel
-                            </button>
+                                <Download size={15} />
+                                Download Format
+                            </a>
 
-                            <button
-                                type="button"
-                                disabled={inv.isImporting || !inv.selectedImportFile}
-                                onClick={() => void inv.importProductsFromExcel()}
-                                className="rounded-xl bg-[#2B174C] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                                {inv.isImporting ? "Reading..." : "Preview Import"}
-                            </button>
+                            <div className="flex justify-end gap-2">
+                                <button
+                                    type="button"
+                                    onClick={inv.closeImportDialog}
+                                    className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]"
+                                >
+                                    Cancel
+                                </button>
+
+                                <button
+                                    type="button"
+                                    disabled={inv.isImporting || !inv.selectedImportFile}
+                                    onClick={() => void inv.importProductsFromExcel()}
+                                    className="rounded-xl bg-[#2B174C] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                    {inv.isImporting ? "Reading..." : "Preview Import"}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>

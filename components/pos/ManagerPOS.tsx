@@ -13,13 +13,57 @@ import {
     ReceiptText,
     ShoppingBag,
     TrendingUp,
+    WalletCards,
     Trash2,
     X,
 } from "lucide-react";
 import type { UsePOSReturn } from "@/hooks/usePOS";
 import { OrdersTable, POSLayout, StatCard, peso } from "./_shared";
 
+function parsePOSExpirationDate(value?: string | null) {
+    const rawValue = String(value || "").trim();
+
+    if (!rawValue) return null;
+
+    const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(rawValue)
+        ? new Date(`${rawValue}T00:00:00`)
+        : new Date(rawValue);
+
+    if (Number.isNaN(parsedDate.getTime())) return null;
+
+    parsedDate.setHours(0, 0, 0, 0);
+    return parsedDate;
+}
+
+function isPOSItemExpired(value?: string | null) {
+    const expirationDate = parsePOSExpirationDate(value);
+
+    if (!expirationDate) return false;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    return expirationDate.getTime() < today.getTime();
+}
+
+function formatPOSExpirationDate(value?: string | null) {
+    const expirationDate = parsePOSExpirationDate(value);
+
+    if (!expirationDate) return "";
+
+    return expirationDate.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+    });
+}
+
 export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
+    const todayTotalCost = Math.max(
+        0,
+        Number(pos.todayRevenue || 0) - Number(pos.todayProfit || 0),
+    );
+
     return (
         <POSLayout
             role={pos.role}
@@ -28,7 +72,7 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
             currentMonth={pos.currentMonth}
             onRefresh={() => window.location.reload()}
         >
-            <div className="mb-3 grid gap-3 md:grid-cols-3">
+            <div className="mb-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <StatCard
                     label="Today's Sales"
                     value={peso(pos.todayRevenue)}
@@ -38,21 +82,30 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
                 />
 
                 <StatCard
-                    label="Orders Today"
-                    value={pos.todayOrders.length}
-                    helper="Orders recorded today"
-                    icon={<ReceiptText size={18} strokeWidth={1.9} />}
-                    iconClassName="bg-[#EAF1FF] text-[#245EDB]"
-                    valueClassName="text-[#245EDB]"
+                    label="Total Cost"
+                    value={peso(todayTotalCost)}
+                    helper="Cost of items sold today"
+                    icon={<WalletCards size={18} strokeWidth={1.9} />}
+                    iconClassName="bg-[#FFF2E5] text-[#D56A1F]"
+                    valueClassName="text-[#D56A1F]"
                 />
 
                 <StatCard
-                    label="Today's Profit"
+                    label="Profit"
                     value={peso(pos.todayProfit)}
-                    helper="Profit earned from today's sales"
+                    helper="Profit earned today"
                     icon={<TrendingUp size={18} strokeWidth={1.9} />}
                     iconClassName="bg-[#EAF8EF] text-[#168A48]"
                     valueClassName="text-[#168A48]"
+                />
+
+                <StatCard
+                    label="Transactions"
+                    value={pos.todayOrders.length}
+                    helper="Transactions recorded today"
+                    icon={<ReceiptText size={18} strokeWidth={1.9} />}
+                    iconClassName="bg-[#EAF1FF] text-[#245EDB]"
+                    valueClassName="text-[#245EDB]"
                 />
             </div>
 
@@ -142,7 +195,11 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
         };
     };
 
-    const renderQtyControls = (key: string, stock: number) => {
+    const renderQtyControls = (
+        key: string,
+        stock: number,
+        expired: boolean
+    ) => {
         const qty = pos.cart[key] || 0;
         const out = stock <= 0;
         const isMax = qty >= stock && stock > 0;
@@ -164,7 +221,9 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
 
                 <button
                     onClick={() => pos.handleQty(key, 1)}
-                    disabled={out || isMax}
+                    disabled={expired || out || isMax}
+                    aria-label={expired ? "Expired item cannot be sold" : "Increase quantity"}
+                    title={expired ? "Expired item cannot be sold" : undefined}
                     className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#2B174C] hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-40"
                     type="button"
                 >
@@ -282,6 +341,9 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
                                                     Number(variant.stock || 0),
                                                     Number(variant.alertLevel || 0)
                                                 );
+                                                const isExpired = isPOSItemExpired(
+                                                    variant.expirationDate
+                                                );
                                                 const isFirstVariant = index === 0;
                                                 const isLastVariant =
                                                     index === variants.length - 1;
@@ -306,14 +368,36 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
                                                                 </div>
 
                                                                 <div className="min-w-0">
-                                                                    <p className="truncate text-sm font-semibold text-[#2B174C]">
-                                                                        {variant.name || "Variant"}
-                                                                    </p>
+                                                                    <div className="flex flex-wrap items-center gap-2">
+                                                                        <p
+                                                                            className={`truncate text-sm font-semibold ${
+                                                                                isExpired
+                                                                                    ? "text-[#C32F2F]"
+                                                                                    : "text-[#2B174C]"
+                                                                            }`}
+                                                                        >
+                                                                            {variant.name || "Variant"}
+                                                                        </p>
+
+                                                                        {isExpired && (
+                                                                            <span className="rounded-full border border-[#F2C4C4] bg-[#FFF0F0] px-2 py-0.5 text-[10px] font-semibold text-[#C32F2F]">
+                                                                                Expired
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
 
                                                                     <p
-                                                                        className={`mt-0.5 text-xs font-semibold ${status.className}`}
+                                                                        className={`mt-0.5 text-xs font-semibold ${
+                                                                            isExpired
+                                                                                ? "text-[#C32F2F]"
+                                                                                : status.className
+                                                                        }`}
                                                                     >
-                                                                        {status.label}
+                                                                        {isExpired
+                                                                            ? `Expired ${formatPOSExpirationDate(
+                                                                                variant.expirationDate
+                                                                            )} · Cannot be sold`
+                                                                            : status.label}
                                                                     </p>
                                                                 </div>
                                                             </div>
@@ -333,7 +417,8 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
 
                                                         {renderQtyControls(
                                                             key,
-                                                            Number(variant.stock || 0)
+                                                            Number(variant.stock || 0),
+                                                            isExpired
                                                         )}
                                                     </div>
                                                 );
@@ -349,6 +434,9 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
                             Number(product.stock || 0),
                             Number(product.alertLevel || 0)
                         );
+                        const isExpired = isPOSItemExpired(
+                            product.expirationDate
+                        );
 
                         return (
                             <div
@@ -356,14 +444,36 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
                                 className={`${productGridClass} min-h-[78px] items-center border-b border-[#EFE7F4] px-5 py-4 transition last:border-0 hover:bg-[#FFFCF7]`}
                             >
                                 <div className="min-w-0 pl-9 pr-4">
-                                    <p className="truncate text-sm font-semibold text-[#1A1220]">
-                                        {product.name}
-                                    </p>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <p
+                                            className={`truncate text-sm font-semibold ${
+                                                isExpired
+                                                    ? "text-[#C32F2F]"
+                                                    : "text-[#1A1220]"
+                                            }`}
+                                        >
+                                            {product.name}
+                                        </p>
+
+                                        {isExpired && (
+                                            <span className="rounded-full border border-[#F2C4C4] bg-[#FFF0F0] px-2 py-0.5 text-[10px] font-semibold text-[#C32F2F]">
+                                                Expired
+                                            </span>
+                                        )}
+                                    </div>
 
                                     <p
-                                        className={`mt-0.5 text-xs font-semibold ${status.className}`}
+                                        className={`mt-0.5 text-xs font-semibold ${
+                                            isExpired
+                                                ? "text-[#C32F2F]"
+                                                : status.className
+                                        }`}
                                     >
-                                        {status.label}
+                                        {isExpired
+                                            ? `Expired ${formatPOSExpirationDate(
+                                                product.expirationDate
+                                            )} · Cannot be sold`
+                                            : status.label}
                                     </p>
                                 </div>
 
@@ -379,7 +489,11 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
                                     {peso(Number(product.salesPrice || 0))}
                                 </div>
 
-                                {renderQtyControls(key, Number(product.stock || 0))}
+                                {renderQtyControls(
+                                    key,
+                                    Number(product.stock || 0),
+                                    isExpired
+                                )}
                             </div>
                         );
                     })}
@@ -467,11 +581,26 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
     const [successToast, setSuccessToast] =
         useState<SaleSuccessToastMessage | null>(null);
 
+    const hasExpiredCartItem = pos.cartItems.some((item) =>
+        isPOSItemExpired(item.expirationDate)
+    );
+
     const orderGridClass =
         "grid grid-cols-[minmax(0,1fr)_62px_76px_82px_24px]";
 
     const handlePlaceOrderClick = async () => {
         if (pos.cartItems.length === 0) return;
+
+        const expiredCartItem = pos.cartItems.find((item) =>
+            isPOSItemExpired(item.expirationDate)
+        );
+
+        if (expiredCartItem) {
+            alert(
+                `Expired item "${expiredCartItem.name}" cannot be sold. Remove it from the current order first.`
+            );
+            return;
+        }
 
         const paymentText = String(pos.payment || "").trim();
         const paidAmount = Number(paymentText.replace(/,/g, ""));
@@ -677,7 +806,15 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
 
                         <button
                             onClick={() => void handlePlaceOrderClick()}
-                            disabled={pos.cartItems.length === 0}
+                            disabled={
+                                pos.cartItems.length === 0 ||
+                                hasExpiredCartItem
+                            }
+                            title={
+                                hasExpiredCartItem
+                                    ? "Remove expired items before placing the order"
+                                    : undefined
+                            }
                             className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-40"
                             type="button"
                         >

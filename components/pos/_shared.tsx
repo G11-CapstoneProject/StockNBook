@@ -12,6 +12,7 @@ export type ProductVariant = {
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
+    expirationDate?: string | null;
 };
 
 export type ProductVariantApiRaw = {
@@ -37,6 +38,10 @@ export type ProductVariantApiRaw = {
     original_price?: number | string;
     salesPrice?: number | string;
     sales_price?: number | string;
+    expirationDate?: string | null;
+    expiration_date?: string | null;
+    expiryDate?: string | null;
+    expiry_date?: string | null;
 };
 
 export type Product = {
@@ -49,6 +54,7 @@ export type Product = {
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
+    expirationDate?: string | null;
     variants?: ProductVariant[];
 };
 
@@ -67,6 +73,10 @@ export type ProductApiRaw = {
     original_price?: number | string;
     salesPrice?: number | string;
     sales_price?: number | string;
+    expirationDate?: string | null;
+    expiration_date?: string | null;
+    expiryDate?: string | null;
+    expiry_date?: string | null;
     variants?: ProductVariantApiRaw[];
 };
 
@@ -83,6 +93,7 @@ export type BuyablePOSItem = {
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
+    expirationDate?: string | null;
     isVariant: boolean;
 };
 
@@ -176,6 +187,7 @@ export type CartItem = {
     originalPrice: number;
     salesPrice: number;
     alertLevel: number;
+    expirationDate?: string | null;
     isVariant: boolean;
 };
 
@@ -239,6 +251,12 @@ export const mapVariant = (
         alertLevel: Number(v.alertLevel ?? v.alert_level ?? 0),
         originalPrice: Number(v.originalPrice ?? v.original_price ?? 0),
         salesPrice: Number(v.salesPrice ?? v.sales_price ?? 0),
+        expirationDate:
+            v.expirationDate ??
+            v.expiration_date ??
+            v.expiryDate ??
+            v.expiry_date ??
+            null,
     };
 };
 
@@ -256,6 +274,12 @@ export const mapProduct = (p: ProductApiRaw): Product => {
         alertLevel: Number(p.alertLevel ?? p.alert_level ?? 0),
         originalPrice: Number(p.originalPrice ?? p.original_price ?? 0),
         salesPrice: Number(p.salesPrice ?? p.sales_price ?? 0),
+        expirationDate:
+            p.expirationDate ??
+            p.expiration_date ??
+            p.expiryDate ??
+            p.expiry_date ??
+            null,
         variants: Array.isArray(p.variants)
             ? p.variants
                 .map((variant) => mapVariant(variant, productId))
@@ -282,6 +306,7 @@ export const productToBuyableItems = (product: Product): BuyablePOSItem[] => {
             alertLevel: Number(variant.alertLevel || 0),
             originalPrice: Number(variant.originalPrice || 0),
             salesPrice: Number(variant.salesPrice || 0),
+            expirationDate: variant.expirationDate || null,
             isVariant: true,
         }));
     }
@@ -300,6 +325,7 @@ export const productToBuyableItems = (product: Product): BuyablePOSItem[] => {
             alertLevel: Number(product.alertLevel || 0),
             originalPrice: Number(product.originalPrice || 0),
             salesPrice: Number(product.salesPrice || 0),
+            expirationDate: product.expirationDate || null,
             isVariant: false,
         },
     ];

@@ -10,6 +10,7 @@ import {
     RefreshCw,
     Search,
     TrendingUp,
+    WalletCards,
     X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -133,6 +134,11 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                 sales: 0,
                 profit: 0,
             };
+
+    const scopeTotalCost = Math.max(
+        0,
+        Number(scopeSales.sales || 0) - Number(scopeSales.profit || 0),
+    );
 
     const orderBranchNames = useMemo(() => {
         const names = new Map<string, string>();
@@ -297,31 +303,40 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                 </header>
 
                 <div className="space-y-3 px-6 py-4">
-                    <div className="grid gap-3 md:grid-cols-3">
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <StatCard
-                            label="Total Orders"
-                            value={scopeSales.orders.length}
-                            helper="Orders in the selected sales scope"
-                            icon={<ReceiptText size={18} strokeWidth={1.9} />}
+                            label="Total Sales"
+                            value={peso(scopeSales.sales)}
+                            helper="Sales in the selected scope"
+                            icon={<CircleDollarSign size={18} strokeWidth={1.9} />}
                             iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
                         />
 
                         <StatCard
-                            label="Total Sales"
-                            value={peso(scopeSales.sales)}
-                            helper="Sales recorded in the selected scope"
-                            icon={<CircleDollarSign size={18} strokeWidth={1.9} />}
-                            iconClassName="bg-[#EAF1FF] text-[#245EDB]"
-                            valueClassName="text-[#245EDB]"
+                            label="Total Cost"
+                            value={peso(scopeTotalCost)}
+                            helper="Cost of items sold in this scope"
+                            icon={<WalletCards size={18} strokeWidth={1.9} />}
+                            iconClassName="bg-[#FFF2E5] text-[#D56A1F]"
+                            valueClassName="text-[#D56A1F]"
                         />
 
                         <StatCard
-                            label="Total Revenue"
+                            label="Profit"
                             value={peso(scopeSales.profit)}
-                            helper="Revenue recorded in the selected scope"
+                            helper="Profit earned in the selected scope"
                             icon={<TrendingUp size={18} strokeWidth={1.9} />}
                             iconClassName="bg-[#EAF8EF] text-[#168A48]"
                             valueClassName="text-[#168A48]"
+                        />
+
+                        <StatCard
+                            label="Transactions"
+                            value={scopeSales.orders.length}
+                            helper="Transactions in the selected scope"
+                            icon={<ReceiptText size={18} strokeWidth={1.9} />}
+                            iconClassName="bg-[#EAF1FF] text-[#245EDB]"
+                            valueClassName="text-[#245EDB]"
                         />
                     </div>
 

@@ -233,17 +233,13 @@ const SALES_DAY_FACTORS = { 0:1.34,1:0.70,2:0.82,3:0.90,4:0.98,5:1.18,6:1.42 };
 const BOOKING_DAY_FACTORS = { 0:2.25,1:0.55,2:0.70,3:0.78,4:0.90,5:1.45,6:2.55 };
 
 function dbConfig() {
-    const required = ["DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME"];
-    const missing = required.filter((key) => !String(process.env[key] || "").trim());
-    if (missing.length) throw new Error(`Missing ${missing.join(", ")} in .env.local.`);
-
     return {
-        host: process.env.DB_HOST,
-        user: process.env.DB_USER,
-        password: process.env.DB_PASSWORD,
-        database: process.env.DB_NAME,
-        port: Number(process.env.DB_PORT || 3306),
-        ssl: String(process.env.DB_SSL || "").toLowerCase() === "true" ? { rejectUnauthorized: false } : undefined,
+        host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",
+        user: "admin",
+        password: "2qJivedWDxCQS6TLjjEl" ,
+        database: "stocknbook",
+        port: 3306,
+        ssl: { rejectUnauthorized: false },
         charset: "utf8mb4",
         supportBigNumbers: true,
     };
@@ -494,7 +490,7 @@ async function tableExists(db, tableName) {
          FROM INFORMATION_SCHEMA.TABLES
          WHERE TABLE_SCHEMA = DATABASE()
            AND TABLE_NAME = ?
-         LIMIT 1`,
+             LIMIT 1`,
         [tableName]
     );
     return rows.length > 0;
@@ -527,7 +523,7 @@ async function ensureColumn(db, tableName, columnName, definition) {
     console.log(`Adding required column ${tableName}.${columnName}...`);
     await db.query(
         `ALTER TABLE ${quoteIdentifier(tableName)}
-         ADD COLUMN ${quoteIdentifier(columnName)} ${definition}`
+            ADD COLUMN ${quoteIdentifier(columnName)} ${definition}`
     );
     await getTableColumns(db, tableName, true);
 }
@@ -563,7 +559,7 @@ async function ensureIndex(db, tableName, indexName, columns) {
     console.log(`Creating performance index ${indexName}...`);
     await db.query(
         `CREATE INDEX ${quoteIdentifier(indexName)}
-         ON ${quoteIdentifier(tableName)} (${columns.map(quoteIdentifier).join(", ")})`
+            ON ${quoteIdentifier(tableName)} (${columns.map(quoteIdentifier).join(", ")})`
     );
 }
 
@@ -590,10 +586,10 @@ async function ensureSeederSchema(db) {
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS product_variants (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            product_id INT NOT NULL,
-            variant_values JSON NULL,
-            sku VARCHAR(120) NULL,
+                                                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                        product_id INT NOT NULL,
+                                                        variant_values JSON NULL,
+                                                        sku VARCHAR(120) NULL,
             barcode VARCHAR(32) NULL,
             stock INT NOT NULL DEFAULT 0,
             alert_level INT NOT NULL DEFAULT 0,
@@ -602,7 +598,7 @@ async function ensureSeederSchema(db) {
             status VARCHAR(30) NOT NULL DEFAULT 'active',
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     await getTableColumns(db, "product_variants", true);
 
@@ -616,23 +612,23 @@ async function ensureSeederSchema(db) {
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS booking_items (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            booking_id BIGINT NOT NULL,
-            product_id INT NOT NULL,
-            variant_id INT NULL,
-            product_name VARCHAR(255) NOT NULL,
+                                                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                     booking_id BIGINT NOT NULL,
+                                                     product_id INT NOT NULL,
+                                                     variant_id INT NULL,
+                                                     product_name VARCHAR(255) NOT NULL,
             quantity INT NOT NULL DEFAULT 1,
             unit_price DECIMAL(14,2) NOT NULL DEFAULT 0.00,
             line_total DECIMAL(14,2) NOT NULL DEFAULT 0.00,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     await getTableColumns(db, "booking_items", true);
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS subscription_plans (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            plan_code VARCHAR(30) NOT NULL UNIQUE,
+                                                          id INT AUTO_INCREMENT PRIMARY KEY,
+                                                          plan_code VARCHAR(30) NOT NULL UNIQUE,
             plan_name VARCHAR(50) NOT NULL,
             plan_label VARCHAR(50) NOT NULL,
             monthly_price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
@@ -643,15 +639,15 @@ async function ensureSeederSchema(db) {
             is_active TINYINT NOT NULL DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS subscriptions (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            store_id INT NOT NULL,
-            plan_id INT NOT NULL,
-            status VARCHAR(30) NOT NULL DEFAULT 'active',
+                                                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                     store_id INT NOT NULL,
+                                                     plan_id INT NOT NULL,
+                                                     status VARCHAR(30) NOT NULL DEFAULT 'active',
             amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
             billing_period VARCHAR(20) NOT NULL DEFAULT 'monthly',
             requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -661,7 +657,7 @@ async function ensureSeederSchema(db) {
             admin_notes TEXT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
     tableColumnCache.clear();
@@ -736,7 +732,7 @@ async function insertRows(db, tableName, rows, batchSize = CONFIG.batchSize) {
 
         await db.query(
             `INSERT INTO ${quoteIdentifier(tableName)}
-             (${columns.map(quoteIdentifier).join(", ")})
+                 (${columns.map(quoteIdentifier).join(", ")})
              VALUES ${placeholders}`,
             values
         );
@@ -797,10 +793,10 @@ async function deleteChildByParent(db, relation) {
     const [result] = await db.query(
         `DELETE child
          FROM ${quoteIdentifier(childTable)} AS child
-         INNER JOIN ${quoteIdentifier(parentTable)} AS parent
-            ON child.${quoteIdentifier(childColumn)} = parent.${quoteIdentifier(parentColumn)}
-         INNER JOIN tmp_perf_seed_store_ids AS seeded
-            ON parent.store_id = seeded.id`
+        INNER JOIN ${quoteIdentifier(parentTable)} AS parent
+        ON child.${quoteIdentifier(childColumn)} = parent.${quoteIdentifier(parentColumn)}
+        INNER JOIN tmp_perf_seed_store_ids AS seeded
+        ON parent.store_id = seeded.id`
     );
 
     if (result.affectedRows) {
@@ -854,8 +850,8 @@ async function removeExistingSeedRun(db) {
             const [result] = await db.query(
                 `DELETE scoped
                  FROM ${quoteIdentifier(tableName)} AS scoped
-                 INNER JOIN tmp_perf_seed_store_ids AS seeded
-                    ON scoped.store_id = seeded.id`
+                INNER JOIN tmp_perf_seed_store_ids AS seeded
+                ON scoped.store_id = seeded.id`
             );
 
             if (result.affectedRows) {
@@ -886,26 +882,26 @@ async function ensureEnterprisePlan(db) {
     await db.execute(
         `INSERT INTO subscription_plans
          (
-            plan_code,
-            plan_name,
-            plan_label,
-            monthly_price,
-            inventory_limit,
-            booking_limit,
-            staff_limit,
-            features,
-            is_active
+             plan_code,
+             plan_name,
+             plan_label,
+             monthly_price,
+             inventory_limit,
+             booking_limit,
+             staff_limit,
+             features,
+             is_active
          )
          VALUES ('enterprise', 'Enterprise', 'Performance Test', 1299.00, 200000, NULL, 100, ?, 1)
-         ON DUPLICATE KEY UPDATE
-            plan_name = VALUES(plan_name),
-            plan_label = VALUES(plan_label),
-            monthly_price = VALUES(monthly_price),
-            inventory_limit = VALUES(inventory_limit),
-            booking_limit = VALUES(booking_limit),
-            staff_limit = VALUES(staff_limit),
-            features = VALUES(features),
-            is_active = 1`,
+             ON DUPLICATE KEY UPDATE
+                                  plan_name = VALUES(plan_name),
+                                  plan_label = VALUES(plan_label),
+                                  monthly_price = VALUES(monthly_price),
+                                  inventory_limit = VALUES(inventory_limit),
+                                  booking_limit = VALUES(booking_limit),
+                                  staff_limit = VALUES(staff_limit),
+                                  features = VALUES(features),
+                                  is_active = 1`,
         [features]
     );
 
@@ -913,7 +909,7 @@ async function ensureEnterprisePlan(db) {
         `SELECT id, monthly_price
          FROM subscription_plans
          WHERE plan_code = 'enterprise'
-         LIMIT 1`
+             LIMIT 1`
     );
 
     if (!rows.length) throw new Error("Unable to create or retrieve enterprise plan.");
@@ -931,7 +927,7 @@ async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelN
 
     const [storeResult] = await db.execute(
         `INSERT INTO stores
-         (store_name, owner_name, email, password, slug)
+             (store_name, owner_name, email, password, slug)
          VALUES (?, ?, ?, ?, ?)`,
         [identity.name, ownerName, identity.ownerEmail, passwordHash, identity.slug]
     );
@@ -944,7 +940,7 @@ async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelN
         const location = PH_LOCATIONS[(storeIndex * 5 + branchIndex * 3) % PH_LOCATIONS.length];
         const [branchResult] = await db.execute(
             `INSERT INTO branches
-             (store_id, branch_name, contact_number, address)
+                 (store_id, branch_name, contact_number, address)
              VALUES (?, ?, ?, ?)`,
             [
                 storeId,
@@ -981,13 +977,13 @@ async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelN
         const [managerResult] = await db.execute(
             `INSERT INTO managers
              (
-                store_id,
-                branch_id,
-                manager_name,
-                manager_email,
-                password,
-                status,
-                permissions
+                 store_id,
+                 branch_id,
+                 manager_name,
+                 manager_email,
+                 password,
+                 status,
+                 permissions
              )
              VALUES (?, ?, ?, ?, ?, 'active', ?)`,
             [
@@ -1169,16 +1165,16 @@ async function createProducts(db, storeId, storeIndex, branches) {
 
     const [storedVariants] = await db.execute(
         `SELECT
-            pv.id,
-            pv.product_id,
-            pv.variant_values,
-            pv.stock,
-            pv.alert_level,
-            pv.original_price,
-            pv.sales_price
+             pv.id,
+             pv.product_id,
+             pv.variant_values,
+             pv.stock,
+             pv.alert_level,
+             pv.original_price,
+             pv.sales_price
          FROM product_variants AS pv
-         INNER JOIN products AS product
-            ON product.id = pv.product_id
+                  INNER JOIN products AS product
+                             ON product.id = pv.product_id
          WHERE product.store_id = ?
          ORDER BY pv.product_id, pv.id`,
         [storeId]

@@ -1966,8 +1966,32 @@ function ExpirationAlertsPanel({
                             </td>
                         </tr>
                     ) : (
+<<<<<<< HEAD
                         items.map((item) => {
                             const isExpired = item.status === "Expired";
+=======
+                        items.map((item) => (
+                            <tr
+                                key={item.id}
+                                className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FCFAFF]"
+                            >
+                                <td className="px-2 py-2 align-middle">
+                                    <p
+                                        title={item.productName}
+                                        className="line-clamp-2 text-[13px] font-semibold leading-5 text-[#30243A]"
+                                    >
+                                        {item.productName}
+                                    </p>
+                                    {item.variantName ? (
+                                        <p
+                                            title={item.variantName}
+                                            className="truncate text-[10px] font-medium text-[#806A8C]"
+                                        >
+                                            {item.variantName}
+                                        </p>
+                                    ) : null}
+                                </td>
+>>>>>>> 6a35c1b (07/28)
 
                             return (
                                 <tr

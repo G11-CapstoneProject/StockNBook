@@ -45,6 +45,24 @@ export async function GET(req: NextRequest) {
     }
 }
 
+
+export async function POST(req: NextRequest) {
+    try {
+        const body = await req.json();
+
+        return await callLambda(req, "save_onboarding", {
+            ...body,
+            send_invitation_emails:
+                body.send_invitation_emails === true,
+        });
+    } catch {
+        return NextResponse.json(
+            { error: "Create branch server error" },
+            { status: 500 }
+        );
+    }
+}
+
 export async function PATCH(req: NextRequest) {
     try {
         const body = await req.json();

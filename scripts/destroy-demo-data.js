@@ -31,18 +31,13 @@ const STORE_SLUG_PREFIX = `${RUN_TAG}-party-store-`;
 const STORE_EMAIL_DOMAIN = `${RUN_TAG}.seed.stocknbook.test`;
 
 function dbConfig() {
-    const required = ["DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME"];
-    const missing = required.filter((key) => !String(process.env[key] || "").trim());
-
-    if (missing.length) throw new Error(`Missing ${missing.join(", ")} in .env.local.`);
-
     return {
-        host: process.env.DB_HOST,
-        user: process.env.DB_USER,
-        password: process.env.DB_PASSWORD,
-        database: process.env.DB_NAME,
-        port: Number(process.env.DB_PORT || 3306),
-        ssl: String(process.env.DB_SSL || "").toLowerCase() === "true" ? { rejectUnauthorized: false } : undefined,
+        host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",
+        user: "admin",
+        password: "2qJivedWDxCQS6TLjjEl",
+        database: "stocknbook",
+        port: 3306,
+        ssl: { rejectUnauthorized: false },
         charset: "utf8mb4",
         supportBigNumbers: true,
     };

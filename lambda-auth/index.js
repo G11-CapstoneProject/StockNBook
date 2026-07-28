@@ -232,6 +232,33 @@ async function ensureStaffInviteOtpsTable(connection) {
     `);
 }
 
+async function ensureBranchOperationalColumns(connection) {
+    const [statusColumns] = await connection.execute(
+        "SHOW COLUMNS FROM branches LIKE 'status'"
+    );
+
+    if (statusColumns.length === 0) {
+        await connection.execute(
+            `ALTER TABLE branches
+             ADD COLUMN status ENUM('active', 'inactive')
+             NOT NULL DEFAULT 'active'
+             AFTER address`
+        );
+    }
+
+    const [reasonColumns] = await connection.execute(
+        "SHOW COLUMNS FROM branches LIKE 'inactive_reason'"
+    );
+
+    if (reasonColumns.length === 0) {
+        await connection.execute(
+            `ALTER TABLE branches
+             ADD COLUMN inactive_reason VARCHAR(255) NULL
+             AFTER status`
+        );
+    }
+}
+
 async function getStaffInviteRecord(connection, inviteToken) {
     if (!inviteToken) {
         const error = new Error("Missing invitation token.");
@@ -1470,6 +1497,8 @@ exports.handler = async (event) => {
         }
         // SAVE ONBOARDING
         if (action === "save_onboarding") {
+            await ensureBranchOperationalColumns(connection);
+
             const authHeader =
                 event.headers?.Authorization || event.headers?.authorization || "";
 
@@ -1553,6 +1582,41 @@ exports.handler = async (event) => {
                         branch.address || ""
                     ).trim();
 
+                    const branchStatus = String(
+                        branch.status ||
+                        branch.branch_status ||
+                        "active"
+                    )
+                        .trim()
+                        .toLowerCase();
+
+                    const inactiveReason =
+                        branchStatus === "inactive"
+                            ? String(
+                                branch.inactive_reason ||
+                                branch.branch_inactive_reason ||
+                                ""
+                            ).trim()
+                            : "";
+
+                    if (
+                        branchStatus !== "active" &&
+                        branchStatus !== "inactive"
+                    ) {
+                        throw new Error(
+                            `Invalid branch status for ${branchName}.`
+                        );
+                    }
+
+                    if (
+                        branchStatus === "inactive" &&
+                        !inactiveReason
+                    ) {
+                        throw new Error(
+                            `Select an inactive reason for ${branchName}.`
+                        );
+                    }
+
                     const managerName = String(
                         branch.manager_name || ""
                     ).trim();
@@ -1578,13 +1642,22 @@ exports.handler = async (event) => {
 
                     const [branchResult] = await connection.execute(
                         `INSERT INTO branches
-                             (store_id, branch_name, contact_number, address)
-                         VALUES (?, ?, ?, ?)`,
+                             (
+                                 store_id,
+                                 branch_name,
+                                 contact_number,
+                                 address,
+                                 status,
+                                 inactive_reason
+                             )
+                         VALUES (?, ?, ?, ?, ?, ?)`,
                         [
                             storeId,
                             branchName,
                             contactNumber || null,
                             address || null,
+                            branchStatus,
+                            inactiveReason || null,
                         ]
                     );
 
@@ -2164,16 +2237,16 @@ exports.handler = async (event) => {
                      branches.branch_name,
                      stores.store_name
                  FROM managers
-                 JOIN branches
-                   ON branches.id = managers.branch_id
-                  AND branches.store_id = managers.store_id
-                 JOIN stores
-                   ON stores.id = managers.store_id
+                          JOIN branches
+                               ON branches.id = managers.branch_id
+                                   AND branches.store_id = managers.store_id
+                          JOIN stores
+                               ON stores.id = managers.store_id
                  WHERE managers.id = ?
                    AND managers.store_id = ?
                    AND managers.branch_id = ?
                    AND managers.status = 'active'
-                 LIMIT 1`,
+                     LIMIT 1`,
                 [managerId, storeId, branchId]
             );
 
@@ -2208,7 +2281,7 @@ exports.handler = async (event) => {
                  WHERE staff_email = ?
                    AND store_id = ?
                    AND branch_id = ?
-                 LIMIT 1`,
+                     LIMIT 1`,
                 [staffEmail, storeId, branchId]
             );
 
@@ -2239,16 +2312,16 @@ exports.handler = async (event) => {
 
             await connection.execute(
                 `INSERT INTO staff
-                     (
-                         store_id,
-                         branch_id,
-                         manager_id,
-                         staff_name,
-                         staff_email,
-                         invite_token,
-                         status,
-                         permissions
-                     )
+                 (
+                     store_id,
+                     branch_id,
+                     manager_id,
+                     staff_name,
+                     staff_email,
+                     invite_token,
+                     status,
+                     permissions
+                 )
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     storeId,
@@ -3446,6 +3519,8 @@ exports.handler = async (event) => {
 
         // GET BRANCHES
         if (action === "get_branches") {
+            await ensureBranchOperationalColumns(connection);
+
             const authHeader =
                 event.headers?.Authorization || event.headers?.authorization || "";
 
@@ -3487,11 +3562,18 @@ exports.handler = async (event) => {
                      branches.branch_name,
                      branches.contact_number,
                      branches.address,
+                     COALESCE(branches.status, 'active') AS branch_status,
+                     COALESCE(branches.inactive_reason, '') AS inactive_reason,
                      COALESCE(managers.manager_name, '') AS manager_name,
                      COALESCE(managers.manager_email, '') AS manager_email,
                      COALESCE(managers.status, 'setup_pending') AS manager_status,
                      managers.permissions,
-                     COUNT(staff.id) AS staff_count
+                     COUNT(
+                             DISTINCT CASE
+                                          WHEN staff.status = 'active' THEN staff.id
+                                          ELSE NULL
+                         END
+                     ) AS staff_count
                  FROM branches
                           LEFT JOIN managers ON managers.branch_id = branches.id
                           LEFT JOIN staff ON staff.branch_id = branches.id
@@ -3501,6 +3583,8 @@ exports.handler = async (event) => {
                      branches.branch_name,
                      branches.contact_number,
                      branches.address,
+                     branches.status,
+                     branches.inactive_reason,
                      managers.manager_name,
                      managers.manager_email,
                      managers.status,
@@ -3518,6 +3602,14 @@ exports.handler = async (event) => {
                         branch_name: branch.branch_name,
                         contact_number: branch.contact_number || "",
                         address: branch.address || "",
+                        branch_status:
+                            branch.branch_status || "active",
+                        status:
+                            branch.branch_status || "active",
+                        inactive_reason:
+                            branch.inactive_reason || "",
+                        branch_inactive_reason:
+                            branch.inactive_reason || "",
                         manager_name: branch.manager_name || "",
                         manager_email: branch.manager_email || "",
                         manager_status: branch.manager_status || "setup_pending",
@@ -3535,6 +3627,8 @@ exports.handler = async (event) => {
 
         // UPDATE BRANCH
         if (action === "update_branch") {
+            await ensureBranchOperationalColumns(connection);
+
             const authHeader =
                 event.headers?.Authorization || event.headers?.authorization || "";
 
@@ -3575,6 +3669,10 @@ exports.handler = async (event) => {
                 branch_name,
                 contact_number,
                 address,
+                status,
+                branch_status,
+                inactive_reason,
+                branch_inactive_reason,
                 manager_name,
                 manager_email,
                 permissions = {},
@@ -3588,6 +3686,49 @@ exports.handler = async (event) => {
                 };
             }
 
+            const normalizedBranchStatus = String(
+                status || branch_status || "active"
+            )
+                .trim()
+                .toLowerCase();
+
+            const normalizedInactiveReason =
+                normalizedBranchStatus === "inactive"
+                    ? String(
+                        inactive_reason ||
+                        branch_inactive_reason ||
+                        ""
+                    ).trim()
+                    : "";
+
+            if (
+                normalizedBranchStatus !== "active" &&
+                normalizedBranchStatus !== "inactive"
+            ) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "Branch status must be active or inactive",
+                    }),
+                };
+            }
+
+            if (
+                normalizedBranchStatus === "inactive" &&
+                !normalizedInactiveReason
+            ) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "Select a reason before marking the branch inactive",
+                    }),
+                };
+            }
+
             await connection.beginTransaction();
 
             try {
@@ -3595,13 +3736,17 @@ exports.handler = async (event) => {
                     `UPDATE branches
                      SET branch_name = ?,
                          contact_number = ?,
-                         address = ?
+                         address = ?,
+                         status = ?,
+                         inactive_reason = ?
                      WHERE id = ?
                        AND store_id = ?`,
                     [
                         branch_name,
                         contact_number || null,
                         address || null,
+                        normalizedBranchStatus,
+                        normalizedInactiveReason || null,
                         branch_id,
                         storeId,
                     ]
@@ -3642,6 +3787,9 @@ exports.handler = async (event) => {
                         message: "Branch updated successfully",
                         branch_updated: branchResult.affectedRows,
                         manager_updated: managerResult.affectedRows,
+                        branch_status: normalizedBranchStatus,
+                        inactive_reason:
+                        normalizedInactiveReason,
                         saved_permissions: permissions,
                     }),
                 };

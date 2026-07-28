@@ -189,6 +189,153 @@ function getUserValue(user: unknown, key: string) {
     return String((user as Record<string, unknown>)[key] ?? "");
 }
 
+type DashboardPermissionRecord = Record<string, unknown>;
+
+function parseDashboardPermissions(
+    value: unknown,
+): DashboardPermissionRecord {
+    if (
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+    ) {
+        return value as DashboardPermissionRecord;
+    }
+
+    if (typeof value === "string" && value.trim()) {
+        try {
+            const parsed = JSON.parse(value);
+
+            if (
+                parsed &&
+                typeof parsed === "object" &&
+                !Array.isArray(parsed)
+            ) {
+                return parsed as DashboardPermissionRecord;
+            }
+        } catch {
+            return {};
+        }
+    }
+
+    return {};
+}
+
+function dashboardPermissionAllowsWrite(value: unknown): boolean {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value > 0;
+
+    if (typeof value === "string") {
+        const normalized = value
+            .trim()
+            .toLowerCase()
+            .replace(/[_-]+/g, " ")
+            .replace(/\s+/g, " ");
+
+        if (
+            [
+                "true",
+                "full",
+                "full access",
+                "manage",
+                "manage access",
+                "write",
+                "edit",
+                "update",
+                "restock",
+                "allowed",
+            ].includes(normalized)
+        ) {
+            return true;
+        }
+
+        if (
+            [
+                "false",
+                "none",
+                "no access",
+                "view",
+                "view only",
+                "read",
+                "read only",
+            ].includes(normalized)
+        ) {
+            return false;
+        }
+    }
+
+    if (
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+    ) {
+        const permission = value as DashboardPermissionRecord;
+
+        const level =
+            permission.level ??
+            permission.access ??
+            permission.permission ??
+            permission.mode;
+
+        if (level !== undefined) {
+            return dashboardPermissionAllowsWrite(level);
+        }
+
+        return Boolean(
+            permission.manage ??
+            permission.write ??
+            permission.edit ??
+            permission.update ??
+            permission.restock ??
+            permission.fullAccess ??
+            permission.full_access
+        );
+    }
+
+    return false;
+}
+
+function hasDashboardInventoryRestockPermission(user: unknown) {
+    const userRecord =
+        user &&
+        typeof user === "object" &&
+        !Array.isArray(user)
+            ? (user as DashboardPermissionRecord)
+            : {};
+
+    const permissionSources: unknown[] = [
+        userRecord.permissions,
+        userRecord.permission,
+        getSavedItem("permissions"),
+        getSavedItem("user_permissions"),
+        getSavedItem("stocknbook_permissions"),
+    ];
+
+    for (const source of permissionSources) {
+        const permissions = parseDashboardPermissions(source);
+
+        const inventoryPermission =
+            permissions.inventory_manage ??
+            permissions.inventory_write ??
+            permissions.manage_inventory ??
+            permissions.inventory;
+
+        if (inventoryPermission !== undefined) {
+            return dashboardPermissionAllowsWrite(
+                inventoryPermission,
+            );
+        }
+    }
+
+    const directPermission =
+        userRecord.inventory_manage ??
+        userRecord.inventory_write ??
+        userRecord.manage_inventory ??
+        userRecord.inventory;
+
+    return dashboardPermissionAllowsWrite(directPermission);
+}
+
 function downloadExcel(
     filename: string,
     sheetName: string,
@@ -1069,6 +1216,11 @@ export default function ManagerDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
 
+    const canRestockInventory = useMemo(
+        () => hasDashboardInventoryRestockPermission(user),
+        [user],
+    );
+
     const [branches, setBranches] = useState<Branch[]>([]);
     const [bookings, setBookings] = useState<Booking[]>([]);
     const [bookingsError, setBookingsError] = useState("");
@@ -1623,7 +1775,12 @@ export default function ManagerDashboard() {
                     totalCount={allInventoryAlerts.length}
                     lowStockCount={lowStockAlertCount}
                     outOfStockCount={outOfStockAlertCount}
+                    canRestock={canRestockInventory}
                     onChangeFilter={setStockAlertFilter}
+                    onRestock={() => {
+                        setShowStockAlertsModal(false);
+                        router.push("/inventory");
+                    }}
                     onClose={() => setShowStockAlertsModal(false)}
                 />
             )}
@@ -2119,8 +2276,32 @@ function ExpirationAlertsPanel({
                             </td>
                         </tr>
                     ) : (
+<<<<<<< HEAD
                         items.map((item) => {
                             const isExpired = item.status === "Expired";
+=======
+                        items.map((item) => (
+                            <tr
+                                key={item.id}
+                                className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FCFAFF]"
+                            >
+                                <td className="px-2 py-2 align-middle">
+                                    <p
+                                        title={item.productName}
+                                        className="line-clamp-2 text-[13px] font-semibold leading-5 text-[#30243A]"
+                                    >
+                                        {item.productName}
+                                    </p>
+                                    {item.variantName ? (
+                                        <p
+                                            title={item.variantName}
+                                            className="truncate text-[10px] font-medium text-[#806A8C]"
+                                        >
+                                            {item.variantName}
+                                        </p>
+                                    ) : null}
+                                </td>
+>>>>>>> 6a35c1b (07/28)
 
                             return (
                                 <tr
@@ -2442,7 +2623,9 @@ function ManagerStockAlertsModal({
                                      totalCount,
                                      lowStockCount,
                                      outOfStockCount,
+                                     canRestock,
                                      onChangeFilter,
+                                     onRestock,
                                      onClose,
                                  }: {
     items: StockAlertItem[];
@@ -2450,7 +2633,9 @@ function ManagerStockAlertsModal({
     totalCount: number;
     lowStockCount: number;
     outOfStockCount: number;
+    canRestock: boolean;
     onChangeFilter: (filter: "all" | "low" | "out") => void;
+    onRestock: (item: StockAlertItem) => void;
     onClose: () => void;
 }) {
     const filterClass = (active: boolean, tone: "all" | "low" | "out") => {
@@ -2542,19 +2727,66 @@ function ManagerStockAlertsModal({
                         </button>
                     </div>
 
-                    <span className="!text-xs !font-semibold text-[#806A8C]">
-                        View only
+                    <span
+                        className={`!text-xs !font-semibold ${
+                            canRestock
+                                ? "text-[#16834A]"
+                                : "text-[#806A8C]"
+                        }`}
+                    >
+                        {canRestock
+                            ? "Restock access"
+                            : "View only"}
                     </span>
                 </div>
 
                 <div className="min-h-0 flex-1 overflow-auto">
-                    <table className="w-full min-w-[760px] table-fixed border-collapse">
+                    <table
+                        className={`w-full table-fixed border-collapse ${
+                            canRestock
+                                ? "min-w-[850px]"
+                                : "min-w-[760px]"
+                        }`}
+                    >
                         <colgroup>
-                            <col className="w-[34%]" />
-                            <col className="w-[28%]" />
-                            <col className="w-[14%]" />
-                            <col className="w-[12%]" />
-                            <col className="w-[12%]" />
+                            <col
+                                className={
+                                    canRestock
+                                        ? "w-[29%]"
+                                        : "w-[34%]"
+                                }
+                            />
+                            <col
+                                className={
+                                    canRestock
+                                        ? "w-[24%]"
+                                        : "w-[28%]"
+                                }
+                            />
+                            <col
+                                className={
+                                    canRestock
+                                        ? "w-[13%]"
+                                        : "w-[14%]"
+                                }
+                            />
+                            <col
+                                className={
+                                    canRestock
+                                        ? "w-[11%]"
+                                        : "w-[12%]"
+                                }
+                            />
+                            <col
+                                className={
+                                    canRestock
+                                        ? "w-[13%]"
+                                        : "w-[12%]"
+                                }
+                            />
+                            {canRestock ? (
+                                <col className="w-[10%]" />
+                            ) : null}
                         </colgroup>
 
                         <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
@@ -2565,6 +2797,7 @@ function ManagerStockAlertsModal({
                                 "Current Stock",
                                 "Alert Level",
                                 "Status",
+                                ...(canRestock ? ["Action"] : []),
                             ].map((header) => (
                                 <th
                                     key={header}
@@ -2580,7 +2813,7 @@ function ManagerStockAlertsModal({
                         {items.length === 0 ? (
                             <tr>
                                 <td
-                                    colSpan={5}
+                                    colSpan={canRestock ? 6 : 5}
                                     className="px-5 py-14 text-center text-sm text-[#7A6A84]"
                                 >
                                     No stock alerts found for this filter.
@@ -2642,6 +2875,20 @@ function ManagerStockAlertsModal({
                                                 {item.status}
                                             </span>
                                         </td>
+
+                                        {canRestock ? (
+                                            <td className="px-4 py-3.5 text-center">
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        onRestock(item)
+                                                    }
+                                                    className="inline-flex h-9 items-center justify-center rounded-lg border border-[#2B174C] bg-white px-3 !text-xs !font-semibold text-[#2B174C] transition hover:bg-[#2B174C] hover:text-white"
+                                                >
+                                                    Restock
+                                                </button>
+                                            </td>
+                                        ) : null}
                                     </tr>
                                 );
                             })
@@ -2651,7 +2898,9 @@ function ManagerStockAlertsModal({
                 </div>
 
                 <div className="border-t border-[#E9E0EF] bg-[#FFFCF7] px-6 py-3 text-xs leading-5 text-[#7A6A84]">
-                    Manager accounts can review stock alerts for their assigned branch here.
+                    {canRestock
+                        ? "Manager accounts with Inventory permission can open Inventory using the Restock action."
+                        : "Manager accounts without Inventory management permission can review these alerts only."}
                 </div>
             </div>
         </div>

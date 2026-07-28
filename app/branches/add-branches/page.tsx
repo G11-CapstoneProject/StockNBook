@@ -294,13 +294,25 @@ export default function BranchesPage() {
             return;
         }
 
+        const normalizedManagerEmail = addManagerEmail
+            .trim()
+            .toLowerCase();
+
         const hasManagerName = Boolean(addManagerName.trim());
-        const hasManagerEmail = Boolean(addManagerEmail.trim());
+        const hasManagerEmail = Boolean(normalizedManagerEmail);
 
         if (hasManagerName !== hasManagerEmail) {
             alert(
                 "Please complete both the manager name and manager email, or leave both fields empty."
             );
+            return;
+        }
+
+        if (
+            hasManagerEmail &&
+            !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedManagerEmail)
+        ) {
+            alert("Please enter a valid manager email address.");
             return;
         }
 
@@ -314,7 +326,7 @@ export default function BranchesPage() {
         setAdding(true);
 
         try {
-            const response = await fetch("/api/onboarding", {
+            const response = await fetch("/api/branches", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -329,7 +341,7 @@ export default function BranchesPage() {
                             status: addBranchStatus,
                             branch_status: addBranchStatus,
                             manager_name: addManagerName.trim(),
-                            manager_email: addManagerEmail.trim(),
+                            manager_email: normalizedManagerEmail,
                             permissions: addPermissions,
                         },
                     ],
@@ -348,9 +360,37 @@ export default function BranchesPage() {
                 return;
             }
 
+            const invitation =
+                Array.isArray(data.invite_links) &&
+                data.invite_links.length > 0
+                    ? data.invite_links[0]
+                    : null;
+
             setShowAddModal(false);
             resetAddForm();
             await loadBranches();
+
+            if (hasManagerEmail) {
+                const emailWasSent =
+                    invitation?.email_sent === true ||
+                    Number(data.invitation_emails_sent || 0) > 0;
+
+                if (emailWasSent) {
+                    alert(
+                        "Branch created successfully. The manager invitation email was sent."
+                    );
+                } else {
+                    const emailError =
+                        invitation?.email_error ||
+                        "The email provider did not confirm delivery.";
+
+                    alert(
+                        `The branch and manager invitation were created, but the invitation email could not be sent. ${emailError}`
+                    );
+                }
+            } else {
+                alert("Branch created successfully.");
+            }
         } catch {
             alert("Something went wrong while creating the branch.");
         } finally {

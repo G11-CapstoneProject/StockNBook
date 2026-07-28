@@ -30,6 +30,7 @@ type Booking = {
     branch_name?: string | null;
     name: string;
     date?: string;
+    time?: string;
     status?: string;
     packageName?: string;
     eventName?: string;
@@ -75,6 +76,7 @@ type Order = {
     date?: string;
     orderDate?: string;
     createdAt?: string;
+    time?: string;
     item?: string;
     items?: OrderItem[];
     status?: string;
@@ -147,6 +149,39 @@ type StockAlertItem = {
 function getSavedItem(key: string) {
     if (typeof window === "undefined") return "";
     return sessionStorage.getItem(key) || localStorage.getItem(key) || "";
+}
+
+function getAssignedBranchId(user: unknown) {
+    return (
+        getUserValue(user, "branch_id") ||
+        getUserValue(user, "branchId") ||
+        getSavedItem("branch_id") ||
+        getSavedItem("stocknbook_branch_id") ||
+        getSavedItem("staff_branch_id")
+    );
+}
+
+function getAssignedBranchName(user: unknown) {
+    return (
+        getUserValue(user, "branch_name") ||
+        getUserValue(user, "branchName") ||
+        getSavedItem("branch_name") ||
+        getSavedItem("stocknbook_branch_name") ||
+        getSavedItem("staff_branch_name") ||
+        "Assigned Branch"
+    );
+}
+
+function belongsToAssignedBranch<
+    T extends { branchId?: number | null; branch_id?: number | null }
+>(item: T, branchId: string) {
+    if (!branchId) return false;
+
+    const itemBranchId = item.branchId ?? item.branch_id;
+
+    return itemBranchId !== null &&
+        itemBranchId !== undefined &&
+        String(itemBranchId) === String(branchId);
 }
 
 function getUserValue(user: unknown, key: string) {
@@ -299,7 +334,36 @@ function normalizeBooking(value: unknown): Booking {
         branchName: readText(raw, ["branchName", "branch_name"]) || null,
         branch_name: readText(raw, ["branch_name", "branchName"]) || null,
         name: readText(raw, ["name", "customer_name"], "Unnamed Client"),
-        date: readText(raw, ["date", "event_date", "created_at"]),
+        date: readText(raw, [
+            "date",
+            "event_date",
+            "eventDate",
+            "booking_date",
+            "bookingDate",
+            "event_datetime",
+            "eventDateTime",
+            "booking_datetime",
+            "bookingDateTime",
+            "scheduled_at",
+            "scheduledAt",
+            "start_at",
+            "startAt",
+            "created_at",
+            "createdAt",
+        ]),
+        time: readText(raw, [
+            "time",
+            "event_time",
+            "eventTime",
+            "booking_time",
+            "bookingTime",
+            "start_time",
+            "startTime",
+            "scheduled_time",
+            "scheduledTime",
+            "time_slot",
+            "timeSlot",
+        ]),
         status: normalizeDashboardBookingStatus(readText(raw, ["status"])),
         packageName: readText(raw, [
             "packageName",
@@ -484,11 +548,46 @@ function normalizeOrder(value: unknown): Order {
             "date",
             "orderDate",
             "order_date",
+            "scheduled_date",
+            "scheduledDate",
+            "pickup_date",
+            "pickupDate",
+            "delivery_date",
+            "deliveryDate",
+            "scheduled_at",
+            "scheduledAt",
+            "pickup_at",
+            "pickupAt",
+            "delivery_at",
+            "deliveryAt",
             "createdAt",
             "created_at",
         ]),
-        orderDate: readText(raw, ["orderDate", "order_date", "date"]),
+        orderDate: readText(raw, [
+            "orderDate",
+            "order_date",
+            "scheduled_date",
+            "scheduledDate",
+            "pickup_date",
+            "pickupDate",
+            "delivery_date",
+            "deliveryDate",
+            "date",
+        ]),
         createdAt: readText(raw, ["createdAt", "created_at"]),
+        time: readText(raw, [
+            "time",
+            "order_time",
+            "orderTime",
+            "scheduled_time",
+            "scheduledTime",
+            "pickup_time",
+            "pickupTime",
+            "delivery_time",
+            "deliveryTime",
+            "time_slot",
+            "timeSlot",
+        ]),
         item: itemText,
         items,
         status: readText(raw, ["status", "order_status"]),
@@ -896,14 +995,6 @@ function getExpirationAlertItems(
         });
 }
 
-function getBranchNameFromId(branches: Branch[], branchId?: number | null) {
-    if (!branchId) return "";
-    return (
-        branches.find((branch) => Number(branch.id) === Number(branchId))
-            ?.branchName || ""
-    );
-}
-
 function compactDashboardReference(
     prefix: "BK" | "SO",
     explicitReference: string | undefined,
@@ -930,7 +1021,51 @@ function compactDashboardReference(
     return `${prefix}-${numberPart}`;
 }
 
-export default function OwnerDashboard() {
+
+function formatDashboardTime(dateValue?: string, explicitTime?: string) {
+    const format = (value: Date) =>
+        value.toLocaleTimeString("en-US", {
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true,
+        });
+
+    const rawTime = String(explicitTime || "").trim();
+
+    if (rawTime) {
+        const timeOnlyMatch = rawTime.match(
+            /^(\d{1,2}):(\d{2})(?::\d{2})?(?:\.\d+)?\s*(AM|PM)?(?:Z|[+-]\d{2}:?\d{2})?$/i,
+        );
+
+        if (timeOnlyMatch) {
+            let hour = Number(timeOnlyMatch[1]);
+            const minute = Number(timeOnlyMatch[2]);
+            const period = timeOnlyMatch[3]?.toUpperCase();
+
+            if (period === "PM" && hour < 12) hour += 12;
+            if (period === "AM" && hour === 12) hour = 0;
+
+            if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+                return format(new Date(2000, 0, 1, hour, minute));
+            }
+        }
+
+        const parsedExplicit = new Date(rawTime);
+        if (!Number.isNaN(parsedExplicit.getTime())) {
+            return format(parsedExplicit);
+        }
+    }
+
+    const rawDate = String(dateValue || "").trim();
+    const containsTime = /(?:T|\s)\d{1,2}:\d{2}/.test(rawDate);
+
+    if (!containsTime) return "";
+
+    const parsedDate = new Date(rawDate);
+    return Number.isNaN(parsedDate.getTime()) ? "" : format(parsedDate);
+}
+
+export default function StaffDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
 
@@ -957,12 +1092,24 @@ export default function OwnerDashboard() {
         };
     }, []);
 
-    const loadOwnerDashboard = useCallback(async () => {
+    const loadStaffDashboard = useCallback(async () => {
         const token = getSavedItem("token");
         const storeId =
-            getSavedItem("store_id") || getSavedItem("stocknbook_store_id");
+            getUserValue(user, "store_id") ||
+            getUserValue(user, "storeId") ||
+            getSavedItem("store_id") ||
+            getSavedItem("stocknbook_store_id");
+        const branchId = getAssignedBranchId(user);
+        const assignedBranchName = getAssignedBranchName(user);
 
-        if (!token) return;
+        if (!token || !branchId) {
+            setBranches([]);
+            setBookings([]);
+            setOrders([]);
+            setProducts([]);
+            setBookingsError("No assigned branch was found for this account.");
+            return;
+        }
 
         setIsRefreshing(true);
 
@@ -978,10 +1125,24 @@ export default function OwnerDashboard() {
                 const branchesData = await branchesRes.json().catch(() => ({}));
 
                 if (branchesRes.ok && Array.isArray(branchesData.branches)) {
-                    setBranches(branchesData.branches.map(normalizeBranch));
+                    const normalizedBranches: Branch[] = (branchesData.branches as unknown[]).map(normalizeBranch);
+                    const assignedBranches = normalizedBranches.filter(
+                        (branch) => String(branch.id) === String(branchId),
+                    );
+
+                    setBranches(
+                        assignedBranches.length > 0
+                            ? assignedBranches
+                            : [
+                                {
+                                    id: Number(branchId),
+                                    branchName: assignedBranchName,
+                                },
+                            ],
+                    );
                 }
             } catch (error) {
-                console.warn("Owner dashboard branches fetch failed:", error);
+                console.warn("Staff dashboard branches fetch failed:", error);
             }
 
             try {
@@ -995,8 +1156,9 @@ export default function OwnerDashboard() {
                     },
                     body: JSON.stringify({
                         action: "get_booking_page_bookings",
-                        role: "owner",
+                        role: "staff",
                         store_id: storeId ? Number(storeId) : undefined,
+                        branch_id: Number(branchId),
                     }),
                     cache: "no-store",
                 });
@@ -1016,20 +1178,25 @@ export default function OwnerDashboard() {
                         "Unable to load booking data.",
                     );
 
-                    console.error("Owner dashboard bookings request failed:", {
+                    console.error("Staff dashboard bookings request failed:", {
                         status: bookingsRes.status,
                         response: bookingsData,
                     });
                     setBookings([]);
                     setBookingsError(message);
                 } else if (Array.isArray(bookingsData.bookings)) {
-                    setBookings(bookingsData.bookings.map(normalizeBooking));
+                    const normalizedBookings = bookingsData.bookings.map(normalizeBooking);
+                    setBookings(
+                        normalizedBookings.filter((booking) =>
+                            belongsToAssignedBranch(booking, branchId),
+                        ),
+                    );
                 } else {
                     setBookings([]);
                     setBookingsError("Bookings API returned an invalid response.");
                 }
             } catch (error) {
-                console.error("Owner dashboard bookings fetch failed:", error);
+                console.error("Staff dashboard bookings fetch failed:", error);
                 setBookings([]);
                 setBookingsError(
                     error instanceof Error
@@ -1047,16 +1214,22 @@ export default function OwnerDashboard() {
                     },
                     body: JSON.stringify({
                         action: "get_products",
+                        branch_id: Number(branchId),
                     }),
                 });
 
                 const productsData = await productsRes.json().catch(() => ({}));
 
                 if (productsRes.ok && Array.isArray(productsData.products)) {
-                    setProducts(productsData.products.map(normalizeProduct));
+                    const normalizedProducts: Product[] = (productsData.products as unknown[]).map(normalizeProduct);
+                    setProducts(
+                        normalizedProducts.filter((product) =>
+                            belongsToAssignedBranch(product, branchId),
+                        ),
+                    );
                 }
             } catch (error) {
-                console.warn("Owner dashboard products fetch failed:", error);
+                console.warn("Staff dashboard products fetch failed:", error);
             }
 
             try {
@@ -1068,27 +1241,33 @@ export default function OwnerDashboard() {
                     },
                     body: JSON.stringify({
                         action: "get_orders",
+                        branch_id: Number(branchId),
                     }),
                 });
 
                 const ordersData = await ordersRes.json().catch(() => ({}));
 
                 if (ordersRes.ok && Array.isArray(ordersData.orders)) {
-                    setOrders(ordersData.orders.map(normalizeOrder));
+                    const normalizedOrders: Order[] = (ordersData.orders as unknown[]).map(normalizeOrder);
+                    setOrders(
+                        normalizedOrders.filter((order) =>
+                            belongsToAssignedBranch(order, branchId),
+                        ),
+                    );
                 }
             } catch (error) {
-                console.warn("Owner dashboard orders fetch failed:", error);
+                console.warn("Staff dashboard orders fetch failed:", error);
             }
         } finally {
             setIsRefreshing(false);
         }
-    }, []);
+    }, [user]);
 
     useEffect(() => {
         // Load the dashboard once when the page opens.
         // After that, data refreshes only when the user presses Refresh.
-        void loadOwnerDashboard();
-    }, [loadOwnerDashboard]);
+        void loadStaffDashboard();
+    }, [loadStaffDashboard]);
 
     const scheduledOrders = useMemo(
         () =>
@@ -1237,16 +1416,6 @@ export default function OwnerDashboard() {
         (item) => item.status === "Expiring",
     ).length;
 
-    const dashboardStoreName =
-        getUserValue(user, "store_name") ||
-        getUserValue(user, "storeName") ||
-        getUserValue(user, "business_name") ||
-        getUserValue(user, "businessName") ||
-        getSavedItem("store_name") ||
-        getSavedItem("storeName") ||
-        getSavedItem("stocknbook_store_name") ||
-        getSavedItem("business_name") ||
-        "your store";
     const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", {
         month: "long",
         year: "numeric",
@@ -1261,8 +1430,7 @@ export default function OwnerDashboard() {
                             Dashboard
                         </h1>
                         <p className="mt-1 truncate text-[12px] text-[#7A6A84]">
-                            Here&apos;s an overview of {dashboardStoreName} business
-                            performance for {currentMonthLabel}.
+                            Here&apos;s an overview of {getAssignedBranchName(user)} branch performance for {currentMonthLabel}.
                         </p>
                     </div>
 
@@ -1273,7 +1441,7 @@ export default function OwnerDashboard() {
 
                         <button
                             type="button"
-                            onClick={() => void loadOwnerDashboard()}
+                            onClick={() => void loadStaffDashboard()}
                             disabled={isRefreshing}
                             aria-label="Refresh dashboard details"
                             title="Refresh dashboard details"
@@ -1293,7 +1461,7 @@ export default function OwnerDashboard() {
                 <div className="mx-auto max-w-none space-y-3.5">
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                         <SalesSummaryCard
-                            title="Total Business Sales"
+                            title="Total Branch Sales"
                             value={peso(totalBusinessSales)}
                             subtitle="All sales channels"
                             icon={<Store size={25} />}
@@ -1357,47 +1525,33 @@ export default function OwnerDashboard() {
                         <CompactDashboardTable
                             title="Upcoming Bookings"
                             subtitle="Next 3 upcoming bookings"
-                            icon={<CalendarDays size={16} />}
+                            icon={<CalendarDays size={18} />}
                             action={() => router.push("/bookings")}
                             onDownload={() =>
                                 downloadExcel(
                                     "upcoming-bookings.xlsx",
                                     "Upcoming Bookings",
-                                    ["Date", "Booking Number", "Branch", "Status"],
+                                    ["Date", "Booking Number", "Time", "Status"],
                                     allUpcomingBookings.map((booking) => [
                                         booking.date || "",
                                         booking.bookingNumber ||
                                         `BK-${String(booking.id).padStart(6, "0")}`,
-                                        booking.branchName ||
-                                        booking.branch_name ||
-                                        getBranchNameFromId(
-                                            branches,
-                                            booking.branchId ?? booking.branch_id,
-                                        ) ||
-                                        "Branch",
+                                        formatDashboardTime(booking.date, booking.time),
                                         booking.status || "Pending",
                                     ]),
                                 )
                             }
                             totalRecords={allUpcomingBookings.length}
-                            headers={["Date", "Booking #", "Branch", "Status"]}
+                            headers={["Date", "Booking #", "Time", "Status"]}
                             emptyText={bookingsError || "No upcoming bookings yet."}
                             rows={upcomingBookings.map((booking) => ({
                                 date: booking.date,
-                                reference:
-                                    compactDashboardReference(
-                                        "BK",
-                                        booking.bookingNumber,
-                                        booking.id,
-                                    ),
-                                branch:
-                                    booking.branchName ||
-                                    booking.branch_name ||
-                                    getBranchNameFromId(
-                                        branches,
-                                        booking.branchId ?? booking.branch_id,
-                                    ) ||
-                                    "Branch",
+                                reference: compactDashboardReference(
+                                    "BK",
+                                    booking.bookingNumber,
+                                    booking.id,
+                                ),
+                                time: formatDashboardTime(booking.date, booking.time),
                                 status: booking.status || "Pending",
                             }))}
                         />
@@ -1412,7 +1566,6 @@ export default function OwnerDashboard() {
                                     [
                                         "Product",
                                         "Variant",
-                                        "Branch",
                                         "Stock Level",
                                         "Alert Level",
                                         "Status",
@@ -1420,7 +1573,6 @@ export default function OwnerDashboard() {
                                     allInventoryAlerts.map((item) => [
                                         item.productName,
                                         item.variantName,
-                                        item.branchName,
                                         item.currentStock,
                                         item.alertLevel,
                                         item.status,
@@ -1436,14 +1588,12 @@ export default function OwnerDashboard() {
                         <ExpirationAlertsPanel
                             items={expirationAlertItems}
                             totalItems={allExpirationAlertItems.length}
-                            showBranch
                             onDownload={() =>
                                 downloadExcel(
                                     "expiration-alerts.xlsx",
                                     "Expiration Alerts",
                                     [
                                         "Product",
-                                        "Branch",
                                         "Stock Level",
                                         "Expiration Date",
                                     ],
@@ -1451,7 +1601,6 @@ export default function OwnerDashboard() {
                                         item.variantName
                                             ? `${item.productName} - ${item.variantName}`
                                             : item.productName,
-                                        item.branchName,
                                         item.stock,
                                         formatDashboardExpirationDate(
                                             item.expirationDate,
@@ -1468,7 +1617,7 @@ export default function OwnerDashboard() {
             </section>
 
             {showStockAlertsModal && (
-                <OwnerStockAlertsModal
+                <StaffStockAlertsModal
                     items={visibleStockAlerts}
                     activeFilter={stockAlertFilter}
                     totalCount={allInventoryAlerts.length}
@@ -1481,7 +1630,6 @@ export default function OwnerDashboard() {
             {showExpirationAlertsModal && (
                 <ExpirationAlertsModal
                     items={allExpirationAlertItems}
-                    showBranch
                     onClose={() => setShowExpirationAlertsModal(false)}
                 />
             )}
@@ -1573,7 +1721,7 @@ function GlanceCard({
 type CompactTableRow = {
     date?: string;
     reference: string;
-    branch: string;
+    time: string;
     status: string;
 };
 
@@ -1602,14 +1750,16 @@ function CompactDashboardTable({
         <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
             <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
                 <div className="flex min-w-0 items-start gap-2 text-[#6D35D4]">
-          <span className="mt-0.5 flex h-6 w-6 items-center justify-center">
-            {icon}
-          </span>
+                    <span className="mt-0.5 flex h-6 w-6 items-center justify-center">
+                        {icon}
+                    </span>
                     <div className="min-w-0">
                         <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
                             {title}
                         </h2>
-                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">{subtitle}</p>
+                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
+                            {subtitle}
+                        </p>
                     </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
@@ -1636,10 +1786,10 @@ function CompactDashboardTable({
             <div className="min-h-0 flex-1 overflow-hidden">
                 <table className="w-full table-fixed border-collapse">
                     <colgroup>
-                        <col className="w-[18%]" />
-                        <col className="w-[28%]" />
-                        <col className="w-[34%]" />
-                        <col className="w-[20%]" />
+                        <col className="w-[22%]" />
+                        <col className="w-[31%]" />
+                        <col className="w-[22%]" />
+                        <col className="w-[25%]" />
                     </colgroup>
                     <thead className="bg-[#FBFAFD]">
                     <tr className="h-[46px] border-b border-[#EEE8F2]">
@@ -1703,8 +1853,8 @@ function CompactDashboardRow({ row }: { row: CompactTableRow }) {
                 <div className="flex h-10 w-10 flex-col items-center justify-center rounded-lg border border-[#E8E0F0] bg-[#FBF9FE] leading-none">
                     <span className="text-[7px] font-bold text-[#7C3AED]">{month}</span>
                     <span className="mt-1 text-[14px] font-bold text-[#342047]">
-            {day}
-          </span>
+                        {day}
+                    </span>
                 </div>
             </td>
             <td className="px-3 py-2">
@@ -1716,19 +1866,16 @@ function CompactDashboardRow({ row }: { row: CompactTableRow }) {
                 </p>
             </td>
             <td className="px-3 py-2">
-                <p
-                    title={row.branch}
-                    className="whitespace-nowrap text-[13px] font-semibold text-[#6D35D4]"
-                >
-                    {row.branch}
+                <p className="whitespace-nowrap text-[13px] font-semibold text-[#5F4E75]">
+                    {row.time}
                 </p>
             </td>
             <td className="px-3 py-2">
-        <span
-            className={`whitespace-nowrap text-[13px] font-semibold capitalize ${statusClass}`}
-        >
-          {row.status}
-        </span>
+                <span
+                    className={`whitespace-nowrap text-[13px] font-semibold capitalize ${statusClass}`}
+                >
+                    {row.status}
+                </span>
             </td>
         </tr>
     );
@@ -1787,9 +1934,9 @@ function InventoryAlertPanel({
             <div className="min-h-0 flex-1 overflow-hidden">
                 <table className="w-full table-fixed border-collapse">
                     <colgroup>
-                        <col className="w-[41%]" />
-                        <col className="w-[39%]" />
-                        <col className="w-[20%]" />
+                        <col className="w-[58%]" />
+                        <col className="w-[18%]" />
+                        <col className="w-[24%]" />
                     </colgroup>
 
                     <thead className="bg-[#FBFAFD]">
@@ -1798,10 +1945,10 @@ function InventoryAlertPanel({
                             Product
                         </th>
                         <th className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
-                            Branch
+                            Stock Level
                         </th>
                         <th className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
-                            Stock Level
+                            Stock Alert
                         </th>
                     </tr>
                     </thead>
@@ -1842,9 +1989,15 @@ function InventoryAlertPanel({
                                     </td>
 
                                     <td className="px-3 py-2">
-                                        <p className="whitespace-nowrap text-[12px] font-semibold tracking-[-0.03em] text-[#6D35D4]">
-                                            {item.branchName}
-                                        </p>
+                                    <span
+                                        className={`whitespace-nowrap text-[13px] font-semibold ${
+                                            isOutOfStock
+                                                ? "text-[#DC2626]"
+                                                : "text-[#B7791F]"
+                                        }`}
+                                    >
+                                        {item.currentStock} left
+                                    </span>
                                     </td>
 
                                     <td className="px-3 py-2">
@@ -1855,7 +2008,7 @@ function InventoryAlertPanel({
                                                 : "text-[#B7791F]"
                                         }`}
                                     >
-                                        {item.currentStock} left
+                                        {item.status}
                                     </span>
                                     </td>
                                 </tr>
@@ -1966,32 +2119,8 @@ function ExpirationAlertsPanel({
                             </td>
                         </tr>
                     ) : (
-<<<<<<< HEAD
                         items.map((item) => {
                             const isExpired = item.status === "Expired";
-=======
-                        items.map((item) => (
-                            <tr
-                                key={item.id}
-                                className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FCFAFF]"
-                            >
-                                <td className="px-2 py-2 align-middle">
-                                    <p
-                                        title={item.productName}
-                                        className="line-clamp-2 text-[13px] font-semibold leading-5 text-[#30243A]"
-                                    >
-                                        {item.productName}
-                                    </p>
-                                    {item.variantName ? (
-                                        <p
-                                            title={item.variantName}
-                                            className="truncate text-[10px] font-medium text-[#806A8C]"
-                                        >
-                                            {item.variantName}
-                                        </p>
-                                    ) : null}
-                                </td>
->>>>>>> 6a35c1b (07/28)
 
                             return (
                                 <tr
@@ -2307,7 +2436,7 @@ function ExpirationAlertsModal({
     );
 }
 
-function OwnerStockAlertsModal({
+function StaffStockAlertsModal({
                                    items,
                                    activeFilter,
                                    totalCount,
@@ -2345,8 +2474,8 @@ function OwnerStockAlertsModal({
             <div
                 role="dialog"
                 aria-modal="true"
-                aria-labelledby="owner-stock-alerts-title"
-                className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
+                aria-labelledby="staff-stock-alerts-title"
+                className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
             >
                 <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
                     <div className="flex min-w-0 items-start gap-3">
@@ -2356,13 +2485,13 @@ function OwnerStockAlertsModal({
 
                         <div className="min-w-0">
                             <h2
-                                id="owner-stock-alerts-title"
+                                id="staff-stock-alerts-title"
                                 className="!text-[20px] !font-bold !leading-6 text-[#1A1220]"
                             >
                                 Stock Alerts
                             </h2>
                             <p className="mt-1 !text-sm !font-normal !leading-5 text-[#7A6A84]">
-                                Low-stock and out-of-stock products and variants across branches.
+                                Low-stock and out-of-stock products and variants.
                             </p>
                         </div>
                     </div>
@@ -2419,21 +2548,19 @@ function OwnerStockAlertsModal({
                 </div>
 
                 <div className="min-h-0 flex-1 overflow-auto">
-                    <table className="w-full min-w-[900px] table-fixed border-collapse">
+                    <table className="w-full min-w-[760px] table-fixed border-collapse">
                         <colgroup>
+                            <col className="w-[34%]" />
                             <col className="w-[28%]" />
-                            <col className="w-[18%]" />
-                            <col className="w-[22%]" />
-                            <col className="w-[11%]" />
-                            <col className="w-[10%]" />
-                            <col className="w-[11%]" />
+                            <col className="w-[14%]" />
+                            <col className="w-[12%]" />
+                            <col className="w-[12%]" />
                         </colgroup>
 
                         <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
                         <tr className="border-b border-[#E9E0EF]">
                             {[
                                 "Product",
-                                "Branch",
                                 "Variant",
                                 "Current Stock",
                                 "Alert Level",
@@ -2453,7 +2580,7 @@ function OwnerStockAlertsModal({
                         {items.length === 0 ? (
                             <tr>
                                 <td
-                                    colSpan={6}
+                                    colSpan={5}
                                     className="px-5 py-14 text-center text-sm text-[#7A6A84]"
                                 >
                                     No stock alerts found for this filter.
@@ -2473,12 +2600,15 @@ function OwnerStockAlertsModal({
                                             <p className="line-clamp-2 !text-sm !font-semibold !leading-5 text-[#1A1220]">
                                                 {item.productName}
                                             </p>
-                                        </td>
-
-                                        <td className="px-4 py-3.5 text-center !text-sm !font-medium !leading-5 text-[#6D35D4]">
-                                            <span className="block whitespace-nowrap">
-                                                {item.branchName}
-                                            </span>
+                                            <p
+                                                className={`mt-0.5 !text-xs !font-medium !leading-4 ${
+                                                    isOut
+                                                        ? "text-[#D92D20]"
+                                                        : "text-[#A56607]"
+                                                }`}
+                                            >
+                                                {item.status}
+                                            </p>
                                         </td>
 
                                         <td className="px-4 py-3.5 text-center !text-sm !font-normal !leading-5 text-[#806A8C]">
@@ -2521,7 +2651,7 @@ function OwnerStockAlertsModal({
                 </div>
 
                 <div className="border-t border-[#E9E0EF] bg-[#FFFCF7] px-6 py-3 text-xs leading-5 text-[#7A6A84]">
-                    Owner accounts can review stock alerts across all branches here.
+                    Staff accounts can review stock alerts for their assigned branch here.
                 </div>
             </div>
         </div>

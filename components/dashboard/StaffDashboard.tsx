@@ -119,9 +119,7 @@ type Product = {
     variants?: ProductVariant[];
 };
 
-type ExpirationAlertStatus = "Expired" | "Expiring";
-
-type ExpirationAlertItem = {
+type ExpiringSoonItem = {
     id: string;
     productName: string;
     branchName: string;
@@ -129,7 +127,6 @@ type ExpirationAlertItem = {
     stock: number;
     expirationDate: string;
     daysRemaining: number;
-    status: ExpirationAlertStatus;
 };
 
 type StockAlertStatus = "Low Stock" | "Out of Stock";
@@ -931,26 +928,6 @@ function formatDashboardExpirationDate(value: string) {
     });
 }
 
-function formatExpirationDistance(daysRemaining: number) {
-    if (daysRemaining < -1) {
-        return `${Math.abs(daysRemaining)} days ago`;
-    }
-
-    if (daysRemaining === -1) {
-        return "1 day ago";
-    }
-
-    if (daysRemaining === 0) {
-        return "Expires today";
-    }
-
-    if (daysRemaining === 1) {
-        return "1 day left";
-    }
-
-    return `${daysRemaining} days left`;
-}
-
 function getDashboardVariantName(variant: ProductVariant) {
     const values =
         variant.variantValues ||
@@ -1044,9 +1021,7 @@ function getDashboardStockAlertItems(
 }
 
 
-function getExpirationAlertItems(
-    products: Product[],
-): ExpirationAlertItem[] {
+function getExpiringSoonItems(products: Product[]): ExpiringSoonItem[] {
     return products
         .flatMap((product) => {
             const variants = Array.isArray(product.variants)
@@ -1064,6 +1039,7 @@ function getExpirationAlertItems(
 
                 if (
                     daysRemaining === null ||
+                    daysRemaining < 0 ||
                     daysRemaining > EXPIRING_SOON_DAYS
                 ) {
                     return [];
@@ -1081,11 +1057,7 @@ function getExpirationAlertItems(
                         stock: Number(variant.stock || 0),
                         expirationDate,
                         daysRemaining,
-                        status:
-                            daysRemaining < 0
-                                ? "Expired"
-                                : "Expiring",
-                    } satisfies ExpirationAlertItem,
+                    },
                 ];
             });
 
@@ -1103,6 +1075,7 @@ function getExpirationAlertItems(
 
             if (
                 daysRemaining === null ||
+                daysRemaining < 0 ||
                 daysRemaining > EXPIRING_SOON_DAYS
             ) {
                 return [];
@@ -1120,26 +1093,13 @@ function getExpirationAlertItems(
                     stock: Number(product.stock || 0),
                     expirationDate,
                     daysRemaining,
-                    status:
-                        daysRemaining < 0
-                            ? "Expired"
-                            : "Expiring",
-                } satisfies ExpirationAlertItem,
+                },
             ];
         })
-        .sort((first, second) => {
-            if (first.status !== second.status) {
-                return first.status === "Expired" ? -1 : 1;
-            }
-
-            if (first.status === "Expired") {
-                // Recently expired items appear first.
-                return second.daysRemaining - first.daysRemaining;
-            }
-
-            // Items expiring soonest appear first.
-            return first.daysRemaining - second.daysRemaining;
-        });
+        .sort(
+            (first, second) =>
+                first.daysRemaining - second.daysRemaining,
+        );
 }
 
 function compactDashboardReference(
@@ -1229,7 +1189,7 @@ export default function StaffDashboard() {
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
-    const [showExpirationAlertsModal, setShowExpirationAlertsModal] = useState(false);
+    const [showExpiringSoonModal, setShowExpiringSoonModal] = useState(false);
     const [stockAlertFilter, setStockAlertFilter] = useState<
         "all" | "low" | "out"
     >("all");
@@ -1559,14 +1519,11 @@ export default function StaffDashboard() {
         return true;
     });
 
-    const allExpirationAlertItems = useMemo(
-        () => getExpirationAlertItems(products),
+    const allExpiringSoonItems = useMemo(
+        () => getExpiringSoonItems(products),
         [products],
     );
-    const expirationAlertItems = allExpirationAlertItems.slice(0, 3);
-    const expiringSoonCount = allExpirationAlertItems.filter(
-        (item) => item.status === "Expiring",
-    ).length;
+    const expiringSoonItems = allExpiringSoonItems.slice(0, 3);
 
     const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", {
         month: "long",
@@ -1652,7 +1609,7 @@ export default function StaffDashboard() {
                         />
                         <GlanceCard
                             title="Expiring Soon"
-                            value={expiringSoonCount}
+                            value={allExpiringSoonItems.length}
                             label="Items"
                             icon={<CalendarClock size={22} />}
                             tone="violet"
@@ -1737,19 +1694,19 @@ export default function StaffDashboard() {
                             }}
                         />
 
-                        <ExpirationAlertsPanel
-                            items={expirationAlertItems}
-                            totalItems={allExpirationAlertItems.length}
+                        <ExpiringSoonPanel
+                            items={expiringSoonItems}
+                            totalItems={allExpiringSoonItems.length}
                             onDownload={() =>
                                 downloadExcel(
-                                    "expiration-alerts.xlsx",
-                                    "Expiration Alerts",
+                                    "expiring-soon.xlsx",
+                                    "Expiring Soon",
                                     [
                                         "Product",
                                         "Stock Level",
                                         "Expiration Date",
                                     ],
-                                    allExpirationAlertItems.map((item) => [
+                                    allExpiringSoonItems.map((item) => [
                                         item.variantName
                                             ? `${item.productName} - ${item.variantName}`
                                             : item.productName,
@@ -1761,7 +1718,7 @@ export default function StaffDashboard() {
                                 )
                             }
                             onViewAll={() =>
-                                setShowExpirationAlertsModal(true)
+                                setShowExpiringSoonModal(true)
                             }
                         />
                     </div>
@@ -1784,10 +1741,10 @@ export default function StaffDashboard() {
                     onClose={() => setShowStockAlertsModal(false)}
                 />
             )}
-            {showExpirationAlertsModal && (
-                <ExpirationAlertsModal
-                    items={allExpirationAlertItems}
-                    onClose={() => setShowExpirationAlertsModal(false)}
+            {showExpiringSoonModal && (
+                <ExpiringSoonModal
+                    items={allExpiringSoonItems}
+                    onClose={() => setShowExpiringSoonModal(false)}
                 />
             )}
 
@@ -2183,14 +2140,14 @@ function InventoryAlertPanel({
         </section>
     );
 }
-function ExpirationAlertsPanel({
-                                   items,
-                                   totalItems,
-                                   showBranch = false,
-                                   onDownload,
-                                   onViewAll,
-                               }: {
-    items: ExpirationAlertItem[];
+function ExpiringSoonPanel({
+                               items,
+                               totalItems,
+                               showBranch = false,
+                               onDownload,
+                               onViewAll,
+                           }: {
+    items: ExpiringSoonItem[];
     totalItems: number;
     showBranch?: boolean;
     onDownload: () => void;
@@ -2208,10 +2165,10 @@ function ExpirationAlertsPanel({
                     />
                     <div className="min-w-0">
                         <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
-                            Expiration Alerts
+                            Expiring Soon
                         </h2>
                         <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
-                            Expired and expiring items
+                            Items expiring within 30 days
                         </p>
                     </div>
                 </div>
@@ -2220,8 +2177,8 @@ function ExpirationAlertsPanel({
                     <button
                         type="button"
                         onClick={onDownload}
-                        aria-label="Download Expiration Alerts"
-                        title="Download Expiration Alerts"
+                        aria-label="Download Expiring Soon"
+                        title="Download Expiring Soon"
                         className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
                     >
                         <Download size={16} strokeWidth={2} />
@@ -2272,14 +2229,10 @@ function ExpirationAlertsPanel({
                                 colSpan={columnCount}
                                 className="px-4 pt-6 text-center align-top text-[13px] text-[#8A7D92]"
                             >
-                                No expiration alerts found.
+                                No products are expiring within 30 days.
                             </td>
                         </tr>
                     ) : (
-<<<<<<< HEAD
-                        items.map((item) => {
-                            const isExpired = item.status === "Expired";
-=======
                         items.map((item) => (
                             <tr
                                 key={item.id}
@@ -2301,149 +2254,78 @@ function ExpirationAlertsPanel({
                                         </p>
                                     ) : null}
                                 </td>
->>>>>>> 6a35c1b (07/28)
 
-                            return (
-                                <tr
-                                    key={item.id}
-                                    className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FCFAFF]"
-                                >
+                                {showBranch ? (
                                     <td className="px-2 py-2 align-middle">
                                         <p
-                                            title={item.productName}
-                                            className="line-clamp-2 text-[13px] font-semibold leading-5 text-[#30243A]"
+                                            title={item.branchName}
+                                            className="whitespace-nowrap text-[12px] font-semibold tracking-[-0.04em] text-[#6D35D4]"
                                         >
-                                            {item.productName}
-                                        </p>
-                                        {item.variantName ? (
-                                            <p
-                                                title={item.variantName}
-                                                className="truncate text-[10px] font-medium text-[#806A8C]"
-                                            >
-                                                {item.variantName}
-                                            </p>
-                                        ) : null}
-                                    </td>
-
-                                    {showBranch ? (
-                                        <td className="px-2 py-2 align-middle">
-                                            <p
-                                                title={item.branchName}
-                                                className="whitespace-nowrap text-[12px] font-semibold tracking-[-0.04em] text-[#6D35D4]"
-                                            >
-                                                {item.branchName}
-                                            </p>
-                                        </td>
-                                    ) : null}
-
-                                    <td className="px-2 py-2 align-middle">
-                                        <span className="whitespace-nowrap text-[12px] font-semibold text-[#30243A]">
-                                            {item.stock} left
-                                        </span>
-                                    </td>
-
-                                    <td className="px-2 py-2 align-middle">
-                                        <p
-                                            className={`whitespace-nowrap text-[12px] font-semibold tracking-[-0.01em] ${
-                                                isExpired
-                                                    ? "text-[#DC2626]"
-                                                    : "text-[#6D35D4]"
-                                            }`}
-                                        >
-                                            {formatDashboardExpirationDate(
-                                                item.expirationDate,
-                                            )}
-                                        </p>
-                                        <p
-                                            className={`whitespace-nowrap text-[10px] font-semibold ${
-                                                isExpired ||
-                                                item.daysRemaining <= 7
-                                                    ? "text-[#DC2626]"
-                                                    : "text-[#806A8C]"
-                                            }`}
-                                        >
-                                            {formatExpirationDistance(
-                                                item.daysRemaining,
-                                            )}
+                                            {item.branchName}
                                         </p>
                                     </td>
-                                </tr>
-                            );
-                        })
+                                ) : null}
+
+                                <td className="px-2 py-2 align-middle">
+                                    <span className="whitespace-nowrap text-[12px] font-semibold text-[#30243A]">
+                                        {item.stock} left
+                                    </span>
+                                </td>
+
+                                <td className="px-2 py-2 align-middle">
+                                    <p className="whitespace-nowrap text-[12px] font-semibold tracking-[-0.01em] text-[#6D35D4]">
+                                        {formatDashboardExpirationDate(
+                                            item.expirationDate,
+                                        )}
+                                    </p>
+                                    <p
+                                        className={`whitespace-nowrap text-[10px] font-semibold ${
+                                            item.daysRemaining <= 7
+                                                ? "text-[#DC2626]"
+                                                : "text-[#806A8C]"
+                                        }`}
+                                    >
+                                        {item.daysRemaining === 0
+                                            ? "Expires today"
+                                            : `${item.daysRemaining} day${
+                                                item.daysRemaining === 1
+                                                    ? ""
+                                                    : "s"
+                                            } left`}
+                                    </p>
+                                </td>
+                            </tr>
+                        ))
                     )}
                     </tbody>
                 </table>
             </div>
 
             <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
-                Showing {items.length} of {totalItems} alert
+                Showing {items.length} of {totalItems} item
                 {totalItems === 1 ? "" : "s"}
             </div>
         </section>
     );
 }
 
-function ExpirationAlertsModal({
-                                   items,
-                                   showBranch = false,
-                                   onClose,
-                               }: {
-    items: ExpirationAlertItem[];
+function ExpiringSoonModal({
+                               items,
+                               showBranch = false,
+                               onClose,
+                           }: {
+    items: ExpiringSoonItem[];
     showBranch?: boolean;
     onClose: () => void;
 }) {
-    const [activeFilter, setActiveFilter] = useState<
-        "all" | "expiring" | "expired"
-    >("all");
-
     const columnCount = showBranch ? 4 : 3;
-    const expiredCount = items.filter(
-        (item) => item.status === "Expired",
-    ).length;
-    const expiringCount = items.filter(
-        (item) => item.status === "Expiring",
-    ).length;
-
-    const visibleItems = items.filter((item) => {
-        if (activeFilter === "expired") {
-            return item.status === "Expired";
-        }
-
-        if (activeFilter === "expiring") {
-            return item.status === "Expiring";
-        }
-
-        return true;
-    });
-
-    const filterClass = (
-        filter: "all" | "expiring" | "expired",
-    ) => {
-        const isActive = activeFilter === filter;
-
-        if (filter === "all") {
-            return isActive
-                ? "border-[#2B174C] bg-[#2B174C] text-white"
-                : "border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#FAF8FF]";
-        }
-
-        if (filter === "expiring") {
-            return isActive
-                ? "border-[#D8C5F3] bg-[#F1EBFF] text-[#6D35D4]"
-                : "border-[#D8C5F3] bg-white text-[#6D35D4] hover:bg-[#F7F1FF]";
-        }
-
-        return isActive
-            ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
-            : "border-[#F2C4C4] bg-white text-[#C32F2F] hover:bg-[#FFF5F5]";
-    };
 
     return (
         <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/45 px-4 py-6 font-sans text-[#1A1220] backdrop-blur-[2px]">
             <div
                 role="dialog"
                 aria-modal="true"
-                aria-labelledby="dashboard-expiration-alerts-title"
+                aria-labelledby="dashboard-expiring-soon-title"
                 className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
             >
                 <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
@@ -2454,13 +2336,13 @@ function ExpirationAlertsModal({
 
                         <div>
                             <h2
-                                id="dashboard-expiration-alerts-title"
+                                id="dashboard-expiring-soon-title"
                                 className="text-[20px] font-bold leading-6 text-[#1A1220]"
                             >
-                                Expiration Alerts
+                                Expiring Soon
                             </h2>
                             <p className="mt-1 text-sm leading-5 text-[#7A6A84]">
-                                Expired items appear first, followed by items expiring within 30 days.
+                                Products and variants expiring within the next 30 days.
                             </p>
                         </div>
                     </div>
@@ -2468,45 +2350,10 @@ function ExpirationAlertsModal({
                     <button
                         type="button"
                         onClick={onClose}
-                        aria-label="Close expiration alerts"
+                        aria-label="Close expiring soon"
                         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[22px] leading-none text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C]"
                     >
                         ×
-                    </button>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 border-b border-[#E9E0EF] px-6 py-3">
-                    <button
-                        type="button"
-                        onClick={() => setActiveFilter("all")}
-                        aria-pressed={activeFilter === "all"}
-                        className={`rounded-xl border px-4 py-2 text-xs font-semibold transition ${filterClass(
-                            "all",
-                        )}`}
-                    >
-                        All ({items.length})
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={() => setActiveFilter("expiring")}
-                        aria-pressed={activeFilter === "expiring"}
-                        className={`rounded-xl border px-4 py-2 text-xs font-semibold transition ${filterClass(
-                            "expiring",
-                        )}`}
-                    >
-                        Expiring ({expiringCount})
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={() => setActiveFilter("expired")}
-                        aria-pressed={activeFilter === "expired"}
-                        className={`rounded-xl border px-4 py-2 text-xs font-semibold transition ${filterClass(
-                            "expired",
-                        )}`}
-                    >
-                        Expired ({expiredCount})
                     </button>
                 </div>
 
@@ -2532,85 +2379,73 @@ function ExpirationAlertsModal({
                         </thead>
 
                         <tbody>
-                        {visibleItems.length === 0 ? (
+                        {items.length === 0 ? (
                             <tr>
                                 <td
                                     colSpan={columnCount}
                                     className="px-5 py-14 text-center text-sm text-[#7A6A84]"
                                 >
-                                    {activeFilter === "expired"
-                                        ? "No expired items found."
-                                        : activeFilter === "expiring"
-                                            ? "No expiring items found."
-                                            : "No expiration alerts found."}
+                                    No products are expiring within 30 days.
                                 </td>
                             </tr>
                         ) : (
-                            visibleItems.map((item) => {
-                                const isExpired =
-                                    item.status === "Expired";
-
-                                return (
-                                    <tr
-                                        key={item.id}
-                                        className="border-b border-[#EEE7F2] transition hover:bg-[#FFFCF7] last:border-b-0"
-                                    >
-                                        <td className="px-5 py-3.5">
-                                            <p className="text-sm font-semibold leading-5 text-[#1A1220]">
-                                                {item.productName}
+                            items.map((item) => (
+                                <tr
+                                    key={item.id}
+                                    className="border-b border-[#EEE7F2] transition hover:bg-[#FFFCF7] last:border-b-0"
+                                >
+                                    <td className="px-5 py-3.5">
+                                        <p className="text-sm font-semibold leading-5 text-[#1A1220]">
+                                            {item.productName}
+                                        </p>
+                                        {item.variantName ? (
+                                            <p className="mt-0.5 text-xs font-medium text-[#806A8C]">
+                                                {item.variantName}
                                             </p>
-                                            {item.variantName ? (
-                                                <p className="mt-0.5 text-xs font-medium text-[#806A8C]">
-                                                    {item.variantName}
-                                                </p>
-                                            ) : null}
-                                        </td>
-
-                                        {showBranch ? (
-                                            <td className="px-5 py-3.5 text-sm font-medium text-[#6D35D4]">
-                                                {item.branchName}
-                                            </td>
                                         ) : null}
+                                    </td>
 
-                                        <td className="px-5 py-3.5 text-sm font-semibold text-[#30243A]">
-                                            {item.stock} left
+                                    {showBranch ? (
+                                        <td className="px-5 py-3.5 text-sm font-medium text-[#6D35D4]">
+                                            {item.branchName}
                                         </td>
+                                    ) : null}
 
-                                        <td className="px-5 py-3.5">
-                                            <p
-                                                className={`text-sm font-semibold ${
-                                                    isExpired
-                                                        ? "text-[#DC2626]"
-                                                        : "text-[#2B174C]"
-                                                }`}
-                                            >
-                                                {formatDashboardExpirationDate(
-                                                    item.expirationDate,
-                                                )}
-                                            </p>
-                                            <p
-                                                className={`mt-0.5 text-xs font-semibold ${
-                                                    isExpired ||
-                                                    item.daysRemaining <= 7
-                                                        ? "text-[#DC2626]"
-                                                        : "text-[#806A8C]"
-                                                }`}
-                                            >
-                                                {formatExpirationDistance(
-                                                    item.daysRemaining,
-                                                )}
-                                            </p>
-                                        </td>
-                                    </tr>
-                                );
-                            })
+                                    <td className="px-5 py-3.5 text-sm font-semibold text-[#30243A]">
+                                        {item.stock} left
+                                    </td>
+
+                                    <td className="px-5 py-3.5">
+                                        <p className="text-sm font-semibold text-[#2B174C]">
+                                            {formatDashboardExpirationDate(
+                                                item.expirationDate,
+                                            )}
+                                        </p>
+                                        <p
+                                            className={`mt-0.5 text-xs font-semibold ${
+                                                item.daysRemaining <= 7
+                                                    ? "text-[#DC2626]"
+                                                    : "text-[#806A8C]"
+                                            }`}
+                                        >
+                                            {item.daysRemaining === 0
+                                                ? "Expires today"
+                                                : `${item.daysRemaining} day${
+                                                    item.daysRemaining === 1
+                                                        ? ""
+                                                        : "s"
+                                                } left`}
+                                        </p>
+                                    </td>
+                                </tr>
+                            ))
                         )}
                         </tbody>
                     </table>
                 </div>
 
                 <div className="border-t border-[#E9E0EF] bg-[#FFFCF7] px-6 py-3 text-xs leading-5 text-[#7A6A84]">
-                    Expired items have dates before today. Expiring items have dates from today through the next 30 days.
+                    Expiring Soon includes items with expiration dates from today through the next 30 days.
                 </div>
             </div>
         </div>

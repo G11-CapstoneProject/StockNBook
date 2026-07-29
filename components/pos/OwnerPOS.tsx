@@ -11,7 +11,6 @@ import {
     Search,
     TrendingUp,
     WalletCards,
-    X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
@@ -22,6 +21,7 @@ import {
     peso,
     type Branch,
     type Order,
+    type Product,
 } from "./_shared";
 
 function formatCurrentDateTime(value: Date) {
@@ -43,7 +43,14 @@ function formatCurrentDateTime(value: Date) {
 }
 
 function toTransactionDateValue(value: string) {
-    const parsed = new Date(value);
+    const rawValue = String(value || "").trim();
+    const isoDateMatch = rawValue.match(/^(\d{4}-\d{2}-\d{2})/);
+
+    if (isoDateMatch) {
+        return isoDateMatch[1];
+    }
+
+    const parsed = new Date(rawValue);
 
     if (Number.isNaN(parsed.getTime())) {
         return "";
@@ -72,13 +79,171 @@ function formatTransactionDate(value: string) {
     });
 }
 
+function isOrderWithinDateRange(
+    orderDate: string,
+    startDate: string,
+    endDate: string,
+) {
+    const dateValue = toTransactionDateValue(orderDate);
+
+    if (!dateValue) return false;
+    if (startDate && dateValue < startDate) return false;
+    if (endDate && dateValue > endDate) return false;
+
+    return true;
+}
+
+function formatDateRangeDescription(startDate: string, endDate: string) {
+    if (startDate && endDate && startDate === endDate) {
+        return `on ${formatTransactionDate(startDate)}`;
+    }
+
+    if (startDate && endDate) {
+        return `from ${formatTransactionDate(startDate)} to ${formatTransactionDate(endDate)}`;
+    }
+
+    if (startDate) {
+        return `from ${formatTransactionDate(startDate)} onward`;
+    }
+
+    if (endDate) {
+        return `up to ${formatTransactionDate(endDate)}`;
+    }
+
+    return "";
+}
+
+function normalizeOrderItemName(value: string) {
+    return String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s*\/\s*/g, "/")
+        .replace(/\s*-\s*/g, "-")
+        .replace(/\s+/g, " ");
+}
+
+function buildProductCostLookup(products: Product[]) {
+    const lookup = new Map<string, number>();
+
+    const addCost = (name: string, cost: number) => {
+        const normalizedName = normalizeOrderItemName(name);
+        const normalizedCost = Number(cost || 0);
+
+        if (!normalizedName || !Number.isFinite(normalizedCost)) return;
+        lookup.set(normalizedName, Math.max(0, normalizedCost));
+    };
+
+    products.forEach((product) => {
+        const variants = Array.isArray(product.variants)
+            ? product.variants
+            : [];
+
+        if (variants.length > 0) {
+            variants.forEach((variant) => {
+                const productName = String(product.name || "").trim();
+                const variantName = String(variant.name || "").trim();
+                const variantCost = Number(variant.originalPrice || 0);
+
+                addCost(`${productName}/${variantName}`, variantCost);
+                addCost(`${productName} / ${variantName}`, variantCost);
+                addCost(`${productName}-${variantName}`, variantCost);
+                addCost(`${productName} - ${variantName}`, variantCost);
+            });
+
+            return;
+        }
+
+        addCost(product.name, Number(product.originalPrice || 0));
+    });
+
+    return lookup;
+}
+
+type OrderWithFinancials = Order & Record<string, unknown>;
+
+function readOrderNumber(order: OrderWithFinancials, keys: string[]) {
+    for (const key of keys) {
+        const rawValue = order[key];
+
+        if (rawValue === null || rawValue === undefined || rawValue === "") {
+            continue;
+        }
+
+        const value = Number(rawValue);
+
+        if (Number.isFinite(value)) {
+            return value;
+        }
+    }
+
+    return null;
+}
+
+function calculateOrderCost(
+    order: Order,
+    productCostLookup: Map<string, number>,
+    fallbackCostRatio: number,
+) {
+    const financialOrder = order as OrderWithFinancials;
+    const sales = Math.max(0, Number(order.total || 0));
+
+    const explicitCost = readOrderNumber(financialOrder, [
+        "totalCost",
+        "total_cost",
+        "cost",
+        "costAmount",
+        "cost_amount",
+    ]);
+
+    if (explicitCost !== null) {
+        return Math.max(0, explicitCost);
+    }
+
+    const explicitProfit = readOrderNumber(financialOrder, [
+        "profit",
+        "grossProfit",
+        "gross_profit",
+    ]);
+
+    if (explicitProfit !== null) {
+        return Math.max(0, sales - explicitProfit);
+    }
+
+    const items = Array.isArray(order.items) ? order.items : [];
+
+    if (items.length > 0) {
+        let calculatedCost = 0;
+        let allItemsMatched = true;
+
+        for (const item of items) {
+            const key = normalizeOrderItemName(item.name);
+
+            if (!productCostLookup.has(key)) {
+                allItemsMatched = false;
+                break;
+            }
+
+            calculatedCost +=
+                Number(productCostLookup.get(key) || 0) *
+                Math.max(0, Number(item.quantity || 0));
+        }
+
+        if (allItemsMatched) {
+            return calculatedCost;
+        }
+    }
+
+    return sales * fallbackCostRatio;
+}
+
 export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
     const [isAllBranchesView, setIsAllBranchesView] = useState(true);
     const [branchQuery, setBranchQuery] = useState("All Branches");
     const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
     const [orderIdQuery, setOrderIdQuery] = useState("");
-    const [transactionDate, setTransactionDate] = useState("");
+    const [startDate, setStartDate] = useState("");
+    const [endDate, setEndDate] = useState("");
 
     const branchSelectorRef = useRef<HTMLDivElement>(null);
 
@@ -140,6 +305,87 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
         Number(scopeSales.sales || 0) - Number(scopeSales.profit || 0),
     );
 
+    const extendedPOS = pos as UsePOSReturn & {
+        products?: Product[];
+        displayProducts?: Product[];
+    };
+
+    const productsForCostCalculation = Array.isArray(extendedPOS.products)
+        ? extendedPOS.products
+        : Array.isArray(extendedPOS.displayProducts)
+            ? extendedPOS.displayProducts
+            : [];
+
+    const productCostLookup = useMemo(
+        () => buildProductCostLookup(productsForCostCalculation),
+        [productsForCostCalculation],
+    );
+
+    const hasDateFilter = Boolean(startDate || endDate);
+    const dateRangeDescription = formatDateRangeDescription(
+        startDate,
+        endDate,
+    );
+
+    const dateFilteredOrders = useMemo(() => {
+        if (!hasDateFilter) {
+            return scopeSales.orders;
+        }
+
+        return scopeSales.orders.filter((order) =>
+            isOrderWithinDateRange(order.date, startDate, endDate),
+        );
+    }, [endDate, hasDateFilter, scopeSales.orders, startDate]);
+
+    const overviewTotals = useMemo(() => {
+        if (!hasDateFilter) {
+            return {
+                sales: Number(scopeSales.sales || 0),
+                cost: scopeTotalCost,
+                profit: Number(scopeSales.profit || 0),
+                transactions: scopeSales.orders.length,
+            };
+        }
+
+        const scopeSalesValue = Number(scopeSales.sales || 0);
+        const fallbackCostRatio =
+            scopeSalesValue > 0
+                ? Math.max(0, scopeTotalCost / scopeSalesValue)
+                : 0;
+
+        return dateFilteredOrders.reduce(
+            (totals, order) => {
+                const sales = Math.max(0, Number(order.total || 0));
+                const cost = calculateOrderCost(
+                    order,
+                    productCostLookup,
+                    fallbackCostRatio,
+                );
+
+                totals.sales += sales;
+                totals.cost += cost;
+                totals.profit += sales - cost;
+                totals.transactions += 1;
+
+                return totals;
+            },
+            {
+                sales: 0,
+                cost: 0,
+                profit: 0,
+                transactions: 0,
+            },
+        );
+    }, [
+        dateFilteredOrders,
+        hasDateFilter,
+        productCostLookup,
+        scopeSales.orders.length,
+        scopeSales.profit,
+        scopeSales.sales,
+        scopeTotalCost,
+    ]);
+
     const orderBranchNames = useMemo(() => {
         const names = new Map<string, string>();
 
@@ -197,18 +443,13 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
     const visibleOrders = useMemo(() => {
         const orderId = orderIdQuery.trim().toLowerCase();
 
-        return scopeSales.orders.filter((order) => {
-            const matchesOrderId =
+        return dateFilteredOrders.filter((order) => {
+            return (
                 !orderId ||
-                String(order.id || "").toLowerCase().includes(orderId);
-
-            const matchesDate =
-                !transactionDate ||
-                toTransactionDateValue(order.date) === transactionDate;
-
-            return matchesOrderId && matchesDate;
+                String(order.id || "").toLowerCase().includes(orderId)
+            );
         });
-    }, [orderIdQuery, scopeSales.orders, transactionDate]);
+    }, [dateFilteredOrders, orderIdQuery]);
 
     useEffect(() => {
         const handleOutsideClick = (event: MouseEvent) => {
@@ -255,15 +496,34 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
         ? "All Branches Orders"
         : `${selectedBranch?.branchName || "Branch"} Orders`;
 
+    const dateRangeSuffix = dateRangeDescription
+        ? ` ${dateRangeDescription}`
+        : "";
+
     const tableSubtitle = isAllBranchesView
         ? `${visibleOrders.length} transaction${
             visibleOrders.length !== 1 ? "s" : ""
-        } shown across all branches.`
+        } shown across all branches${dateRangeSuffix}.`
         : `${visibleOrders.length} transaction${
             visibleOrders.length !== 1 ? "s" : ""
-        } shown for ${selectedBranch?.branchName || "this branch"}.`;
+        } shown for ${selectedBranch?.branchName || "this branch"}${dateRangeSuffix}.`;
 
-    const hasActiveFilters = Boolean(orderIdQuery.trim() || transactionDate);
+    const hasActiveFilters = Boolean(
+        orderIdQuery.trim() || startDate || endDate,
+    );
+
+    const salesHelper = dateRangeDescription
+        ? `Sales ${dateRangeDescription}`
+        : "Sales in the selected scope";
+    const costHelper = dateRangeDescription
+        ? `Cost of items sold ${dateRangeDescription}`
+        : "Cost of items sold in this scope";
+    const profitHelper = dateRangeDescription
+        ? `Profit earned ${dateRangeDescription}`
+        : "Profit earned in the selected scope";
+    const transactionHelper = dateRangeDescription
+        ? `Transactions ${dateRangeDescription}`
+        : "Transactions in the selected scope";
 
     return (
         <div
@@ -306,16 +566,16 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <StatCard
                             label="Total Sales"
-                            value={peso(scopeSales.sales)}
-                            helper="Sales in the selected scope"
+                            value={peso(overviewTotals.sales)}
+                            helper={salesHelper}
                             icon={<CircleDollarSign size={18} strokeWidth={1.9} />}
                             iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
                         />
 
                         <StatCard
                             label="Total Cost"
-                            value={peso(scopeTotalCost)}
-                            helper="Cost of items sold in this scope"
+                            value={peso(overviewTotals.cost)}
+                            helper={costHelper}
                             icon={<WalletCards size={18} strokeWidth={1.9} />}
                             iconClassName="bg-[#FFF2E5] text-[#D56A1F]"
                             valueClassName="text-[#D56A1F]"
@@ -323,8 +583,8 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
 
                         <StatCard
                             label="Profit"
-                            value={peso(scopeSales.profit)}
-                            helper="Profit earned in the selected scope"
+                            value={peso(overviewTotals.profit)}
+                            helper={profitHelper}
                             icon={<TrendingUp size={18} strokeWidth={1.9} />}
                             iconClassName="bg-[#EAF8EF] text-[#168A48]"
                             valueClassName="text-[#168A48]"
@@ -332,15 +592,15 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
 
                         <StatCard
                             label="Transactions"
-                            value={scopeSales.orders.length}
-                            helper="Transactions in the selected scope"
+                            value={overviewTotals.transactions}
+                            helper={transactionHelper}
                             icon={<ReceiptText size={18} strokeWidth={1.9} />}
                             iconClassName="bg-[#EAF1FF] text-[#245EDB]"
                             valueClassName="text-[#245EDB]"
                         />
                     </div>
 
-                    <section className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_220px_290px]">
+                    <section className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_190px_190px_290px]">
                         <div className="relative">
                             <Search
                                 size={15}
@@ -361,30 +621,45 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                         <div className="relative">
                             <CalendarDays
                                 size={15}
-                                className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
+                                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
                             />
+
+                            <span className="pointer-events-none absolute left-9 top-1/2 -translate-y-1/2 text-[10px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                                From
+                            </span>
 
                             <input
                                 type="date"
-                                value={transactionDate}
+                                value={startDate}
+                                max={endDate || undefined}
                                 onChange={(event) =>
-                                    setTransactionDate(event.target.value)
+                                    setStartDate(event.target.value)
                                 }
-                                aria-label="Filter transactions by date"
-                                className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white px-10 pr-9 text-sm font-medium text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                aria-label="Filter transactions from date"
+                                className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-[76px] pr-2 text-xs font-medium text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                            />
+                        </div>
+
+                        <div className="relative">
+                            <CalendarDays
+                                size={15}
+                                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
                             />
 
-                            {transactionDate && (
-                                <button
-                                    type="button"
-                                    onClick={() => setTransactionDate("")}
-                                    aria-label="Clear transaction date"
-                                    title="Clear date"
-                                    className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C]"
-                                >
-                                    <X size={15} />
-                                </button>
-                            )}
+                            <span className="pointer-events-none absolute left-9 top-1/2 -translate-y-1/2 text-[10px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                                To
+                            </span>
+
+                            <input
+                                type="date"
+                                value={endDate}
+                                min={startDate || undefined}
+                                onChange={(event) =>
+                                    setEndDate(event.target.value)
+                                }
+                                aria-label="Filter transactions to date"
+                                className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-[58px] pr-2 text-xs font-medium text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                            />
                         </div>
 
                         <div ref={branchSelectorRef} className="relative">
@@ -528,10 +803,8 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                         <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-2.5">
                             <p className="text-xs text-[#7A6A84]">
                                 Showing filtered transactions
-                                {transactionDate
-                                    ? ` for ${formatTransactionDate(
-                                        transactionDate
-                                    )}`
+                                {dateRangeDescription
+                                    ? ` ${dateRangeDescription}`
                                     : ""}
                                 {orderIdQuery.trim()
                                     ? ` matching “${orderIdQuery.trim()}”`
@@ -543,7 +816,8 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                                 type="button"
                                 onClick={() => {
                                     setOrderIdQuery("");
-                                    setTransactionDate("");
+                                    setStartDate("");
+                                    setEndDate("");
                                 }}
                                 className="text-xs font-semibold text-[#2B174C] transition hover:text-[#5B2FC6]"
                             >
@@ -560,7 +834,7 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                         getBranchName={getOrderBranchName}
                         emptyText={
                             hasActiveFilters
-                                ? "No transactions match the current order ID or date filter."
+                                ? "No transactions match the current order ID or date range."
                                 : isAllBranchesView
                                     ? "No orders found across all branches."
                                     : "No orders found for this branch."

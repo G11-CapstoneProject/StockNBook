@@ -151,39 +151,6 @@ function getSavedItem(key: string) {
     return sessionStorage.getItem(key) || localStorage.getItem(key) || "";
 }
 
-function getAssignedBranchId(user: unknown) {
-    return (
-        getUserValue(user, "branch_id") ||
-        getUserValue(user, "branchId") ||
-        getSavedItem("branch_id") ||
-        getSavedItem("stocknbook_branch_id") ||
-        getSavedItem("staff_branch_id")
-    );
-}
-
-function getAssignedBranchName(user: unknown) {
-    return (
-        getUserValue(user, "branch_name") ||
-        getUserValue(user, "branchName") ||
-        getSavedItem("branch_name") ||
-        getSavedItem("stocknbook_branch_name") ||
-        getSavedItem("staff_branch_name") ||
-        "Assigned Branch"
-    );
-}
-
-function belongsToAssignedBranch<
-    T extends { branchId?: number | null; branch_id?: number | null }
->(item: T, branchId: string) {
-    if (!branchId) return false;
-
-    const itemBranchId = item.branchId ?? item.branch_id;
-
-    return itemBranchId !== null &&
-        itemBranchId !== undefined &&
-        String(itemBranchId) === String(branchId);
-}
-
 function getUserValue(user: unknown, key: string) {
     if (!user || typeof user !== "object") return "";
     return String((user as Record<string, unknown>)[key] ?? "");
@@ -1065,7 +1032,7 @@ function formatDashboardTime(dateValue?: string, explicitTime?: string) {
     return Number.isNaN(parsedDate.getTime()) ? "" : format(parsedDate);
 }
 
-export default function StaffDashboard() {
+export default function OwnerDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
 
@@ -1092,22 +1059,19 @@ export default function StaffDashboard() {
         };
     }, []);
 
-    const loadStaffDashboard = useCallback(async () => {
+    const loadOwnerDashboard = useCallback(async () => {
         const token = getSavedItem("token");
         const storeId =
             getUserValue(user, "store_id") ||
             getUserValue(user, "storeId") ||
             getSavedItem("store_id") ||
             getSavedItem("stocknbook_store_id");
-        const branchId = getAssignedBranchId(user);
-        const assignedBranchName = getAssignedBranchName(user);
-
-        if (!token || !branchId) {
+        if (!token) {
             setBranches([]);
             setBookings([]);
             setOrders([]);
             setProducts([]);
-            setBookingsError("No assigned branch was found for this account.");
+            setBookingsError("Unable to load the owner dashboard because no login token was found.");
             return;
         }
 
@@ -1120,29 +1084,17 @@ export default function StaffDashboard() {
                     headers: {
                         Authorization: `Bearer ${token}`,
                     },
+                    cache: "no-store",
                 });
 
                 const branchesData = await branchesRes.json().catch(() => ({}));
 
                 if (branchesRes.ok && Array.isArray(branchesData.branches)) {
                     const normalizedBranches: Branch[] = (branchesData.branches as unknown[]).map(normalizeBranch);
-                    const assignedBranches = normalizedBranches.filter(
-                        (branch) => String(branch.id) === String(branchId),
-                    );
-
-                    setBranches(
-                        assignedBranches.length > 0
-                            ? assignedBranches
-                            : [
-                                {
-                                    id: Number(branchId),
-                                    branchName: assignedBranchName,
-                                },
-                            ],
-                    );
+                    setBranches(normalizedBranches);
                 }
             } catch (error) {
-                console.warn("Staff dashboard branches fetch failed:", error);
+                console.warn("Owner dashboard branches fetch failed:", error);
             }
 
             try {
@@ -1156,9 +1108,8 @@ export default function StaffDashboard() {
                     },
                     body: JSON.stringify({
                         action: "get_booking_page_bookings",
-                        role: "staff",
+                        role: "owner",
                         store_id: storeId ? Number(storeId) : undefined,
-                        branch_id: Number(branchId),
                     }),
                     cache: "no-store",
                 });
@@ -1178,7 +1129,7 @@ export default function StaffDashboard() {
                         "Unable to load booking data.",
                     );
 
-                    console.error("Staff dashboard bookings request failed:", {
+                    console.error("Owner dashboard bookings request failed:", {
                         status: bookingsRes.status,
                         response: bookingsData,
                     });
@@ -1186,17 +1137,13 @@ export default function StaffDashboard() {
                     setBookingsError(message);
                 } else if (Array.isArray(bookingsData.bookings)) {
                     const normalizedBookings = bookingsData.bookings.map(normalizeBooking);
-                    setBookings(
-                        normalizedBookings.filter((booking) =>
-                            belongsToAssignedBranch(booking, branchId),
-                        ),
-                    );
+                    setBookings(normalizedBookings);
                 } else {
                     setBookings([]);
                     setBookingsError("Bookings API returned an invalid response.");
                 }
             } catch (error) {
-                console.error("Staff dashboard bookings fetch failed:", error);
+                console.error("Owner dashboard bookings fetch failed:", error);
                 setBookings([]);
                 setBookingsError(
                     error instanceof Error
@@ -1214,22 +1161,18 @@ export default function StaffDashboard() {
                     },
                     body: JSON.stringify({
                         action: "get_products",
-                        branch_id: Number(branchId),
                     }),
+                    cache: "no-store",
                 });
 
                 const productsData = await productsRes.json().catch(() => ({}));
 
                 if (productsRes.ok && Array.isArray(productsData.products)) {
                     const normalizedProducts: Product[] = (productsData.products as unknown[]).map(normalizeProduct);
-                    setProducts(
-                        normalizedProducts.filter((product) =>
-                            belongsToAssignedBranch(product, branchId),
-                        ),
-                    );
+                    setProducts(normalizedProducts);
                 }
             } catch (error) {
-                console.warn("Staff dashboard products fetch failed:", error);
+                console.warn("Owner dashboard products fetch failed:", error);
             }
 
             try {
@@ -1241,22 +1184,18 @@ export default function StaffDashboard() {
                     },
                     body: JSON.stringify({
                         action: "get_orders",
-                        branch_id: Number(branchId),
                     }),
+                    cache: "no-store",
                 });
 
                 const ordersData = await ordersRes.json().catch(() => ({}));
 
                 if (ordersRes.ok && Array.isArray(ordersData.orders)) {
                     const normalizedOrders: Order[] = (ordersData.orders as unknown[]).map(normalizeOrder);
-                    setOrders(
-                        normalizedOrders.filter((order) =>
-                            belongsToAssignedBranch(order, branchId),
-                        ),
-                    );
+                    setOrders(normalizedOrders);
                 }
             } catch (error) {
-                console.warn("Staff dashboard orders fetch failed:", error);
+                console.warn("Owner dashboard orders fetch failed:", error);
             }
         } finally {
             setIsRefreshing(false);
@@ -1266,8 +1205,8 @@ export default function StaffDashboard() {
     useEffect(() => {
         // Load the dashboard once when the page opens.
         // After that, data refreshes only when the user presses Refresh.
-        void loadStaffDashboard();
-    }, [loadStaffDashboard]);
+        void loadOwnerDashboard();
+    }, [loadOwnerDashboard]);
 
     const scheduledOrders = useMemo(
         () =>
@@ -1430,7 +1369,7 @@ export default function StaffDashboard() {
                             Dashboard
                         </h1>
                         <p className="mt-1 truncate text-[12px] text-[#7A6A84]">
-                            Here&apos;s an overview of {getAssignedBranchName(user)} branch performance for {currentMonthLabel}.
+                            Here&apos;s an overview of your store performance across all branches for {currentMonthLabel}.
                         </p>
                     </div>
 
@@ -1441,7 +1380,7 @@ export default function StaffDashboard() {
 
                         <button
                             type="button"
-                            onClick={() => void loadStaffDashboard()}
+                            onClick={() => void loadOwnerDashboard()}
                             disabled={isRefreshing}
                             aria-label="Refresh dashboard details"
                             title="Refresh dashboard details"
@@ -1617,7 +1556,7 @@ export default function StaffDashboard() {
             </section>
 
             {showStockAlertsModal && (
-                <StaffStockAlertsModal
+                <OwnerStockAlertsModal
                     items={visibleStockAlerts}
                     activeFilter={stockAlertFilter}
                     totalCount={allInventoryAlerts.length}
@@ -2436,7 +2375,7 @@ function ExpirationAlertsModal({
     );
 }
 
-function StaffStockAlertsModal({
+function OwnerStockAlertsModal({
                                    items,
                                    activeFilter,
                                    totalCount,
@@ -2474,7 +2413,7 @@ function StaffStockAlertsModal({
             <div
                 role="dialog"
                 aria-modal="true"
-                aria-labelledby="staff-stock-alerts-title"
+                aria-labelledby="owner-stock-alerts-title"
                 className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
             >
                 <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
@@ -2485,7 +2424,7 @@ function StaffStockAlertsModal({
 
                         <div className="min-w-0">
                             <h2
-                                id="staff-stock-alerts-title"
+                                id="owner-stock-alerts-title"
                                 className="!text-[20px] !font-bold !leading-6 text-[#1A1220]"
                             >
                                 Stock Alerts

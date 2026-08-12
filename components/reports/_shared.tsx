@@ -9,6 +9,7 @@ import {
     useMemo,
     useState,
 } from "react";
+import * as XLSX from "xlsx";
 import {
     ArrowLeft,
     ArrowRight,
@@ -24,22 +25,36 @@ import {
     RotateCcw,
     Search,
     Store,
-    TrendingUp,
     Users,
 } from "lucide-react";
 
 export type UserRole = "owner" | "manager" | "staff";
+
+export type ReportsViewConfig = {
+    showBranchFilter: boolean;
+    showBranchColumn: boolean;
+};
+
+export type ReportsWorkspaceProps = {
+    initialRole: UserRole;
+    assignedBranch: string;
+    storeName: string;
+    viewConfig: ReportsViewConfig;
+};
 type ReportKey =
     | "inventory"
     | "restock"
     | "bookings"
     | "sales"
     | "forecasting"
-    | "staff";
+    | "staff"
+    | "packages";
 
 type InventoryStatus = "In Stock" | "Low Stock" | "Out of Stock";
-type InventoryFilter = "all" | "low" | "out";
+type ExpirationStatus = "Good" | "Soon to Expire" | "Expired" | "No Expiry";
+type InventoryFilter = "all" | "in" | "low" | "out" | "soon" | "expired";
 type BookingFilter = "all" | BookingStatus;
+type PackageStatusFilter = "all" | "active" | "inactive";
 type BookingStatus =
     | "pending"
     | "confirmed"
@@ -103,6 +118,9 @@ type InventoryVariant = {
     status?: InventoryStatus;
     costPrice?: number;
     salesPrice?: number;
+    expiryDate?: string;
+    lastUpdated?: string;
+    updatedBy?: string;
 };
 
 type InventoryItem = {
@@ -115,6 +133,9 @@ type InventoryItem = {
     status: InventoryStatus;
     costPrice?: number;
     salesPrice?: number;
+    expiryDate?: string;
+    lastUpdated?: string;
+    updatedBy?: string;
     variants?: InventoryVariant[];
 };
 
@@ -179,15 +200,6 @@ type SaleRecord = {
     statusLabel?: string;
 };
 
-type SalesSummaryRow = {
-    id: string;
-    source: "pos" | "booking";
-    date: string;
-    recordId: string;
-    posSales: number;
-    bookingRevenue: number;
-    totalRevenue: number;
-};
 
 type ForecastRecord = {
     id: string;
@@ -206,7 +218,6 @@ type SeasonalInsight = {
 };
 
 type SystemModule = "Bookings" | "Inventory" | "Packages" | "Sales / POS";
-type SalesView = "summary" | "pos" | "booking";
 type StaffModuleFilter = "all" | SystemModule;
 
 type StaffActivity = {
@@ -220,6 +231,19 @@ type StaffActivity = {
     reference?: string;
     details?: string;
     branch: string;
+};
+
+type PackageRecord = {
+    id: string;
+    name: string;
+    description?: string;
+    category?: string;
+    branch: string;
+    price: number;
+    itemCount?: number;
+    status: string;
+    updatedAt?: string;
+    updatedBy?: string;
 };
 
 type BookingSummary = {
@@ -264,13 +288,15 @@ type ReportData = {
     forecasting?: ForecastRecord[];
     seasonalInsights?: SeasonalInsight[];
     staffActivities?: StaffActivity[];
+    packageList?: PackageRecord[];
 };
 
 type ReportCard = {
     key: ReportKey;
     title: string;
     subtitle: string;
-    icon: ComponentType<{ size?: number; strokeWidth?: number }>;
+    icon: ComponentType<{ size?: number; strokeWidth?: number; className?: string }>;
+    iconClassName: string;
 };
 
 type ExportTable = {
@@ -290,38 +316,44 @@ const REPORT_CARDS: ReportCard[] = [
     {
         key: "inventory",
         title: "Inventory Report",
-        subtitle: "Stock levels & movement",
+        subtitle: "View stock levels, item movement, and inventory valuation.",
         icon: Package,
+        iconClassName: "bg-[#F1E8FF] text-[#6F3EE8]",
     },
     {
         key: "restock",
-        title: "Restock History",
-        subtitle: "Past restock records",
+        title: "Restock Report",
+        subtitle: "Identify low-stock items and recommended restock quantities.",
         icon: RotateCcw,
-    },
-    {
-        key: "bookings",
-        title: "Booking History",
-        subtitle: "All booking records",
-        icon: CalendarDays,
+        iconClassName: "bg-[#FFF0DF] text-[#F47A18]",
     },
     {
         key: "sales",
-        title: "Sales Report",
-        subtitle: "Revenue & transactions",
+        title: "POS Report",
+        subtitle: "Analyze sales performance, revenue, and transaction summaries.",
         icon: DollarSign,
+        iconClassName: "bg-[#E7F7EE] text-[#0E9A53]",
     },
     {
-        key: "forecasting",
-        title: "Forecasting Report",
-        subtitle: "Predictions & trends",
-        icon: TrendingUp,
+        key: "bookings",
+        title: "Booking Report",
+        subtitle: "Review booking activity, status, and revenue over time.",
+        icon: CalendarDays,
+        iconClassName: "bg-[#E8F2FF] text-[#2F7BEA]",
+    },
+    {
+        key: "packages",
+        title: "Packages Report",
+        subtitle: "View all package offerings, details, and pricing information.",
+        icon: Package,
+        iconClassName: "bg-[#FFF3DB] text-[#E9A008]",
     },
     {
         key: "staff",
-        title: "Staff Report",
-        subtitle: "Current staff actions",
+        title: "Employee Actions",
+        subtitle: "Monitor ongoing actions and recent activity by employees.",
         icon: Users,
+        iconClassName: "bg-[#F1E8FF] text-[#7A3FF2]",
     },
 ];
 
@@ -363,23 +395,39 @@ function formatDateRange(startDate: string, endDate: string) {
     return `${formatDate(startDate)} – ${formatDate(endDate)}`;
 }
 
-function formatCurrentDateTime(value: Date) {
-    const dateLabel = value.toLocaleDateString("en-US", {
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-    });
 
-    const timeLabel = value
-        .toLocaleTimeString("en-US", {
-            hour: "numeric",
-            minute: "2-digit",
-            hour12: true,
-        })
-        .toLowerCase();
+function getExpirationStatus(expiryDate?: string): ExpirationStatus {
+    const normalizedDate = toReportDateValue(expiryDate);
 
-    return `${dateLabel} | ${timeLabel}`;
+    if (!normalizedDate) return "No Expiry";
+
+    const today = getToday();
+
+    if (normalizedDate < today) return "Expired";
+
+    const soonLimit = new Date(`${today}T12:00:00`);
+    soonLimit.setDate(soonLimit.getDate() + 30);
+    const soonLimitValue = soonLimit.toISOString().slice(0, 10);
+
+    return normalizedDate <= soonLimitValue ? "Soon to Expire" : "Good";
 }
+
+function expirationStatusClass(status: ExpirationStatus) {
+    if (status === "Expired") return "bg-[#FCE9E7] text-[#C7372F]";
+    if (status === "Soon to Expire") return "bg-[#FFF4D8] text-[#B66A00]";
+    if (status === "Good") return "bg-[#E8F6EC] text-[#17733A]";
+    return "bg-[#F2EEF5] text-[#766A7E]";
+}
+
+function getEarliestExpiryDate(values: Array<string | undefined>) {
+    const dates = values
+        .map((value) => toReportDateValue(value))
+        .filter(Boolean)
+        .sort();
+
+    return dates[0] || "";
+}
+
 
 function getStoredSessionValue(keys: string[]) {
     if (typeof window === "undefined") {
@@ -646,6 +694,27 @@ function normalizeLiveInventoryProduct(
             salesPrice: asLiveNumber(
                 variant.salesPrice ?? variant.sales_price ?? variant.price
             ),
+            expiryDate:
+                toReportDateValue(
+                    variant.expiryDate ??
+                    variant.expiry_date ??
+                    variant.expirationDate ??
+                    variant.expiration_date
+                ) || undefined,
+            lastUpdated:
+                asLiveText(
+                    variant.updatedAt,
+                    variant.updated_at,
+                    variant.lastUpdated,
+                    variant.last_updated
+                ) || undefined,
+            updatedBy:
+                asLiveText(
+                    variant.updatedByName,
+                    variant.updated_by_name,
+                    variant.updatedBy,
+                    variant.updated_by
+                ) || undefined,
             status: getInventoryStatus(stock, reorderLevel),
         } satisfies InventoryVariant;
     });
@@ -703,6 +772,33 @@ function normalizeLiveInventoryProduct(
         salesPrice: asLiveNumber(
             raw.salesPrice ?? raw.sales_price ?? raw.price
         ),
+        expiryDate:
+            toReportDateValue(
+                raw.expiryDate ??
+                raw.expiry_date ??
+                raw.expirationDate ??
+                raw.expiration_date
+            ) ||
+            getEarliestExpiryDate(variants.map((variant) => variant.expiryDate)) ||
+            undefined,
+        lastUpdated:
+            asLiveText(
+                raw.updatedAt,
+                raw.updated_at,
+                raw.lastUpdated,
+                raw.last_updated,
+                raw.createdAt,
+                raw.created_at
+            ) || undefined,
+        updatedBy:
+            asLiveText(
+                raw.updatedByName,
+                raw.updated_by_name,
+                raw.updatedBy,
+                raw.updated_by,
+                raw.modifiedBy,
+                raw.modified_by
+            ) || undefined,
         variants: variants.length > 0 ? variants : undefined,
     };
 }
@@ -1040,54 +1136,6 @@ function getSaleItemsLabel(sale: SaleRecord) {
         : sale.product || "No items recorded";
 }
 
-function normalizeRevenueRecordKey(value: unknown) {
-    return String(value ?? "")
-        .trim()
-        .toUpperCase()
-        .replace(/[^A-Z0-9]/g, "");
-}
-
-function resolveBookingRevenueStatus(
-    order: SaleRecord,
-    bookings: BookingRecord[]
-) {
-    if (String(order.statusLabel || "").trim()) {
-        return String(order.statusLabel).trim();
-    }
-
-    const orderKeys = new Set(
-        [
-            order.id,
-            order.reference,
-            order.linkedBookingId,
-            order.linkedBookingReference,
-        ]
-            .map(normalizeRevenueRecordKey)
-            .filter(Boolean)
-    );
-
-    const linkedBooking = bookings.find((booking) => {
-        const bookingIdKey = normalizeRevenueRecordKey(booking.id);
-        const bookingReferenceKey = normalizeRevenueRecordKey(booking.reference);
-
-        return (
-            orderKeys.has(bookingIdKey) ||
-            orderKeys.has(bookingReferenceKey)
-        );
-    });
-
-    if (linkedBooking?.statusLabel) {
-        return linkedBooking.statusLabel;
-    }
-
-    /*
-      The record is already classified as booking revenue, not POS. When the
-      legacy orders table does not return a booking status/link, show Completed
-      instead of a blank status because this row is being counted as booking
-      revenue in the report.
-    */
-    return "Completed";
-}
 
 function sumBy<T>(items: T[], callback: (item: T) => number) {
     return items.reduce((total, item) => total + callback(item), 0);
@@ -1412,40 +1460,47 @@ function createTablePdf({
             [0.1, 0.07, 0.13]
         );
 
+        let metadataY = pageHeight - 49;
+
         addText(
             `Store: ${storeName}`,
             marginX,
-            pageHeight - 49,
+            metadataY,
             8.5,
             regularFont,
             [0.21, 0.15, 0.27]
         );
 
-        addText(
-            `Branch: ${branch}`,
-            marginX,
-            pageHeight - 62,
-            8.5,
-            regularFont,
-            [0.21, 0.15, 0.27]
-        );
+        if (branch) {
+            metadataY -= 13;
+            addText(
+                `Branch: ${branch}`,
+                marginX,
+                metadataY,
+                8.5,
+                regularFont,
+                [0.21, 0.15, 0.27]
+            );
+        }
 
+        metadataY -= 13;
         addText(
             `Date range: ${dateRange}`,
             marginX,
-            pageHeight - 75,
+            metadataY,
             8.5,
             regularFont,
             [0.21, 0.15, 0.27]
         );
 
+        const dividerY = metadataY - 8;
         commands.push(
-            `q 0.84 0.79 0.9 RG 0.6 w ${marginX} ${pageHeight - 83} m ${
+            `q 0.84 0.79 0.9 RG 0.6 w ${marginX} ${dividerY} m ${
                 pageWidth - marginX
-            } ${pageHeight - 83} l S Q`
+            } ${dividerY} l S Q`
         );
 
-        cursorY = pageHeight - 84;
+        cursorY = dividerY - 1;
         drawTableHeader();
     }
 
@@ -1578,512 +1633,6 @@ function createTablePdf({
     return pdf;
 }
 
-function buildSalesRows(
-    posOrders: SaleRecord[],
-    bookingRevenueOrders: SaleRecord[]
-): SalesSummaryRow[] {
-    const posRows: SalesSummaryRow[] = posOrders.map((order) => ({
-        id: `pos-${order.id}`,
-        source: "pos",
-        date: order.date,
-        recordId: order.reference || order.id,
-        posSales: order.amount,
-        bookingRevenue: 0,
-        totalRevenue: order.amount,
-    }));
-
-    const bookingRows: SalesSummaryRow[] = bookingRevenueOrders.map((order) => ({
-        id: `booking-${order.id}`,
-        source: "booking",
-        date: order.date,
-        recordId: order.reference || order.id,
-        posSales: 0,
-        bookingRevenue: order.amount,
-        totalRevenue: order.amount,
-    }));
-
-    /*
-      Keep every database order on its own ledger row.
-      - POS-... / <STORE>-POS-... => POS Sales
-      - Non-POS booking order IDs such as DEMO-FC-W-SC-03 => Booking Revenue
-    */
-    return [...posRows, ...bookingRows].sort((left, right) => {
-        const dateDifference = right.date.localeCompare(left.date);
-
-        if (dateDifference !== 0) {
-            return dateDifference;
-        }
-
-        if (left.source !== right.source) {
-            return left.source === "pos" ? -1 : 1;
-        }
-
-        return left.recordId.localeCompare(right.recordId);
-    });
-}
-
-function fallbackInventory(branch: string): InventoryItem[] {
-    return [
-        {
-            id: "inventory-gold-balloon",
-            product: "Gold Balloon",
-            category: "Balloons",
-            branch,
-            stock: 102,
-            reorderLevel: 55,
-            status: "In Stock",
-            variants: [
-                {
-                    id: "gold-balloon-small-piece",
-                    name: "small, piece",
-                    stock: 50,
-                    reorderLevel: 20,
-                    costPrice: 10,
-                    salesPrice: 120,
-                    status: "In Stock",
-                },
-                {
-                    id: "gold-balloon-large-piece",
-                    name: "large, piece",
-                    stock: 23,
-                    reorderLevel: 15,
-                    costPrice: 15,
-                    salesPrice: 180,
-                    status: "In Stock",
-                },
-                {
-                    id: "gold-balloon-small-pack",
-                    name: "small, pack",
-                    stock: 14,
-                    reorderLevel: 10,
-                    costPrice: 20,
-                    salesPrice: 300,
-                    status: "In Stock",
-                },
-                {
-                    id: "gold-balloon-large-pack",
-                    name: "large, pack",
-                    stock: 15,
-                    reorderLevel: 10,
-                    costPrice: 25,
-                    salesPrice: 350,
-                    status: "In Stock",
-                },
-            ],
-        },
-        {
-            id: "inventory-tae",
-            product: "Tae",
-            category: "Backdrops",
-            branch,
-            stock: 90,
-            reorderLevel: 60,
-            costPrice: 1000,
-            status: "In Stock",
-            variants: [
-                {
-                    id: "tae-small",
-                    name: "small",
-                    stock: 45,
-                    reorderLevel: 30,
-                    costPrice: 1000,
-                    salesPrice: 200,
-                    status: "In Stock",
-                },
-                {
-                    id: "tae-large",
-                    name: "large",
-                    stock: 45,
-                    reorderLevel: 30,
-                    costPrice: 1000,
-                    salesPrice: 300,
-                    status: "In Stock",
-                },
-            ],
-        },
-        {
-            id: "inventory-table-cover",
-            product: "Table Cover",
-            category: "Linens & Covers",
-            branch,
-            stock: 193,
-            reorderLevel: 40,
-            status: "In Stock",
-            variants: [
-                {
-                    id: "table-cover-small",
-                    name: "small",
-                    stock: 94,
-                    reorderLevel: 20,
-                    costPrice: 200,
-                    salesPrice: 400,
-                    status: "In Stock",
-                },
-                {
-                    id: "table-cover-large",
-                    name: "large",
-                    stock: 99,
-                    reorderLevel: 20,
-                    costPrice: 300,
-                    salesPrice: 500,
-                    status: "In Stock",
-                },
-            ],
-        },
-        {
-            id: "inventory-balloon-pump",
-            product: "Balloon Pump",
-            category: "Decorations",
-            branch,
-            stock: 0,
-            reorderLevel: 5,
-            costPrice: 120,
-            salesPrice: 180,
-            status: "Out of Stock",
-        },
-        {
-            id: "inventory-cake-topper",
-            product: "Cake Topper",
-            category: "Cake & Desserts",
-            branch,
-            stock: 30,
-            reorderLevel: 8,
-            costPrice: 25,
-            salesPrice: 40,
-            status: "In Stock",
-        },
-        {
-            id: "inventory-party-hat",
-            product: "Party Hat",
-            category: "Costumes & Props",
-            branch,
-            stock: 38,
-            reorderLevel: 10,
-            costPrice: 10,
-            salesPrice: 15,
-            status: "In Stock",
-        },
-        {
-            id: "inventory-black-balloon",
-            product: "Black Balloon",
-            category: "Balloons",
-            branch,
-            stock: 110,
-            reorderLevel: 55,
-            status: "In Stock",
-            variants: [
-                {
-                    id: "black-balloon-small-piece",
-                    name: "small, piece",
-                    stock: 50,
-                    reorderLevel: 20,
-                    costPrice: 10,
-                    salesPrice: 12,
-                    status: "In Stock",
-                },
-                {
-                    id: "black-balloon-large-piece",
-                    name: "large, piece",
-                    stock: 25,
-                    reorderLevel: 15,
-                    costPrice: 15,
-                    salesPrice: 20,
-                    status: "In Stock",
-                },
-                {
-                    id: "black-balloon-small-pack",
-                    name: "small, pack",
-                    stock: 18,
-                    reorderLevel: 10,
-                    costPrice: 20,
-                    salesPrice: 28,
-                    status: "In Stock",
-                },
-                {
-                    id: "black-balloon-large-pack",
-                    name: "large, pack",
-                    stock: 17,
-                    reorderLevel: 10,
-                    costPrice: 25,
-                    salesPrice: 35,
-                    status: "In Stock",
-                },
-            ],
-        },
-    ];
-}
-
-function fallbackRestocks(branch: string): RestockRecord[] {
-    return [
-        {
-            id: "restock-1",
-            date: "2026-06-18",
-            product: "Gold Balloon",
-            variantName: "small, piece",
-            branch,
-            quantityAdded: 30,
-            stockBefore: 20,
-            currentStock: 50,
-            receivedBy: "Shiela Maningo",
-            reference: "RST-MKT-20260618-001",
-            notes: "Restocked to meet the reorder level for the small-piece variant.",
-        },
-        {
-            id: "restock-2",
-            date: "2026-06-15",
-            product: "LED Lights",
-            branch,
-            quantityAdded: 30,
-            stockBefore: 55,
-            currentStock: 85,
-            receivedBy: "Ash",
-            reference: "RST-MKT-20260615-002",
-            notes: "Restocked after a low stock alert.",
-        },
-        {
-            id: "restock-3",
-            date: "2026-06-10",
-            product: "Party Hats",
-            branch,
-            quantityAdded: 50,
-            stockBefore: 90,
-            currentStock: 140,
-            receivedBy: "Ellise Tamayo",
-            reference: "RST-MKT-20260610-003",
-            notes: "Added stock for upcoming birthday package reservations.",
-        },
-        {
-            id: "restock-4",
-            date: "2026-06-07",
-            product: "Table Covers",
-            branch,
-            quantityAdded: 20,
-            stockBefore: 40,
-            currentStock: 60,
-            receivedBy: "Mark Santos",
-            reference: "RST-MKT-20260607-004",
-            notes: "Regular branch replenishment.",
-        },
-    ];
-}
-
-function fallbackBookings(branch: string): BookingRecord[] {
-    return [
-        {
-            id: "BK-001",
-            reference: "REF-2026-001",
-            date: "2026-01-10",
-            eventDate: "2026-01-20",
-            branch,
-            customer: "Maria Santos",
-            packageName: "Wedding Package",
-            status: "completed",
-            amount: 12000,
-        },
-        {
-            id: "BK-002",
-            reference: "REF-2026-002",
-            date: "2026-01-11",
-            eventDate: "2026-01-25",
-            branch,
-            customer: "Juan Cruz",
-            packageName: "Birthday Package",
-            status: "confirmed",
-            amount: 8000,
-        },
-        {
-            id: "BK-003",
-            reference: "REF-2026-003",
-            date: "2026-01-12",
-            eventDate: "2026-01-30",
-            branch,
-            customer: "Anna Reyes",
-            packageName: "Debut Package",
-            status: "completed",
-            amount: 9500,
-        },
-        {
-            id: "BK-004",
-            reference: "REF-2026-004",
-            date: "2026-01-13",
-            eventDate: "2026-02-03",
-            branch,
-            customer: "Carlo Dela Cruz",
-            packageName: "Birthday Package",
-            status: "pending",
-            amount: 6500,
-        },
-        {
-            id: "BK-005",
-            reference: "REF-2026-005",
-            date: "2026-01-14",
-            eventDate: "2026-02-10",
-            branch,
-            customer: "Jessa Lim",
-            packageName: "Wedding Package",
-            status: "preparing",
-            amount: 14000,
-        },
-        {
-            id: "BK-006",
-            reference: "REF-2026-006",
-            date: "2026-01-15",
-            eventDate: "2026-02-12",
-            branch,
-            customer: "Miguel Ramos",
-            packageName: "Debut Package",
-            status: "cancelled",
-            amount: 7500,
-        },
-    ];
-}
-
-function fallbackSales(branch: string): SaleRecord[] {
-    return [
-        {
-            id: "sale-1",
-            reference: "POS-20260110-001",
-            date: "2026-01-10",
-            branch,
-            customer: "Walk-in Customer",
-            product: "Balloon Set",
-            category: "Balloons",
-            quantity: 15,
-            amount: 8500,
-            revenueSource: "pos",
-        },
-        {
-            id: "sale-2",
-            reference: "POS-20260111-002",
-            date: "2026-01-11",
-            branch,
-            customer: "Walk-in Customer",
-            product: "LED Lights",
-            category: "Lights & Sounds",
-            quantity: 20,
-            amount: 10200,
-            revenueSource: "pos",
-        },
-        {
-            id: "sale-3",
-            reference: "POS-20260112-003",
-            date: "2026-01-12",
-            branch,
-            customer: "Walk-in Customer",
-            product: "Plastic Chair",
-            category: "Furniture",
-            quantity: 18,
-            amount: 7800,
-            revenueSource: "pos",
-        },
-    ];
-}
-
-function fallbackForecasts(): ForecastRecord[] {
-    return [
-        {
-            id: "forecast-1",
-            item: "Balloon Set",
-            type: "Product",
-            currentValue: "120 units",
-            forecastedDemand: "180 units",
-            suggestedRestock: "+60 units",
-            riskLevel: "Medium",
-        },
-        {
-            id: "forecast-2",
-            item: "LED Lights",
-            type: "Product",
-            currentValue: "20 units",
-            forecastedDemand: "45 units",
-            suggestedRestock: "+25 units",
-            riskLevel: "High",
-        },
-        {
-            id: "forecast-3",
-            item: "Birthday Package",
-            type: "Package",
-            currentValue: "35 bookings",
-            forecastedDemand: "42 bookings",
-            suggestedRestock: "Prepare additional inventory",
-            riskLevel: "Low",
-        },
-    ];
-}
-
-function fallbackSeasons(): SeasonalInsight[] {
-    return [
-        {
-            period: "Graduation Season",
-            trend: "Higher event bookings",
-            recommendation: "Prepare balloon sets and backdrops.",
-        },
-        {
-            period: "December Holidays",
-            trend: "Increased package demand",
-            recommendation: "Increase package inventory.",
-        },
-        {
-            period: "Summer Months",
-            trend: "Higher wedding bookings",
-            recommendation: "Reserve wedding supplies early.",
-        },
-    ];
-}
-
-function fallbackStaffActivities(branch: string): StaffActivity[] {
-    return [
-        {
-            id: "staff-action-1",
-            date: "2026-06-05",
-            time: "10:42 AM",
-            staffName: "Ash",
-            role: "Staff",
-            action: "Approved booking",
-            module: "Bookings",
-            reference: "BKG-MKT-20260620-005",
-            details: "Approved booking BKG-MKT-20260620-005.",
-            branch,
-        },
-        {
-            id: "staff-action-2",
-            date: "2026-06-04",
-            time: "3:18 PM",
-            staffName: "Ellise Tamayo",
-            role: "Staff",
-            action: "Created POS transaction #12",
-            module: "Sales / POS",
-            reference: "POS-MKT-20260604-012",
-            details: "Made transaction #12 in Sales / POS.",
-            branch,
-        },
-        {
-            id: "staff-action-3",
-            date: "2026-06-04",
-            time: "1:05 PM",
-            staffName: "Shiela Maningo",
-            role: "Staff",
-            action: "Updated inventory stock",
-            module: "Inventory",
-            reference: "INV-MKT-20260604-003",
-            details: "Updated the stock record for Balloon Set.",
-            branch,
-        },
-        {
-            id: "staff-action-4",
-            date: "2026-06-03",
-            time: "4:20 PM",
-            staffName: "Mark Santos",
-            role: "Staff",
-            action: "Updated package details",
-            module: "Packages",
-            reference: "PKG-MKT-20260603-001",
-            details: "Updated the Birthday Package details and price.",
-            branch,
-        },
-    ];
-}
-
 function getInventoryVariants(item: InventoryItem) {
     return Array.isArray(item.variants) ? item.variants : [];
 }
@@ -2099,28 +1648,89 @@ function getVariantStatus(variant: InventoryVariant): InventoryStatus {
     return "In Stock";
 }
 
+type InventoryPriceRange = {
+    min: number;
+    max: number;
+};
+
+function getInventoryPriceRange(
+    item: InventoryItem,
+    priceKey: "costPrice" | "salesPrice"
+): InventoryPriceRange | null {
+    const variantPrices = getInventoryVariants(item)
+        .map((variant) => variant[priceKey])
+        .filter(
+            (price): price is number =>
+                typeof price === "number" && Number.isFinite(price) && price > 0
+        );
+
+    if (variantPrices.length > 0) {
+        return {
+            min: Math.min(...variantPrices),
+            max: Math.max(...variantPrices),
+        };
+    }
+
+    const directPrice = item[priceKey];
+
+    if (
+        typeof directPrice === "number" &&
+        Number.isFinite(directPrice) &&
+        directPrice > 0
+    ) {
+        return { min: directPrice, max: directPrice };
+    }
+
+    return null;
+}
+
 function getPriceRange(
     item: InventoryItem,
     priceKey: "costPrice" | "salesPrice"
 ) {
-    const directPrice = item[priceKey];
+    const range = getInventoryPriceRange(item, priceKey);
 
-    if (typeof directPrice === "number") {
-        return formatPeso(directPrice);
+    if (!range) return "—";
+
+    return range.min === range.max
+        ? formatPeso(range.min)
+        : `${formatPeso(range.min)} - ${formatPeso(range.max)}`;
+}
+
+function InventoryPriceValue({
+                                 item,
+                                 priceKey,
+                             }: {
+    item: InventoryItem;
+    priceKey: "costPrice" | "salesPrice";
+}) {
+    const range = getInventoryPriceRange(item, priceKey);
+
+    if (!range) {
+        return (
+            <span className="flex w-full items-center justify-center text-center tabular-nums">
+                —
+            </span>
+        );
     }
 
-    const values = getInventoryVariants(item)
-        .map((variant) => variant[priceKey])
-        .filter((price): price is number => typeof price === "number");
+    if (range.min === range.max) {
+        return (
+            <span className="flex w-full items-center justify-center whitespace-nowrap text-center tabular-nums">
+                {formatPeso(range.min)}
+            </span>
+        );
+    }
 
-    if (!values.length) return "—";
-
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-
-    return min === max
-        ? formatPeso(min)
-        : `${formatPeso(min)} – ${formatPeso(max)}`;
+    return (
+        <span className="flex w-full flex-col items-center justify-center text-center tabular-nums leading-[1.15]">
+            <span className="whitespace-nowrap">{formatPeso(range.min)}</span>
+            <span className="w-full text-center" aria-hidden="true">
+                -
+            </span>
+            <span className="whitespace-nowrap">{formatPeso(range.max)}</span>
+        </span>
+    );
 }
 
 function getBookingStatusLabel(booking: BookingRecord) {
@@ -2364,105 +1974,6 @@ function StatCard({
     );
 }
 
-function SalesFilterCard({
-                             label,
-                             value,
-                             helper,
-                             active,
-                             onClick,
-                         }: {
-    label: string;
-    value: string;
-    helper: string;
-    active: boolean;
-    onClick: () => void;
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            aria-pressed={active}
-            className={`group cursor-pointer rounded-[14px] border p-3 text-left shadow-sm transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[#2B174C]/30 ${
-                active
-                    ? "border-[#2B174C] bg-[#2B174C] text-white shadow-[0_8px_18px_rgba(43,23,76,0.18)] hover:bg-[#1B0D31] hover:shadow-[0_12px_24px_rgba(43,23,76,0.26)]"
-                    : "border-[#E6DDF0] bg-white text-[#1A1220] hover:border-[#BFA3D5] hover:bg-[#FCF9FF] hover:shadow-[0_10px_22px_rgba(43,23,76,0.12)]"
-            }`}
-        >
-            <p
-                className={`text-xs font-semibold transition-colors ${
-                    active
-                        ? "text-[#EBDCFF]"
-                        : "text-[#806A8C] group-hover:text-[#6F4D83]"
-                }`}
-            >
-                {label}
-            </p>
-
-            <p className="mt-1 text-[19px] font-bold">{value}</p>
-
-            <p
-                className={`mt-1 text-xs transition-colors ${
-                    active
-                        ? "text-[#F4E9B8]"
-                        : "text-[#7A6A84] group-hover:text-[#5F4E75]"
-                }`}
-            >
-                {helper}
-            </p>
-        </button>
-    );
-}
-
-function InventoryFilterCard({
-                                 label,
-                                 value,
-                                 helper,
-                                 active,
-                                 onClick,
-                             }: {
-    label: string;
-    value: string;
-    helper: string;
-    active: boolean;
-    onClick: () => void;
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            aria-pressed={active}
-            title={`View ${label.toLowerCase()} items`}
-            className={`group cursor-pointer rounded-[14px] border p-3 text-left shadow-sm transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[#2B174C]/30 ${
-                active
-                    ? "border-[#2B174C] bg-[#2B174C] text-white shadow-[0_8px_18px_rgba(43,23,76,0.18)] hover:bg-[#1B0D31] hover:shadow-[0_12px_24px_rgba(43,23,76,0.26)]"
-                    : "border-[#E6DDF0] bg-white text-[#1A1220] hover:border-[#BFA3D5] hover:bg-[#FCF9FF] hover:shadow-[0_10px_22px_rgba(43,23,76,0.12)]"
-            }`}
-        >
-            <p
-                className={`text-[11px] font-medium tracking-[0.08em] transition-colors ${
-                    active
-                        ? "text-[#EBDCFF]"
-                        : "text-[#9B8AAA] group-hover:text-[#6F4D83]"
-                }`}
-            >
-                {label}
-            </p>
-
-            <p className="mt-1 text-[19px] font-bold">{value}</p>
-
-            <p
-                className={`mt-1 text-xs transition-colors ${
-                    active
-                        ? "text-[#F4E9B8]"
-                        : "text-[#8A7A91] group-hover:text-[#5F4E75]"
-                }`}
-            >
-                {helper}
-            </p>
-        </button>
-    );
-}
-
 function StaffModuleFilterCard({
                                    label,
                                    value,
@@ -2541,66 +2052,6 @@ function BookingFilterCard({
     );
 }
 
-function ReportModuleCard({
-                              title,
-                              subtitle,
-                              icon: Icon,
-                              metricLabel,
-                              metricValue,
-                              detail,
-                              onClick,
-                          }: {
-    title: string;
-    subtitle: string;
-    icon: ComponentType<{ size?: number; strokeWidth?: number }>;
-    metricLabel: string;
-    metricValue: string;
-    detail: string;
-    onClick: () => void;
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            className="group relative flex min-h-[166px] flex-col rounded-[14px] border border-[#E6DDF0] bg-white p-3 text-left shadow-sm transition duration-200 hover:border-[#CDB7E1] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#2B174C]/30"
-            aria-label={`Open ${title}`}
-        >
-            <div className="flex items-start justify-between gap-4">
-        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#F7F1FF] text-[#8B4DFF] transition group-hover:bg-[#EEE2FF]">
-          <Icon size={22} strokeWidth={1.9} />
-        </span>
-
-                <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#735184] transition group-hover:text-[#2B174C]">
-          View report
-          <ArrowRight size={14} className="transition-transform group-hover:translate-x-0.5" />
-        </span>
-            </div>
-
-            <div className="mt-3">
-                <h3 className="text-[16px] font-bold text-[#1A1220]">
-                    {title}
-                </h3>
-                <p className="mt-1 text-xs text-[#7A6A84]">{subtitle}</p>
-            </div>
-
-            <div className="mt-auto flex items-end justify-between gap-3 border-t border-[#F0E9F4] pt-3">
-                <div>
-                    <p className="text-xs font-semibold text-[#806A8C]">
-                        {metricLabel}
-                    </p>
-                    <p className="mt-1 text-[19px] font-bold text-[#1A1220]">
-                        {metricValue}
-                    </p>
-                </div>
-
-                <p className="max-w-[155px] text-right text-xs leading-5 text-[#7A6A84]">
-                    {detail}
-                </p>
-            </div>
-        </button>
-    );
-}
-
 function SectionCard({
                          title,
                          subtitle,
@@ -2623,127 +2074,1767 @@ function SectionCard({
     );
 }
 
-function OwnerBranchSelector({
-                                 value,
-                                 options,
-                                 onChange,
+function InventoryExportMenu({
+                                 onExportPdf,
+                                 onExportXlsx,
+                                 onExportDoc,
                              }: {
-    value: string;
-    options: string[];
-    onChange: (branch: string) => void;
+    onExportPdf: () => void;
+    onExportXlsx: () => void;
+    onExportDoc: () => void;
 }) {
-    const [query, setQuery] = useState("");
     const [isOpen, setIsOpen] = useState(false);
 
-    const filteredOptions = useMemo(() => {
-        const normalizedQuery = query.trim().toLowerCase();
-
-        if (!normalizedQuery) {
-            return options;
-        }
-
-        return options.filter((option) =>
-            option.toLowerCase().includes(normalizedQuery)
-        );
-    }, [options, query]);
-
-    const inputValue = isOpen ? query : value;
-
-    const chooseBranch = (branch: string) => {
-        onChange(branch);
-        setQuery("");
+    const runExport = (callback: () => void) => {
+        callback();
         setIsOpen(false);
     };
 
     return (
-        <div className="relative w-full sm:w-[260px]">
-            <p className="mb-1 text-[10px] font-medium tracking-[0.08em] text-[#806A8C]">
-                BRANCH
-            </p>
-
-            <div className="relative">
-                <Search
-                    size={15}
-                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#806A8C]"
-                />
-
-                <input
-                    value={inputValue}
-                    onFocus={() => {
-                        setIsOpen(true);
-                        setQuery("");
-                    }}
-                    onBlur={() => {
-                        window.setTimeout(() => {
-                            setIsOpen(false);
-                            setQuery("");
-                        }, 150);
-                    }}
-                    onChange={(event) => {
-                        setQuery(event.target.value);
-                        setIsOpen(true);
-                    }}
-                    onKeyDown={(event) => {
-                        if (event.key === "Escape") {
-                            setIsOpen(false);
-                            setQuery("");
-                            event.currentTarget.blur();
-                        }
-
-                        if (event.key === "Enter" && filteredOptions.length === 1) {
-                            event.preventDefault();
-                            chooseBranch(filteredOptions[0]);
-                        }
-                    }}
-                    placeholder="Search or select branch..."
-                    aria-label="Search or select report branch"
-                    aria-expanded={isOpen}
-                    aria-haspopup="listbox"
-                    className="h-9 w-full rounded-lg border border-[#E6DDF0] bg-white px-9 pr-9 text-sm font-normal text-[#1A1220] outline-none transition placeholder:text-[#A99BB1] focus:border-[#8D63C8] focus:ring-2 focus:ring-[#8D63C8]/15"
-                />
-
+        <div
+            className="relative mt-4"
+            onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                    setIsOpen(false);
+                }
+            }}
+        >
+            <button
+                type="button"
+                onClick={() => setIsOpen((current) => !current)}
+                aria-expanded={isOpen}
+                aria-haspopup="menu"
+                className="flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-[#7C4DFF] bg-white text-[12px] font-bold text-[#6334D4] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#F4EDFF] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#7C4DFF]/20"
+            >
+                <FileSpreadsheet size={14} />
+                Export Filtered Inventory
                 <ChevronDown
-                    size={15}
-                    className={`pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#5F4E75] transition-transform ${
-                        isOpen ? "rotate-180" : ""
-                    }`}
+                    size={14}
+                    className={`transition-transform ${isOpen ? "rotate-180" : ""}`}
                 />
-            </div>
+            </button>
 
-            {isOpen && (
+            {isOpen ? (
+                <div
+                    role="menu"
+                    className="absolute bottom-[46px] left-0 right-0 z-30 overflow-hidden rounded-xl border border-[#E2D7EA] bg-white p-1.5 shadow-[0_14px_35px_rgba(43,23,76,0.18)]"
+                >
+                    <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => runExport(onExportPdf)}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-[#3C2947] transition hover:bg-[#F6F0FC] hover:text-[#6334D4]"
+                    >
+                        <FileText size={14} />
+                        Export as PDF
+                    </button>
+                    <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => runExport(onExportXlsx)}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-[#3C2947] transition hover:bg-[#F6F0FC] hover:text-[#6334D4]"
+                    >
+                        <FileSpreadsheet size={14} />
+                        Export as XLSX
+                    </button>
+                    <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => runExport(onExportDoc)}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-[#3C2947] transition hover:bg-[#F6F0FC] hover:text-[#6334D4]"
+                    >
+                        <FileText size={14} />
+                        Export as DOC
+                    </button>
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
+
+
+type SearchableSelectOption<T extends string> = {
+    value: T;
+    label: string;
+};
+
+type SearchableFilterSelectProps<T extends string> = {
+    value: T;
+    options: ReadonlyArray<SearchableSelectOption<T>>;
+    onChange: (value: T) => void;
+    icon: ComponentType<{
+        size?: number;
+        className?: string;
+        strokeWidth?: number;
+    }>;
+    ariaLabel: string;
+    className?: string;
+};
+
+function SearchableFilterSelect<T extends string>({
+                                                      value,
+                                                      options,
+                                                      onChange,
+                                                      icon: Icon,
+                                                      ariaLabel,
+                                                      className = "",
+                                                  }: SearchableFilterSelectProps<T>) {
+    const selectedLabel =
+        options.find((option) => option.value === value)?.label || "";
+    const [query, setQuery] = useState(selectedLabel);
+    const [isOpen, setIsOpen] = useState(false);
+
+    useEffect(() => {
+        if (!isOpen) {
+            setQuery(selectedLabel);
+        }
+    }, [isOpen, selectedLabel]);
+
+    const filteredOptions = useMemo(() => {
+        const normalizedQuery = query.trim().toLowerCase();
+
+        if (!normalizedQuery || normalizedQuery === selectedLabel.toLowerCase()) {
+            return options;
+        }
+
+        return options.filter((option) =>
+            option.label.toLowerCase().includes(normalizedQuery)
+        );
+    }, [options, query, selectedLabel]);
+
+    const selectOption = (option: SearchableSelectOption<T>) => {
+        onChange(option.value);
+        setQuery(option.label);
+        setIsOpen(false);
+    };
+
+    return (
+        <div
+            className={`relative ${className}`}
+            onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                    setIsOpen(false);
+                    setQuery(selectedLabel);
+                }
+            }}
+        >
+            <Icon
+                size={14}
+                className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-[#87748F]"
+            />
+
+            <input
+                type="text"
+                role="combobox"
+                aria-label={ariaLabel}
+                aria-expanded={isOpen}
+                aria-autocomplete="list"
+                value={query}
+                onFocus={(event) => {
+                    setIsOpen(true);
+                    event.currentTarget.select();
+                }}
+                onClick={() => setIsOpen(true)}
+                onChange={(event) => {
+                    setQuery(event.target.value);
+                    setIsOpen(true);
+                }}
+                onKeyDown={(event) => {
+                    if (event.key === "Enter" && filteredOptions.length > 0) {
+                        event.preventDefault();
+                        selectOption(filteredOptions[0]);
+                    }
+
+                    if (event.key === "Escape") {
+                        setIsOpen(false);
+                        setQuery(selectedLabel);
+                    }
+                }}
+                className="h-11 w-full rounded-xl border border-[#E3D9E9] bg-white pl-9 pr-8 text-[12px] font-semibold text-[#2D2035] shadow-sm outline-none transition focus:border-[#8D63C8] focus:ring-2 focus:ring-[#8D63C8]/10"
+            />
+
+            <button
+                type="button"
+                tabIndex={-1}
+                aria-label={`Open ${ariaLabel}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setIsOpen((current) => !current)}
+                className="absolute right-0 top-0 flex h-11 w-9 items-center justify-center text-[#6F5C7C]"
+            >
+                <ChevronDown
+                    size={14}
+                    className={`transition-transform ${isOpen ? "rotate-180" : ""}`}
+                />
+            </button>
+
+            {isOpen ? (
                 <div
                     role="listbox"
-                    className="absolute z-40 mt-2 max-h-56 w-full overflow-y-auto rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-lg"
+                    className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 max-h-56 overflow-y-auto rounded-xl border border-[#E3D9E9] bg-white p-1.5 shadow-[0_14px_35px_rgba(43,23,76,0.18)]"
                 >
                     {filteredOptions.length > 0 ? (
                         filteredOptions.map((option) => {
-                            const selected = option === value;
+                            const isSelected = option.value === value;
 
                             return (
                                 <button
-                                    key={option}
+                                    key={option.value}
                                     type="button"
                                     role="option"
-                                    aria-selected={selected}
-                                    onMouseDown={(event) => event.preventDefault()}
-                                    onClick={() => chooseBranch(option)}
-                                    className={`flex w-full items-center rounded-lg px-3 py-2.5 text-left text-sm transition ${
-                                        selected
-                                            ? "bg-[#F0EAFE] font-semibold text-[#2B174C]"
-                                            : "text-[#1A1220] hover:bg-[#F7F1FF]"
+                                    aria-selected={isSelected}
+                                    onClick={() => selectOption(option)}
+                                    className={`flex w-full items-center rounded-lg px-3 py-2 text-left text-[12px] font-semibold transition ${
+                                        isSelected
+                                            ? "bg-[#F1E9FF] text-[#6334D4]"
+                                            : "text-[#3C2947] hover:bg-[#F8F3FF] hover:text-[#6334D4]"
                                     }`}
                                 >
-                                    <span className="truncate">{option}</span>
+                                    {option.label}
                                 </button>
                             );
                         })
                     ) : (
-                        <p className="px-3 py-4 text-sm text-[#8A7A91]">
-                            No matching branch found.
+                        <p className="px-3 py-2 text-[11px] text-[#8A7A91]">
+                            No matching option found.
                         </p>
                     )}
                 </div>
+            ) : null}
+        </div>
+    );
+}
+
+type ReportFilterBarProps = {
+    selectedReport: ReportKey | null;
+    searchQuery: string;
+    onSearchChange: (value: string) => void;
+    startDate: string;
+    endDate: string;
+    onStartDateChange: (value: string) => void;
+    onEndDateChange: (value: string) => void;
+    categoryFilter: string;
+    inventoryCategories: string[];
+    onCategoryChange: (value: string) => void;
+    bookingStatusFilter: BookingFilter;
+    onBookingStatusChange: (value: BookingFilter) => void;
+    packageStatusFilter: PackageStatusFilter;
+    onPackageStatusChange: (value: PackageStatusFilter) => void;
+    staffModuleFilter: StaffModuleFilter;
+    onStaffModuleChange: (value: StaffModuleFilter) => void;
+    showBranchFilter: boolean;
+    branch: string;
+    branchOptions: string[];
+    onBranchChange: (value: string) => void;
+    onClear: () => void;
+};
+
+function ReportFilterBar({
+                             selectedReport,
+                             searchQuery,
+                             onSearchChange,
+                             startDate,
+                             endDate,
+                             onStartDateChange,
+                             onEndDateChange,
+                             categoryFilter,
+                             inventoryCategories,
+                             onCategoryChange,
+                             bookingStatusFilter,
+                             onBookingStatusChange,
+                             packageStatusFilter,
+                             onPackageStatusChange,
+                             staffModuleFilter,
+                             onStaffModuleChange,
+                             showBranchFilter,
+                             branch,
+                             branchOptions,
+                             onBranchChange,
+                             onClear,
+                         }: ReportFilterBarProps) {
+    const isInventory = selectedReport === "inventory";
+    const isBooking = selectedReport === "bookings";
+    const isPackages = selectedReport === "packages";
+    const isStaff = selectedReport === "staff";
+    const hasOptionFilter = isInventory || isBooking || isPackages || isStaff;
+    const searchSpan = hasOptionFilter
+        ? showBranchFilter
+            ? "xl:col-span-3"
+            : "xl:col-span-5"
+        : showBranchFilter
+            ? "xl:col-span-5"
+            : "xl:col-span-7";
+    const optionSpan = "xl:col-span-2";
+    const bookingStatusOptions: Array<SearchableSelectOption<BookingFilter>> = [
+        { value: "all", label: "All Status" },
+        { value: "pending", label: "Pending" },
+        { value: "confirmed", label: "Confirmed" },
+        { value: "preparing", label: "Preparing" },
+        { value: "completed", label: "Completed" },
+        { value: "cancelled", label: "Cancelled" },
+    ];
+    const packageStatusOptions: Array<SearchableSelectOption<PackageStatusFilter>> = [
+        { value: "all", label: "All Status" },
+        { value: "active", label: "Active" },
+        { value: "inactive", label: "Inactive" },
+    ];
+    const staffModuleOptions: Array<SearchableSelectOption<StaffModuleFilter>> = [
+        { value: "all", label: "All Modules" },
+        { value: "Bookings", label: "Bookings" },
+        { value: "Inventory", label: "Inventory" },
+        { value: "Packages", label: "Packages" },
+        { value: "Sales / POS", label: "Sales / POS" },
+    ];
+    const searchableBranchOptions: Array<SearchableSelectOption<string>> =
+        branchOptions.map((option) => ({ value: option, label: option }));
+
+    const placeholder =
+        selectedReport === "inventory"
+            ? "Search products or variants..."
+            : selectedReport === "restock"
+                ? "Search restock records..."
+                : selectedReport === "sales"
+                    ? "Search POS order..."
+                    : selectedReport === "bookings"
+                        ? "Search booking or customer..."
+                        : selectedReport === "staff"
+                            ? "Search employee action..."
+                            : "Search packages...";
+
+    return (
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-12">
+            <label className={`relative sm:col-span-2 ${searchSpan}`}>
+                <Search
+                    size={15}
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#887496]"
+                />
+                <input
+                    value={searchQuery}
+                    onChange={(event) => onSearchChange(event.target.value)}
+                    placeholder={placeholder}
+                    className="h-11 w-full rounded-xl border border-[#E3D9E9] bg-white pl-9 pr-3 text-[12px] text-[#1A1220] shadow-sm outline-none transition focus:border-[#8D63C8] focus:ring-2 focus:ring-[#8D63C8]/10"
+                />
+            </label>
+
+            <label className="relative xl:col-span-2">
+                <CalendarDays
+                    size={14}
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#87748F]"
+                />
+                <span className="pointer-events-none absolute left-9 top-1/2 -translate-y-1/2 text-[9px] font-bold tracking-[0.08em] text-[#8B7695]">
+                    FROM
+                </span>
+                <input
+                    type="date"
+                    value={startDate}
+                    max={endDate}
+                    onChange={(event) => onStartDateChange(event.target.value)}
+                    aria-label="Report start date"
+                    className="h-11 w-full rounded-xl border border-[#E3D9E9] bg-white pb-0 pl-[72px] pr-2 text-[11px] font-semibold text-[#2D2035] shadow-sm outline-none transition focus:border-[#8D63C8]"
+                />
+            </label>
+
+            <label className="relative xl:col-span-2">
+                <CalendarDays
+                    size={14}
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#87748F]"
+                />
+                <span className="pointer-events-none absolute left-9 top-1/2 -translate-y-1/2 text-[9px] font-bold tracking-[0.08em] text-[#8B7695]">
+                    TO
+                </span>
+                <input
+                    type="date"
+                    value={endDate}
+                    min={startDate}
+                    onChange={(event) => onEndDateChange(event.target.value)}
+                    aria-label="Report end date"
+                    className="h-11 w-full rounded-xl border border-[#E3D9E9] bg-white pb-0 pl-[58px] pr-2 text-[11px] font-semibold text-[#2D2035] shadow-sm outline-none transition focus:border-[#8D63C8]"
+                />
+            </label>
+
+            {isInventory ? (
+                <label className={`relative ${optionSpan}`}>
+                    <Package
+                        size={14}
+                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#87748F]"
+                    />
+                    <select
+                        value={categoryFilter}
+                        onChange={(event) => onCategoryChange(event.target.value)}
+                        className="h-11 w-full appearance-none rounded-xl border border-[#E3D9E9] bg-white pl-9 pr-8 text-[12px] font-semibold text-[#2D2035] shadow-sm outline-none transition focus:border-[#8D63C8]"
+                    >
+                        <option value="all">All Categories</option>
+                        {inventoryCategories.map((category) => (
+                            <option key={category} value={category}>
+                                {category}
+                            </option>
+                        ))}
+                    </select>
+                    <ChevronDown
+                        size={14}
+                        className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#6F5C7C]"
+                    />
+                </label>
+            ) : null}
+
+            {isBooking ? (
+                <SearchableFilterSelect
+                    className={optionSpan}
+                    value={bookingStatusFilter}
+                    options={bookingStatusOptions}
+                    onChange={onBookingStatusChange}
+                    icon={CalendarDays}
+                    ariaLabel="Booking status filter"
+                />
+            ) : null}
+
+            {isPackages ? (
+                <SearchableFilterSelect
+                    className={optionSpan}
+                    value={packageStatusFilter}
+                    options={packageStatusOptions}
+                    onChange={onPackageStatusChange}
+                    icon={Package}
+                    ariaLabel="Package status filter"
+                />
+            ) : null}
+
+            {isStaff ? (
+                <SearchableFilterSelect
+                    className={optionSpan}
+                    value={staffModuleFilter}
+                    options={staffModuleOptions}
+                    onChange={onStaffModuleChange}
+                    icon={Users}
+                    ariaLabel="Employee action module filter"
+                />
+            ) : null}
+
+            {showBranchFilter ? (
+                <SearchableFilterSelect
+                    className="xl:col-span-2"
+                    value={branch}
+                    options={searchableBranchOptions}
+                    onChange={onBranchChange}
+                    icon={Store}
+                    ariaLabel="Branch filter"
+                />
+            ) : null}
+
+            <button
+                type="button"
+                onClick={onClear}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-[#E3D9E9] bg-white px-3 text-[11px] font-semibold text-[#4F3B5C] shadow-sm transition-all duration-200 hover:border-[#A77CE8] hover:bg-[#F8F3FF] hover:text-[#5F2DB9] xl:col-span-1"
+            >
+                <RotateCcw size={14} />
+                Clear
+            </button>
+        </div>
+    );
+}
+
+type InventoryItemsTableProps = {
+    items: InventoryItem[];
+    showBranchColumn: boolean;
+    expandedInventoryId: string | null;
+    onToggleExpanded: (itemId: string) => void;
+};
+
+function InventoryItemsTable({
+                                 items,
+                                 showBranchColumn,
+                                 expandedInventoryId,
+                                 onToggleExpanded,
+                             }: InventoryItemsTableProps) {
+    const columnCount = showBranchColumn ? 10 : 9;
+
+    return (
+        <table className="w-full table-fixed border-collapse text-[11px]">
+            <colgroup>
+                <col className={showBranchColumn ? "w-[18%]" : "w-[25%]"} />
+                {showBranchColumn ? <col className="w-[11%]" /> : null}
+                <col className={showBranchColumn ? "w-[9%]" : "w-[13%]"} />
+                <col className="w-[8%]" />
+                <col className="w-[6%]" />
+                <col className="w-[6%]" />
+                <col className={showBranchColumn ? "w-[9%]" : "w-[10%]"} />
+                <col className={showBranchColumn ? "w-[9%]" : "w-[10%]"} />
+                <col className={showBranchColumn ? "w-[13%]" : "w-[12%]"} />
+                <col className={showBranchColumn ? "w-[11%]" : "w-[10%]"} />
+            </colgroup>
+
+            <thead>
+            <tr className="border-b border-[#E8DFED] bg-[#FCFAFD]">
+                <th className="px-3 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                    Product
+                </th>
+                {showBranchColumn ? (
+                    <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                        Branch
+                    </th>
+                ) : null}
+                <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                    Category
+                </th>
+                <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                    Type
+                </th>
+                <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                    Stock
+                </th>
+                <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                    Alert
+                </th>
+                <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                    Cost Price
+                </th>
+                <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                    Selling Price
+                </th>
+                <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                    Expiration Date
+                </th>
+                <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                    Status
+                </th>
+            </tr>
+            </thead>
+
+            <tbody>
+            {items.length > 0 ? (
+                items.map((item) => {
+                    const variants = getInventoryVariants(item);
+                    const hasVariants = variants.length > 0;
+                    const isExpanded = expandedInventoryId === item.id;
+                    const expirationStatus = getExpirationStatus(item.expiryDate);
+                    const stockTextClass =
+                        item.status === "Out of Stock"
+                            ? "text-[#E3322A]"
+                            : item.status === "Low Stock"
+                                ? "text-[#F07800]"
+                                : "text-[#12A150]";
+                    const productTextClass =
+                        expirationStatus === "Expired"
+                            ? "text-[#D7312A]"
+                            : "text-[#20152A]";
+
+                    return (
+                        <Fragment key={item.id}>
+                            <tr
+                                className={`border-b border-[#EFE8F2] transition-colors ${
+                                    isExpanded
+                                        ? "bg-[#F8F2FC]"
+                                        : "bg-white hover:bg-[#FCFAFF]"
+                                }`}
+                            >
+                                <td className="px-3 py-3 align-top">
+                                    <div className="flex min-w-0 items-start gap-2">
+                                        {hasVariants ? (
+                                            <button
+                                                type="button"
+                                                onClick={() => onToggleExpanded(item.id)}
+                                                className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[#4E2C66] transition hover:bg-[#EEE4F7] hover:text-[#6D35D1]"
+                                                aria-label={
+                                                    isExpanded
+                                                        ? `Hide ${item.product} variants`
+                                                        : `Show ${item.product} variants`
+                                                }
+                                            >
+                                                {isExpanded ? (
+                                                    <ChevronUp size={14} />
+                                                ) : (
+                                                    <ChevronDown size={14} />
+                                                )}
+                                            </button>
+                                        ) : (
+                                            <span className="block h-5 w-5 shrink-0" />
+                                        )}
+
+                                        <div className="min-w-0">
+                                            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                                                <p className={`break-words font-semibold ${productTextClass}`}>
+                                                    {item.product}
+                                                </p>
+                                                {expirationStatus === "Expired" ? (
+                                                    <span className="shrink-0 rounded-full border border-[#F2B5B0] bg-[#FFF0EF] px-1.5 py-0.5 text-[8px] font-bold text-[#D7312A]">
+                                                            Expired
+                                                        </span>
+                                                ) : null}
+                                            </div>
+                                            {hasVariants ? (
+                                                <p className="mt-0.5 break-words text-[9px] text-[#8C7A95]">
+                                                    {variants.length} variant{variants.length === 1 ? "" : "s"}
+                                                </p>
+                                            ) : null}
+                                        </div>
+                                    </div>
+                                </td>
+
+                                {showBranchColumn ? (
+                                    <td
+                                        className="whitespace-normal break-words px-2 py-3 align-top leading-snug text-[#5F5267]"
+                                        title={item.branch}
+                                    >
+                                        {item.branch}
+                                    </td>
+                                ) : null}
+
+                                <td className="break-words px-2 py-3 align-top text-[#5F5267]">
+                                    {item.category}
+                                </td>
+                                <td className="break-words px-2 py-3 align-top text-[#5F5267]">
+                                    {hasVariants
+                                        ? `${variants.length} variant${variants.length === 1 ? "" : "s"}`
+                                        : "Regular"}
+                                </td>
+                                <td className={`px-2 py-3 text-center align-top font-bold ${stockTextClass}`}>
+                                    {formatNumber(item.stock)}
+                                </td>
+                                <td className="px-2 py-3 text-center align-top font-semibold text-[#685674]">
+                                    {formatNumber(item.reorderLevel)}
+                                </td>
+                                <td className="px-2 py-3 text-center align-top font-semibold text-[#5F5267]">
+                                    <InventoryPriceValue item={item} priceKey="costPrice" />
+                                </td>
+                                <td className="px-2 py-3 text-center align-top font-bold text-[#251A2C]">
+                                    <InventoryPriceValue item={item} priceKey="salesPrice" />
+                                </td>
+                                <td
+                                    className={`px-2 py-3 text-center align-top text-[10px] font-semibold ${
+                                        expirationStatus === "Expired"
+                                            ? "text-[#D7312A]"
+                                            : expirationStatus === "Soon to Expire"
+                                                ? "text-[#D97706]"
+                                                : "text-[#685674]"
+                                    }`}
+                                >
+                                    {item.expiryDate ? formatDate(item.expiryDate) : "No Expiry"}
+                                </td>
+                                <td className="px-2 py-3 text-center align-top">
+                                    <StatusBadge status={item.status} />
+                                </td>
+                            </tr>
+
+                            {hasVariants && isExpanded
+                                ? variants.map((variant) => {
+                                    const variantExpiration = getExpirationStatus(
+                                        variant.expiryDate
+                                    );
+                                    const variantStatus = getVariantStatus(variant);
+                                    const variantStockClass =
+                                        variantStatus === "Out of Stock"
+                                            ? "text-[#E3322A]"
+                                            : variantStatus === "Low Stock"
+                                                ? "text-[#F07800]"
+                                                : "text-[#12A150]";
+
+                                    return (
+                                        <tr
+                                            key={variant.id}
+                                            className="border-b border-[#E8DDF0] bg-[#FBF7FE] transition hover:bg-[#F6EFFB]"
+                                        >
+                                            <td className="px-3 py-3 align-top">
+                                                <div className="flex min-w-0 items-start gap-3 pl-8">
+                                                    <span className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-[#9B65D6]" />
+                                                    <div className="min-w-0">
+                                                        <p className="break-words font-semibold text-[#3C2947]">
+                                                            {variant.name}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            </td>
+
+                                            {showBranchColumn ? (
+                                                <td className="px-2 py-3 align-top text-[#9A8CA2]">—</td>
+                                            ) : null}
+                                            <td className="px-2 py-3 align-top text-[#9A8CA2]">—</td>
+                                            <td className="px-2 py-3 align-top text-[#6A5D6F]">Variant</td>
+                                            <td className={`px-2 py-3 text-center align-top font-bold ${variantStockClass}`}>
+                                                {formatNumber(variant.stock)}
+                                            </td>
+                                            <td className="px-2 py-3 text-center align-top text-[#6A5D6F]">
+                                                {formatNumber(variant.reorderLevel ?? 0)}
+                                            </td>
+                                            <td className="px-2 py-3 text-center align-top text-[#6A5D6F]">
+                                                <span className="flex w-full items-center justify-center whitespace-nowrap text-center tabular-nums">
+                                                    {typeof variant.costPrice === "number" && variant.costPrice > 0
+                                                        ? formatPeso(variant.costPrice)
+                                                        : "—"}
+                                                </span>
+                                            </td>
+                                            <td className="px-2 py-3 text-center align-top font-semibold text-[#251A2C]">
+                                                <span className="flex w-full items-center justify-center whitespace-nowrap text-center tabular-nums">
+                                                    {typeof variant.salesPrice === "number" && variant.salesPrice > 0
+                                                        ? formatPeso(variant.salesPrice)
+                                                        : "—"}
+                                                </span>
+                                            </td>
+                                            <td
+                                                className={`px-2 py-3 text-center align-top text-[10px] font-semibold ${
+                                                    variantExpiration === "Expired"
+                                                        ? "text-[#D7312A]"
+                                                        : variantExpiration === "Soon to Expire"
+                                                            ? "text-[#D97706]"
+                                                            : "text-[#685674]"
+                                                }`}
+                                            >
+                                                {variant.expiryDate
+                                                    ? formatDate(variant.expiryDate)
+                                                    : "No Expiry"}
+                                            </td>
+                                            <td className="px-2 py-3 text-center align-top">
+                                                <StatusBadge status={variantStatus} />
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                                : null}
+                        </Fragment>
+                    );
+                })
+            ) : (
+                <tr>
+                    <td
+                        colSpan={columnCount}
+                        className="px-4 py-14 text-center text-sm text-[#8A7A91]"
+                    >
+                        No inventory items match the selected filters.
+                    </td>
+                </tr>
             )}
+            </tbody>
+        </table>
+    );
+}
+
+type RestockReportViewProps = {
+    records: RestockRecord[];
+    showBranchColumn: boolean;
+};
+
+function RestockReportView({
+                               records,
+                               showBranchColumn,
+                           }: RestockReportViewProps) {
+    const totalUnitsAdded = sumBy(records, (item) => item.quantityAdded);
+    const productsRestocked = new Set(
+        records.map((item) => item.product.trim().toLowerCase()).filter(Boolean)
+    ).size;
+    const variantsRestocked = new Set(
+        records
+            .map((item) => item.variantName?.trim().toLowerCase() || "")
+            .filter(Boolean)
+    ).size;
+
+    const latestRestock = [...records].sort((left, right) =>
+        right.date.localeCompare(left.date)
+    )[0];
+
+    const restockByProduct = Array.from(
+        records.reduce((summary, item) => {
+            const product = item.product || "Unnamed Product";
+            summary.set(
+                product,
+                (summary.get(product) || 0) + Number(item.quantityAdded || 0)
+            );
+            return summary;
+        }, new Map<string, number>())
+    )
+        .map(([name, quantity]) => ({ name, quantity }))
+        .sort((left, right) => right.quantity - left.quantity)
+        .slice(0, 6);
+
+    const largestRestockQuantity = Math.max(
+        1,
+        ...restockByProduct.map((item) => item.quantity)
+    );
+    const columnCount = showBranchColumn ? 8 : 7;
+
+    return (
+        <div className="grid grid-cols-1 items-start gap-3 2xl:grid-cols-[minmax(0,1fr)_260px]">
+            <section className="min-w-0 self-start overflow-hidden rounded-[14px] border border-[#E5DDEA] bg-white shadow-sm">
+                <div className="border-b border-[#ECE5F0] px-4 py-3.5">
+                    <h2 className="text-[16px] font-bold text-[#1A1220]">
+                        Restock Report History
+                    </h2>
+                    <p className="mt-1 text-[11px] text-[#8A7A91]">
+                        Review product restocks, quantities added, stock movement, and receiving details.
+                    </p>
+                </div>
+
+                <table className="w-full table-fixed border-collapse text-[11px]">
+                    <colgroup>
+                        <col className={showBranchColumn ? "w-[13%]" : "w-[14%]"} />
+                        <col className={showBranchColumn ? "w-[22%]" : "w-[27%]"} />
+                        {showBranchColumn ? <col className="w-[12%]" /> : null}
+                        <col className={showBranchColumn ? "w-[10%]" : "w-[11%]"} />
+                        <col className={showBranchColumn ? "w-[9%]" : "w-[10%]"} />
+                        <col className={showBranchColumn ? "w-[10%]" : "w-[11%]"} />
+                        <col className={showBranchColumn ? "w-[10%]" : "w-[11%]"} />
+                        <col className={showBranchColumn ? "w-[14%]" : "w-[16%]"} />
+                    </colgroup>
+
+                    <thead>
+                    <tr className="border-b border-[#E8DFED] bg-[#FCFAFD]">
+                        <th className="px-3 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Date
+                        </th>
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Product
+                        </th>
+                        {showBranchColumn ? (
+                            <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                                Branch
+                            </th>
+                        ) : null}
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Type
+                        </th>
+                        <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Stock Before
+                        </th>
+                        <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Qty Added
+                        </th>
+                        <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Current Stock
+                        </th>
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Received By
+                        </th>
+                    </tr>
+                    </thead>
+
+                    <tbody>
+                    {records.length > 0 ? (
+                        records.map((item) => {
+                            const stockBefore =
+                                typeof item.stockBefore === "number"
+                                    ? item.stockBefore
+                                    : Math.max(
+                                        Number(item.currentStock || 0) -
+                                        Number(item.quantityAdded || 0),
+                                        0
+                                    );
+
+                            return (
+                                <tr
+                                    key={item.id}
+                                    className="border-b border-[#EFE8F2] bg-white transition-colors hover:bg-[#FCFAFF]"
+                                >
+                                    <td className="px-3 py-3 align-top">
+                                        <p className="font-semibold text-[#1A1220]">
+                                            {formatDate(item.date)}
+                                        </p>
+                                        <p className="mt-0.5 break-words text-[9px] text-[#8C7A95]">
+                                            {item.reference || item.id}
+                                        </p>
+                                    </td>
+
+                                    <td className="px-2 py-3 align-top">
+                                        <p className="break-words font-semibold text-[#20152A]">
+                                            {item.product}
+                                        </p>
+                                        <p className="mt-0.5 break-words text-[9px] text-[#8C7A95]">
+                                            {item.variantName || "Regular product"}
+                                        </p>
+                                    </td>
+
+                                    {showBranchColumn ? (
+                                        <td
+                                            className="whitespace-normal break-words px-2 py-3 align-top leading-snug text-[#5F5267]"
+                                            title={item.branch}
+                                        >
+                                            {item.branch}
+                                        </td>
+                                    ) : null}
+
+                                    <td className="break-words px-2 py-3 align-top text-[#5F5267]">
+                                        {item.variantName ? "Variant" : "Regular"}
+                                    </td>
+                                    <td className="px-2 py-3 text-center align-top font-semibold tabular-nums text-[#685674]">
+                                        {formatNumber(stockBefore)}
+                                    </td>
+                                    <td className="px-2 py-3 text-center align-top font-bold tabular-nums text-[#12A150]">
+                                        +{formatNumber(item.quantityAdded)}
+                                    </td>
+                                    <td className="px-2 py-3 text-center align-top font-bold tabular-nums text-[#1A1220]">
+                                        {formatNumber(item.currentStock)}
+                                    </td>
+                                    <td className="break-words px-2 py-3 align-top text-[#5F5267]">
+                                        {item.receivedBy || "Not recorded"}
+                                    </td>
+                                </tr>
+                            );
+                        })
+                    ) : (
+                        <tr>
+                            <td
+                                colSpan={columnCount}
+                                className="px-4 py-14 text-center text-sm text-[#8A7A91]"
+                            >
+                                No restock records match the selected filters.
+                            </td>
+                        </tr>
+                    )}
+                    </tbody>
+                </table>
+            </section>
+
+            <aside className="self-start rounded-[14px] border border-[#E5DDEA] bg-white p-3 shadow-sm">
+                <h2 className="text-[16px] font-bold text-[#1A1220]">
+                    Restock Summary
+                </h2>
+
+                <div className="mt-3 divide-y divide-[#EEE7F2]">
+                    {[
+                        {
+                            label: "Restock Records",
+                            value: records.length,
+                            dot: "bg-[#7A45E8]",
+                        },
+                        {
+                            label: "Units Added",
+                            value: totalUnitsAdded,
+                            dot: "bg-[#22B65B]",
+                        },
+                        {
+                            label: "Products Restocked",
+                            value: productsRestocked,
+                            dot: "bg-[#FF8A00]",
+                        },
+                        {
+                            label: "Variants Restocked",
+                            value: variantsRestocked,
+                            dot: "bg-[#2F80ED]",
+                        },
+                    ].map((summary) => (
+                        <div
+                            key={summary.label}
+                            className="flex w-full items-center justify-between gap-3 px-1 py-2 text-[#392A42]"
+                        >
+                            <span className="flex items-center gap-2 text-[11px] font-semibold">
+                                <span className={`h-2.5 w-2.5 rounded-full ${summary.dot}`} />
+                                {summary.label}
+                            </span>
+                            <span className="text-[12px] font-bold tabular-nums">
+                                {formatNumber(summary.value)}
+                            </span>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">
+                        Latest Restock
+                    </h3>
+                    {latestRestock ? (
+                        <div className="mt-3 rounded-[12px] border border-[#EEE7F2] bg-[#FCFAFD] p-3">
+                            <p className="break-words text-[11px] font-bold text-[#1A1220]">
+                                {latestRestock.product}
+                            </p>
+                            <p className="mt-1 text-[10px] text-[#6A5D6F]">
+                                {formatDate(latestRestock.date)}
+                            </p>
+                            <div className="mt-2 flex items-center justify-between gap-2 text-[10px]">
+                                <span className="text-[#7A6984]">Quantity Added</span>
+                                <span className="font-bold tabular-nums text-[#12A150]">
+                                    +{formatNumber(latestRestock.quantityAdded)}
+                                </span>
+                            </div>
+                        </div>
+                    ) : (
+                        <p className="mt-3 text-[10px] text-[#8A7A91]">
+                            No restock activity recorded.
+                        </p>
+                    )}
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">
+                        Most Restocked Products
+                    </h3>
+                    <div className="mt-3 space-y-2">
+                        {restockByProduct.length > 0 ? (
+                            restockByProduct.map((item) => (
+                                <div
+                                    key={item.name}
+                                    className="grid grid-cols-[72px_1fr_auto] items-center gap-1.5 text-[9px]"
+                                >
+                                    <span className="truncate text-[#5F5267]" title={item.name}>
+                                        {item.name}
+                                    </span>
+                                    <span className="h-1.5 overflow-hidden rounded-full bg-[#EFE9F4]">
+                                        <span
+                                            className="block h-full rounded-full bg-[#7041E5]"
+                                            style={{
+                                                width: `${
+                                                    (item.quantity / largestRestockQuantity) * 100
+                                                }%`,
+                                            }}
+                                        />
+                                    </span>
+                                    <span className="font-bold tabular-nums text-[#251A2C]">
+                                        {formatNumber(item.quantity)}
+                                    </span>
+                                </div>
+                            ))
+                        ) : (
+                            <p className="text-[10px] text-[#8A7A91]">
+                                No restock product data available.
+                            </p>
+                        )}
+                    </div>
+                </div>
+            </aside>
+        </div>
+    );
+}
+
+type SummaryMetricRowProps = {
+    label: string;
+    value: string | number;
+    dot: string;
+    active?: boolean;
+    onClick?: () => void;
+};
+
+function SummaryMetricRow({
+                              label,
+                              value,
+                              dot,
+                              active = false,
+                              onClick,
+                          }: SummaryMetricRowProps) {
+    const content = (
+        <>
+            <span className="flex min-w-0 items-center gap-2 text-[11px] font-semibold">
+                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot}`} />
+                <span className="truncate">{label}</span>
+            </span>
+            <span className="shrink-0 text-[12px] font-bold tabular-nums">
+                {typeof value === "number" ? formatNumber(value) : value}
+            </span>
+        </>
+    );
+
+    if (onClick) {
+        return (
+            <button
+                type="button"
+                onClick={onClick}
+                className={`flex w-full items-center justify-between gap-3 px-1 py-2 text-left transition hover:bg-[#FAF6FF] ${
+                    active ? "text-[#5C2FC0]" : "text-[#392A42]"
+                }`}
+            >
+                {content}
+            </button>
+        );
+    }
+
+    return (
+        <div className="flex w-full items-center justify-between gap-3 px-1 py-2 text-[#392A42]">
+            {content}
+        </div>
+    );
+}
+
+type SummaryBarItem = {
+    name: string;
+    value: number;
+};
+
+function SummaryBarList({
+                            items,
+                            emptyText,
+                        }: {
+    items: SummaryBarItem[];
+    emptyText: string;
+}) {
+    const maximum = Math.max(1, ...items.map((item) => item.value));
+
+    if (items.length === 0) {
+        return <p className="text-[10px] text-[#8A7A91]">{emptyText}</p>;
+    }
+
+    return (
+        <div className="space-y-2">
+            {items.map((item) => (
+                <div
+                    key={item.name}
+                    className="grid grid-cols-[72px_1fr_auto] items-center gap-1.5 text-[9px]"
+                >
+                    <span className="truncate text-[#5F5267]" title={item.name}>
+                        {item.name}
+                    </span>
+                    <span className="h-1.5 overflow-hidden rounded-full bg-[#EFE9F4]">
+                        <span
+                            className="block h-full rounded-full bg-[#7041E5]"
+                            style={{ width: `${(item.value / maximum) * 100}%` }}
+                        />
+                    </span>
+                    <span className="font-bold tabular-nums text-[#251A2C]">
+                        {formatNumber(item.value)}
+                    </span>
+                </div>
+            ))}
+        </div>
+    );
+}
+
+function PosReportView({
+                           records,
+                           showBranchColumn,
+                       }: {
+    records: SaleRecord[];
+    showBranchColumn: boolean;
+}) {
+    const totalSalesValue = sumBy(records, (item) => item.amount);
+    const totalItemsSold = sumBy(records, (item) => item.quantity);
+    const averageTransaction = records.length
+        ? totalSalesValue / records.length
+        : 0;
+    const latestTransaction = [...records].sort((left, right) =>
+        right.date.localeCompare(left.date)
+    )[0];
+    const topSellingItems = Array.from(
+        records.reduce((summary, item) => {
+            const name = item.product || item.itemsText || "Unspecified Item";
+            summary.set(name, (summary.get(name) || 0) + Number(item.quantity || 0));
+            return summary;
+        }, new Map<string, number>())
+    )
+        .map(([name, value]) => ({ name, value }))
+        .sort((left, right) => right.value - left.value)
+        .slice(0, 6);
+    const columnCount = showBranchColumn ? 5 : 4;
+
+    return (
+        <div className="grid grid-cols-1 items-start gap-3 2xl:grid-cols-[minmax(0,1fr)_260px]">
+            <section className="min-w-0 self-start overflow-hidden rounded-[14px] border border-[#E5DDEA] bg-white shadow-sm">
+                <div className="border-b border-[#ECE5F0] px-4 py-3.5">
+                    <h2 className="text-[16px] font-bold text-[#1A1220]">
+                        POS Report History
+                    </h2>
+                    <p className="mt-1 text-[11px] text-[#8A7A91]">
+                        Review order IDs, items sold, totals, transaction dates, and branch records.
+                    </p>
+                </div>
+
+                <table className="w-full table-fixed border-collapse text-[11px]">
+                    <colgroup>
+                        <col className={showBranchColumn ? "w-[20%]" : "w-[22%]"} />
+                        {showBranchColumn ? <col className="w-[18%]" /> : null}
+                        <col className={showBranchColumn ? "w-[34%]" : "w-[48%]"} />
+                        <col className={showBranchColumn ? "w-[14%]" : "w-[15%]"} />
+                        <col className={showBranchColumn ? "w-[14%]" : "w-[15%]"} />
+                    </colgroup>
+                    <thead>
+                    <tr className="border-b border-[#E8DFED] bg-[#FCFAFD]">
+                        <th className="px-3 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Order ID
+                        </th>
+                        {showBranchColumn ? (
+                            <th className="px-3 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                                Branch
+                            </th>
+                        ) : null}
+                        <th className="px-3 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Items
+                        </th>
+                        <th className="px-3 py-3 text-right text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Total
+                        </th>
+                        <th className="px-3 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">
+                            Date
+                        </th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {records.length > 0 ? (
+                        records.map((item) => (
+                            <tr
+                                key={item.id}
+                                className="border-b border-[#EFE8F2] bg-white transition-colors hover:bg-[#FCFAFF]"
+                            >
+                                <td className="break-words px-3 py-3 align-top font-mono text-[10px] font-semibold text-[#6039A4]">
+                                    {item.reference || item.id}
+                                </td>
+                                {showBranchColumn ? (
+                                    <td className="break-words px-3 py-3 align-top text-[#5F5267]">
+                                        {item.branch || "—"}
+                                    </td>
+                                ) : null}
+                                <td className="break-words px-3 py-3 align-top text-[#5F5267]">
+                                    {getSaleItemsLabel(item)}
+                                </td>
+                                <td className="px-3 py-3 text-right align-top font-bold tabular-nums text-[#1A1220]">
+                                    {formatPeso(item.amount)}
+                                </td>
+                                <td className="whitespace-nowrap px-3 py-3 align-top font-semibold text-[#1A1220]">
+                                    {formatDate(item.date)}
+                                </td>
+                            </tr>
+                        ))
+                    ) : (
+                        <tr>
+                            <td colSpan={columnCount} className="px-4 py-14 text-center text-sm text-[#8A7A91]">
+                                No POS orders match the selected filters.
+                            </td>
+                        </tr>
+                    )}
+                    </tbody>
+                </table>
+            </section>
+
+            <aside className="self-start rounded-[14px] border border-[#E5DDEA] bg-white p-3 shadow-sm">
+                <h2 className="text-[16px] font-bold text-[#1A1220]">POS Summary</h2>
+                <div className="mt-3 divide-y divide-[#EEE7F2]">
+                    <SummaryMetricRow label="Total Transactions" value={records.length} dot="bg-[#7A45E8]" />
+                    <SummaryMetricRow label="Total POS Sales" value={formatPeso(totalSalesValue)} dot="bg-[#22B65B]" />
+                    <SummaryMetricRow label="Average Transaction" value={formatPeso(averageTransaction)} dot="bg-[#FF8A00]" />
+                    <SummaryMetricRow label="Items Sold" value={totalItemsSold} dot="bg-[#2F80ED]" />
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">Latest Transaction</h3>
+                    {latestTransaction ? (
+                        <div className="mt-3 rounded-[12px] border border-[#EEE7F2] bg-[#FCFAFD] p-3">
+                            <p className="break-words text-[11px] font-bold text-[#1A1220]">
+                                {latestTransaction.reference || latestTransaction.id}
+                            </p>
+                            <p className="mt-1 text-[10px] text-[#6A5D6F]">
+                                {formatDate(latestTransaction.date)}
+                            </p>
+                            <div className="mt-2 flex items-center justify-between gap-2 text-[10px]">
+                                <span className="text-[#7A6984]">Amount</span>
+                                <span className="font-bold tabular-nums text-[#12A150]">
+                                    {formatPeso(latestTransaction.amount)}
+                                </span>
+                            </div>
+                        </div>
+                    ) : (
+                        <p className="mt-3 text-[10px] text-[#8A7A91]">No POS activity recorded.</p>
+                    )}
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">Top Selling Items</h3>
+                    <div className="mt-3">
+                        <SummaryBarList items={topSellingItems} emptyText="No item sales data available." />
+                    </div>
+                </div>
+            </aside>
+        </div>
+    );
+}
+
+type BookingReportViewProps = {
+    records: BookingRecord[];
+    searchQuery: string;
+    activeFilter: BookingFilter;
+    onFilterChange: (filter: BookingFilter) => void;
+    expandedBookingId: string | null;
+    onToggleExpanded: (bookingId: string) => void;
+    showBranchColumn: boolean;
+};
+
+function BookingReportView({
+                               records,
+                               searchQuery,
+                               activeFilter,
+                               onFilterChange,
+                               expandedBookingId,
+                               onToggleExpanded,
+                               showBranchColumn,
+                           }: BookingReportViewProps) {
+    const query = searchQuery.trim().toLowerCase();
+    const searchedRecords = records.filter((item) =>
+        !query ||
+        [
+            item.id,
+            item.reference,
+            item.customer,
+            item.phone,
+            item.venue,
+            item.packageName,
+            item.statusLabel,
+            item.paymentStatus,
+            item.branch,
+        ]
+            .join(" ")
+            .toLowerCase()
+            .includes(query)
+    );
+    const displayedRecords =
+        activeFilter === "all"
+            ? searchedRecords
+            : searchedRecords.filter((item) => item.status === activeFilter);
+    const latestBooking = [...searchedRecords].sort((left, right) =>
+        right.date.localeCompare(left.date)
+    )[0];
+    const topPackages = Array.from(
+        searchedRecords.reduce((summary, item) => {
+            const name = item.packageName || "Custom Booking";
+            summary.set(name, (summary.get(name) || 0) + 1);
+            return summary;
+        }, new Map<string, number>())
+    )
+        .map(([name, value]) => ({ name, value }))
+        .sort((left, right) => right.value - left.value)
+        .slice(0, 6);
+    const statusRows: Array<{
+        label: string;
+        filter: BookingFilter;
+        dot: string;
+        value: number;
+    }> = [
+        { label: "Total Bookings", filter: "all", dot: "bg-[#7A45E8]", value: searchedRecords.length },
+        { label: "Pending", filter: "pending", dot: "bg-[#FF8A00]", value: searchedRecords.filter((item) => item.status === "pending").length },
+        { label: "Confirmed", filter: "confirmed", dot: "bg-[#7A45E8]", value: searchedRecords.filter((item) => item.status === "confirmed").length },
+        { label: "Preparing", filter: "preparing", dot: "bg-[#F6A800]", value: searchedRecords.filter((item) => item.status === "preparing").length },
+        { label: "Completed", filter: "completed", dot: "bg-[#22B65B]", value: searchedRecords.filter((item) => item.status === "completed").length },
+        { label: "Cancelled", filter: "cancelled", dot: "bg-[#EF3E38]", value: searchedRecords.filter((item) => item.status === "cancelled").length },
+    ];
+
+    return (
+        <div className="grid grid-cols-1 items-start gap-3 2xl:grid-cols-[minmax(0,1fr)_260px]">
+            <section className="min-w-0 self-start overflow-hidden rounded-[14px] border border-[#E5DDEA] bg-white shadow-sm">
+                <div className="border-b border-[#ECE5F0] px-4 py-3.5">
+                    <h2 className="text-[16px] font-bold text-[#1A1220]">Booking Report History</h2>
+                    <p className="mt-1 text-[11px] text-[#8A7A91]">
+                        Review booking clients, schedules, packages, payments, and status.
+                    </p>
+                </div>
+
+                <table className="w-full table-fixed border-collapse text-[11px]">
+                    <colgroup>
+                        <col className={showBranchColumn ? "w-[18%]" : "w-[20%]"} />
+                        {showBranchColumn ? <col className="w-[12%]" /> : null}
+                        <col className={showBranchColumn ? "w-[14%]" : "w-[16%]"} />
+                        <col className={showBranchColumn ? "w-[18%]" : "w-[20%]"} />
+                        <col className={showBranchColumn ? "w-[15%]" : "w-[17%]"} />
+                        <col className={showBranchColumn ? "w-[11%]" : "w-[13%]"} />
+                        <col className={showBranchColumn ? "w-[12%]" : "w-[14%]"} />
+                    </colgroup>
+                    <thead>
+                    <tr className="border-b border-[#E8DFED] bg-[#FCFAFD]">
+                        {[
+                            ["Client", "text-left"],
+                            ...(showBranchColumn ? [["Branch", "text-left"]] : []),
+                            ["Schedule", "text-left"],
+                            ["Package", "text-left"],
+                            ["Payment", "text-left"],
+                            ["Status", "text-center"],
+                            ["Details", "text-right"],
+                        ].map(([label, align]) => (
+                            <th key={label} className={`px-2 py-3 text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674] ${align}`}>
+                                {label}
+                            </th>
+                        ))}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {displayedRecords.length > 0 ? (
+                        displayedRecords.map((item) => {
+                            const isExpanded = expandedBookingId === item.id;
+                            const payment = getBookingPaymentDetails(item);
+
+                            return (
+                                <Fragment key={item.id}>
+                                    <tr className={`border-b border-[#EFE8F2] transition-colors ${isExpanded ? "bg-[#F8F2FC]" : "bg-white hover:bg-[#FCFAFF]"}`}>
+                                        <td className="px-2 py-3 align-top">
+                                            <div className="flex items-start gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onToggleExpanded(item.id)}
+                                                    className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[#4E2C66] transition hover:bg-[#EEE4F7] hover:text-[#6D35D1]"
+                                                    aria-label={isExpanded ? "Hide booking details" : "Show booking details"}
+                                                >
+                                                    {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                                </button>
+                                                <div className="min-w-0">
+                                                    <p className="break-words font-semibold text-[#1A1220]">{item.customer}</p>
+                                                    <p className="mt-0.5 break-words text-[9px] text-[#8C7A95]">{item.phone || item.reference}</p>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        {showBranchColumn ? (
+                                            <td className="break-words px-2 py-3 align-top text-[#5F5267]">
+                                                {item.branch || "—"}
+                                            </td>
+                                        ) : null}
+                                        <td className="px-2 py-3 align-top">
+                                            <p className="font-semibold text-[#1A1220]">{formatDate(item.eventDate)}</p>
+                                            <p className="mt-0.5 text-[9px] text-[#8C7A95]">{item.scheduleTime || "Time not recorded"}</p>
+                                        </td>
+                                        <td className="break-words px-2 py-3 align-top">
+                                            <p className="font-semibold text-[#1A1220]">{item.packageName}</p>
+                                            <p className="mt-0.5 text-[9px] text-[#8C7A95]">{formatPeso(payment.packagePrice)}</p>
+                                        </td>
+                                        <td className="px-2 py-3 align-top">
+                                            <StatusBadge status={payment.paymentStatus} />
+                                            <p className="mt-1 text-[9px] text-[#8C7A95]">Paid {formatPeso(payment.amountPaid)}</p>
+                                        </td>
+                                        <td className="px-2 py-3 text-center align-top">
+                                            <StatusBadge status={getBookingStatusLabel(item)} />
+                                        </td>
+                                        <td className="break-words px-2 py-3 text-right align-top text-[#5F5267]">
+                                            {item.venue || "Venue not recorded"}
+                                        </td>
+                                    </tr>
+                                    {isExpanded ? (
+                                        <tr className="border-b border-[#E6DDF0]">
+                                            <td colSpan={showBranchColumn ? 7 : 6} className="p-0">
+                                                <BookingDetailPanel booking={item} />
+                                            </td>
+                                        </tr>
+                                    ) : null}
+                                </Fragment>
+                            );
+                        })
+                    ) : (
+                        <tr>
+                            <td colSpan={showBranchColumn ? 7 : 6} className="px-4 py-14 text-center text-sm text-[#8A7A91]">
+                                No booking records match the selected filters.
+                            </td>
+                        </tr>
+                    )}
+                    </tbody>
+                </table>
+            </section>
+
+            <aside className="self-start rounded-[14px] border border-[#E5DDEA] bg-white p-3 shadow-sm">
+                <h2 className="text-[16px] font-bold text-[#1A1220]">Booking Summary</h2>
+                <div className="mt-3 divide-y divide-[#EEE7F2]">
+                    {statusRows.map((item) => (
+                        <SummaryMetricRow
+                            key={item.filter}
+                            label={item.label}
+                            value={item.value}
+                            dot={item.dot}
+                            active={activeFilter === item.filter}
+                            onClick={() => onFilterChange(item.filter)}
+                        />
+                    ))}
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">Latest Booking</h3>
+                    {latestBooking ? (
+                        <div className="mt-3 rounded-[12px] border border-[#EEE7F2] bg-[#FCFAFD] p-3">
+                            <p className="break-words text-[11px] font-bold text-[#1A1220]">{latestBooking.customer}</p>
+                            <p className="mt-1 text-[10px] text-[#6A5D6F]">{formatDate(latestBooking.eventDate)}</p>
+                            <div className="mt-2 flex items-center justify-between gap-2 text-[10px]">
+                                <span className="text-[#7A6984]">Package</span>
+                                <span className="max-w-[120px] truncate font-bold text-[#4E2C66]" title={latestBooking.packageName}>
+                                    {latestBooking.packageName}
+                                </span>
+                            </div>
+                        </div>
+                    ) : (
+                        <p className="mt-3 text-[10px] text-[#8A7A91]">No booking activity recorded.</p>
+                    )}
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">Top Packages</h3>
+                    <div className="mt-3">
+                        <SummaryBarList items={topPackages} emptyText="No package booking data available." />
+                    </div>
+                </div>
+            </aside>
+        </div>
+    );
+}
+
+function PackagesReportView({
+                                records,
+                                showBranchColumn,
+                            }: {
+    records: PackageRecord[];
+    showBranchColumn: boolean;
+}) {
+    const activePackages = records.filter((item) => item.status.toLowerCase() === "active");
+    const inactivePackages = records.filter((item) => item.status.toLowerCase() !== "active");
+    const totalPackageItems = sumBy(records, (item) => item.itemCount || 0);
+    const averagePrice = records.length
+        ? sumBy(records, (item) => item.price) / records.length
+        : 0;
+    const latestPackage = [...records].sort((left, right) =>
+        toReportDateValue(right.updatedAt).localeCompare(toReportDateValue(left.updatedAt))
+    )[0];
+    const categorySummary = Array.from(
+        records.reduce((summary, item) => {
+            const category = item.category || "Event Package";
+            summary.set(category, (summary.get(category) || 0) + 1);
+            return summary;
+        }, new Map<string, number>())
+    )
+        .map(([name, value]) => ({ name, value }))
+        .sort((left, right) => right.value - left.value);
+    const columnCount = showBranchColumn ? 7 : 6;
+
+    return (
+        <div className="grid grid-cols-1 items-start gap-3 2xl:grid-cols-[minmax(0,1fr)_260px]">
+            <section className="min-w-0 self-start overflow-hidden rounded-[14px] border border-[#E5DDEA] bg-white shadow-sm">
+                <div className="border-b border-[#ECE5F0] px-4 py-3.5">
+                    <h2 className="text-[16px] font-bold text-[#1A1220]">Packages Report History</h2>
+                    <p className="mt-1 text-[11px] text-[#8A7A91]">
+                        Review package names, categories, prices, included items, and availability.
+                    </p>
+                </div>
+
+                <table className="w-full table-fixed border-collapse text-[11px]">
+                    <colgroup>
+                        <col className={showBranchColumn ? "w-[12%]" : "w-[13%]"} />
+                        <col className={showBranchColumn ? "w-[23%]" : "w-[27%]"} />
+                        <col className={showBranchColumn ? "w-[14%]" : "w-[16%]"} />
+                        {showBranchColumn ? <col className="w-[14%]" /> : null}
+                        <col className={showBranchColumn ? "w-[13%]" : "w-[15%]"} />
+                        <col className={showBranchColumn ? "w-[10%]" : "w-[12%]"} />
+                        <col className={showBranchColumn ? "w-[14%]" : "w-[17%]"} />
+                    </colgroup>
+                    <thead>
+                    <tr className="border-b border-[#E8DFED] bg-[#FCFAFD]">
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Package ID</th>
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Package Name</th>
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Category</th>
+                        {showBranchColumn ? <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Branch</th> : null}
+                        <th className="px-2 py-3 text-right text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Price</th>
+                        <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Items</th>
+                        <th className="px-2 py-3 text-center text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Status</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {records.length > 0 ? (
+                        records.map((item) => (
+                            <tr key={item.id} className="border-b border-[#EFE8F2] bg-white transition-colors hover:bg-[#FCFAFF]">
+                                <td className="break-words px-2 py-3 align-top font-mono text-[10px] font-semibold text-[#6039A4]">{item.id}</td>
+                                <td className="px-2 py-3 align-top">
+                                    <p className="break-words font-semibold text-[#1A1220]">{item.name}</p>
+                                    <p className="mt-0.5 break-words text-[9px] text-[#8C7A95]">{item.description || "No description recorded"}</p>
+                                </td>
+                                <td className="break-words px-2 py-3 align-top text-[#5F5267]">{item.category || "Event Package"}</td>
+                                {showBranchColumn ? <td className="break-words px-2 py-3 align-top text-[#5F5267]">{item.branch}</td> : null}
+                                <td className="px-2 py-3 text-right align-top font-bold tabular-nums text-[#1A1220]">{formatPeso(item.price)}</td>
+                                <td className="px-2 py-3 text-center align-top font-semibold tabular-nums text-[#1A1220]">{typeof item.itemCount === "number" ? formatNumber(item.itemCount) : "—"}</td>
+                                <td className="px-2 py-3 text-center align-top"><StatusBadge status={item.status} /></td>
+                            </tr>
+                        ))
+                    ) : (
+                        <tr>
+                            <td colSpan={columnCount} className="px-4 py-14 text-center text-sm text-[#8A7A91]">
+                                No packages match the selected filters.
+                            </td>
+                        </tr>
+                    )}
+                    </tbody>
+                </table>
+            </section>
+
+            <aside className="self-start rounded-[14px] border border-[#E5DDEA] bg-white p-3 shadow-sm">
+                <h2 className="text-[16px] font-bold text-[#1A1220]">Packages Summary</h2>
+                <div className="mt-3 divide-y divide-[#EEE7F2]">
+                    <SummaryMetricRow label="Total Packages" value={records.length} dot="bg-[#7A45E8]" />
+                    <SummaryMetricRow label="Active Packages" value={activePackages.length} dot="bg-[#22B65B]" />
+                    <SummaryMetricRow label="Inactive Packages" value={inactivePackages.length} dot="bg-[#EF3E38]" />
+                    <SummaryMetricRow label="Average Price" value={formatPeso(averagePrice)} dot="bg-[#FF8A00]" />
+                    <SummaryMetricRow label="Package Items" value={totalPackageItems} dot="bg-[#2F80ED]" />
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">Latest Package</h3>
+                    {latestPackage ? (
+                        <div className="mt-3 rounded-[12px] border border-[#EEE7F2] bg-[#FCFAFD] p-3">
+                            <p className="break-words text-[11px] font-bold text-[#1A1220]">{latestPackage.name}</p>
+                            <p className="mt-1 text-[10px] text-[#6A5D6F]">
+                                {toReportDateValue(latestPackage.updatedAt) ? formatDate(toReportDateValue(latestPackage.updatedAt)) : "Date not recorded"}
+                            </p>
+                            <div className="mt-2 flex items-center justify-between gap-2 text-[10px]">
+                                <span className="text-[#7A6984]">Price</span>
+                                <span className="font-bold tabular-nums text-[#12A150]">{formatPeso(latestPackage.price)}</span>
+                            </div>
+                        </div>
+                    ) : (
+                        <p className="mt-3 text-[10px] text-[#8A7A91]">No package activity recorded.</p>
+                    )}
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">Package Categories</h3>
+                    <div className="mt-3">
+                        <SummaryBarList items={categorySummary} emptyText="No package category data available." />
+                    </div>
+                </div>
+            </aside>
+        </div>
+    );
+}
+
+type EmployeeActionsReportViewProps = {
+    records: StaffActivity[];
+    searchQuery: string;
+    activeFilter: StaffModuleFilter;
+    onFilterChange: (filter: StaffModuleFilter) => void;
+    showBranchColumn: boolean;
+};
+
+function EmployeeActionsReportView({
+                                       records,
+                                       searchQuery,
+                                       activeFilter,
+                                       onFilterChange,
+                                       showBranchColumn,
+                                   }: EmployeeActionsReportViewProps) {
+    const query = searchQuery.trim().toLowerCase();
+    const searchedRecords = records.filter((item) =>
+        !query ||
+        [
+            item.id,
+            item.staffName,
+            item.role,
+            item.action,
+            item.module,
+            item.reference,
+            item.details,
+            item.branch,
+        ]
+            .join(" ")
+            .toLowerCase()
+            .includes(query)
+    );
+    const displayedRecords =
+        activeFilter === "all"
+            ? searchedRecords
+            : searchedRecords.filter((item) => item.module === activeFilter);
+    const latestAction = [...searchedRecords].sort((left, right) => {
+        const dateDifference = right.date.localeCompare(left.date);
+        return dateDifference || String(right.time || "").localeCompare(String(left.time || ""));
+    })[0];
+    const employeeSummary = Array.from(
+        searchedRecords.reduce((summary, item) => {
+            const employee = item.staffName || "Unknown Employee";
+            summary.set(employee, (summary.get(employee) || 0) + 1);
+            return summary;
+        }, new Map<string, number>())
+    )
+        .map(([name, value]) => ({ name, value }))
+        .sort((left, right) => right.value - left.value)
+        .slice(0, 6);
+    const moduleRows: Array<{
+        label: string;
+        filter: StaffModuleFilter;
+        dot: string;
+        value: number;
+    }> = [
+        { label: "Total Actions", filter: "all", dot: "bg-[#7A45E8]", value: searchedRecords.length },
+        { label: "Bookings", filter: "Bookings", dot: "bg-[#7A45E8]", value: searchedRecords.filter((item) => item.module === "Bookings").length },
+        { label: "Packages", filter: "Packages", dot: "bg-[#F6A800]", value: searchedRecords.filter((item) => item.module === "Packages").length },
+        { label: "Inventory", filter: "Inventory", dot: "bg-[#FF8A00]", value: searchedRecords.filter((item) => item.module === "Inventory").length },
+        { label: "Sales / POS", filter: "Sales / POS", dot: "bg-[#22B65B]", value: searchedRecords.filter((item) => item.module === "Sales / POS").length },
+    ];
+    const columnCount = showBranchColumn ? 6 : 5;
+
+    return (
+        <div className="grid grid-cols-1 items-start gap-3 2xl:grid-cols-[minmax(0,1fr)_260px]">
+            <section className="min-w-0 self-start overflow-hidden rounded-[14px] border border-[#E5DDEA] bg-white shadow-sm">
+                <div className="border-b border-[#ECE5F0] px-4 py-3.5">
+                    <h2 className="text-[16px] font-bold text-[#1A1220]">Employee Actions History</h2>
+                    <p className="mt-1 text-[11px] text-[#8A7A91]">
+                        Review employee actions across Bookings, Inventory, Packages, and Sales / POS.
+                    </p>
+                </div>
+
+                <table className="w-full table-fixed border-collapse text-[11px]">
+                    <colgroup>
+                        <col className={showBranchColumn ? "w-[15%]" : "w-[17%]"} />
+                        <col className={showBranchColumn ? "w-[18%]" : "w-[20%]"} />
+                        <col className={showBranchColumn ? "w-[27%]" : "w-[31%]"} />
+                        <col className={showBranchColumn ? "w-[15%]" : "w-[16%]"} />
+                        <col className={showBranchColumn ? "w-[15%]" : "w-[16%]"} />
+                        {showBranchColumn ? <col className="w-[10%]" /> : null}
+                    </colgroup>
+                    <thead>
+                    <tr className="border-b border-[#E8DFED] bg-[#FCFAFD]">
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Date / Time</th>
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Employee</th>
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Action</th>
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Module</th>
+                        <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Reference</th>
+                        {showBranchColumn ? <th className="px-2 py-3 text-left text-[9px] font-semibold uppercase tracking-[0.06em] text-[#685674]">Branch</th> : null}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {displayedRecords.length > 0 ? (
+                        displayedRecords.map((item) => (
+                            <tr key={item.id} className="border-b border-[#EFE8F2] bg-white transition-colors hover:bg-[#FCFAFF]">
+                                <td className="px-2 py-3 align-top">
+                                    <p className="font-semibold text-[#1A1220]">{formatDate(item.date)}</p>
+                                    <p className="mt-0.5 text-[9px] text-[#8C7A95]">{item.time || "Time not recorded"}</p>
+                                </td>
+                                <td className="px-2 py-3 align-top">
+                                    <p className="break-words font-semibold text-[#1A1220]">{item.staffName}</p>
+                                    <p className="mt-0.5 break-words text-[9px] text-[#8C7A95]">{item.role}</p>
+                                </td>
+                                <td className="px-2 py-3 align-top">
+                                    <p className="break-words font-semibold text-[#1A1220]">{item.action}</p>
+                                    <p className="mt-0.5 break-words text-[9px] text-[#8C7A95]">{item.details || "No additional details recorded."}</p>
+                                </td>
+                                <td className="px-2 py-3 align-top"><ActivityModuleBadge module={item.module} /></td>
+                                <td className="break-words px-2 py-3 align-top font-mono text-[10px] font-semibold text-[#5F4E75]">{item.reference || "—"}</td>
+                                {showBranchColumn ? <td className="break-words px-2 py-3 align-top text-[#5F5267]">{item.branch}</td> : null}
+                            </tr>
+                        ))
+                    ) : (
+                        <tr>
+                            <td colSpan={columnCount} className="px-4 py-14 text-center text-sm text-[#8A7A91]">
+                                No employee actions match the selected filters.
+                            </td>
+                        </tr>
+                    )}
+                    </tbody>
+                </table>
+            </section>
+
+            <aside className="self-start rounded-[14px] border border-[#E5DDEA] bg-white p-3 shadow-sm">
+                <h2 className="text-[16px] font-bold text-[#1A1220]">Employee Actions Summary</h2>
+                <div className="mt-3 divide-y divide-[#EEE7F2]">
+                    {moduleRows.map((item) => (
+                        <SummaryMetricRow
+                            key={item.filter}
+                            label={item.label}
+                            value={item.value}
+                            dot={item.dot}
+                            active={activeFilter === item.filter}
+                            onClick={() => onFilterChange(item.filter)}
+                        />
+                    ))}
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">Latest Action</h3>
+                    {latestAction ? (
+                        <div className="mt-3 rounded-[12px] border border-[#EEE7F2] bg-[#FCFAFD] p-3">
+                            <p className="break-words text-[11px] font-bold text-[#1A1220]">{latestAction.staffName}</p>
+                            <p className="mt-1 break-words text-[10px] text-[#6A5D6F]">{latestAction.action}</p>
+                            <div className="mt-2 flex items-center justify-between gap-2 text-[10px]">
+                                <span className="text-[#7A6984]">Module</span>
+                                <span className="font-bold text-[#4E2C66]">{latestAction.module}</span>
+                            </div>
+                        </div>
+                    ) : (
+                        <p className="mt-3 text-[10px] text-[#8A7A91]">No employee activity recorded.</p>
+                    )}
+                </div>
+
+                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                    <h3 className="text-[12px] font-bold text-[#211629]">Most Active Employees</h3>
+                    <div className="mt-3">
+                        <SummaryBarList items={employeeSummary} emptyText="No employee action data available." />
+                    </div>
+                </div>
+            </aside>
         </div>
     );
 }
@@ -2752,12 +3843,12 @@ export function ReportsWorkspace({
                                      initialRole,
                                      assignedBranch,
                                      storeName,
-                                 }: {
-    initialRole: UserRole;
-    assignedBranch: string;
-    storeName: string;
-}) {
+                                     viewConfig,
+                                 }: ReportsWorkspaceProps) {
     const role = initialRole;
+    const isOwner = role === "owner";
+    const showBranchFilter = isOwner && viewConfig.showBranchFilter;
+    const showBranchColumn = isOwner || viewConfig.showBranchColumn;
     const [branch, setBranch] = useState(() =>
         initialRole === "owner"
             ? ALL_BRANCHES
@@ -2765,14 +3856,17 @@ export function ReportsWorkspace({
     );
     const [startDate, setStartDate] = useState(getMonthStart(getToday()));
     const [endDate, setEndDate] = useState(getToday());
-    const [selectedReport, setSelectedReport] = useState<ReportKey | null>(null);
+    const [selectedReport, setSelectedReport] = useState<ReportKey | null>("inventory");
+    const [searchQuery, setSearchQuery] = useState("");
+    const [categoryFilter, setCategoryFilter] = useState("all");
     const [inventoryFilter, setInventoryFilter] = useState<InventoryFilter>("all");
     const [expandedInventoryId, setExpandedInventoryId] = useState<string | null>(null);
     const [bookingFilter, setBookingFilter] = useState<BookingFilter>("all");
+    const [packageStatusFilter, setPackageStatusFilter] =
+        useState<PackageStatusFilter>("all");
     const [expandedBookingId, setExpandedBookingId] = useState<string | null>(null);
     const [staffModuleFilter, setStaffModuleFilter] =
         useState<StaffModuleFilter>("all");
-    const [salesView, setSalesView] = useState<SalesView>("summary");
     const [report, setReport] = useState<ReportData | null>(null);
     const [loading, setLoading] = useState(true);
     const [liveInventoryState, setLiveInventoryState] =
@@ -2793,7 +3887,6 @@ export function ReportsWorkspace({
             ready: false,
             items: [],
         });
-    const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
 
     const storedAssignedBranchId = getStoredSessionValue([
         "branch_id",
@@ -3216,7 +4309,6 @@ export function ReportsWorkspace({
             loadLiveSales(),
             loadLiveBookings(),
         ]);
-        setCurrentDateTime(new Date());
     }, [
         loadLiveBookings,
         loadLiveBranches,
@@ -3239,19 +4331,6 @@ export function ReportsWorkspace({
         loadReport,
     ]);
 
-    useEffect(() => {
-        const updateDateTime = () => setCurrentDateTime(new Date());
-
-        updateDateTime();
-        const timer = window.setInterval(updateDateTime, 30_000);
-
-        return () => {
-            window.clearInterval(timer);
-        };
-    }, []);
-
-    const actualRole = report?.access?.role || role;
-    const isOwner = role === "owner";
 
     const activeBranch = isOwner
         ? branch
@@ -3320,6 +4399,27 @@ export function ReportsWorkspace({
         [report?.restockHistory]
     );
 
+    const displayedRestocks = useMemo(() => {
+        const query = searchQuery.trim().toLowerCase();
+
+        if (!query) return restocks;
+
+        return restocks.filter((item) =>
+            [
+                item.id,
+                item.reference,
+                item.product,
+                item.variantName,
+                item.branch,
+                item.receivedBy,
+                item.notes,
+            ]
+                .join(" ")
+                .toLowerCase()
+                .includes(query)
+        );
+    }, [restocks, searchQuery]);
+
     const bookings = useMemo(() => {
         if (liveBookingsState.ready) {
             return liveBookingsState.items;
@@ -3361,13 +4461,35 @@ export function ReportsWorkspace({
         [orderRevenueRecords]
     );
 
-    const bookingRevenueOrders = useMemo(
-        () =>
-            orderRevenueRecords.filter(
-                (order) => order.revenueSource === "booking"
-            ),
-        [orderRevenueRecords]
-    );
+
+    const packages = useMemo<PackageRecord[]>(() => {
+        if (report?.packageList?.length) {
+            return report.packageList;
+        }
+
+        const packageMap = new Map<string, PackageRecord>();
+
+        bookings.forEach((booking, index) => {
+            const key = booking.packageName.trim().toLowerCase();
+
+            if (!key || packageMap.has(key)) return;
+
+            packageMap.set(key, {
+                id: `PKG-${String(index + 1).padStart(3, "0")}`,
+                name: booking.packageName,
+                description: "Package used in booking records.",
+                category: "Event Package",
+                branch: booking.branch,
+                price: booking.amount,
+                itemCount: undefined,
+                status: "Active",
+                updatedAt: booking.date,
+                updatedBy: undefined,
+            });
+        });
+
+        return Array.from(packageMap.values());
+    }, [bookings, report?.packageList]);
 
     const forecasts = useMemo(
         () => report?.forecasting ?? [],
@@ -3405,7 +4527,6 @@ export function ReportsWorkspace({
         [staffActivities]
     );
 
-    const latestStaffAction = staffActivities[0];
 
     const displayedStaffActivities = useMemo(() => {
         if (staffModuleFilter === "all") return staffActivities;
@@ -3417,13 +4538,13 @@ export function ReportsWorkspace({
 
     const staffActionListTitle =
         staffModuleFilter === "all"
-            ? "Current Staff Actions"
-            : `${staffModuleFilter} Staff Actions`;
+            ? "Current Employee Actions"
+            : `${staffModuleFilter} Employee Actions`;
 
     const staffActionListSubtitle =
         staffModuleFilter === "all"
-            ? "Track staff actions from Bookings, Inventory, Packages, and Sales / POS."
-            : `Showing only staff actions from the ${staffModuleFilter} module.`;
+            ? "Track employee actions from Bookings, Inventory, Packages, and Sales / POS."
+            : `Showing only employee actions from the ${staffModuleFilter} module.`;
 
     const lowStock = useMemo(() => {
         if (liveInventoryState.ready) {
@@ -3453,25 +4574,130 @@ export function ReportsWorkspace({
         report?.outOfStockItems,
     ]);
 
+    const inStock = useMemo(
+        () => inventory.filter((item) => item.status === "In Stock"),
+        [inventory]
+    );
+
+    const soonToExpire = useMemo(
+        () =>
+            inventory.filter(
+                (item) => getExpirationStatus(item.expiryDate) === "Soon to Expire"
+            ),
+        [inventory]
+    );
+
+    const expiredItems = useMemo(
+        () =>
+            inventory.filter(
+                (item) => getExpirationStatus(item.expiryDate) === "Expired"
+            ),
+        [inventory]
+    );
+
+    const goodExpirationItems = useMemo(
+        () =>
+            inventory.filter((item) => {
+                const status = getExpirationStatus(item.expiryDate);
+                return status === "Good" || status === "No Expiry";
+            }),
+        [inventory]
+    );
+
+    const inventoryCategories = useMemo(
+        () =>
+            Array.from(
+                new Set(
+                    inventory
+                        .map((item) => item.category.trim())
+                        .filter(Boolean)
+                )
+            ).sort((left, right) => left.localeCompare(right)),
+        [inventory]
+    );
+
+
     const displayedInventory = useMemo(() => {
-        if (inventoryFilter === "low") return lowStock;
-        if (inventoryFilter === "out") return outOfStock;
-        return inventory;
-    }, [inventory, inventoryFilter, lowStock, outOfStock]);
+        const normalizedSearch = searchQuery.trim().toLowerCase();
 
-    const inventoryListTitle =
-        inventoryFilter === "low"
-            ? "Low Stock Items"
-            : inventoryFilter === "out"
-                ? "Out of Stock Items"
-                : "All Inventory Items";
+        return inventory.filter((item) => {
+            const expirationStatus = getExpirationStatus(item.expiryDate);
+            const updatedDate = toReportDateValue(item.lastUpdated);
 
+            const matchesInventoryStatus =
+                inventoryFilter === "all" ||
+                (inventoryFilter === "in" && item.status === "In Stock") ||
+                (inventoryFilter === "low" && item.status === "Low Stock") ||
+                (inventoryFilter === "out" && item.status === "Out of Stock") ||
+                (inventoryFilter === "soon" &&
+                    expirationStatus === "Soon to Expire") ||
+                (inventoryFilter === "expired" &&
+                    expirationStatus === "Expired");
+
+            const matchesSearch =
+                !normalizedSearch ||
+                [
+                    item.product,
+                    item.category,
+                    item.branch,
+                    ...getInventoryVariants(item).flatMap((variant) => [
+                        variant.name,
+                        variant.sku,
+                    ]),
+                ]
+                    .join(" ")
+                    .toLowerCase()
+                    .includes(normalizedSearch);
+
+            const matchesCategory =
+                categoryFilter === "all" || item.category === categoryFilter;
+
+
+            const matchesDate =
+                !updatedDate ||
+                isDateInSelectedRange(updatedDate, startDate, endDate);
+
+            return (
+                matchesInventoryStatus &&
+                matchesSearch &&
+                matchesCategory &&
+                matchesDate
+            );
+        });
+    }, [
+        categoryFilter,
+        endDate,
+        inventory,
+        inventoryFilter,
+        searchQuery,
+        startDate,
+    ]);
+
+
+    const inventoryCategorySummary = useMemo(() => {
+        const counts = new Map<string, number>();
+
+        inventory.forEach((item) => {
+            const category = item.category || "Uncategorized";
+            counts.set(category, (counts.get(category) || 0) + 1);
+        });
+
+        return Array.from(counts.entries())
+            .map(([name, count]) => ({ name, count }))
+            .sort((left, right) => {
+                const countDifference = right.count - left.count;
+                return countDifference || left.name.localeCompare(right.name);
+            });
+    }, [inventory]);
+
+    const largestInventoryCategoryCount = Math.max(
+        1,
+        ...inventoryCategorySummary.map((category) => category.count)
+    );
+
+    const inventoryListTitle = "Inventory Report History";
     const inventoryListSubtitle =
-        inventoryFilter === "low"
-            ? "Items that have reached or fallen below the reorder level."
-            : inventoryFilter === "out"
-                ? "Items with zero available stock that need immediate restocking."
-                : "Current stock monitoring, low-stock alerts, and status per product.";
+        "Review current stock, prices, variants, and expiration status for every item.";
 
     const displayedBookings = useMemo(() => {
         if (bookingFilter === "all") return bookings;
@@ -3532,10 +4758,6 @@ export function ReportsWorkspace({
         },
     ];
 
-    const salesRows = useMemo(
-        () => buildSalesRows(sales, bookingRevenueOrders),
-        [bookingRevenueOrders, sales]
-    );
 
     const posTransactions = useMemo(
         () =>
@@ -3551,307 +4773,128 @@ export function ReportsWorkspace({
         [sales]
     );
 
-    const bookingRevenueRecords = useMemo(
-        () =>
-            bookingRevenueOrders
-                .map((order) => ({
-                    ...order,
-                    statusLabel: resolveBookingRevenueStatus(order, bookings),
-                }))
-                .sort((a, b) => {
-                    const dateDifference = b.date.localeCompare(a.date);
+    const displayedPosTransactions = useMemo(() => {
+        const query = searchQuery.trim().toLowerCase();
 
-                    if (dateDifference !== 0) {
-                        return dateDifference;
-                    }
+        if (!query) return posTransactions;
 
-                    return (b.reference || b.id).localeCompare(
-                        a.reference || a.id
-                    );
-                }),
-        [bookingRevenueOrders, bookings]
-    );
+        return posTransactions.filter((item) =>
+            [
+                item.id,
+                item.reference,
+                item.customer,
+                item.product,
+                item.itemsText,
+                item.statusLabel,
+            ]
+                .join(" ")
+                .toLowerCase()
+                .includes(query)
+        );
+    }, [posTransactions, searchQuery]);
 
-    const totalStock = useMemo(() => sumBy(inventory, (item) => item.stock), [inventory]);
+    const displayedPackages = useMemo(() => {
+        const query = searchQuery.trim().toLowerCase();
+
+        return packages.filter((item) => {
+            const searchableText = [
+                item.id,
+                item.name,
+                item.description,
+                item.category,
+                item.branch,
+                item.status,
+                item.updatedBy,
+            ]
+                .join(" ")
+                .toLowerCase();
+            const normalizedStatus = item.status.trim().toLowerCase();
+            const matchesSearch = !query || searchableText.includes(query);
+            const matchesStatus =
+                packageStatusFilter === "all" ||
+                (packageStatusFilter === "active" && normalizedStatus === "active") ||
+                (packageStatusFilter === "inactive" && normalizedStatus !== "active");
+
+            return matchesSearch && matchesStatus;
+        });
+    }, [packageStatusFilter, packages, searchQuery]);
+
+
     const totalSales = useMemo(() => sumBy(sales, (item) => item.amount), [sales]);
-    const totalBookingRevenue = useMemo(
-        () => sumBy(bookingRevenueRecords, (item) => item.amount),
-        [bookingRevenueRecords]
-    );
 
-    const completedBookings = useMemo(
-        () => bookings.filter((item) => item.status === "completed").length,
-        [bookings]
-    );
 
-    const highRiskForecasts = useMemo(
-        () => forecasts.filter((item) => item.riskLevel === "High").length,
-        [forecasts]
-    );
-
-    const reportModuleMeta: Record<
-        ReportKey,
-        { metricLabel: string; metricValue: string; detail: string }
-    > = {
-        inventory: {
-            metricLabel: "CURRENT STOCK",
-            metricValue: formatNumber(totalStock),
-            detail: `${lowStock.length} low stock · ${outOfStock.length} out`,
-        },
-        restock: {
-            metricLabel: "RESTOCK RECORDS",
-            metricValue: formatNumber(restocks.length),
-            detail: restocks.length
-                ? `Latest: ${formatDate(restocks[0].date)}`
-                : "No restock records",
-        },
-        bookings: {
-            metricLabel: "TOTAL BOOKINGS",
-            metricValue: formatNumber(bookings.length),
-            detail: `${completedBookings} completed bookings`,
-        },
-        sales: {
-            metricLabel: "TOTAL REVENUE",
-            metricValue: formatPeso(totalSales + totalBookingRevenue),
-            detail: `${sales.length} POS transaction(s)`,
-        },
-        forecasting: {
-            metricLabel: "FORECAST ITEMS",
-            metricValue: formatNumber(forecasts.length),
-            detail:
-                highRiskForecasts > 0
-                    ? `${highRiskForecasts} high-risk item(s)`
-                    : "Forecasts ready to review",
-        },
-        staff: {
-            metricLabel: "RECENT ACTIONS",
-            metricValue: formatNumber(staffActivities.length),
-            detail: latestStaffAction
-                ? `${latestStaffAction.staffName}: ${latestStaffAction.action}`
-                : "No staff actions recorded",
-        },
-    };
 
     const currentRange =
         report?.dateRange?.startDate && report?.dateRange?.endDate
             ? formatDateRange(report.dateRange.startDate, report.dateRange.endDate)
             : formatDateRange(startDate, endDate);
 
-    const allowedCards = REPORT_CARDS.filter((card) => {
-        if (card.key === "staff") return actualRole !== "staff";
-        return true;
-    });
+    const allowedCards = REPORT_CARDS;
 
-    const selectedTitle =
-        REPORT_CARDS.find((card) => card.key === selectedReport)?.title || "Reports";
 
-    function getExportTable(): ExportTable {
-        if (selectedReport === "restock") {
-            return {
-                title: "Inventory Restock History",
-                headers: [
-                    "Date",
-                    "Product",
-                    "Variant",
-                    "Branch",
-                    "Quantity Added",
-                    "Current Stock",
-                    "Reference",
-                ],
-                rows: restocks.map((item) => [
-                    formatDate(item.date),
-                    item.product,
-                    item.variantName || "—",
-                    item.branch,
-                    `+${item.quantityAdded}`,
-                    String(item.currentStock),
-                    item.reference || item.id,
-                ]),
-            };
-        }
+    function getFilteredInventoryExportTable(): ExportTable {
+        const headers = [
+            "Product Name",
+            ...(showBranchColumn ? ["Branch"] : []),
+            "Category",
+            "Type",
+            "Current Stock",
+            "Alert Level",
+            "Unit Cost",
+            "Selling Price",
+            "Expiration Date",
+            "Status",
+        ];
 
-        if (selectedReport === "bookings") {
-            return {
-                title:
-                    bookingFilter === "all"
-                        ? "Booking History"
-                        : `${bookingFilter.charAt(0).toUpperCase()}${bookingFilter.slice(1)} Booking History`,
-                headers: [
-                    "Booking ID",
-                    "Reference No.",
-                    "Customer",
-                    "Package",
-                    "Event Date",
-                    "Status",
-                ],
-                rows: displayedBookings.map((item) => [
-                    item.id,
-                    item.reference,
-                    item.customer,
-                    item.packageName,
-                    formatDate(item.eventDate),
-                    item.statusLabel ||
-                    `${item.status.charAt(0).toUpperCase()}${item.status.slice(1)}`,
-                ]),
-            };
-        }
+        const rows = displayedInventory.flatMap((item) => {
+            const variants = getInventoryVariants(item);
+            const parentRow = [
+                item.product,
+                ...(showBranchColumn ? [item.branch] : []),
+                item.category,
+                variants.length > 0
+                    ? `${variants.length} variant${variants.length === 1 ? "" : "s"}`
+                    : "Regular",
+                formatNumber(item.stock),
+                formatNumber(item.reorderLevel),
+                getPriceRange(item, "costPrice"),
+                getPriceRange(item, "salesPrice"),
+                item.expiryDate
+                    ? `${formatDate(item.expiryDate)} (${getExpirationStatus(item.expiryDate)})`
+                    : "No expiry",
+                item.status,
+            ];
 
-        if (selectedReport === "sales") {
-            if (salesView === "pos") {
-                return {
-                    title: "POS Orders Report",
-                    headers: [
-                        "Date",
-                        "Order ID",
-                        "Items",
-                        "Total",
-                    ],
-                    rows: posTransactions.map((item) => [
-                        formatDate(item.date),
-                        item.reference || item.id,
-                        getSaleItemsLabel(item),
-                        formatPeso(item.amount),
-                    ]),
-                };
-            }
+            const variantRows = variants.map((variant) => [
+                `↳ ${variant.name}`,
+                ...(showBranchColumn ? ["—"] : []),
+                "—",
+                "Variant",
+                formatNumber(variant.stock),
+                formatNumber(variant.reorderLevel ?? 0),
+                typeof variant.costPrice === "number"
+                    ? formatPeso(variant.costPrice)
+                    : "—",
+                typeof variant.salesPrice === "number"
+                    ? formatPeso(variant.salesPrice)
+                    : "—",
+                variant.expiryDate
+                    ? `${formatDate(variant.expiryDate)} (${getExpirationStatus(variant.expiryDate)})`
+                    : "No expiry",
+                getVariantStatus(variant),
+            ]);
 
-            if (salesView === "booking") {
-                return {
-                    title: "Completed Booking Revenue Report",
-                    headers: [
-                        "Date",
-                        "Reference No.",
-                        "Customer",
-                        "Package",
-                        "Status",
-                        "Revenue",
-                    ],
-                    rows: bookingRevenueRecords.map((item) => [
-                        formatDate(item.date),
-                        item.reference || item.id,
-                        item.customer || "-",
-                        getSaleItemsLabel(item),
-                        item.statusLabel || "Completed",
-                        formatPeso(item.amount),
-                    ]),
-                };
-            }
-
-            return {
-                title: "Sales Summary Report",
-                headers: [
-                    "Date",
-                    "Transaction / Booking ID(s)",
-                    "POS Sales",
-                    "Booking Revenue",
-                    "Total Revenue",
-                ],
-                rows: salesRows.map((item) => [
-                    formatDate(item.date),
-                    item.recordId || "-",
-                    item.source === "pos" ? formatPeso(item.posSales) : "-",
-                    item.source === "booking"
-                        ? formatPeso(item.bookingRevenue)
-                        : "-",
-                    formatPeso(item.totalRevenue),
-                ]),
-            };
-        }
-
-        if (selectedReport === "forecasting") {
-            return {
-                title: "Forecasting Report",
-                headers: [
-                    "Product / Package",
-                    "Current Stock / Bookings",
-                    "Forecasted Demand",
-                    "Suggested Restock",
-                    "Risk Level",
-                ],
-                rows: forecasts.map((item) => [
-                    item.item,
-                    item.currentValue,
-                    item.forecastedDemand,
-                    item.suggestedRestock,
-                    item.riskLevel,
-                ]),
-            };
-        }
-
-        if (selectedReport === "staff") {
-            return {
-                title: "Staff Current Actions Report",
-                headers: [
-                    "Date",
-                    "Time",
-                    "Staff Name",
-                    "Role",
-                    "Action",
-                    "Module",
-                    "Reference",
-                    "Details",
-                    "Branch",
-                ],
-                rows: displayedStaffActivities.map((item) => [
-                    formatDate(item.date),
-                    item.time || "—",
-                    item.staffName,
-                    item.role,
-                    item.action,
-                    item.module,
-                    item.reference || "—",
-                    item.details || "—",
-                    item.branch,
-                ]),
-            };
-        }
+            return [parentRow, ...variantRows];
+        });
 
         return {
-            title:
-                inventoryFilter === "low"
-                    ? "Low Stock Inventory Report"
-                    : inventoryFilter === "out"
-                        ? "Out of Stock Inventory Report"
-                        : "Inventory Report",
-            headers: [
-                "Product Name",
-                "Category",
-                "Branch",
-                "Variants",
-                "Current Stock",
-                "Reorder Level",
-                "Status",
-            ],
-            rows: displayedInventory.flatMap((item) => {
-                const variants = getInventoryVariants(item);
-
-                const parentRow = [
-                    item.product,
-                    item.category,
-                    item.branch,
-                    variants.length ? `${variants.length} variants` : "Regular",
-                    String(item.stock),
-                    String(item.reorderLevel),
-                    item.status,
-                ];
-
-                const variantRows = variants.map((variant) => [
-                    `  ↳ ${variant.name}`,
-                    "Variant",
-                    item.branch,
-                    variant.sku || "—",
-                    String(variant.stock),
-                    String(variant.reorderLevel ?? "—"),
-                    getVariantStatus(variant),
-                ]);
-
-                return [parentRow, ...variantRows];
-            }),
+            title: "Filtered Inventory Report",
+            headers,
+            rows,
         };
     }
 
-    function exportDoc() {
-        const table = getExportTable();
+    function exportDoc(table: ExportTable) {
         const rows = table.rows
             .map(
                 (row) =>
@@ -3873,7 +4916,11 @@ export function ReportsWorkspace({
         </head>
         <body>
           <h1>${escapeHtml(table.title)}</h1>
-          <p>Store: ${escapeHtml(activeStoreName)} | Branch: ${escapeHtml(activeBranch)} | Date range: ${escapeHtml(currentRange)}</p>
+          <p>Store: ${escapeHtml(activeStoreName)}${
+            showBranchColumn
+                ? ` | Branch: ${escapeHtml(activeBranch)}`
+                : ""
+        } | Date range: ${escapeHtml(currentRange)}</p>
           <table>
             <thead><tr>${table.headers
             .map((header) => `<th>${escapeHtml(header)}</th>`)
@@ -3885,1161 +4932,643 @@ export function ReportsWorkspace({
     `;
 
         downloadFile(
-            `stocknbook-${selectedReport || "report"}-${startDate}.doc`,
+            `stocknbook-full-inventory-${startDate}.doc`,
             "application/msword;charset=utf-8",
             documentHtml
         );
     }
 
-    function exportExcel() {
-        const table = getExportTable();
-        const rows = table.rows
-            .map(
-                (row) =>
-                    `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`
-            )
-            .join("");
+    function exportExcel(table: ExportTable) {
+        const worksheet = XLSX.utils.aoa_to_sheet([
+            [table.title],
+            [
+                `Store: ${activeStoreName}`,
+                ...(showBranchColumn ? [`Branch: ${activeBranch}`] : []),
+                `Date range: ${currentRange}`,
+            ],
+            [],
+            table.headers,
+            ...table.rows,
+        ]);
 
-        const excelHtml = `
-      <html>
-        <head>
-          <meta charset="UTF-8" />
-          <style>
-            table { border-collapse: collapse; font-family: Arial, sans-serif; }
-            th { background: #2B174C; color: white; }
-            th, td { border: 1px solid #DED3E8; padding: 8px; text-align: left; }
-          </style>
-        </head>
-        <body>
-          <table>
-            <thead>
-              <tr><th colspan="${table.headers.length}">${escapeHtml(table.title)}</th></tr>
-              <tr><td colspan="${table.headers.length}">Store: ${escapeHtml(activeStoreName)} | Branch: ${escapeHtml(activeBranch)} | Date range: ${escapeHtml(currentRange)}</td></tr>
-              <tr>${table.headers
-            .map((header) => `<th>${escapeHtml(header)}</th>`)
-            .join("")}</tr>
-            </thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </body>
-      </html>
-    `;
+        worksheet["!cols"] = table.headers.map((header, columnIndex) => {
+            const longestValue = Math.max(
+                header.length,
+                ...table.rows.map((row) => String(row[columnIndex] ?? "").length)
+            );
 
-        downloadFile(
-            `stocknbook-${selectedReport || "report"}-${startDate}.xls`,
-            "application/vnd.ms-excel;charset=utf-8",
-            excelHtml
-        );
+            return { wch: Math.min(Math.max(longestValue + 2, 12), 36) };
+        });
+
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Inventory Report");
+        XLSX.writeFile(workbook, `stocknbook-full-inventory-${startDate}.xlsx`);
     }
 
-    function exportPdf() {
-        const table = getExportTable();
+    function exportPdf(table: ExportTable) {
         const pdf = createTablePdf({
             title: table.title,
             storeName: activeStoreName,
-            branch: activeBranch,
+            branch: showBranchColumn ? activeBranch : "",
             dateRange: currentRange,
             headers: table.headers,
             rows: table.rows,
         });
 
         downloadFile(
-            `stocknbook-${selectedReport || "report"}-${startDate}.pdf`,
+            `stocknbook-full-inventory-${startDate}.pdf`,
             "application/pdf",
             pdf
         );
     }
 
     return (
-        <div className="min-w-0 overflow-x-hidden font-sans">
-            <div className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
-                <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 px-6 py-3">
-                    <h1 className="text-[25px] font-bold text-[#1A1220]">
-                        Reports
-                    </h1>
+        <div className="min-h-screen min-w-0 overflow-x-hidden bg-[#FFFDF8] font-sans">
+            <div className="px-4 py-5 sm:px-5 lg:px-6">
+                <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                        <h1 className="text-[27px] font-bold leading-none text-[#1A1220]">
+                            Reports
+                        </h1>
+                        <p className="mt-2 text-sm text-[#7F7188]">
+                            View and export business reports and activity history.
+                        </p>
+                    </div>
 
-                    <div className="flex items-center gap-2.5">
-                            <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-                                {currentDateTime
-                                    ? formatCurrentDateTime(currentDateTime)
-                                    : "Loading date..."}
-                            </span>
-
+                    <div className="flex items-center gap-2">
                         <button
                             type="button"
                             onClick={() => void handleRefresh()}
                             disabled={loading}
-                            aria-label="Refresh reports"
-                            title="Refresh reports"
-                            className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                            className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#1B0D31] hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             <RefreshCw
-                                size={16}
+                                size={15}
                                 className={loading ? "animate-spin" : ""}
                             />
                             Refresh
                         </button>
                     </div>
-                </div>
-            </div>
+                </header>
 
-            <div className="px-5 py-5">
-                <section className="mb-3 rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-3 shadow-sm">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="flex min-w-0 items-center gap-3">
-                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EFE8F8] text-[#4E2C66]">
-                                <Store size={18} />
-                            </div>
+                <nav
+                    aria-label="Report types"
+                    className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6"
+                >
+                    {allowedCards.map((card) => {
+                        const Icon = card.icon;
+                        const active = selectedReport === card.key;
 
-                            <div className="min-w-0">
-                                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                    Report Context
-                                </p>
-                                <p className="mt-0.5 truncate text-[15px] font-bold text-[#1A1220]">
-                                    {activeStoreName}
-                                </p>
-                            </div>
-                        </div>
+                        return (
+                            <button
+                                key={card.key}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => {
+                                    setSelectedReport(card.key);
+                                    setSearchQuery("");
+                                    setExpandedInventoryId(null);
+                                    setExpandedBookingId(null);
 
-                        {isOwner ? (
-                            <OwnerBranchSelector
-                                value={branch}
-                                options={branchOptions}
-                                onChange={setBranch}
-                            />
-                        ) : (
-                            <div className="flex min-w-0 items-center gap-2 border-t border-[#F0ECF5] pt-3 sm:border-t-0 sm:border-l sm:pl-5 sm:pt-0">
-                                <MapPin size={16} className="shrink-0 text-[#806A8C]" />
-                                <div className="min-w-0">
-                                    <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                        Branch
-                                    </p>
-                                    <p className="mt-0.5 truncate text-[15px] font-semibold text-[#1A1220]">
-                                        {activeBranch}
-                                    </p>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                </section>
+                                    if (card.key === "inventory") {
+                                        setInventoryFilter("all");
+                                        setCategoryFilter("all");
+                                    }
 
-                {!selectedReport ? (
-                    <>
-                        {loading ? (
-                            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                                {[1, 2, 3, 4, 5, 6].map((item) => (
-                                    <div
-                                        key={item}
-                                        className="h-[166px] animate-pulse rounded-2xl border border-[#E6DDF0] bg-white"
-                                    />
-                                ))}
-                            </div>
-                        ) : (
-                            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                                {allowedCards.map((card) => {
-                                    const moduleMeta = reportModuleMeta[card.key];
+                                    if (card.key === "bookings") {
+                                        setBookingFilter("all");
+                                    }
 
-                                    return (
-                                        <ReportModuleCard
-                                            key={card.key}
-                                            title={card.title}
-                                            subtitle={card.subtitle}
-                                            icon={card.icon}
-                                            metricLabel={moduleMeta.metricLabel}
-                                            metricValue={moduleMeta.metricValue}
-                                            detail={moduleMeta.detail}
-                                            onClick={() => {
-                                                setSelectedReport(card.key);
+                                    if (card.key === "packages") {
+                                        setPackageStatusFilter("all");
+                                    }
 
-                                                if (card.key === "inventory") {
-                                                    setInventoryFilter("all");
-                                                    setExpandedInventoryId(null);
-                                                }
-
-                                                if (card.key === "bookings") {
-                                                    setBookingFilter("all");
-                                                    setExpandedBookingId(null);
-                                                }
-
-                                                if (card.key === "staff") {
-                                                    setStaffModuleFilter("all");
-                                                }
-                                            }}
-                                        />
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </>
-                ) : (
-                    <section>
-                        <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-                            <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-                                <div className="flex items-center gap-3">
-                                    <button
-                                        type="button"
-                                        onClick={() => setSelectedReport(null)}
-                                        className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#5F4E75] transition hover:bg-[#F7F1FF]"
-                                        title="Back to reports"
+                                    if (card.key === "staff") {
+                                        setStaffModuleFilter("all");
+                                    }
+                                }}
+                                className={`group flex min-h-[132px] min-w-0 flex-col rounded-[16px] border p-4 text-left transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[#7C4DFF]/20 ${
+                                    active
+                                        ? "border-[#9B6CF3] bg-[#FCF9FF] shadow-[0_0_0_2px_rgba(124,77,255,0.12),0_10px_24px_rgba(62,32,100,0.12)]"
+                                        : "border-[#E7DFED] bg-white shadow-sm hover:-translate-y-0.5 hover:border-[#C5A9E8] hover:shadow-[0_10px_24px_rgba(62,32,100,0.12)]"
+                                }`}
+                            >
+                                <span className="flex min-w-0 items-start justify-between gap-2">
+                                    <span
+                                        className={`min-w-0 break-words pr-1 text-[13px] font-bold leading-5 transition-colors ${
+                                            active ? "text-[#5727C8]" : "text-[#20152A]"
+                                        }`}
                                     >
-                                        <ArrowLeft size={17} />
-                                    </button>
+                                        {card.title}
+                                    </span>
 
-                                    <div>
-                                        <h2 className="text-[19px] font-bold text-[#1A1220]">
-                                            {selectedTitle}
-                                        </h2>
-                                        <p className="mt-0.5 text-xs text-[#8A7A91]">
-                                            {activeStoreName} · {activeBranch} · {currentRange}
-                                        </p>
-                                    </div>
-                                </div>
-
-                                <div className="flex flex-wrap items-end gap-2">
-                                    {actualRole === "staff" ? (
-                                        <div className="rounded-lg border border-[#E6DDF0] bg-[#FFFCF7] px-3 py-2">
-                                            <p className="text-xs font-semibold text-[#806A8C]">
-                                                ACCOUNT BRANCH
-                                            </p>
-                                            <p className="mt-0.5 text-sm font-semibold text-[#1A1220]">
-                                                {activeBranch}
-                                            </p>
-                                        </div>
-                                    ) : null}
-
-                                    <label className="flex flex-col gap-1 text-[10px] font-medium tracking-[0.08em] text-[#806A8C]">
-                                        START
-                                        <input
-                                            type="date"
-                                            value={startDate}
-                                            max={endDate}
-                                            onChange={(event) => setStartDate(event.target.value)}
-                                            className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-3 text-sm font-normal text-[#1A1220] outline-none focus:border-[#8D63C8]"
-                                        />
-                                    </label>
-
-                                    <label className="flex flex-col gap-1 text-[10px] font-medium tracking-[0.08em] text-[#806A8C]">
-                                        END
-                                        <input
-                                            type="date"
-                                            value={endDate}
-                                            min={startDate}
-                                            onChange={(event) => setEndDate(event.target.value)}
-                                            className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-3 text-sm font-normal text-[#1A1220] outline-none focus:border-[#8D63C8]"
-                                        />
-                                    </label>
-
-                                    <button
-                                        type="button"
-                                        onClick={() => void handleRefresh()}
-                                        className="h-9 rounded-lg bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#3A205F]"
+                                    <span
+                                        className={`flex h-10 shrink-0 items-center justify-end overflow-hidden rounded-full transition-all duration-200 ${card.iconClassName} ${
+                                            active
+                                                ? "w-[76px]"
+                                                : "w-10 group-hover:w-[76px]"
+                                        }`}
                                     >
-                                        Apply
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="mt-3 flex flex-wrap justify-end gap-2 border-t border-[#EFE7F4] pt-3">
-                                <button
-                                    type="button"
-                                    onClick={exportDoc}
-                                    className="flex h-9 items-center gap-2 rounded-lg border border-[#E6DDF0] bg-white px-3 text-sm font-semibold text-[#4E2C66] hover:bg-[#F7F1FF]"
-                                >
-                                    <FileText size={15} />
-                                    Export DOC
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={exportPdf}
-                                    className="flex h-9 items-center gap-2 rounded-lg border border-[#E6DDF0] bg-white px-3 text-sm font-semibold text-[#4E2C66] hover:bg-[#F7F1FF]"
-                                >
-                                    <FileText size={15} />
-                                    Export PDF
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={exportExcel}
-                                    className="flex h-9 items-center gap-2 rounded-lg bg-[#2B174C] px-3 text-sm font-semibold text-white hover:bg-[#3A205F]"
-                                >
-                                    <FileSpreadsheet size={15} />
-                                    Export Excel
-                                </button>
-                            </div>
-                        </div>
-
-                        {selectedReport === "inventory" && (
-                            <div className="mt-4 space-y-4">
-                                <section className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                                    <InventoryFilterCard
-                                        label="CURRENT STOCK"
-                                        value={formatNumber(totalStock)}
-                                        helper={`${inventory.length} inventory record(s)`}
-                                        active={inventoryFilter === "all"}
-                                        onClick={() => setInventoryFilter("all")}
-                                    />
-                                    <InventoryFilterCard
-                                        label="LOW STOCK"
-                                        value={formatNumber(lowStock.length)}
-                                        helper="Show items at reorder level"
-                                        active={inventoryFilter === "low"}
-                                        onClick={() => setInventoryFilter("low")}
-                                    />
-                                    <InventoryFilterCard
-                                        label="OUT OF STOCK"
-                                        value={formatNumber(outOfStock.length)}
-                                        helper="Show items needing restock"
-                                        active={inventoryFilter === "out"}
-                                        onClick={() => setInventoryFilter("out")}
-                                    />
-                                </section>
-
-                                <SectionCard
-                                    title={inventoryListTitle}
-                                    subtitle={inventoryListSubtitle}
-                                >
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full min-w-[1080px] border-collapse text-sm">
-                                            <thead>
-                                            <tr className="border-b border-[#E6DDF0] bg-[#FFFCF7]">
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Product
-                                                </th>
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Category
-                                                </th>
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Type
-                                                </th>
-                                                <th className="px-3 py-3 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Stock
-                                                </th>
-                                                <th className="px-3 py-3 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Alert
-                                                </th>
-                                                <th className="px-3 py-3 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Cost Price
-                                                </th>
-                                                <th className="px-3 py-3 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Sales Price
-                                                </th>
-                                                <th className="px-3 py-3 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Status
-                                                </th>
-                                            </tr>
-                                            </thead>
-
-                                            <tbody>
-                                            {displayedInventory.length > 0 ? (
-                                                displayedInventory.map((item) => {
-                                                    const variants = getInventoryVariants(item);
-                                                    const hasVariants = variants.length > 0;
-                                                    const isExpanded = expandedInventoryId === item.id;
-
-                                                    return (
-                                                        <Fragment key={item.id}>
-                                                            <tr
-                                                                className={`border-b border-[#EFE7F4] transition ${
-                                                                    isExpanded
-                                                                        ? "bg-[#F4ECFA]"
-                                                                        : "bg-white hover:bg-[#FCFAFD]"
-                                                                }`}
-                                                            >
-                                                                <td className="px-3 py-3 align-top">
-                                                                    <div className="flex items-start gap-2.5">
-                                                                        {hasVariants ? (
-                                                                            <button
-                                                                                type="button"
-                                                                                onClick={() =>
-                                                                                    setExpandedInventoryId((current) =>
-                                                                                        current === item.id ? null : item.id
-                                                                                    )
-                                                                                }
-                                                                                className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition ${
-                                                                                    isExpanded
-                                                                                        ? "border-[#8D63C8] bg-[#8D63C8] text-white"
-                                                                                        : "border-[#DDD1E8] bg-white text-[#5D4774] hover:bg-[#F1E9F8]"
-                                                                                }`}
-                                                                                aria-label={
-                                                                                    isExpanded
-                                                                                        ? "Hide variants"
-                                                                                        : "Show variants"
-                                                                                }
-                                                                            >
-                                                                                {isExpanded ? (
-                                                                                    <ChevronUp size={14} />
-                                                                                ) : (
-                                                                                    <ChevronDown size={14} />
-                                                                                )}
-                                                                            </button>
-                                                                        ) : (
-                                                                            <span className="mt-0.5 block h-6 w-6 shrink-0" />
-                                                                        )}
-
-                                                                        <div className="min-w-0">
-                                                                            <p className="truncate font-semibold text-[#1A1220]">
-                                                                                {item.product}
-                                                                            </p>
-                                                                            {hasVariants && (
-                                                                                <p className="mt-0.5 text-xs text-[#7E6B8A]">
-                                                                                    Click to view {variants.length} variants
-                                                                                </p>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
-                                                                </td>
-
-                                                                <td className="px-3 py-3 text-[#6A5D6F]">
-                                                                    {item.category}
-                                                                </td>
-
-                                                                <td className="px-3 py-3 text-[#6A5D6F]">
-                                                                    {hasVariants
-                                                                        ? `${variants.length} variants`
-                                                                        : "Single product"}
-                                                                </td>
-
-                                                                <td className="px-3 py-3 text-right font-semibold text-[#1A1220]">
-                                                                    {formatNumber(item.stock)}
-                                                                </td>
-
-                                                                <td className="px-3 py-3 text-right text-[#6A5D6F]">
-                                                                    {formatNumber(item.reorderLevel)}
-                                                                </td>
-
-                                                                <td className="px-3 py-3 text-right text-[#6A5D6F]">
-                                                                    {getPriceRange(item, "costPrice")}
-                                                                </td>
-
-                                                                <td className="px-3 py-3 text-right font-semibold text-[#1A1220]">
-                                                                    {getPriceRange(item, "salesPrice")}
-                                                                </td>
-
-                                                                <td className="px-3 py-3 text-right">
-                                                                    <StatusBadge status={item.status} />
-                                                                </td>
-                                                            </tr>
-
-                                                            {hasVariants && isExpanded && (
-                                                                <tr className="border-b border-[#E1D5EB] bg-[#F4ECFA]">
-                                                                    <td colSpan={8} className="p-0">
-                                                                        <div className="bg-[#F4ECFA] px-4 py-2">
-                                                                            {variants.map((variant, index) => (
-                                                                                <div
-                                                                                    key={variant.id}
-                                                                                    className="grid grid-cols-[minmax(230px,2fr)_minmax(140px,1fr)_minmax(110px,0.8fr)_minmax(90px,0.65fr)_minmax(90px,0.65fr)_minmax(120px,0.85fr)_minmax(120px,0.85fr)_minmax(110px,0.8fr)] items-center gap-3 border-b border-[#E2D6EC] py-3 last:border-b-0"
-                                                                                >
-                                                                                    <div className="relative pl-8">
-                                                                                        {index < variants.length - 1 && (
-                                                                                            <span className="absolute bottom-[-15px] left-[9px] top-[16px] border-l border-dashed border-[#C9AEE5]" />
-                                                                                        )}
-                                                                                        <span className="absolute left-[4px] top-[7px] h-3 w-3 rounded-full bg-[#9B65D6]" />
-                                                                                        <p className="truncate text-sm font-semibold text-[#2B174C]">
-                                                                                            {variant.name}
-                                                                                        </p>
-                                                                                    </div>
-
-                                                                                    <p className="text-sm text-[#8A7A91]">—</p>
-
-                                                                                    <p className="text-sm text-[#6A5D6F]">Variant</p>
-
-                                                                                    <p className="text-right text-sm font-semibold text-[#1A1220]">
-                                                                                        {formatNumber(variant.stock)}
-                                                                                    </p>
-
-                                                                                    <p className="text-right text-sm text-[#6A5D6F]">
-                                                                                        {formatNumber(
-                                                                                            variant.reorderLevel ?? 0
-                                                                                        )}
-                                                                                    </p>
-
-                                                                                    <p className="text-right text-sm text-[#6A5D6F]">
-                                                                                        {typeof variant.costPrice === "number"
-                                                                                            ? formatPeso(variant.costPrice)
-                                                                                            : "—"}
-                                                                                    </p>
-
-                                                                                    <p className="text-right text-sm font-semibold text-[#1A1220]">
-                                                                                        {typeof variant.salesPrice === "number"
-                                                                                            ? formatPeso(variant.salesPrice)
-                                                                                            : "—"}
-                                                                                    </p>
-
-                                                                                    <div className="text-right">
-                                                                                        <StatusBadge
-                                                                                            status={getVariantStatus(variant)}
-                                                                                        />
-                                                                                    </div>
-                                                                                </div>
-                                                                            ))}
-                                                                        </div>
-                                                                    </td>
-                                                                </tr>
-                                                            )}
-                                                        </Fragment>
-                                                    );
-                                                })
-                                            ) : (
-                                                <tr>
-                                                    <td
-                                                        colSpan={8}
-                                                        className="px-3 py-10 text-center text-sm text-[#8A7A91]"
-                                                    >
-                                                        No matching inventory items found.
-                                                    </td>
-                                                </tr>
-                                            )}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </SectionCard>
-                            </div>
-                        )}
-
-                        {selectedReport === "restock" && (
-                            <div className="mt-4 space-y-4">
-                                <section className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                                    <StatCard
-                                        label="RESTOCK RECORDS"
-                                        value={formatNumber(restocks.length)}
-                                        helper="Recorded restock entries"
-                                    />
-                                    <StatCard
-                                        label="UNITS ADDED"
-                                        value={formatNumber(
-                                            sumBy(restocks, (item) => item.quantityAdded)
-                                        )}
-                                        helper="Total quantity added"
-                                    />
-                                    <StatCard
-                                        label="PRODUCTS RESTOCKED"
-                                        value={formatNumber(
-                                            new Set(restocks.map((item) => item.product)).size
-                                        )}
-                                        helper="Unique products replenished"
-                                    />
-                                </section>
-
-                                <SectionCard
-                                    title="Inventory Restock History"
-                                    subtitle="Review restock references, products, quantities added, and current stock."
-                                >
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full min-w-[860px] border-collapse text-sm">
-                                            <thead>
-                                            <tr className="border-b border-[#E6DDF0] bg-[#FFFCF7]">
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Date
-                                                </th>
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Product
-                                                </th>
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Branch
-                                                </th>
-                                                <th className="px-3 py-3 text-center text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Quantity Added
-                                                </th>
-                                                <th className="px-3 py-3 text-center text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Current Stock
-                                                </th>
-                                            </tr>
-                                            </thead>
-
-                                            <tbody>
-                                            {restocks.length > 0 ? (
-                                                restocks.map((item) => (
-                                                    <tr
-                                                        key={item.id}
-                                                        className="border-b border-[#EFE7F4] bg-white hover:bg-[#FCFAFD]"
-                                                    >
-                                                        <td className="px-3 py-3 align-top">
-                                                            <p className="font-semibold text-[#1A1220]">
-                                                                {formatDate(item.date)}
-                                                            </p>
-                                                            <p className="mt-0.5 text-xs text-[#7E6B8A]">
-                                                                {item.reference || item.id}
-                                                            </p>
-                                                        </td>
-
-                                                        <td className="px-3 py-3 align-top">
-                                                            <p className="font-semibold text-[#1A1220]">
-                                                                {item.product}
-                                                            </p>
-                                                            <p className="mt-0.5 text-xs text-[#7E6B8A]">
-                                                                {item.variantName || "Product restock"}
-                                                            </p>
-                                                        </td>
-
-                                                        <td className="px-3 py-3 align-top text-[#6A5D6F]">
-                                                            {item.branch}
-                                                        </td>
-
-                                                        <td className="px-3 py-3 text-center align-top font-semibold text-[#176C27]">
-                                                            +{formatNumber(item.quantityAdded)}
-                                                        </td>
-
-                                                        <td className="px-3 py-3 text-center align-top font-semibold text-[#1A1220]">
-                                                            {formatNumber(item.currentStock)}
-                                                        </td>
-                                                    </tr>
-                                                ))
-                                            ) : (
-                                                <tr>
-                                                    <td
-                                                        colSpan={5}
-                                                        className="px-3 py-10 text-center text-sm text-[#8A7A91]"
-                                                    >
-                                                        No restock records found for the selected period.
-                                                    </td>
-                                                </tr>
-                                            )}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </SectionCard>
-                            </div>
-                        )}
-
-                        {selectedReport === "bookings" && (
-                            <div className="mt-4 space-y-4">
-                                <div className="overflow-x-auto px-1 py-1">
-                                    <section className="grid min-w-[690px] grid-cols-6 gap-2">
-                                        {bookingFilters.map((filter) => (
-                                            <BookingFilterCard
-                                                key={filter.key}
-                                                label={filter.label}
-                                                value={formatNumber(filter.count)}
-                                                active={bookingFilter === filter.key}
-                                                onClick={() => setBookingFilter(filter.key)}
-                                            />
-                                        ))}
-                                    </section>
-                                </div>
-
-                                <SectionCard
-                                    title={bookingListTitle}
-                                    subtitle={bookingListSubtitle}
-                                >
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full min-w-[1080px] border-collapse text-sm">
-                                            <thead>
-                                            <tr className="border-b border-[#E6DDF0] bg-[#FFFCF7]">
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Client
-                                                </th>
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Schedule
-                                                </th>
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Package
-                                                </th>
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Payment
-                                                </th>
-                                                <th className="px-3 py-3 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Status
-                                                </th>
-                                                <th className="px-3 py-3 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Details
-                                                </th>
-                                            </tr>
-                                            </thead>
-
-                                            <tbody>
-                                            {displayedBookings.length > 0 ? (
-                                                displayedBookings.map((item) => {
-                                                    const isExpanded = expandedBookingId === item.id;
-                                                    const payment = getBookingPaymentDetails(item);
-
-                                                    return (
-                                                        <Fragment key={item.id}>
-                                                            <tr
-                                                                className={`border-b border-[#EFE7F4] transition ${
-                                                                    isExpanded ? "bg-[#F7F1FC]" : "bg-white hover:bg-[#FCFAFD]"
-                                                                }`}
-                                                            >
-                                                                <td className="px-3 py-3 align-top">
-                                                                    <div className="flex items-start gap-2.5">
-                                                                        <button
-                                                                            type="button"
-                                                                            onClick={() =>
-                                                                                setExpandedBookingId((current) =>
-                                                                                    current === item.id ? null : item.id
-                                                                                )
-                                                                            }
-                                                                            className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-[#DDD1E8] bg-white text-[#5D4774] transition hover:bg-[#F1E9F8]"
-                                                                            aria-label={
-                                                                                isExpanded
-                                                                                    ? "Hide booking details"
-                                                                                    : "Show booking details"
-                                                                            }
-                                                                        >
-                                                                            {isExpanded ? (
-                                                                                <ChevronUp size={14} />
-                                                                            ) : (
-                                                                                <ChevronDown size={14} />
-                                                                            )}
-                                                                        </button>
-
-                                                                        <div className="min-w-0">
-                                                                            <p className="truncate font-semibold text-[#1A1220]">
-                                                                                {item.customer}
-                                                                            </p>
-                                                                            <p className="mt-0.5 text-xs text-[#7E6B8A]">
-                                                                                {item.phone || "Contact not recorded"}
-                                                                            </p>
-                                                                            <p className="mt-0.5 font-mono text-[10px] font-semibold text-[#887494]">
-                                                                                {item.reference}
-                                                                            </p>
-                                                                        </div>
-                                                                    </div>
-                                                                </td>
-
-                                                                <td className="px-3 py-3 align-top">
-                                                                    <p className="font-semibold text-[#1A1220]">
-                                                                        {formatDate(item.eventDate)}
-                                                                    </p>
-                                                                    <p className="mt-0.5 text-xs text-[#7E6B8A]">
-                                                                        {item.scheduleTime || `Booked ${formatDate(item.date)}`}
-                                                                    </p>
-                                                                </td>
-
-                                                                <td className="px-3 py-3 align-top">
-                                                                    <p className="font-semibold text-[#1A1220]">
-                                                                        {item.packageName}
-                                                                    </p>
-                                                                    <p className="mt-0.5 text-xs text-[#7E6B8A]">
-                                                                        {formatPeso(payment.packagePrice)}
-                                                                    </p>
-                                                                </td>
-
-                                                                <td className="px-3 py-3 align-top">
-                                                                    <StatusBadge status={payment.paymentStatus} />
-                                                                    <p className="mt-1 text-xs text-[#7E6B8A]">
-                                                                        Paid {formatPeso(payment.amountPaid)}
-                                                                    </p>
-                                                                </td>
-
-                                                                <td className="px-3 py-3 align-top">
-                                                                    <StatusBadge status={getBookingStatusLabel(item)} />
-                                                                </td>
-
-                                                                <td className="px-3 py-3 align-top text-right">
-                                                                    <div className="inline-flex max-w-[180px] items-center gap-1.5 text-left text-xs text-[#6D5980]">
-                                                                        <MapPin size={13} className="shrink-0" />
-                                                                        <span className="truncate">
-                                          {item.venue || "Venue not recorded"}
+                                        <span
+                                            className={`overflow-hidden whitespace-nowrap text-[11px] font-semibold transition-all duration-200 ${
+                                                active
+                                                    ? "ml-3 max-w-[34px] opacity-100"
+                                                    : "ml-0 max-w-0 opacity-0 group-hover:ml-3 group-hover:max-w-[34px] group-hover:opacity-100"
+                                            }`}
+                                        >
+                                            View
                                         </span>
-                                                                    </div>
-                                                                </td>
-                                                            </tr>
+                                        <Icon
+                                            size={19}
+                                            strokeWidth={2}
+                                            className="mx-2.5 shrink-0"
+                                        />
+                                    </span>
+                                </span>
 
-                                                            {isExpanded && (
-                                                                <tr className="border-b border-[#E6DDF0]">
-                                                                    <td colSpan={6} className="p-0">
-                                                                        <BookingDetailPanel booking={item} />
-                                                                    </td>
-                                                                </tr>
-                                                            )}
-                                                        </Fragment>
-                                                    );
-                                                })
-                                            ) : (
-                                                <tr>
-                                                    <td
-                                                        colSpan={6}
-                                                        className="px-3 py-10 text-center text-sm text-[#8A7A91]"
-                                                    >
-                                                        No {bookingFilter} booking records found.
-                                                    </td>
-                                                </tr>
-                                            )}
-                                            </tbody>
-                                        </table>
+                                <span className="mt-4 block break-words text-[11px] leading-[1.45] text-[#7F7188]">
+                                    {card.subtitle}
+                                </span>
+                            </button>
+                        );
+                    })}
+                </nav>
+
+                <ReportFilterBar
+                    selectedReport={selectedReport}
+                    searchQuery={searchQuery}
+                    onSearchChange={(value) => {
+                        setSearchQuery(value);
+                    }}
+                    startDate={startDate}
+                    endDate={endDate}
+                    onStartDateChange={(value) => {
+                        setStartDate(value);
+                    }}
+                    onEndDateChange={(value) => {
+                        setEndDate(value);
+                    }}
+                    categoryFilter={categoryFilter}
+                    inventoryCategories={inventoryCategories}
+                    onCategoryChange={(value) => {
+                        setCategoryFilter(value);
+                    }}
+                    bookingStatusFilter={bookingFilter}
+                    onBookingStatusChange={setBookingFilter}
+                    packageStatusFilter={packageStatusFilter}
+                    onPackageStatusChange={setPackageStatusFilter}
+                    staffModuleFilter={staffModuleFilter}
+                    onStaffModuleChange={setStaffModuleFilter}
+                    showBranchFilter={showBranchFilter}
+                    branch={branch}
+                    branchOptions={branchOptions}
+                    onBranchChange={(value) => {
+                        setBranch(value);
+                    }}
+                    onClear={() => {
+                        setSearchQuery("");
+                        setCategoryFilter("all");
+                        setInventoryFilter("all");
+                        setBookingFilter("all");
+                        setPackageStatusFilter("all");
+                        setStaffModuleFilter("all");
+                        setStartDate(getMonthStart(getToday()));
+                        setEndDate(getToday());
+                        setExpandedInventoryId(null);
+
+                        if (showBranchFilter) {
+                            setBranch(ALL_BRANCHES);
+                        }
+                    }}
+                />
+
+                <section className="mt-4">
+                    {selectedReport === "inventory" && (
+                        <div className="grid grid-cols-1 items-start gap-3 2xl:grid-cols-[minmax(0,1fr)_260px]">
+                            <section className="min-w-0 self-start overflow-hidden rounded-[14px] border border-[#E5DDEA] bg-white shadow-sm">
+                                <div className="border-b border-[#ECE5F0] px-4 py-3.5">
+                                    <h2 className="text-[16px] font-bold text-[#1A1220]">
+                                        {inventoryListTitle}
+                                    </h2>
+                                    <p className="mt-1 text-[11px] text-[#8A7A91]">
+                                        {inventoryListSubtitle}
+                                    </p>
+                                </div>
+
+                                <InventoryItemsTable
+                                    items={displayedInventory}
+                                    showBranchColumn={showBranchColumn}
+                                    expandedInventoryId={expandedInventoryId}
+                                    onToggleExpanded={(itemId) =>
+                                        setExpandedInventoryId((current) =>
+                                            current === itemId ? null : itemId
+                                        )
+                                    }
+                                />
+
+                            </section>
+
+                            <aside className="self-start rounded-[14px] border border-[#E5DDEA] bg-white p-3 shadow-sm">
+                                <h2 className="text-[16px] font-bold text-[#1A1220]">
+                                    Inventory Summary
+                                </h2>
+
+                                <div className="mt-3 divide-y divide-[#EEE7F2]">
+                                    {[
+                                        {
+                                            label: "Total Items",
+                                            value: inventory.length,
+                                            filter: "all" as InventoryFilter,
+                                            dot: "bg-[#7A45E8]",
+                                        },
+                                        {
+                                            label: "In Stock",
+                                            value: inStock.length,
+                                            filter: "in" as InventoryFilter,
+                                            dot: "bg-[#22B65B]",
+                                        },
+                                        {
+                                            label: "Low Stock",
+                                            value: lowStock.length,
+                                            filter: "low" as InventoryFilter,
+                                            dot: "bg-[#FF8A00]",
+                                        },
+                                        {
+                                            label: "Out of Stock",
+                                            value: outOfStock.length,
+                                            filter: "out" as InventoryFilter,
+                                            dot: "bg-[#EF3E38]",
+                                        },
+                                        {
+                                            label: "Soon to Expire",
+                                            value: soonToExpire.length,
+                                            filter: "soon" as InventoryFilter,
+                                            dot: "bg-[#F6A800]",
+                                        },
+                                        {
+                                            label: "Expired",
+                                            value: expiredItems.length,
+                                            filter: "expired" as InventoryFilter,
+                                            dot: "bg-[#E32222]",
+                                        },
+                                    ].map((summary) => (
+                                        <button
+                                            key={summary.label}
+                                            type="button"
+                                            onClick={() => setInventoryFilter(summary.filter)}
+                                            className={`flex w-full items-center justify-between gap-3 px-1 py-2 text-left transition hover:bg-[#FAF6FF] ${
+                                                inventoryFilter ===
+                                                summary.filter
+                                                    ? "text-[#5C2FC0]"
+                                                    : "text-[#392A42]"
+                                            }`}
+                                        >
+                                                <span className="flex items-center gap-2 text-[11px] font-semibold">
+                                                    <span
+                                                        className={`h-2.5 w-2.5 rounded-full ${summary.dot}`}
+                                                    />
+                                                    {summary.label}
+                                                </span>
+                                            <span className="text-[12px] font-bold">
+                                                    {formatNumber(summary.value)}
+                                                </span>
+                                        </button>
+                                    ))}
+                                </div>
+
+                                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                                    <h3 className="text-[12px] font-bold text-[#211629]">
+                                        Stock Status Breakdown
+                                    </h3>
+                                    <div className="mt-3 flex items-center gap-4">
+                                        <div
+                                            className="relative h-20 w-20 shrink-0 rounded-full"
+                                            style={{
+                                                background: `conic-gradient(
+                                                        #22B65B 0 ${
+                                                    (inStock.length /
+                                                        Math.max(
+                                                            inventory.length,
+                                                            1
+                                                        )) *
+                                                    100
+                                                }%,
+                                                        #FF8A00 ${
+                                                    (inStock.length /
+                                                        Math.max(
+                                                            inventory.length,
+                                                            1
+                                                        )) *
+                                                    100
+                                                }% ${
+                                                    ((inStock.length +
+                                                            lowStock.length) /
+                                                        Math.max(
+                                                            inventory.length,
+                                                            1
+                                                        )) *
+                                                    100
+                                                }%,
+                                                        #EF3E38 ${
+                                                    ((inStock.length +
+                                                            lowStock.length) /
+                                                        Math.max(
+                                                            inventory.length,
+                                                            1
+                                                        )) *
+                                                    100
+                                                }% 100%
+                                                    )`,
+                                            }}
+                                        >
+                                            <span className="absolute inset-[14px] rounded-full bg-white" />
+                                        </div>
+
+                                        <div className="min-w-0 flex-1 space-y-2">
+                                            {[
+                                                {
+                                                    label: "In Stock",
+                                                    count: inStock.length,
+                                                    dot: "bg-[#22B65B]",
+                                                },
+                                                {
+                                                    label: "Low Stock",
+                                                    count: lowStock.length,
+                                                    dot: "bg-[#FF8A00]",
+                                                },
+                                                {
+                                                    label: "Out of Stock",
+                                                    count: outOfStock.length,
+                                                    dot: "bg-[#EF3E38]",
+                                                },
+                                            ].map((item) => (
+                                                <div
+                                                    key={item.label}
+                                                    className="flex items-center justify-between gap-2 text-[10px]"
+                                                >
+                                                        <span className="flex min-w-0 items-center gap-2 text-[#5F5267]">
+                                                            <span
+                                                                className={`h-2 w-2 shrink-0 rounded-full ${item.dot}`}
+                                                            />
+                                                            <span className="truncate">
+                                                                {item.label}
+                                                            </span>
+                                                        </span>
+                                                    <span className="font-bold text-[#251A2C]">
+                                                            {formatNumber(item.count)}
+                                                        </span>
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
-                                </SectionCard>
+                                </div>
 
-                            </div>
-                        )}
-
-                        {selectedReport === "sales" && (
-                            <div className="mt-4 space-y-4">
-                                <section className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                                    <SalesFilterCard
-                                        label="TOTAL REVENUE"
-                                        value={formatPeso(totalSales + totalBookingRevenue)}
-                                        helper="POS sales plus booking-linked order revenue · View summary"
-                                        active={salesView === "summary"}
-                                        onClick={() => setSalesView("summary")}
-                                    />
-
-                                    <SalesFilterCard
-                                        label="POS SALES"
-                                        value={formatPeso(totalSales)}
-                                        helper={`${posTransactions.length} POS order(s) for the selected date range · View orders`}
-                                        active={salesView === "pos"}
-                                        onClick={() => setSalesView("pos")}
-                                    />
-
-                                    <SalesFilterCard
-                                        label="BOOKING REVENUE"
-                                        value={formatPeso(totalBookingRevenue)}
-                                        helper={`${bookingRevenueRecords.length} booking revenue record(s) · View records`}
-                                        active={salesView === "booking"}
-                                        onClick={() => setSalesView("booking")}
-                                    />
-                                </section>
-
-                                {salesView === "summary" && (
-                                    <SectionCard
-                                        title="Total Revenue Records"
-                                        subtitle="One compact row per POS order or booking-linked order. POS and Booking Revenue stay in separate columns."
-                                    >
-                                        <div className="overflow-x-auto">
-                                            <div className="mx-auto max-w-[1080px]">
-                                                <table className="w-full min-w-[820px] table-fixed text-[13px]">
-                                                    <thead>
-                                                    <tr className="border-b border-[#E6DDF0]">
-                                                        <th className="w-[15%] px-2.5 py-2 text-left text-[10px] font-medium tracking-widest text-[#806A8C]">Date</th>
-                                                        <th className="w-[33%] px-2.5 py-2 text-left text-[10px] font-medium tracking-widest text-[#806A8C]">Transaction / Booking ID</th>
-                                                        <th className="w-[17%] px-2.5 py-2 text-right text-[10px] font-medium tracking-widest text-[#806A8C]">POS Sales</th>
-                                                        <th className="w-[19%] px-2.5 py-2 text-right text-[10px] font-medium tracking-widest text-[#806A8C]">Booking Revenue</th>
-                                                        <th className="w-[16%] px-2.5 py-2 text-right text-[10px] font-medium tracking-widest text-[#806A8C]">Total Revenue</th>
-                                                    </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                    {salesRows.length > 0 ? (
-                                                        salesRows.map((item) => (
-                                                            <tr key={item.id} className="border-b border-[#EFE7F4] last:border-0">
-                                                                <td className="whitespace-nowrap px-2.5 py-2.5 font-semibold text-[#1A1220]">
-                                                                    {formatDate(item.date)}
-                                                                </td>
-
-                                                                <td className="truncate px-2.5 py-2.5 font-mono text-[10px] font-semibold text-[#5F4E75]">
-                                                                    {item.recordId || "-"}
-                                                                </td>
-
-                                                                <td className="px-2.5 py-2.5 text-right font-semibold text-[#1A1220]">
-                                                                    {item.source === "pos"
-                                                                        ? formatPeso(item.posSales)
-                                                                        : "-"}
-                                                                </td>
-
-                                                                <td className="px-2.5 py-2.5 text-right font-semibold text-[#1A1220]">
-                                                                    {item.source === "booking"
-                                                                        ? formatPeso(item.bookingRevenue)
-                                                                        : "-"}
-                                                                </td>
-
-                                                                <td className="px-2.5 py-2.5 text-right font-semibold text-[#2B174C]">
-                                                                    {formatPeso(item.totalRevenue)}
-                                                                </td>
-                                                            </tr>
-                                                        ))
-                                                    ) : (
-                                                        <tr>
-                                                            <td colSpan={5} className="px-2.5 py-8 text-center text-sm text-[#8A7A91]">
-                                                                No POS sales or booking revenue records found for the selected date range.
-                                                            </td>
-                                                        </tr>
-                                                    )}
-                                                    </tbody>
-                                                </table>
-                                            </div>
+                                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                                    <h3 className="text-[12px] font-bold text-[#211629]">
+                                        Expiration Status Breakdown
+                                    </h3>
+                                    <div className="mt-3 flex items-center gap-4">
+                                        <div
+                                            className="relative h-20 w-20 shrink-0 rounded-full"
+                                            style={{
+                                                background: `conic-gradient(
+                                                        #22B65B 0 ${
+                                                    (goodExpirationItems.length /
+                                                        Math.max(
+                                                            inventory.length,
+                                                            1
+                                                        )) *
+                                                    100
+                                                }%,
+                                                        #F6A800 ${
+                                                    (goodExpirationItems.length /
+                                                        Math.max(
+                                                            inventory.length,
+                                                            1
+                                                        )) *
+                                                    100
+                                                }% ${
+                                                    ((goodExpirationItems.length +
+                                                            soonToExpire.length) /
+                                                        Math.max(
+                                                            inventory.length,
+                                                            1
+                                                        )) *
+                                                    100
+                                                }%,
+                                                        #E32222 ${
+                                                    ((goodExpirationItems.length +
+                                                            soonToExpire.length) /
+                                                        Math.max(
+                                                            inventory.length,
+                                                            1
+                                                        )) *
+                                                    100
+                                                }% 100%
+                                                    )`,
+                                            }}
+                                        >
+                                            <span className="absolute inset-[14px] rounded-full bg-white" />
                                         </div>
-                                    </SectionCard>
-                                )}
 
-                                {salesView === "pos" && (
-                                    <SectionCard
-                                        title="POS Orders"
-                                        subtitle={`${posTransactions.length} POS order(s) recorded for the selected date range.`}
-                                    >
-                                        <div className="overflow-x-auto">
-                                            <table className="w-full min-w-[880px] table-fixed text-sm">
-                                                <thead>
-                                                <tr className="border-b border-[#E6DDF0]">
-                                                    <th className="w-[17%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Date</th>
-                                                    <th className="w-[26%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Order ID</th>
-                                                    <th className="w-[42%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Items</th>
-                                                    <th className="w-[15%] px-3 py-2 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">Total</th>
-                                                </tr>
-                                                </thead>
-                                                <tbody>
-                                                {posTransactions.length > 0 ? (
-                                                    posTransactions.map((item) => (
-                                                        <tr key={item.id} className="border-b border-[#EFE7F4] last:border-0">
-                                                            <td className="whitespace-nowrap px-3 py-3 font-semibold text-[#1A1220]">
-                                                                {formatDate(item.date)}
-                                                            </td>
-
-                                                            <td className="truncate px-3 py-3 font-mono text-[11px] font-semibold text-[#5F4E75]">
-                                                                {item.reference || item.id}
-                                                            </td>
-
-                                                            <td className="px-3 py-3 text-[#6A5D6F]">
-                                                                <span className="block truncate">
-                                                                    {getSaleItemsLabel(item)}
-                                                                </span>
-                                                            </td>
-
-                                                            <td className="px-3 py-3 text-right font-semibold text-[#1A1220]">
-                                                                {formatPeso(item.amount)}
-                                                            </td>
-                                                        </tr>
-                                                    ))
-                                                ) : (
-                                                    <tr>
-                                                        <td colSpan={4} className="px-3 py-10 text-center text-sm text-[#8A7A91]">
-                                                            No POS orders found for the selected date range.
-                                                        </td>
-                                                    </tr>
-                                                )}
-                                                </tbody>
-                                            </table>
+                                        <div className="min-w-0 flex-1 space-y-2">
+                                            {[
+                                                {
+                                                    label: "Good / No Expiry",
+                                                    count:
+                                                    goodExpirationItems.length,
+                                                    dot: "bg-[#22B65B]",
+                                                },
+                                                {
+                                                    label: "Soon to Expire",
+                                                    count: soonToExpire.length,
+                                                    dot: "bg-[#F6A800]",
+                                                },
+                                                {
+                                                    label: "Expired",
+                                                    count: expiredItems.length,
+                                                    dot: "bg-[#E32222]",
+                                                },
+                                            ].map((item) => (
+                                                <div
+                                                    key={item.label}
+                                                    className="flex items-center justify-between gap-2 text-[10px]"
+                                                >
+                                                        <span className="flex min-w-0 items-center gap-2 text-[#5F5267]">
+                                                            <span
+                                                                className={`h-2 w-2 shrink-0 rounded-full ${item.dot}`}
+                                                            />
+                                                            <span className="truncate">
+                                                                {item.label}
+                                                            </span>
+                                                        </span>
+                                                    <span className="font-bold text-[#251A2C]">
+                                                            {formatNumber(item.count)}
+                                                        </span>
+                                                </div>
+                                            ))}
                                         </div>
-                                    </SectionCard>
-                                )}
+                                    </div>
+                                </div>
 
-                                {salesView === "booking" && (
-                                    <SectionCard
-                                        title="Booking Revenue Records"
-                                        subtitle="Booking-linked order records are shown separately from POS orders, with their booking status."
-                                    >
-                                        <div className="overflow-x-auto">
-                                            <table className="w-full min-w-[960px] table-fixed text-sm">
-                                                <thead>
-                                                <tr className="border-b border-[#E6DDF0]">
-                                                    <th className="w-[14%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Date</th>
-                                                    <th className="w-[21%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Reference No.</th>
-                                                    <th className="w-[18%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Customer</th>
-                                                    <th className="w-[25%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Package</th>
-                                                    <th className="w-[10%] px-3 py-2 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">Status</th>
-                                                    <th className="w-[12%] px-3 py-2 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">Revenue</th>
-                                                </tr>
-                                                </thead>
-                                                <tbody>
-                                                {bookingRevenueRecords.length > 0 ? (
-                                                    bookingRevenueRecords.map((item) => (
-                                                        <tr key={item.id} className="border-b border-[#EFE7F4] last:border-0">
-                                                            <td className="whitespace-nowrap px-3 py-3 font-semibold text-[#1A1220]">
-                                                                {formatDate(item.date)}
-                                                            </td>
-
-                                                            <td className="truncate px-3 py-3 text-[11px] font-semibold text-[#5F4E75]">
-                                                                {item.reference || item.id}
-                                                            </td>
-
-                                                            <td className="truncate px-3 py-3 text-[#6A5D6F]">
-                                                                {item.customer || "-"}
-                                                            </td>
-
-                                                            <td className="truncate px-3 py-3 text-[#6A5D6F]">
-                                                                {getSaleItemsLabel(item)}
-                                                            </td>
-
-                                                            <td className="px-3 py-3 text-right">
-                                                                <StatusBadge
-                                                                    status={item.statusLabel || "Completed"}
+                                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
+                                    <h3 className="text-[12px] font-bold text-[#211629]">
+                                        All Categories
+                                    </h3>
+                                    <div className="mt-3 space-y-2">
+                                        {inventoryCategorySummary.length > 0 ? (
+                                            inventoryCategorySummary.map(
+                                                (category) => (
+                                                    <div
+                                                        key={category.name}
+                                                        className="grid grid-cols-[72px_1fr_auto] items-center gap-1.5 text-[9px]"
+                                                    >
+                                                            <span className="truncate text-[#5F5267]">
+                                                                {category.name}
+                                                            </span>
+                                                        <span className="h-1.5 overflow-hidden rounded-full bg-[#EFE9F4]">
+                                                                <span
+                                                                    className="block h-full rounded-full bg-[#7041E5]"
+                                                                    style={{
+                                                                        width: `${
+                                                                            (category.count /
+                                                                                largestInventoryCategoryCount) *
+                                                                            100
+                                                                        }%`,
+                                                                    }}
                                                                 />
-                                                            </td>
+                                                            </span>
+                                                        <span className="font-bold text-[#251A2C]">
+                                                                {formatNumber(
+                                                                    category.count
+                                                                )}
+                                                            </span>
+                                                    </div>
+                                                )
+                                            )
+                                        ) : (
+                                            <p className="text-[10px] text-[#8A7A91]">
+                                                No category data available.
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
 
-                                                            <td className="px-3 py-3 text-right font-semibold text-[#1A1220]">
-                                                                {formatPeso(item.amount)}
-                                                            </td>
-                                                        </tr>
-                                                    ))
-                                                ) : (
-                                                    <tr>
-                                                        <td colSpan={6} className="px-3 py-10 text-center text-sm text-[#8A7A91]">
-                                                            No booking revenue records found for the selected date range.
-                                                        </td>
-                                                    </tr>
-                                                )}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    </SectionCard>
-                                )}
-                            </div>
-                        )}
+                                <InventoryExportMenu
+                                    onExportPdf={() =>
+                                        exportPdf(getFilteredInventoryExportTable())
+                                    }
+                                    onExportXlsx={() =>
+                                        exportExcel(getFilteredInventoryExportTable())
+                                    }
+                                    onExportDoc={() =>
+                                        exportDoc(getFilteredInventoryExportTable())
+                                    }
+                                />
+                            </aside>
+                        </div>
+                    )}
 
-                        {selectedReport === "forecasting" && (
-                            <div className="mt-4 space-y-4">
-                                <SectionCard
-                                    title="Forecasting Summary"
-                                    subtitle="Predicted demand monitoring, recommended restocks, and risk level."
-                                >
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full min-w-[850px] table-fixed text-sm">
-                                            <thead>
-                                            <tr className="border-b border-[#E6DDF0]">
-                                                <th className="w-[22%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Product / Package</th>
-                                                <th className="w-[21%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Current</th>
-                                                <th className="w-[20%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Forecasted</th>
-                                                <th className="w-[24%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Suggested Restock</th>
-                                                <th className="w-[13%] px-3 py-2 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">Risk</th>
-                                            </tr>
-                                            </thead>
-                                            <tbody>
-                                            {forecasts.map((item) => (
-                                                <tr key={item.id} className="border-b border-[#EFE7F4] last:border-0">
-                                                    <td className="px-3 py-3 font-semibold text-[#1A1220]">{item.item}</td>
-                                                    <td className="px-3 py-3 text-[#6A5D6F]">{item.currentValue}</td>
-                                                    <td className="px-3 py-3 font-semibold text-[#1A1220]">{item.forecastedDemand}</td>
-                                                    <td className="px-3 py-3 text-[#6A5D6F]">{item.suggestedRestock}</td>
-                                                    <td className="px-3 py-3 text-right">
+                    {selectedReport === "restock" && (
+                        <RestockReportView
+                            records={displayedRestocks}
+                            showBranchColumn={showBranchColumn}
+                        />
+                    )}
+
+                    {selectedReport === "bookings" && (
+                        <BookingReportView
+                            records={bookings}
+                            searchQuery={searchQuery}
+                            activeFilter={bookingFilter}
+                            onFilterChange={setBookingFilter}
+                            expandedBookingId={expandedBookingId}
+                            onToggleExpanded={(bookingId) =>
+                                setExpandedBookingId((current) =>
+                                    current === bookingId ? null : bookingId
+                                )
+                            }
+                            showBranchColumn={showBranchColumn}
+                        />
+                    )}
+
+                    {selectedReport === "sales" && (
+                        <PosReportView
+                            records={displayedPosTransactions}
+                            showBranchColumn={showBranchColumn}
+                        />
+                    )}
+
+                    {selectedReport === "packages" && (
+                        <PackagesReportView
+                            records={displayedPackages}
+                            showBranchColumn={showBranchColumn}
+                        />
+                    )}
+
+                    {selectedReport === "forecasting" && (
+                        <div className="mt-4 space-y-4">
+                            <SectionCard
+                                title="Forecasting Summary"
+                                subtitle="Predicted demand monitoring, recommended restocks, and risk level."
+                            >
+                                <div className="overflow-x-auto">
+                                    <table className="w-full min-w-[850px] table-fixed text-sm">
+                                        <thead>
+                                        <tr className="border-b border-[#E6DDF0]">
+                                            <th className="w-[22%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Product / Package</th>
+                                            <th className="w-[21%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Current</th>
+                                            <th className="w-[20%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Forecasted</th>
+                                            <th className="w-[24%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">Suggested Restock</th>
+                                            <th className="w-[13%] px-3 py-2 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">Risk</th>
+                                        </tr>
+                                        </thead>
+                                        <tbody>
+                                        {forecasts.map((item) => (
+                                            <tr key={item.id} className="border-b border-[#EFE7F4] last:border-0">
+                                                <td className="px-3 py-3 font-semibold text-[#1A1220]">{item.item}</td>
+                                                <td className="px-3 py-3 text-[#6A5D6F]">{item.currentValue}</td>
+                                                <td className="px-3 py-3 font-semibold text-[#1A1220]">{item.forecastedDemand}</td>
+                                                <td className="px-3 py-3 text-[#6A5D6F]">{item.suggestedRestock}</td>
+                                                <td className="px-3 py-3 text-right">
                                 <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${riskClass(item.riskLevel)}`}>
                                   {item.riskLevel}
                                 </span>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </SectionCard>
-
-                                <SectionCard
-                                    title="Seasonal Demand Analysis"
-                                    subtitle="Expected trends and recommended preparation by season."
-                                >
-                                    <div className="space-y-2">
-                                        {seasons.map((item) => (
-                                            <div key={item.period} className="rounded-lg border border-[#EFE7F4] px-3 py-3">
-                                                <p className="text-sm font-semibold text-[#1A1220]">{item.period}</p>
-                                                <p className="mt-1 text-sm text-[#4E2C66]">{item.trend}</p>
-                                                <p className="mt-1 text-xs text-[#7A6A84]">{item.recommendation}</p>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </SectionCard>
-                            </div>
-                        )}
-
-                        {selectedReport === "staff" && (
-                            <div className="mt-4 space-y-4">
-                                <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
-                                    <StaffModuleFilterCard
-                                        label="ALL"
-                                        value={formatNumber(staffActivities.length)}
-                                        active={staffModuleFilter === "all"}
-                                        onClick={() => setStaffModuleFilter("all")}
-                                    />
-                                    <StaffModuleFilterCard
-                                        label="BOOKINGS"
-                                        value={formatNumber(bookingStaffActions)}
-                                        active={staffModuleFilter === "Bookings"}
-                                        onClick={() => setStaffModuleFilter("Bookings")}
-                                    />
-                                    <StaffModuleFilterCard
-                                        label="PACKAGES"
-                                        value={formatNumber(packageStaffActions)}
-                                        active={staffModuleFilter === "Packages"}
-                                        onClick={() => setStaffModuleFilter("Packages")}
-                                    />
-                                    <StaffModuleFilterCard
-                                        label="INVENTORY"
-                                        value={formatNumber(inventoryStaffActions)}
-                                        active={staffModuleFilter === "Inventory"}
-                                        onClick={() => setStaffModuleFilter("Inventory")}
-                                    />
-                                    <StaffModuleFilterCard
-                                        label="SALES / POS"
-                                        value={formatNumber(salesPosStaffActions)}
-                                        active={staffModuleFilter === "Sales / POS"}
-                                        onClick={() => setStaffModuleFilter("Sales / POS")}
-                                    />
-                                </section>
-
-                                <SectionCard
-                                    title={staffActionListTitle}
-                                    subtitle={staffActionListSubtitle}
-                                >
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full min-w-[980px] table-fixed text-sm">
-                                            <thead>
-                                            <tr className="border-b border-[#E6DDF0]">
-                                                <th className="w-[16%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Date / Time
-                                                </th>
-                                                <th className="w-[17%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Staff
-                                                </th>
-                                                <th className="w-[25%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Current Action
-                                                </th>
-                                                <th className="w-[15%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    System Module
-                                                </th>
-                                                <th className="w-[17%] px-3 py-2 text-left text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Reference
-                                                </th>
-                                                <th className="w-[10%] px-3 py-2 text-right text-[11px] font-medium tracking-widest text-[#806A8C]">
-                                                    Details
-                                                </th>
+                                                </td>
                                             </tr>
-                                            </thead>
-                                            <tbody>
-                                            {displayedStaffActivities.length > 0 ? (
-                                                displayedStaffActivities.map((item) => (
-                                                    <tr
-                                                        key={item.id}
-                                                        className="border-b border-[#EFE7F4] last:border-0"
-                                                    >
-                                                        <td className="px-3 py-3 align-top">
-                                                            <p className="font-semibold text-[#1A1220]">
-                                                                {formatDate(item.date)}
-                                                            </p>
-                                                            <p className="mt-0.5 text-xs text-[#7E6B8A]">
-                                                                {item.time || "Time not recorded"}
-                                                            </p>
-                                                        </td>
-                                                        <td className="px-3 py-3 align-top">
-                                                            <p className="font-semibold text-[#1A1220]">
-                                                                {item.staffName}
-                                                            </p>
-                                                            <p className="mt-0.5 text-xs text-[#7E6B8A]">
-                                                                {item.role}
-                                                            </p>
-                                                        </td>
-                                                        <td className="px-3 py-3 align-top">
-                                                            <p className="font-semibold text-[#1A1220]">
-                                                                {item.action}
-                                                            </p>
-                                                            <p className="mt-0.5 text-xs text-[#7E6B8A]">
-                                                                {item.details || "No additional details recorded."}
-                                                            </p>
-                                                        </td>
-                                                        <td className="px-3 py-3 align-top">
-                                                            <ActivityModuleBadge module={item.module} />
-                                                        </td>
-                                                        <td className="px-3 py-3 align-top font-mono text-[11px] font-semibold text-[#5F4E75]">
-                                                            {item.reference || "—"}
-                                                        </td>
-                                                        <td className="px-3 py-3 text-right align-top text-xs text-[#6D5980]">
-                                                            {item.branch}
-                                                        </td>
-                                                    </tr>
-                                                ))
-                                            ) : (
-                                                <tr>
-                                                    <td
-                                                        colSpan={6}
-                                                        className="px-3 py-10 text-center text-sm text-[#8A7A91]"
-                                                    >
-                                                        No staff actions were recorded for this module in the selected period.
-                                                    </td>
-                                                </tr>
-                                            )}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </SectionCard>
-                            </div>
-                        )}
-                    </section>
-                )}
+                                        ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </SectionCard>
+
+                            <SectionCard
+                                title="Seasonal Demand Analysis"
+                                subtitle="Expected trends and recommended preparation by season."
+                            >
+                                <div className="space-y-2">
+                                    {seasons.map((item) => (
+                                        <div key={item.period} className="rounded-lg border border-[#EFE7F4] px-3 py-3">
+                                            <p className="text-sm font-semibold text-[#1A1220]">{item.period}</p>
+                                            <p className="mt-1 text-sm text-[#4E2C66]">{item.trend}</p>
+                                            <p className="mt-1 text-xs text-[#7A6A84]">{item.recommendation}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            </SectionCard>
+                        </div>
+                    )}
+
+                    {selectedReport === "staff" && (
+                        <EmployeeActionsReportView
+                            records={staffActivities}
+                            searchQuery={searchQuery}
+                            activeFilter={staffModuleFilter}
+                            onFilterChange={setStaffModuleFilter}
+                            showBranchColumn={showBranchColumn}
+                        />
+                    )}
+                </section>
             </div>
         </div>
     );

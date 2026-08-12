@@ -1,10 +1,18 @@
 "use client";
 
-import { ReportsWorkspace } from "./_shared";
+import {
+    ReportsWorkspace,
+    type ReportsViewConfig,
+} from "./_shared";
 
-type StaffReportsProps = {
+export type StaffReportsProps = {
     assignedBranch: string;
     storeName: string;
+};
+
+const STAFF_REPORTS_VIEW: ReportsViewConfig = {
+    showBranchFilter: false,
+    showBranchColumn: false,
 };
 
 export default function StaffReports({
@@ -16,6 +24,7 @@ export default function StaffReports({
             initialRole="staff"
             assignedBranch={assignedBranch}
             storeName={storeName}
+            viewConfig={STAFF_REPORTS_VIEW}
         />
     );
 }

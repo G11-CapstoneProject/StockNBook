@@ -7,18 +7,16 @@ const tls = require("tls");
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 
 const OTP_EXPIRY_SECONDS = 90;
-const MANAGER_INVITE_OTP_EXPIRY_SECONDS = 300;
-const STAFF_INVITE_OTP_EXPIRY_SECONDS = 300;
+const MANAGER_INVITE_OTP_EXPIRY_SECONDS = OTP_EXPIRY_SECONDS;
+const STAFF_INVITE_OTP_EXPIRY_SECONDS = OTP_EXPIRY_SECONDS;
 
 const SMTP_USER = "noreplystocknbook@gmail.com";
 
-/*
- * Paste a NEW 16-character Google App Password here.
- * Do not use your normal Gmail password.
- */
-const SMTP_PASS =
-    "sftp dapx ffxw qqrt"
-        .replace(/\s/g, "");
+// Replace this value with a CURRENT 16-character Google App Password
+// generated for the same Gmail account used in SMTP_USER.
+// Do not use the normal Gmail account password.
+const SMTP_PASS = "xokj flbi mavr shyt"
+    .replace(/\s/g, "");
 
 const EMAIL_FROM =
     `"StockNBook No Reply" <${SMTP_USER}>`;
@@ -142,6 +140,7 @@ async function getManagerInviteRecord(connection, inviteToken) {
            AND managers.manager_email = ?
            AND managers.store_id = ?
            AND managers.branch_id = ?
+           AND managers.status = 'pending'
              LIMIT 1`,
         [
             inviteToken,
@@ -240,7 +239,7 @@ async function ensureBranchOperationalColumns(connection) {
     if (statusColumns.length === 0) {
         await connection.execute(
             `ALTER TABLE branches
-             ADD COLUMN status ENUM('active', 'inactive')
+                ADD COLUMN status ENUM('active', 'inactive')
              NOT NULL DEFAULT 'active'
              AFTER address`
         );
@@ -253,7 +252,7 @@ async function ensureBranchOperationalColumns(connection) {
     if (reasonColumns.length === 0) {
         await connection.execute(
             `ALTER TABLE branches
-             ADD COLUMN inactive_reason VARCHAR(255) NULL
+                ADD COLUMN inactive_reason VARCHAR(255) NULL
              AFTER status`
         );
     }
@@ -304,6 +303,7 @@ async function getStaffInviteRecord(connection, inviteToken) {
            AND staff.store_id = ?
            AND staff.branch_id = ?
            AND staff.manager_id = ?
+           AND staff.status = 'pending'
              LIMIT 1`,
         [
             inviteToken,
@@ -561,7 +561,7 @@ function buildManagerInviteOtpEmail(toEmail, otp, managerName) {
                         <div style="font-size:34px;font-weight:800;letter-spacing:8px;color:#4B2380;">${safeOtp}</div>
                     </div>
                     <p style="margin:0;font-size:13px;line-height:1.6;color:#7A6E88;">
-                        This code expires in 5 minutes. Do not share it with anyone.
+                        This code expires in 1 minute and 30 seconds. Do not share it with anyone.
                     </p>
                 </div>
             </div>
@@ -605,7 +605,7 @@ function buildStaffInviteOtpEmail(toEmail, otp, staffName) {
                         <div style="font-size:34px;font-weight:800;letter-spacing:8px;color:#4B2380;">${safeOtp}</div>
                     </div>
                     <p style="margin:0;font-size:13px;line-height:1.6;color:#7A6E88;">
-                        This code expires in 5 minutes. Do not share it with anyone.
+                        This code expires in 1 minute and 30 seconds. Do not share it with anyone.
                     </p>
                 </div>
             </div>
@@ -855,9 +855,23 @@ function buildStaffInvitationEmail({
 }
 
 async function sendGmailHtmlEmail(toEmail, rawMessage, logLabel) {
-    if (!SMTP_USER || !SMTP_PASS) {
+    if (
+        !SMTP_USER ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(SMTP_USER)
+    ) {
         const configError = new Error(
-            "A valid Gmail App Password has not been configured in SMTP_PASS."
+            "Email sending is not configured. Set a valid SMTP_USER directly in index.js."
+        );
+        configError.code = "SMTP_NOT_CONFIGURED";
+        throw configError;
+    }
+
+    if (
+        !SMTP_PASS ||
+        SMTP_PASS === "PASTE_NEW_GOOGLE_APP_PASSWORD_HERE"
+    ) {
+        const configError = new Error(
+            "Email sending is not configured. Replace PASTE_NEW_GOOGLE_APP_PASSWORD_HERE in index.js with a valid Google App Password."
         );
         configError.code = "SMTP_NOT_CONFIGURED";
         throw configError;
@@ -968,13 +982,25 @@ async function sendGmailHtmlEmail(toEmail, rawMessage, logLabel) {
             message: error?.message,
         });
 
+        if (error?.code === "GMAIL_AUTH_FAILED") {
+            const authError = new Error(
+                "Gmail rejected the sender credentials. Replace SMTP_PASS in index.js with a current Google App Password generated for the same Gmail account used in SMTP_USER."
+            );
+            authError.code = "GMAIL_AUTH_FAILED";
+            throw authError;
+        }
+
         if (
             error?.code === "ETIMEDOUT" ||
             error?.code === "ECONNRESET" ||
             error?.code === "EHOSTUNREACH" ||
             error?.code === "ENETUNREACH"
         ) {
-            error.code = "GMAIL_NETWORK_FAILED";
+            const networkError = new Error(
+                "Lambda could not connect to Gmail SMTP. Check the Lambda network configuration and try again."
+            );
+            networkError.code = "GMAIL_NETWORK_FAILED";
+            throw networkError;
         }
 
         throw error;
@@ -1642,14 +1668,14 @@ exports.handler = async (event) => {
 
                     const [branchResult] = await connection.execute(
                         `INSERT INTO branches
-                             (
-                                 store_id,
-                                 branch_name,
-                                 contact_number,
-                                 address,
-                                 status,
-                                 inactive_reason
-                             )
+                         (
+                             store_id,
+                             branch_name,
+                             contact_number,
+                             address,
+                             status,
+                             inactive_reason
+                         )
                          VALUES (?, ?, ?, ?, ?, ?)`,
                         [
                             storeId,
@@ -2120,6 +2146,19 @@ exports.handler = async (event) => {
                     };
                 }
 
+                await ensureManagerInviteOtpsTable(connection);
+                await connection.execute(
+                    `UPDATE manager_invite_otps
+                     SET used = 1,
+                         verified_at = NULL
+                     WHERE invite_token_hash = ?
+                       AND email = ?`,
+                    [
+                        hashInviteToken(inviteToken),
+                        manager.manager_email,
+                    ]
+                );
+
                 const sessionToken = jwt.sign(
                     {
                         manager_id: manager.manager_id,
@@ -2383,7 +2422,6 @@ exports.handler = async (event) => {
         }
 
         // LOGIN
-        // LOGIN
         if (action === "login") {
             if (!email || !password) {
                 return {
@@ -2444,31 +2482,68 @@ exports.handler = async (event) => {
                           JOIN branches ON managers.branch_id = branches.id
                           JOIN stores ON managers.store_id = stores.id
                  WHERE managers.manager_email = ?
-                   AND managers.status = 'active'
                      LIMIT 1`,
                 [email]
             );
 
             if (managerRows.length > 0) {
                 const manager = managerRows[0];
+                const managerStatus = String(
+                    manager.status || ""
+                ).trim().toLowerCase();
 
-                if (!manager.password) {
+                if (managerStatus === "inactive") {
                     return {
-                        statusCode: 401,
+                        statusCode: 403,
                         headers,
                         body: JSON.stringify({
-                            error: "Manager invitation has not been accepted yet",
+                            error:
+                                "Your branch manager account has already been deactivated. Please contact the store owner if you think this was a mistake.",
+                            code: "ACCOUNT_DEACTIVATED",
+                            message:
+                                "Your branch manager account has already been deactivated. Please contact the store owner if you think this was a mistake.",
                         }),
                     };
                 }
 
-                const managerMatch = await bcrypt.compare(password, manager.password);
+                if (managerStatus === "pending" || !manager.password) {
+                    return {
+                        statusCode: 403,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Account activation required",
+                            code: "ACCOUNT_PENDING",
+                            message:
+                                "Your manager invitation has not been accepted yet. Open the invitation email and complete the account activation first.",
+                        }),
+                    };
+                }
+
+                if (managerStatus !== "active") {
+                    return {
+                        statusCode: 403,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Account unavailable",
+                            code: "ACCOUNT_UNAVAILABLE",
+                            message:
+                                "Your branch manager account is not currently active. Please contact the store owner.",
+                        }),
+                    };
+                }
+
+                const managerMatch = await bcrypt.compare(
+                    password,
+                    manager.password
+                );
 
                 if (!managerMatch) {
                     return {
                         statusCode: 401,
                         headers,
-                        body: JSON.stringify({ error: "Invalid email or password" }),
+                        body: JSON.stringify({
+                            error: "Invalid email or password",
+                        }),
                     };
                 }
 
@@ -2923,6 +2998,19 @@ exports.handler = async (event) => {
                     };
                 }
 
+                await ensureStaffInviteOtpsTable(connection);
+                await connection.execute(
+                    `UPDATE staff_invite_otps
+                     SET used = 1,
+                         verified_at = NULL
+                     WHERE invite_token_hash = ?
+                       AND email = ?`,
+                    [
+                        hashInviteToken(inviteToken),
+                        staff.staff_email,
+                    ]
+                );
+
                 const sessionToken = jwt.sign(
                     {
                         staff_id: staff.staff_id,
@@ -3068,12 +3156,18 @@ exports.handler = async (event) => {
                         ? JSON.parse(row.permissions || "{}")
                         : row.permissions || {};
 
-                if (row.status === "active") {
+                if (
+                    row.status === "active" ||
+                    row.status === "inactive"
+                ) {
                     staff.push({
                         id: row.id,
                         name: row.staff_name || "Unnamed staff",
                         email: row.staff_email || "",
-                        status: "Accepted",
+                        status:
+                            row.status === "inactive"
+                                ? "Inactive"
+                                : "Accepted",
                         permissions: parsedPermissions,
                     });
                 } else if (row.status === "pending") {
@@ -3094,6 +3188,184 @@ exports.handler = async (event) => {
                 body: JSON.stringify({
                     staff,
                     pending_invites: pendingInvites,
+                }),
+            };
+        }
+
+        // DEACTIVATE OR REACTIVATE STAFF
+        if (
+            action === "deactivate_staff" ||
+            action === "reactivate_staff"
+        ) {
+            const authHeader =
+                event.headers?.Authorization ||
+                event.headers?.authorization ||
+                "";
+
+            const token = authHeader.replace("Bearer ", "");
+
+            if (!token) {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Missing token",
+                    }),
+                };
+            }
+
+            let decoded;
+
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Invalid token",
+                    }),
+                };
+            }
+
+            if (decoded.role !== "manager") {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "Only managers can update staff account status",
+                    }),
+                };
+            }
+
+            const managerId = decoded.manager_id;
+            const storeId = decoded.store_id;
+            const branchId = decoded.branch_id;
+            const staffId = Number(body.staff_id);
+            const staffEmail = String(
+                body.staff_email || ""
+            )
+                .trim()
+                .toLowerCase();
+
+            if (!staffId && !staffEmail) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Missing staff id or email",
+                    }),
+                };
+            }
+
+            const [managerRows] =
+                await connection.execute(
+                    `SELECT permissions
+                     FROM managers
+                     WHERE id = ?
+                       AND store_id = ?
+                       AND branch_id = ?
+                       AND status = 'active'
+                     LIMIT 1`,
+                    [managerId, storeId, branchId]
+                );
+
+            if (managerRows.length === 0) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "Your manager account is not active",
+                    }),
+                };
+            }
+
+            const managerPermissions =
+                typeof managerRows[0].permissions ===
+                "string"
+                    ? JSON.parse(
+                        managerRows[0].permissions ||
+                        "{}"
+                    )
+                    : managerRows[0].permissions || {};
+
+            if (!managerPermissions.staff_management) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "You do not have permission to update staff accounts",
+                    }),
+                };
+            }
+
+            const nextStatus =
+                action === "reactivate_staff"
+                    ? "active"
+                    : "inactive";
+
+            let result;
+
+            if (staffId) {
+                [result] = await connection.execute(
+                    `UPDATE staff
+                     SET status = ?
+                     WHERE id = ?
+                       AND store_id = ?
+                       AND branch_id = ?
+                       AND manager_id = ?
+                       AND status IN ('active', 'inactive')`,
+                    [
+                        nextStatus,
+                        staffId,
+                        storeId,
+                        branchId,
+                        managerId,
+                    ]
+                );
+            } else {
+                [result] = await connection.execute(
+                    `UPDATE staff
+                     SET status = ?
+                     WHERE staff_email = ?
+                       AND store_id = ?
+                       AND branch_id = ?
+                       AND manager_id = ?
+                       AND status IN ('active', 'inactive')`,
+                    [
+                        nextStatus,
+                        staffEmail,
+                        storeId,
+                        branchId,
+                        managerId,
+                    ]
+                );
+            }
+
+            if (result.affectedRows === 0) {
+                return {
+                    statusCode: 404,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "Staff account was not found or is still pending activation",
+                    }),
+                };
+            }
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    message:
+                        nextStatus === "active"
+                            ? "Staff account reactivated successfully"
+                            : "Staff account deactivated successfully",
+                    staff_status: nextStatus,
+                    staff_updated: result.affectedRows,
                 }),
             };
         }
@@ -3439,6 +3711,303 @@ exports.handler = async (event) => {
                     invite_link: inviteLink,
                     staff_email: staff.staff_email,
                     staff_name: staff.staff_name,
+                    email_sent: true,
+                    email_status: "sent",
+                    email_error: "",
+                }),
+            };
+        }
+
+        // ADD MANAGER TO AN EXISTING BRANCH
+        if (action === "add_manager_to_branch") {
+            const authHeader =
+                event.headers?.Authorization ||
+                event.headers?.authorization ||
+                "";
+
+            const token = authHeader.replace("Bearer ", "");
+
+            if (!token) {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({ error: "Missing token" }),
+                };
+            }
+
+            let decoded;
+
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({ error: "Invalid token" }),
+                };
+            }
+
+            if (
+                decoded.role !== "owner" ||
+                !decoded.store_id
+            ) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "Only the store owner can add a branch manager",
+                    }),
+                };
+            }
+
+            const storeId = Number(decoded.store_id);
+            const branchId = Number(body.branch_id);
+            const managerName = String(
+                body.manager_name || ""
+            ).trim();
+            const managerEmail = String(
+                body.manager_email || ""
+            )
+                .trim()
+                .toLowerCase();
+
+            const permissions =
+                body.permissions &&
+                typeof body.permissions === "object" &&
+                !Array.isArray(body.permissions)
+                    ? body.permissions
+                    : {};
+
+            if (!branchId) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Select a branch",
+                    }),
+                };
+            }
+
+            if (!managerName) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Manager name is required",
+                    }),
+                };
+            }
+
+            if (
+                !managerEmail ||
+                !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+                    managerEmail
+                )
+            ) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "Enter a valid manager email address",
+                    }),
+                };
+            }
+
+            const [branchRows] = await connection.execute(
+                `SELECT
+                     branches.id,
+                     branches.branch_name,
+                     stores.store_name
+                 FROM branches
+                          JOIN stores
+                               ON stores.id = branches.store_id
+                 WHERE branches.id = ?
+                   AND branches.store_id = ?
+                     LIMIT 1`,
+                [branchId, storeId]
+            );
+
+            if (branchRows.length === 0) {
+                return {
+                    statusCode: 404,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "The selected branch was not found",
+                    }),
+                };
+            }
+
+            const branch = branchRows[0];
+
+            const [branchManagerRows] =
+                await connection.execute(
+                    `SELECT id
+                     FROM managers
+                     WHERE branch_id = ?
+                       AND store_id = ?
+                         LIMIT 1`,
+                    [branchId, storeId]
+                );
+
+            if (branchManagerRows.length > 0) {
+                return {
+                    statusCode: 409,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "This branch already has an assigned or pending manager",
+                    }),
+                };
+            }
+
+            const [existingEmailRows] =
+                await connection.execute(
+                    `SELECT id
+                     FROM managers
+                     WHERE manager_email = ?
+                       AND store_id = ?
+                         LIMIT 1`,
+                    [managerEmail, storeId]
+                );
+
+            if (existingEmailRows.length > 0) {
+                return {
+                    statusCode: 409,
+                    headers,
+                    body: JSON.stringify({
+                        error:
+                            "This email is already assigned to a manager in your store",
+                    }),
+                };
+            }
+
+            const inviteToken = jwt.sign(
+                {
+                    store_id: storeId,
+                    branch_id: branchId,
+                    email: managerEmail,
+                    type: "manager_invite",
+                },
+                JWT_SECRET,
+                { expiresIn: "7d" }
+            );
+
+            const inviteLink =
+                `${APP_BASE_URL}/accept-invite?token=${encodeURIComponent(
+                    inviteToken
+                )}`;
+
+            const [managerResult] =
+                await connection.execute(
+                    `INSERT INTO managers
+                     (
+                         store_id,
+                         branch_id,
+                         manager_name,
+                         manager_email,
+                         invite_token,
+                         permissions,
+                         status
+                     )
+                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        storeId,
+                        branchId,
+                        managerName,
+                        managerEmail,
+                        inviteToken,
+                        JSON.stringify(permissions),
+                        "pending",
+                    ]
+                );
+
+            const invitation = {
+                manager_email: managerEmail,
+                manager_name: managerName,
+                store_name:
+                    branch.store_name ||
+                    "StockNBook Store",
+                branch_name:
+                    branch.branch_name ||
+                    "Assigned Branch",
+                invite_link: inviteLink,
+                permissions,
+            };
+
+            try {
+                await sendManagerInvitationEmail(invitation);
+            } catch (sendError) {
+                const emailError =
+                    sendError?.message ||
+                    "Unable to send the manager invitation email.";
+
+                // Do not leave a branch occupied by a pending manager when
+                // the activation email was not delivered. This allows the
+                // owner to correct the SMTP configuration and try again.
+                await connection.execute(
+                    `DELETE FROM managers
+                     WHERE id = ?
+                       AND store_id = ?
+                       AND branch_id = ?
+                       AND manager_email = ?
+                       AND status = 'pending'`,
+                    [
+                        managerResult.insertId,
+                        storeId,
+                        branchId,
+                        managerEmail,
+                    ]
+                );
+
+                console.error(
+                    "[stocknbook-auth] Manager invitation email failed. Pending manager record was removed:",
+                    {
+                        manager_id: managerResult.insertId,
+                        branch_id: branchId,
+                        manager_email: managerEmail,
+                        code: sendError?.code || "EMAIL_SEND_FAILED",
+                        error: emailError,
+                    }
+                );
+
+                return {
+                    statusCode: 502,
+                    headers,
+                    body: JSON.stringify({
+                        error: emailError,
+                        code:
+                            sendError?.code ||
+                            "EMAIL_SEND_FAILED",
+                        message:
+                            "The manager was not added because the activation email could not be sent. Fix the email configuration and try again.",
+                        manager_created: false,
+                        email_sent: false,
+                        email_status: "failed",
+                        email_error: emailError,
+                    }),
+                };
+            }
+
+            return {
+                statusCode: 201,
+                headers,
+                body: JSON.stringify({
+                    message:
+                        "Manager added and invitation email sent successfully.",
+                    manager: {
+                        id: managerResult.insertId,
+                        name: managerName,
+                        email: managerEmail,
+                        branch:
+                            branch.branch_name ||
+                            "No branch assigned",
+                        status: "pending",
+                        permissions,
+                    },
+                    invite_link: inviteLink,
                     email_sent: true,
                     email_status: "sent",
                     email_error: "",

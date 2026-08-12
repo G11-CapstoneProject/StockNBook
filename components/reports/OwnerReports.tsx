@@ -1,10 +1,18 @@
 "use client";
 
-import { ReportsWorkspace } from "./_shared";
+import {
+    ReportsWorkspace,
+    type ReportsViewConfig,
+} from "./_shared";
 
-type OwnerReportsProps = {
+export type OwnerReportsProps = {
     assignedBranch: string;
     storeName: string;
+};
+
+const OWNER_REPORTS_VIEW: ReportsViewConfig = {
+    showBranchFilter: true,
+    showBranchColumn: true,
 };
 
 export default function OwnerReports({
@@ -16,6 +24,7 @@ export default function OwnerReports({
             initialRole="owner"
             assignedBranch={assignedBranch}
             storeName={storeName}
+            viewConfig={OWNER_REPORTS_VIEW}
         />
     );
 }

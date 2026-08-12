@@ -45,6 +45,42 @@ export async function GET(req: NextRequest) {
     }
 }
 
+
+export async function POST(req: NextRequest) {
+    try {
+        const body = await req.json();
+        const requestedAction = String(body.action || "").trim();
+
+        const action =
+            requestedAction ||
+            (body.status === "active"
+                ? "reactivate_manager"
+                : body.status === "inactive"
+                    ? "deactivate_manager"
+                    : "");
+
+        const allowedActions = new Set([
+            "add_manager_to_branch",
+            "deactivate_manager",
+            "reactivate_manager",
+        ]);
+
+        if (!allowedActions.has(action)) {
+            return NextResponse.json(
+                { error: "Unsupported branch manager action" },
+                { status: 400 }
+            );
+        }
+
+        return await callLambda(req, action, body);
+    } catch {
+        return NextResponse.json(
+            { error: "Branch managers server error" },
+            { status: 500 }
+        );
+    }
+}
+
 export async function PATCH(req: NextRequest) {
     try {
         const body = await req.json();

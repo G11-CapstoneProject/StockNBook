@@ -3,6 +3,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const tls = require("tls");
+const fs = require("fs");
 
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 
@@ -1086,11 +1087,13 @@ function generateSlug(storeName) {
  */
 
 const dbConfig = {
-    host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",
-    user: "admin",
-    password: "2qJivedWDxCQS6TLjjEl",
+    host: "gateway01.ap-southeast-1.prod.aws.tidbcloud.com",
+    user: "4VMJYNRD5H472NK.root",
+    password: "rH9a9Tj2r7uJpQqf",
     database: "stocknbook",
-    ssl: { rejectUnauthorized: false },
+    ssl: {
+        ca: fs.readFileSync('./certs/isrgrootx1.pem')
+    }
 };
 
 exports.handler = async (event) => {

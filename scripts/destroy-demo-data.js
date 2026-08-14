@@ -11,7 +11,7 @@
  *   SEED_RUN_TAG=another-run node destroy-demo-data.js
  */
 require("dotenv").config({ path: ".env.local" });
-
+const fs = require("fs");
 const mysql = require("mysql2/promise");
 
 function sanitizeRunTag(value) {
@@ -32,12 +32,13 @@ const STORE_EMAIL_DOMAIN = `${RUN_TAG}.seed.stocknbook.test`;
 
 function dbConfig() {
     return {
-        host: "stocknbook-db.ctc4eeuyq62e.ap-southeast-1.rds.amazonaws.com",
-        user: "admin",
-        password: "2qJivedWDxCQS6TLjjEl",
+        host: "gateway01.ap-southeast-1.prod.aws.tidbcloud.com",
+        user: "4VMJYNRD5H472NK.root",
+        password: "rH9a9Tj2r7uJpQqf",
         database: "stocknbook",
-        port: 3306,
-        ssl: { rejectUnauthorized: false },
+        ssl: {
+            ca: fs.readFileSync('./certs/isrgrootx1.pem')
+        },
         charset: "utf8mb4",
         supportBigNumbers: true,
     };

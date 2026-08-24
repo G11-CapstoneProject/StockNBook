@@ -8,7 +8,7 @@ const JWT_SECRET = "stocknbook-secret-key";
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -288,6 +288,7 @@ async function attachVariants(connection, products) {
              created_at AS createdAt
          FROM product_variants
          WHERE product_id IN (${placeholders})
+           AND deleted_at IS NULL
          ORDER BY id ASC`,
         productIds
     );
@@ -341,6 +342,7 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
                            ON products.branch_id = branches.id
                                AND products.store_id = branches.store_id
         WHERE products.store_id = ?
+          AND products.deleted_at IS NULL
     `;
 
     const params = [storeId];
@@ -456,7 +458,8 @@ async function findExistingProductByName(
         `SELECT id, name
          FROM products
          WHERE store_id = ?
-           AND branch_id = ?`,
+           AND branch_id = ?
+           AND deleted_at IS NULL`,
         [storeId, branchId]
     );
 
@@ -477,11 +480,11 @@ async function findExistingProductByName(
 async function ensureRestockHistoryTable(connection) {
     await connection.execute(`
         CREATE TABLE IF NOT EXISTS restock_history (
-            id BIGINT NOT NULL AUTO_INCREMENT,
-            store_id BIGINT NOT NULL,
-            branch_id BIGINT NOT NULL,
-            product_id BIGINT NOT NULL,
-            product_name VARCHAR(255) NOT NULL,
+                                                       id BIGINT NOT NULL AUTO_INCREMENT,
+                                                       store_id BIGINT NOT NULL,
+                                                       branch_id BIGINT NOT NULL,
+                                                       product_id BIGINT NOT NULL,
+                                                       product_name VARCHAR(255) NOT NULL,
             variant_name VARCHAR(255) NULL,
             stock_before INT NOT NULL DEFAULT 0,
             quantity_added INT NOT NULL DEFAULT 0,
@@ -494,7 +497,7 @@ async function ensureRestockHistoryTable(connection) {
             INDEX idx_restock_branch (branch_id),
             INDEX idx_restock_product (product_id),
             INDEX idx_restock_created_at (created_at)
-        )
+            )
     `);
 }
 
@@ -704,6 +707,100 @@ async function recordRestockHistory(
     }
 }
 
+/*
+ * The JWT issued at login only carries ids (store_id / manager_id /
+ * staff_id) and an email — never a display name. To log a real,
+ * human-readable employee_actions row we look the acting user's name up
+ * from their own table using the id that's already in the token.
+ */
+async function getActingEmployee(connection, decoded, tokenRole, storeId) {
+    const role = String(tokenRole || "").toLowerCase();
+
+    if (role === "manager" && decoded?.manager_id) {
+        const [rows] = await connection.execute(
+            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            [Number(decoded.manager_id), storeId]
+        );
+
+        return {
+            id: Number(decoded.manager_id),
+            name: toSafeString(rows[0]?.manager_name, 255) || "Manager",
+            role: "Manager",
+        };
+    }
+
+    if (role === "staff" && decoded?.staff_id) {
+        const [rows] = await connection.execute(
+            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            [Number(decoded.staff_id), storeId]
+        );
+
+        return {
+            id: Number(decoded.staff_id),
+            name: toSafeString(rows[0]?.staff_name, 255) || "Staff",
+            role: "Staff",
+        };
+    }
+
+    if (role === "owner") {
+        const [rows] = await connection.execute(
+            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            [storeId]
+        );
+
+        return {
+            id: null,
+            name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
+            role: "Owner",
+        };
+    }
+
+    return { id: null, name: "Unknown", role: "Staff" };
+}
+
+/*
+ * Writes one row to employee_actions. Called from inside the same DB
+ * transaction as the product action it's logging, so the log and the
+ * action succeed or fail together.
+ */
+async function logEmployeeAction(connection, entry) {
+    await connection.execute(
+        `INSERT INTO employee_actions
+         (store_id, branch_id, employee_id, employee_name, employee_role,
+          module, reference_number, action, reference_id, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            entry.storeId,
+            entry.branchId ?? null,
+            entry.employee.id,
+            entry.employee.name,
+            entry.employee.role,
+            entry.module,
+            entry.referenceNumber ?? null,
+            entry.action,
+            entry.referenceId ?? null,
+            entry.details ?? null,
+        ]
+    );
+}
+
+function buildProductReference(id) {
+    return `PRD-${String(id).padStart(6, "0")}`;
+}
+
+function getTotalStock(product) {
+    if (!product) return 0;
+
+    if (product.hasVariants && Array.isArray(product.variants)) {
+        return product.variants.reduce(
+            (sum, variant) => sum + Number(variant.stock || 0),
+            0
+        );
+    }
+
+    return Number(product.stock || 0);
+}
+
 exports.handler = async (event) => {
     const headers = {
         "Access-Control-Allow-Origin": "*",
@@ -908,6 +1005,24 @@ exports.handler = async (event) => {
                 await insertProductVariants(connection, productId, incomingVariants);
             }
 
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decoded,
+                tokenRole,
+                storeId
+            );
+
+            await logEmployeeAction(connection, {
+                storeId,
+                branchId: activeBranchId,
+                employee: actingEmployee,
+                module: "Inventory",
+                referenceNumber: buildProductReference(productId),
+                action: "Added product",
+                referenceId: String(productId),
+                details: `Added ${name}${hasVariants ? ` with ${incomingVariants.length} variant(s)` : ""} to inventory`,
+            });
+
             await connection.commit();
 
             const product = await getProductById(
@@ -1092,6 +1207,29 @@ exports.handler = async (event) => {
                 }
             );
 
+            const stockDelta = getTotalStock(product) - getTotalStock(existing);
+
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decoded,
+                tokenRole,
+                storeId
+            );
+
+            await logEmployeeAction(connection, {
+                storeId,
+                branchId: activeBranchId,
+                employee: actingEmployee,
+                module: "Inventory",
+                referenceNumber: buildProductReference(id),
+                action: stockDelta > 0 ? "Restocked inventory" : "Updated product",
+                referenceId: String(id),
+                details:
+                    stockDelta > 0
+                        ? `Added ${stockDelta} unit${stockDelta === 1 ? "" : "s"} to ${name}`
+                        : `Updated details for ${name}`,
+            });
+
             await connection.commit();
 
             return jsonResponse(200, headers, {
@@ -1120,15 +1258,19 @@ exports.handler = async (event) => {
 
             await connection.beginTransaction();
 
+            // Soft-delete variants too, since they can also be referenced
+            // by order_items/booking_items and would hit the same FK error.
             await connection.execute(
-                "DELETE FROM product_variants WHERE product_id = ?",
+                "UPDATE product_variants SET deleted_at = NOW() WHERE product_id = ? AND deleted_at IS NULL",
                 [id]
             );
 
             let query = `
-                DELETE FROM products
+                UPDATE products
+                SET deleted_at = NOW()
                 WHERE id = ?
                   AND store_id = ?
+                  AND deleted_at IS NULL
             `;
 
             const params = [id, storeId];
@@ -1144,6 +1286,24 @@ exports.handler = async (event) => {
                 await safeRollback(connection);
                 return notFound(headers, "Product not found");
             }
+
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decoded,
+                tokenRole,
+                storeId
+            );
+
+            await logEmployeeAction(connection, {
+                storeId,
+                branchId: activeBranchId,
+                employee: actingEmployee,
+                module: "Inventory",
+                referenceNumber: buildProductReference(id),
+                action: "Deleted product",
+                referenceId: String(id),
+                details: `Removed ${existing.name} from inventory`,
+            });
 
             await connection.commit();
 

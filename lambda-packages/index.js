@@ -7,7 +7,7 @@ const JWT_SECRET = "stocknbook-secret-key";
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -95,6 +95,87 @@ async function ensureBranchBelongsToStore(connection, branchId, storeId) {
     );
 
     return rows.length > 0;
+}
+
+/*
+ * The JWT issued at login only carries ids (store_id / manager_id /
+ * staff_id) and an email — never a display name. To log a real,
+ * human-readable employee_actions row we look the acting user's name up
+ * from their own table using the id that's already in the token.
+ */
+async function getActingEmployee(connection, decoded, tokenRole, storeId) {
+    const role = String(tokenRole || "").toLowerCase();
+
+    if (role === "manager" && decoded?.manager_id) {
+        const [rows] = await connection.execute(
+            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            [Number(decoded.manager_id), storeId]
+        );
+
+        return {
+            id: Number(decoded.manager_id),
+            name: toSafeString(rows[0]?.manager_name, 255) || "Manager",
+            role: "Manager",
+        };
+    }
+
+    if (role === "staff" && decoded?.staff_id) {
+        const [rows] = await connection.execute(
+            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            [Number(decoded.staff_id), storeId]
+        );
+
+        return {
+            id: Number(decoded.staff_id),
+            name: toSafeString(rows[0]?.staff_name, 255) || "Staff",
+            role: "Staff",
+        };
+    }
+
+    if (role === "owner") {
+        const [rows] = await connection.execute(
+            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            [storeId]
+        );
+
+        return {
+            id: null,
+            name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
+            role: "Owner",
+        };
+    }
+
+    return { id: null, name: "Unknown", role: "Staff" };
+}
+
+/*
+ * Writes one row to employee_actions. Called from inside the same DB
+ * transaction as the package action it's logging, so the log and the
+ * action succeed or fail together.
+ */
+async function logEmployeeAction(connection, entry) {
+    await connection.execute(
+        `INSERT INTO employee_actions
+             (store_id, branch_id, employee_id, employee_name, employee_role,
+              module, reference_number, action, reference_id, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            entry.storeId,
+            entry.branchId ?? null,
+            entry.employee.id,
+            entry.employee.name,
+            entry.employee.role,
+            entry.module,
+            entry.referenceNumber ?? null,
+            entry.action,
+            entry.referenceId ?? null,
+            entry.details ?? null,
+        ]
+    );
+}
+
+function buildPackageReference(id) {
+    return `PKG-${String(id).padStart(6, "0")}`;
 }
 
 function normalizeInclusion(item, index = 0) {
@@ -573,10 +654,11 @@ exports.handler = async (event) => {
         let storeId;
         let tokenBranchId = null;
         let tokenRole = "";
+        let decoded;
 
         try {
             const token = authHeader.replace(/^Bearer\s+/i, "");
-            const decoded = jwt.verify(token, JWT_SECRET);
+            decoded = jwt.verify(token, JWT_SECRET);
 
             storeId = Number(decoded.store_id);
             tokenBranchId = decoded.branch_id
@@ -733,13 +815,33 @@ exports.handler = async (event) => {
                     ]
                 );
 
+                const packageId = Number(result.insertId);
+
+                const actingEmployee = await getActingEmployee(
+                    connection,
+                    decoded,
+                    tokenRole,
+                    storeId
+                );
+
+                await logEmployeeAction(connection, {
+                    storeId,
+                    branchId: activeBranchId,
+                    employee: actingEmployee,
+                    module: "Packages",
+                    referenceNumber: buildPackageReference(packageId),
+                    action: "Added package",
+                    referenceId: String(packageId),
+                    details: `Added ${pkg.name} to packages`,
+                });
+
                 await connection.commit();
 
                 const createdPackage = await getPackageById(
                     connection,
                     storeId,
                     activeBranchId,
-                    Number(result.insertId)
+                    packageId
                 );
 
                 return jsonResponse(201, headers, {
@@ -849,6 +951,26 @@ exports.handler = async (event) => {
                     return notFound(headers, "Package not found.");
                 }
 
+                const actingEmployee = await getActingEmployee(
+                    connection,
+                    decoded,
+                    tokenRole,
+                    storeId
+                );
+
+                await logEmployeeAction(connection, {
+                    storeId,
+                    branchId,
+                    employee: actingEmployee,
+                    module: "Packages",
+                    referenceNumber: buildPackageReference(packageId),
+                    action: "Updated package",
+                    referenceId: String(packageId),
+                    details: existingPackage.name !== pkg.name
+                        ? `Renamed ${existingPackage.name} to ${pkg.name}`
+                        : `Updated details for ${pkg.name}`,
+                });
+
                 await connection.commit();
 
                 const updatedPackage = await getPackageById(
@@ -875,37 +997,65 @@ exports.handler = async (event) => {
                 return badRequest(headers, "Invalid package id.");
             }
 
-            if (
-                !(await getPackageById(
+            const existingPackage = await getPackageById(
+                connection,
+                storeId,
+                activeBranchId,
+                packageId
+            );
+
+            if (!existingPackage) {
+                return notFound(headers, "Package not found.");
+            }
+
+            await connection.beginTransaction();
+
+            try {
+                let query = `
+                    DELETE FROM packages
+                    WHERE id = ?
+                      AND store_id = ?
+                `;
+
+                const params = [packageId, storeId];
+
+                if (activeBranchId) {
+                    query += " AND branch_id = ?";
+                    params.push(activeBranchId);
+                }
+
+                const [result] = await connection.execute(query, params);
+
+                if (result.affectedRows === 0) {
+                    await safeRollback(connection);
+                    return notFound(headers, "Package not found.");
+                }
+
+                const actingEmployee = await getActingEmployee(
                     connection,
+                    decoded,
+                    tokenRole,
+                    storeId
+                );
+
+                await logEmployeeAction(connection, {
                     storeId,
-                    activeBranchId,
-                    packageId
-                ))
-            ) {
-                return notFound(headers, "Package not found.");
+                    branchId: activeBranchId || Number(existingPackage.branch_id),
+                    employee: actingEmployee,
+                    module: "Packages",
+                    referenceNumber: buildPackageReference(packageId),
+                    action: "Deleted package",
+                    referenceId: String(packageId),
+                    details: `Removed ${existingPackage.name} from packages`,
+                });
+
+                await connection.commit();
+
+                return jsonResponse(200, headers, { success: true });
+            } catch (error) {
+                await safeRollback(connection);
+                throw error;
             }
-
-            let query = `
-                DELETE FROM packages
-                WHERE id = ?
-                  AND store_id = ?
-            `;
-
-            const params = [packageId, storeId];
-
-            if (activeBranchId) {
-                query += " AND branch_id = ?";
-                params.push(activeBranchId);
-            }
-
-            const [result] = await connection.execute(query, params);
-
-            if (result.affectedRows === 0) {
-                return notFound(headers, "Package not found.");
-            }
-
-            return jsonResponse(200, headers, { success: true });
         }
 
         return badRequest(headers, "Invalid action.");

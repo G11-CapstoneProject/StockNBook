@@ -8,7 +8,7 @@ const JWT_SECRET = "stocknbook-secret-key";
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -563,6 +563,85 @@ async function decreaseStockForOrder(
     }
 }
 
+/*
+ * The JWT issued at login only carries ids (store_id / manager_id /
+ * staff_id) and an email — never a display name. To log a real,
+ * human-readable employee_actions row we look the acting user's name up
+ * from their own table using the id that's already in the token.
+ */
+async function getActingEmployee(connection, decoded) {
+    const role = String(decoded?.role || "").toLowerCase();
+    const storeId = toPositiveInteger(decoded?.store_id);
+
+    if (role === "manager" && toPositiveInteger(decoded?.manager_id)) {
+        const [rows] = await connection.execute(
+            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            [toPositiveInteger(decoded.manager_id), storeId]
+        );
+
+        return {
+            id: toPositiveInteger(decoded.manager_id),
+            name: toSafeString(rows[0]?.manager_name, 255) || "Manager",
+            role: "Manager",
+        };
+    }
+
+    if (role === "staff" && toPositiveInteger(decoded?.staff_id)) {
+        const [rows] = await connection.execute(
+            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            [toPositiveInteger(decoded.staff_id), storeId]
+        );
+
+        return {
+            id: toPositiveInteger(decoded.staff_id),
+            name: toSafeString(rows[0]?.staff_name, 255) || "Staff",
+            role: "Staff",
+        };
+    }
+
+    if (role === "owner" && storeId) {
+        const [rows] = await connection.execute(
+            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            [storeId]
+        );
+
+        return {
+            id: null,
+            name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
+            role: "Owner",
+        };
+    }
+
+    return { id: null, name: "Unknown", role: "Staff" };
+}
+
+/*
+ * Writes one row to employee_actions. Callers decide whether this runs
+ * inside the same DB transaction as the action it's logging (so the log
+ * and the action succeed/fail together) or as a best-effort call after
+ * the action already committed.
+ */
+async function logEmployeeAction(connection, entry) {
+    await connection.execute(
+        `INSERT INTO employee_actions
+             (store_id, branch_id, employee_id, employee_name, employee_role,
+              module, reference_number, action, reference_id, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            entry.storeId,
+            entry.branchId ?? null,
+            entry.employee.id,
+            entry.employee.name,
+            entry.employee.role,
+            entry.module,
+            entry.referenceNumber ?? null,
+            entry.action,
+            entry.referenceId ?? null,
+            entry.details ?? null,
+        ]
+    );
+}
+
 exports.handler = async (event) => {
     const headers = {
         "Access-Control-Allow-Origin": "*",
@@ -641,6 +720,7 @@ exports.handler = async (event) => {
         let storeId;
         let tokenBranchId = null;
         let tokenRole = "";
+        let decodedToken = null;
 
         try {
             const token =
@@ -648,6 +728,8 @@ exports.handler = async (event) => {
 
             const decoded =
                 jwt.verify(token, JWT_SECRET);
+
+            decodedToken = decoded;
 
             storeId =
                 Number(decoded.store_id);
@@ -850,6 +932,26 @@ exports.handler = async (event) => {
                         storeId,
                         tokenBranchId,
                         orderLines
+                    );
+
+                    const actingEmployee =
+                        await getActingEmployee(
+                            connection,
+                            decodedToken
+                        );
+
+                    await logEmployeeAction(
+                        connection,
+                        {
+                            storeId,
+                            branchId: tokenBranchId,
+                            employee: actingEmployee,
+                            module: "Sales / POS",
+                            referenceNumber: orderId,
+                            action: "Completed POS transaction",
+                            referenceId: orderId,
+                            details: `${item} — Total ₱${total}`,
+                        }
                     );
 
                     await connection.commit();
@@ -1284,6 +1386,35 @@ exports.handler = async (event) => {
                 );
             }
 
+            try {
+                const actingEmployee =
+                    await getActingEmployee(
+                        connection,
+                        decodedToken
+                    );
+
+                await logEmployeeAction(
+                    connection,
+                    {
+                        storeId,
+                        branchId: tokenBranchId,
+                        employee: actingEmployee,
+                        module: "Sales / POS",
+                        referenceNumber: orderId,
+                        action: "Updated POS order",
+                        referenceId: orderId,
+                        details: `${item} — Total ₱${total}`,
+                    }
+                );
+            } catch (logError) {
+                // The order update already succeeded; don't fail the
+                // request just because the activity log couldn't be written.
+                console.error(
+                    "employee_actions logging failed for update_order:",
+                    logError
+                );
+            }
+
             return jsonResponse(
                 200,
                 headers,
@@ -1311,7 +1442,7 @@ exports.handler = async (event) => {
 
             try {
                 let lookupQuery = `
-                    SELECT order_id
+                    SELECT order_id, item, total, branch_id
                     FROM orders
                     WHERE order_id = ?
                       AND store_id = ?
@@ -1349,6 +1480,8 @@ exports.handler = async (event) => {
                     );
                 }
 
+                const deletedOrder = orders[0];
+
                 await connection.execute(
                     `DELETE FROM order_items
                      WHERE order_id = ?`,
@@ -1363,6 +1496,28 @@ exports.handler = async (event) => {
                         orderId,
                         storeId,
                     ]
+                );
+
+                const actingEmployee =
+                    await getActingEmployee(
+                        connection,
+                        decodedToken
+                    );
+
+                await logEmployeeAction(
+                    connection,
+                    {
+                        storeId,
+                        branchId:
+                            tokenBranchId ||
+                            deletedOrder.branch_id,
+                        employee: actingEmployee,
+                        module: "Sales / POS",
+                        referenceNumber: orderId,
+                        action: "Deleted POS order",
+                        referenceId: orderId,
+                        details: `${deletedOrder.item || "Order"} — Total ₱${deletedOrder.total ?? 0}`,
+                    }
                 );
 
                 await connection.commit();

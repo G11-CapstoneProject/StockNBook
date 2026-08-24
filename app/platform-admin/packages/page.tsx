@@ -17,7 +17,7 @@ interface PlanLimits {
     maxBranches: number | "Unlimited";
 }
 
-interface Package {
+interface PlanItem {
     id: string;
     name: string;
     tagline: string;
@@ -33,7 +33,7 @@ interface Package {
 // Mock data
 // ---------------------------------------------------------------------------
 
-const MOCK_PACKAGES: Package[] = [
+const MOCK_PLANS: PlanItem[] = [
     {
         id: "p0",
         name: "Starter",
@@ -84,14 +84,14 @@ function formatPeso(amount: number) {
     return amount === 0 ? "Free" : `\u20B1${amount.toLocaleString("en-PH")}`;
 }
 
-const totalActiveSubscribers = MOCK_PACKAGES.reduce((sum, p) => sum + p.activeSubscribers, 0);
+const totalActiveSubscribers = MOCK_PLANS.reduce((sum, p) => sum + p.activeSubscribers, 0);
 
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
-export default function PackagesPage() {
-    const [packages] = useState<Package[]>(MOCK_PACKAGES);
+export default function PlansPage() {
+    const [plans] = useState<PlanItem[]>(MOCK_PLANS);
 
     return (
         <div className="flex min-h-screen bg-[#FFFDF8] font-sans text-[#1A1220]">
@@ -99,7 +99,7 @@ export default function PackagesPage() {
 
             <AdminPageShell>
                 <AdminHeader
-                    title="Packages"
+                    title="Plans"
                     subtitle="What stores can subscribe to, and how each plan is performing"
                     action={
                         <button
@@ -118,7 +118,7 @@ export default function PackagesPage() {
                             <Users2 size={16} className="shrink-0 text-[#8A7D92]" />
                             <span className="shrink-0 text-[11px] font-semibold text-[#4B3E55]">Subscriber mix</span>
                             <div className="flex h-2 flex-1 overflow-hidden rounded-full bg-[#F3EFE3]">
-                                {packages
+                                {plans
                                     .filter((p) => p.status === "Active")
                                     .map((p) => (
                                         <div
@@ -135,50 +135,50 @@ export default function PackagesPage() {
 
                     {/* Plan cards */}
                     <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
-                        {packages.map((pkg) => (
-                            <Card key={pkg.id} className={pkg.status === "Archived" ? "opacity-60" : ""}>
+                        {plans.map((plan) => (
+                            <Card key={plan.id} className={plan.status === "Archived" ? "opacity-60" : ""}>
                                 <div className="flex flex-col">
                                     <div className="mb-3 flex items-start justify-between">
-                    <span
-                        className={`inline-flex rounded-md border px-2 py-0.5 text-[10px] font-bold ${pkg.badgeStyle}`}
-                    >
-                      {pkg.name}
-                    </span>
-                                        {pkg.status === "Archived" && (
+                                        <span
+                                            className={`inline-flex rounded-md border px-2 py-0.5 text-[10px] font-bold ${plan.badgeStyle}`}
+                                        >
+                                            {plan.name}
+                                        </span>
+                                        {plan.status === "Archived" && (
                                             <span className="text-[9px] uppercase tracking-wide text-[#8A7D92]">Archived</span>
                                         )}
                                     </div>
 
-                                    <p className="mb-4 text-[11px] text-[#7A6A84]">{pkg.tagline}</p>
+                                    <p className="mb-4 text-[11px] text-[#7A6A84]">{plan.tagline}</p>
 
                                     <div className="mb-5">
-                    <span className="text-[26px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
-                      {formatPeso(pkg.price)}
-                    </span>
-                                        {pkg.price > 0 && <span className="text-[11px] text-[#8A7D92]"> / month</span>}
+                                        <span className="text-[26px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
+                                            {formatPeso(plan.price)}
+                                        </span>
+                                        {plan.price > 0 && <span className="text-[11px] text-[#8A7D92]"> / month</span>}
                                     </div>
 
                                     <ul className="mb-6 flex-1 space-y-2 text-[11px] text-[#4B3E55]">
-                                        <LimitRow label="Inventory items" value={pkg.limits.maxInventoryItems} />
-                                        <LimitRow label="Staff accounts" value={pkg.limits.maxStaffAccounts} />
-                                        <LimitRow label="Branches" value={pkg.limits.maxBranches} />
+                                        <LimitRow label="Inventory items" value={plan.limits.maxInventoryItems} />
+                                        <LimitRow label="Staff accounts" value={plan.limits.maxStaffAccounts} />
+                                        <LimitRow label="Branches" value={plan.limits.maxBranches} />
                                     </ul>
 
                                     <div className="flex items-center justify-between border-t border-[#EEE8F2] pt-4">
                                         <div className="text-[11px] text-[#8A7D92]">
-                                            <span className="font-semibold text-[#1A1220]">{pkg.activeSubscribers}</span>{" "}
-                                            subscriber{pkg.activeSubscribers === 1 ? "" : "s"}
+                                            <span className="font-semibold text-[#1A1220]">{plan.activeSubscribers}</span>{" "}
+                                            subscriber{plan.activeSubscribers === 1 ? "" : "s"}
                                         </div>
                                         <div className="flex items-center gap-1">
                                             <button
                                                 className="rounded-md p-1.5 text-[#7A6A84] hover:bg-[#FAF8FF]"
-                                                aria-label={`Edit ${pkg.name}`}
+                                                aria-label={`Edit ${plan.name}`}
                                             >
                                                 <Pencil size={14} />
                                             </button>
                                             <button
                                                 className="rounded-md p-1.5 text-[#7A6A84] hover:bg-[#FAF8FF]"
-                                                aria-label={`Archive ${pkg.name}`}
+                                                aria-label={`Archive ${plan.name}`}
                                             >
                                                 <Archive size={14} />
                                             </button>

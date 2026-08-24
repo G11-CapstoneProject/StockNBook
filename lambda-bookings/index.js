@@ -8,7 +8,7 @@ const JWT_SECRET = "stocknbook-secret-key";
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -809,7 +809,124 @@ function verifyProtectedStore(event) {
     const token = authHeader.replace("Bearer ", "");
     const decoded = jwt.verify(token, JWT_SECRET);
 
-    return Number(decoded.store_id || decoded.storeId || 0);
+    return {
+        storeId: Number(decoded.store_id || decoded.storeId || 0),
+        tokenRole: String(decoded.role || "").toLowerCase(),
+        tokenBranchId: decoded.branch_id ? Number(decoded.branch_id) : null,
+        decoded,
+    };
+}
+
+function toSafeString(value, max = 255) {
+    return String(value ?? "").trim().slice(0, max);
+}
+
+/*
+ * The JWT issued at login only carries ids (store_id / manager_id /
+ * staff_id) and an email — never a display name. To log a real,
+ * human-readable employee_actions row we look the acting user's name up
+ * from their own table using the id that's already in the token.
+ */
+async function getActingEmployee(connection, decoded, tokenRole, storeId) {
+    const role = String(tokenRole || "").toLowerCase();
+
+    if (role === "manager" && decoded?.manager_id) {
+        const [rows] = await connection.execute(
+            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            [Number(decoded.manager_id), storeId]
+        );
+
+        return {
+            id: Number(decoded.manager_id),
+            name: toSafeString(rows[0]?.manager_name, 255) || "Manager",
+            role: "Manager",
+        };
+    }
+
+    if (role === "staff" && decoded?.staff_id) {
+        const [rows] = await connection.execute(
+            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            [Number(decoded.staff_id), storeId]
+        );
+
+        return {
+            id: Number(decoded.staff_id),
+            name: toSafeString(rows[0]?.staff_name, 255) || "Staff",
+            role: "Staff",
+        };
+    }
+
+    if (role === "owner") {
+        const [rows] = await connection.execute(
+            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            [storeId]
+        );
+
+        return {
+            id: null,
+            name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
+            role: "Owner",
+        };
+    }
+
+    return { id: null, name: "Unknown", role: "Staff" };
+}
+
+/*
+ * Writes one row to employee_actions. Called from inside the same DB
+ * transaction as the booking action it's logging, so the log and the
+ * action succeed or fail together.
+ */
+async function logEmployeeAction(connection, entry) {
+    await connection.execute(
+        `INSERT INTO employee_actions
+         (store_id, branch_id, employee_id, employee_name, employee_role,
+          module, reference_number, action, reference_id, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            entry.storeId,
+            entry.branchId ?? null,
+            entry.employee.id,
+            entry.employee.name,
+            entry.employee.role,
+            entry.module,
+            entry.referenceNumber ?? null,
+            entry.action,
+            entry.referenceId ?? null,
+            entry.details ?? null,
+        ]
+    );
+}
+
+function buildBookingReference(row, id) {
+    return row?.booking_reference || `BKG-${String(id).padStart(6, "0")}`;
+}
+
+// Canonical booking statuses. Any casing/spacing variant coming from the
+// frontend or already sitting in the DB gets mapped to one of these, so
+// status-transition checks never fail due to a stray "confirmed" vs
+// "Confirmed" mismatch.
+const CANONICAL_BOOKING_STATUSES = [
+    "Pending Review",
+    "Confirmed",
+    "Preparing",
+    "Completed",
+    "Cancelled",
+];
+
+function normalizeBookingStatus(value) {
+    const clean = String(value ?? "").trim().toLowerCase();
+
+    const match = CANONICAL_BOOKING_STATUSES.find(
+        (canonical) => canonical.toLowerCase() === clean
+    );
+
+    if (match) return match;
+
+    // Accept the common "canceled" (one L) spelling too.
+    if (clean === "canceled") return "Cancelled";
+
+    return null;
 }
 
 const packagePriceExpr = `
@@ -1125,7 +1242,7 @@ exports.handler = async (event) => {
                     theme || null,
                     venue || null,
                     notes || "",
-                    status || "Pending Review",
+                    normalizeBookingStatus(status) || "Pending Review",
                     null,
                     packagePrice,
                     requiredDownPayment,
@@ -1251,9 +1368,16 @@ exports.handler = async (event) => {
 
         // ── PROTECTED: verify token ───────────────────────────────────────────
         let store_id;
+        let tokenRole;
+        let tokenBranchId;
+        let decodedToken;
 
         try {
-            store_id = verifyProtectedStore(event);
+            const auth = verifyProtectedStore(event);
+            store_id = auth.storeId;
+            tokenRole = auth.tokenRole;
+            tokenBranchId = auth.tokenBranchId;
+            decodedToken = auth.decoded;
         } catch (err) {
             return response(401, {
                 error: err.message === "No token" ? "No token" : "Invalid token",
@@ -1436,17 +1560,22 @@ exports.handler = async (event) => {
 
         // ── PROTECTED: update_status (enhanced) ────────────────────────────────
         if (action === "update_status") {
-            const { booking_id, status, agreed_price, branch_id, branchId } = body;
+            const { booking_id, status: rawStatus, agreed_price, branch_id, branchId } = body;
+            let status = rawStatus;
             const usedItems = getUsedItemsInput(body);
             const requestedBranchId = branch_id || branchId;
 
             if (!booking_id || !status) return response(400, { error: "Missing booking_id or status" });
 
             const allowedStatuses = ["Pending Review","Confirmed","Preparing","Completed","Cancelled"];
-            if (!allowedStatuses.includes(status)) return response(400, { error: "Invalid booking status" });
+            const normalizedTargetStatus = normalizeBookingStatus(status);
+            if (!normalizedTargetStatus || !allowedStatuses.includes(normalizedTargetStatus)) {
+                return response(400, { error: "Invalid booking status" });
+            }
+            status = normalizedTargetStatus;
 
             let selectQuery = `
-                SELECT id, status, store_id, branch_id, package_json
+                SELECT id, status, store_id, branch_id, package_json, booking_reference, name
                 FROM bookings
                 WHERE id = ?
                   AND store_id = ?
@@ -1460,7 +1589,7 @@ exports.handler = async (event) => {
             console.log("COMPLETED BLOCK HIT");
             console.log("PACKAGE JSON:", rows[0].package_json);
 
-            const currentStatus = rows[0].status || "Pending Review";
+            const currentStatus = normalizeBookingStatus(rows[0].status) || "Pending Review";
             const allowedTransitions = {
                 "Pending Review": ["Confirmed","Cancelled"],
                 "Confirmed": ["Preparing","Cancelled"],
@@ -1532,6 +1661,34 @@ exports.handler = async (event) => {
                 throw err;
             }
 
+            const statusActionLabels = {
+                Confirmed: "Confirmed booking",
+                Preparing: "Started preparing booking",
+                Completed: "Marked booking as completed",
+                Cancelled: "Cancelled booking",
+            };
+
+            const bookingRef = buildBookingReference(rows[0], booking_id);
+            const customerName = rows[0].name || "customer";
+
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decodedToken,
+                tokenRole,
+                store_id
+            );
+
+            await logEmployeeAction(connection, {
+                storeId: store_id,
+                branchId: requestedBranchId || rows[0].branch_id || null,
+                employee: actingEmployee,
+                module: "Bookings",
+                referenceNumber: bookingRef,
+                action: statusActionLabels[status] || `Updated booking status to ${status}`,
+                referenceId: String(booking_id),
+                details: `${bookingRef} (${customerName}): ${currentStatus} → ${status}`,
+            });
+
             return response(200, {
                 success: true,
                 status,
@@ -1584,6 +1741,26 @@ exports.handler = async (event) => {
                 });
             }
 
+            let priceSelectQuery = `
+                SELECT id, branch_id, booking_reference, name, agreed_price, required_down_payment
+                FROM bookings
+                WHERE id = ?
+                  AND store_id = ?
+            `;
+            const priceSelectParams = [Number(booking_id), store_id];
+            if (requestedBranchId) {
+                priceSelectQuery += ` AND branch_id = ?`;
+                priceSelectParams.push(Number(requestedBranchId));
+            }
+
+            const [priceRows] = await connection.execute(priceSelectQuery, priceSelectParams);
+
+            if (!priceRows.length) {
+                return response(404, { error: "Booking not found" });
+            }
+
+            const previousBooking = priceRows[0];
+
             let query = `
                 UPDATE bookings
                 SET
@@ -1616,7 +1793,42 @@ exports.handler = async (event) => {
                 params.push(Number(requestedBranchId));
             }
 
-            await connection.execute(query, params);
+            await connection.beginTransaction();
+
+            try {
+                await connection.execute(query, params);
+
+                const priceBookingRef = buildBookingReference(previousBooking, booking_id);
+                const customerNameForPrice = previousBooking.name || "customer";
+                const prevAgreed = Number(previousBooking.agreed_price || 0);
+                const prevDp = Number(previousBooking.required_down_payment || 0);
+
+                const actingEmployeeForPrice = await getActingEmployee(
+                    connection,
+                    decodedToken,
+                    tokenRole,
+                    store_id
+                );
+
+                await logEmployeeAction(connection, {
+                    storeId: store_id,
+                    branchId: requestedBranchId || previousBooking.branch_id || null,
+                    employee: actingEmployeeForPrice,
+                    module: "Bookings",
+                    referenceNumber: priceBookingRef,
+                    action: "Updated custom price",
+                    referenceId: String(booking_id),
+                    details:
+                        `${priceBookingRef} (${customerNameForPrice}): ` +
+                        `price ₱${prevAgreed.toLocaleString()} → ₱${total.toLocaleString()}, ` +
+                        `down payment ₱${prevDp.toLocaleString()} → ₱${requiredDp.toLocaleString()}`,
+                });
+
+                await connection.commit();
+            } catch (err) {
+                await connection.rollback();
+                throw err;
+            }
 
             return response(200, {
                 success: true,
@@ -1654,7 +1866,7 @@ exports.handler = async (event) => {
                 balance !== undefined && balance !== null ? toNumber(balance) : null;
 
             let selectQuery = `
-                SELECT id, status, store_id, branch_id
+                SELECT id, status, store_id, branch_id, booking_reference, name
                 FROM bookings
                 WHERE id = ?
                   AND store_id = ?
@@ -1673,7 +1885,7 @@ exports.handler = async (event) => {
                 return response(404, { error: "Booking not found" });
             }
 
-            const currentStatus = bookingRows[0].status || "Pending Review";
+            const currentStatus = normalizeBookingStatus(bookingRows[0].status) || "Pending Review";
             const willAutoConfirm =
                 ["Down Payment Paid", "Fully Paid"].includes(payment_status) &&
                 ["Pending Review", "Awaiting Down Payment"].includes(currentStatus);
@@ -1747,6 +1959,33 @@ exports.handler = async (event) => {
                 await connection.rollback();
                 throw err;
             }
+
+            const paymentBookingRef = buildBookingReference(bookingRows[0], booking_id);
+            const customerNameForPayment = bookingRows[0].name || "customer";
+
+            const paymentActionLabels = {
+                "Fully Paid": "Marked as fully paid",
+                "Down Payment Paid": "Marked down payment as paid",
+                "Partial": "Recorded partial payment",
+            };
+
+            const actingEmployeeForPayment = await getActingEmployee(
+                connection,
+                decodedToken,
+                tokenRole,
+                store_id
+            );
+
+            await logEmployeeAction(connection, {
+                storeId: store_id,
+                branchId: requestedBranchId || bookingRows[0].branch_id || null,
+                employee: actingEmployeeForPayment,
+                module: "Bookings",
+                referenceNumber: paymentBookingRef,
+                action: paymentActionLabels[payment_status] || `Updated payment status to ${payment_status}`,
+                referenceId: String(booking_id),
+                details: `${paymentBookingRef} (${customerNameForPayment}): paid ₱${paid.toLocaleString()}, status → ${payment_status}`,
+            });
 
             return response(200, {
                 success: true,

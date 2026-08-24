@@ -7,7 +7,7 @@ const JWT_SECRET = "stocknbook-secret-key";
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -59,6 +59,87 @@ function serverError(headers, err) {
 
 function toSafeString(value, max = 255) {
     return String(value ?? "").trim().slice(0, max);
+}
+
+function buildCategoryReference(id) {
+    return `CAT-${String(id).padStart(6, "0")}`;
+}
+
+/*
+ * The JWT issued at login only carries ids (store_id / manager_id /
+ * staff_id) and an email — never a display name. To log a real,
+ * human-readable employee_actions row we look the acting user's name up
+ * from their own table using the id that's already in the token.
+ */
+async function getActingEmployee(connection, decoded, tokenRole, storeId) {
+    const role = String(tokenRole || "").toLowerCase();
+
+    if (role === "manager" && decoded?.manager_id) {
+        const [rows] = await connection.execute(
+            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            [Number(decoded.manager_id), storeId]
+        );
+
+        return {
+            id: Number(decoded.manager_id),
+            name: toSafeString(rows[0]?.manager_name, 255) || "Manager",
+            role: "Manager",
+        };
+    }
+
+    if (role === "staff" && decoded?.staff_id) {
+        const [rows] = await connection.execute(
+            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            [Number(decoded.staff_id), storeId]
+        );
+
+        return {
+            id: Number(decoded.staff_id),
+            name: toSafeString(rows[0]?.staff_name, 255) || "Staff",
+            role: "Staff",
+        };
+    }
+
+    if (role === "owner") {
+        const [rows] = await connection.execute(
+            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            [storeId]
+        );
+
+        return {
+            id: null,
+            name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
+            role: "Owner",
+        };
+    }
+
+    return { id: null, name: "Unknown", role: "Staff" };
+}
+
+/*
+ * Writes one row to employee_actions. Called from inside the same DB
+ * transaction as the category action it's logging, so the log and the
+ * action succeed or fail together.
+ */
+async function logEmployeeAction(connection, entry) {
+    await connection.execute(
+        `INSERT INTO employee_actions
+             (store_id, branch_id, employee_id, employee_name, employee_role,
+              module, reference_number, action, reference_id, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            entry.storeId,
+            entry.branchId ?? null,
+            entry.employee.id,
+            entry.employee.name,
+            entry.employee.role,
+            entry.module,
+            entry.referenceNumber ?? null,
+            entry.action,
+            entry.referenceId ?? null,
+            entry.details ?? null,
+        ]
+    );
 }
 
 const DEFAULT_CATEGORIES = [
@@ -207,13 +288,18 @@ exports.handler = async (event) => {
             return unauthorized(headers, "No token provided");
         }
 
+        let decoded;
         let storeId;
+        let tokenRole;
+        let branchId;
 
         try {
             const token = authHeader.replace("Bearer ", "");
-            const decoded = jwt.verify(token, JWT_SECRET);
+            decoded = jwt.verify(token, JWT_SECRET);
 
             storeId = Number(decoded.store_id);
+            tokenRole = String(decoded.role || "").toLowerCase();
+            branchId = decoded.branch_id ? Number(decoded.branch_id) : null;
         } catch {
             return unauthorized(headers, "Invalid token");
         }
@@ -256,7 +342,7 @@ exports.handler = async (event) => {
                  FROM categories
                  WHERE store_id = ?
                    AND LOWER(category_name) = LOWER(?)
-                 LIMIT 1`,
+                     LIMIT 1`,
                 [storeId, safeName]
             );
 
@@ -266,6 +352,8 @@ exports.handler = async (event) => {
                     "Category already exists for this store"
                 );
             }
+
+            await connection.beginTransaction();
 
             const [result] = await connection.execute(
                 `INSERT INTO categories (
@@ -290,6 +378,26 @@ exports.handler = async (event) => {
                      LIMIT 1`,
                 [result.insertId]
             );
+
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decoded,
+                tokenRole,
+                storeId
+            );
+
+            await logEmployeeAction(connection, {
+                storeId,
+                branchId,
+                employee: actingEmployee,
+                module: "Inventory",
+                referenceNumber: buildCategoryReference(result.insertId),
+                action: "Added category",
+                referenceId: String(result.insertId),
+                details: `Added ${safeName} to categories`,
+            });
+
+            await connection.commit();
 
             return {
                 statusCode: 201,
@@ -373,6 +481,15 @@ exports.handler = async (event) => {
                 );
             }
 
+            const [beforeRows] = await connection.execute(
+                `SELECT category_name FROM categories WHERE id = ? AND store_id = ? LIMIT 1`,
+                [categoryId, storeId]
+            );
+
+            const previousName = beforeRows[0]?.category_name || null;
+
+            await connection.beginTransaction();
+
             const [result] = await connection.execute(
                 `UPDATE categories
                  SET
@@ -384,6 +501,7 @@ exports.handler = async (event) => {
             );
 
             if (result.affectedRows === 0) {
+                await connection.rollback();
                 return {
                     statusCode: 404,
                     headers,
@@ -392,6 +510,28 @@ exports.handler = async (event) => {
                     }),
                 };
             }
+
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decoded,
+                tokenRole,
+                storeId
+            );
+
+            await logEmployeeAction(connection, {
+                storeId,
+                branchId,
+                employee: actingEmployee,
+                module: "Inventory",
+                referenceNumber: buildCategoryReference(categoryId),
+                action: "Updated category",
+                referenceId: String(categoryId),
+                details: previousName && previousName !== safeName
+                    ? `Renamed ${previousName} to ${safeName}`
+                    : `Updated ${safeName}`,
+            });
+
+            await connection.commit();
 
             return {
                 statusCode: 200,
@@ -416,14 +556,12 @@ exports.handler = async (event) => {
                 );
             }
 
-            const [result] = await connection.execute(
-                `DELETE FROM categories
-                 WHERE id = ?
-                   AND store_id = ?`,
+            const [existingRows] = await connection.execute(
+                `SELECT category_name FROM categories WHERE id = ? AND store_id = ? LIMIT 1`,
                 [categoryId, storeId]
             );
 
-            if (result.affectedRows === 0) {
+            if (existingRows.length === 0) {
                 return {
                     statusCode: 404,
                     headers,
@@ -432,6 +570,48 @@ exports.handler = async (event) => {
                     }),
                 };
             }
+
+            const categoryName = existingRows[0].category_name;
+
+            await connection.beginTransaction();
+
+            const [result] = await connection.execute(
+                `DELETE FROM categories
+                 WHERE id = ?
+                   AND store_id = ?`,
+                [categoryId, storeId]
+            );
+
+            if (result.affectedRows === 0) {
+                await connection.rollback();
+                return {
+                    statusCode: 404,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Category not found",
+                    }),
+                };
+            }
+
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decoded,
+                tokenRole,
+                storeId
+            );
+
+            await logEmployeeAction(connection, {
+                storeId,
+                branchId,
+                employee: actingEmployee,
+                module: "Inventory",
+                referenceNumber: buildCategoryReference(categoryId),
+                action: "Deleted category",
+                referenceId: String(categoryId),
+                details: `Removed ${categoryName} from categories`,
+            });
+
+            await connection.commit();
 
             return {
                 statusCode: 200,
@@ -444,6 +624,13 @@ exports.handler = async (event) => {
 
         return badRequest(headers, "Invalid action");
     } catch (err) {
+        if (connection) {
+            try {
+                await connection.rollback();
+            } catch {
+                // ignore rollback errors, original error is what matters
+            }
+        }
         return serverError(headers, err);
     } finally {
         if (connection) {

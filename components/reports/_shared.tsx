@@ -251,6 +251,23 @@ type StaffActivity = {
     branchId?: string;
 };
 
+// Raw shape returned by /api/reports -> data.employeeActions, sourced directly
+// from the employee_actions table (who did what, in which module, when).
+type EmployeeAction = {
+    id: string;
+    employeeName: string;
+    employeeRole: string;
+    action: string;
+    module: string;
+    referenceNumber?: string;
+    referenceId?: string;
+    details?: string;
+    branch?: string;
+    branchId?: string;
+    date: string;
+    time?: string;
+};
+
 type PackageRecord = {
     id: string;
     name: string;
@@ -319,6 +336,7 @@ type ReportData = {
     forecasting?: ForecastRecord[];
     seasonalInsights?: SeasonalInsight[];
     staffActivities?: StaffActivity[];
+    employeeActions?: EmployeeAction[];
     packageList?: PackageRecord[];
 };
 
@@ -1315,96 +1333,38 @@ function sumBy<T>(items: T[], callback: (item: T) => number) {
     return items.reduce((total, item) => total + callback(item), 0);
 }
 
-function deriveStaffActivitiesFromRecords(input: {
-    inventory: InventoryItem[];
-    restocks: RestockRecord[];
-    bookings: BookingRecord[];
-    packages: PackageRecord[];
-    sales: SaleRecord[];
-}): StaffActivity[] {
-    const derived: StaffActivity[] = [];
+// Normalizes the free-text `module` column from employee_actions into the
+// fixed SystemModule union the reports UI (badges/filters) expects.
+function normalizeSystemModule(value: string): SystemModule {
+    const normalized = value.trim().toLowerCase();
 
-    input.restocks.forEach((item) => {
-        if (!item.receivedBy) return;
-        derived.push({
-            id: `restock-${item.id}`,
-            date: toReportDateValue(item.date) || item.date,
-            staffName: item.receivedBy,
-            role: "Staff",
-            action: "Restocked inventory",
-            module: "Inventory",
-            reference: item.reference || item.product,
-            details: `Added ${formatNumber(item.quantityAdded)} unit${item.quantityAdded === 1 ? "" : "s"} of ${item.product}${item.variantName ? ` (${item.variantName})` : ""}`,
-            branch: item.branch,
-            branchId: item.branchId,
-        });
-    });
+    if (normalized.startsWith("book")) return "Bookings";
+    if (normalized.startsWith("package")) return "Packages";
+    if (normalized.startsWith("sales") || normalized.includes("pos")) return "Sales / POS";
+    return "Inventory";
+}
 
-    input.inventory.forEach((item) => {
-        if (!item.updatedBy || !item.lastUpdated) return;
-        derived.push({
-            id: `inventory-${item.id}`,
-            date: toReportDateValue(item.lastUpdated) || item.lastUpdated,
-            staffName: item.updatedBy,
-            role: "Staff",
-            action: "Updated inventory item",
-            module: "Inventory",
-            reference: item.id,
-            details: `Updated stock details for ${item.product}`,
-            branch: item.branch,
-            branchId: item.branchId,
-        });
-    });
-
-    input.bookings.forEach((item) => {
-        if (!item.createdBy) return;
-        derived.push({
-            id: `booking-${item.id}`,
-            date: toReportDateValue(item.date) || item.date,
-            staffName: item.createdBy,
-            role: "Staff",
-            action: `Booking ${item.statusLabel || item.status}`,
-            module: "Bookings",
-            reference: item.reference,
-            details: `${item.packageName} for ${item.customer}`,
-            branch: item.branch,
-            branchId: item.branchId,
-        });
-    });
-
-    input.packages.forEach((item) => {
-        if (!item.updatedBy || !item.updatedAt) return;
-        derived.push({
-            id: `package-${item.id}`,
-            date: toReportDateValue(item.updatedAt) || item.updatedAt,
-            staffName: item.updatedBy,
-            role: "Staff",
-            action: "Updated package",
-            module: "Packages",
-            reference: item.id,
-            details: `Updated ${item.name}`,
-            branch: item.branch,
-            branchId: item.branchId,
-        });
-    });
-
-    input.sales.forEach((item) => {
-        if (!item.cashier) return;
-        derived.push({
-            id: `sale-${item.id}`,
-            date: toReportDateValue(item.date) || item.date,
-            staffName: item.cashier,
-            role: "Staff",
-            action: "Processed sale",
-            module: "Sales / POS",
-            reference: item.reference || item.id,
-            details: `${getSaleItemsLabel(item)} — ${formatPeso(item.amount)}`,
-            branch: item.branch,
-            branchId: item.branchId,
-        });
-    });
-
-    return derived;
+// Maps the real, already-logged rows from the employee_actions table
+// (who did what, in which module, with which reference number, when) into
+// the shape the Employee Actions History view renders. This is the single
+// source of truth for "who added/deleted/ordered what" — nothing here is
+// inferred or reconstructed from other report records.
+function mapEmployeeActionsToStaffActivities(
+    actions: EmployeeAction[]
+): StaffActivity[] {
+    return actions.map((item) => ({
+        id: item.id,
+        date: toReportDateValue(item.date) || item.date,
+        time: item.time || undefined,
+        staffName: item.employeeName || "Unknown Employee",
+        role: item.employeeRole || "Staff",
+        action: item.action || "Recorded action",
+        module: normalizeSystemModule(item.module || "Inventory"),
+        reference: item.referenceNumber || item.referenceId || undefined,
+        details: item.details || undefined,
+        branch: item.branch || "—",
+        branchId: item.branchId,
+    }));
 }
 
 function statusClass(status: string) {
@@ -4259,6 +4219,9 @@ type EmployeeActionsReportViewProps = {
     activeFilter: StaffModuleFilter;
     onFilterChange: (filter: StaffModuleFilter) => void;
     showBranchColumn: boolean;
+    onExportPdf: () => void;
+    onExportXlsx: () => void;
+    onExportDoc: () => void;
 };
 
 function EmployeeActionsReportView({
@@ -4267,6 +4230,9 @@ function EmployeeActionsReportView({
                                        activeFilter,
                                        onFilterChange,
                                        showBranchColumn,
+                                       onExportPdf,
+                                       onExportXlsx,
+                                       onExportDoc,
                                    }: EmployeeActionsReportViewProps) {
     const query = searchQuery.trim().toLowerCase();
     const searchedRecords = records.filter((item) =>
@@ -4289,10 +4255,6 @@ function EmployeeActionsReportView({
         activeFilter === "all"
             ? searchedRecords
             : searchedRecords.filter((item) => item.module === activeFilter);
-    const latestAction = [...searchedRecords].sort((left, right) => {
-        const dateDifference = right.date.localeCompare(left.date);
-        return dateDifference || String(right.time || "").localeCompare(String(left.time || ""));
-    })[0];
     const employeeSummary = Array.from(
         searchedRecords.reduce((summary, item) => {
             const employee = item.staffName || "Unknown Employee";
@@ -4394,27 +4356,18 @@ function EmployeeActionsReportView({
                 </div>
 
                 <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
-                    <h3 className="text-[12px] font-bold text-[#211629]">Latest Action</h3>
-                    {latestAction ? (
-                        <div className="mt-3 rounded-[12px] border border-[#EEE7F2] bg-[#FCFAFD] p-3">
-                            <p className="break-words text-[11px] font-bold text-[#1A1220]">{latestAction.staffName}</p>
-                            <p className="mt-1 break-words text-[10px] text-[#6A5D6F]">{latestAction.action}</p>
-                            <div className="mt-2 flex items-center justify-between gap-2 text-[10px]">
-                                <span className="text-[#7A6984]">Module</span>
-                                <span className="font-bold text-[#4E2C66]">{latestAction.module}</span>
-                            </div>
-                        </div>
-                    ) : (
-                        <p className="mt-3 text-[10px] text-[#8A7A91]">No employee activity recorded.</p>
-                    )}
-                </div>
-
-                <div className="mt-4 border-t border-dashed border-[#E4D9EB] pt-4">
                     <h3 className="text-[12px] font-bold text-[#211629]">Most Active Employees</h3>
                     <div className="mt-3">
                         <SummaryBarList items={employeeSummary} emptyText="No employee action data available." />
                     </div>
                 </div>
+
+                <InventoryExportMenu
+                    label="Export Employee Actions"
+                    onExportPdf={onExportPdf}
+                    onExportXlsx={onExportXlsx}
+                    onExportDoc={onExportDoc}
+                />
             </aside>
         </div>
     );
@@ -5294,21 +5247,11 @@ export function ReportsWorkspace({
     );
 
     const staffActivities = useMemo(() => {
-        const backendActivities = (report?.staffActivities ?? []);
-        const derivedActivities = deriveStaffActivitiesFromRecords({
-            inventory,
-            restocks,
-            bookings,
-            packages,
-            sales,
-        });
-
-        const merged = [...backendActivities, ...derivedActivities];
-        const deduped = Array.from(
-            merged.reduce((map, item) => map.set(item.id, item), new Map<string, StaffActivity>()).values()
+        const loggedActivities = mapEmployeeActionsToStaffActivities(
+            report?.employeeActions ?? []
         );
 
-        return deduped
+        return loggedActivities
             .map(item => {
                 let resolvedBranch = item.branch;
                 if (resolvedBranch === ALL_BRANCHES || resolvedBranch === "Assigned Branch") {
@@ -5326,7 +5269,7 @@ export function ReportsWorkspace({
                 const dateDiff = right.date.localeCompare(left.date);
                 return dateDiff || String(right.time || "").localeCompare(String(left.time || ""));
             });
-    }, [report?.staffActivities, liveBranchOptions, inventory, restocks, bookings, packages, sales]);
+    }, [report?.employeeActions, liveBranchOptions]);
 
     const bookingStaffActions = useMemo(
         () => staffActivities.filter((item) => item.module === "Bookings").length,
@@ -5901,6 +5844,56 @@ export function ReportsWorkspace({
         };
     }
 
+    function getFilteredEmployeeActionsExportTable(): ExportTable {
+        const query = searchQuery.trim().toLowerCase();
+        const searchedActivities = displayedStaffActivities.filter((item) =>
+            !query ||
+            [
+                item.id,
+                item.staffName,
+                item.role,
+                item.action,
+                item.module,
+                item.reference,
+                item.details,
+                item.branch,
+            ]
+                .join(" ")
+                .toLowerCase()
+                .includes(query)
+        );
+
+        const headers = [
+            "Date",
+            "Time",
+            "Employee",
+            "Role",
+            "Action",
+            "Module",
+            "Reference",
+            ...(showBranchColumn ? ["Branch"] : []),
+            "Details",
+        ];
+
+        const rows = searchedActivities.map((item) => [
+            formatDate(item.date),
+            item.time || "—",
+            item.staffName,
+            item.role,
+            item.action,
+            item.module,
+            item.reference || "—",
+            ...(showBranchColumn ? [item.branch || "—"] : []),
+            item.details || "—",
+        ]);
+
+        return {
+            title: "Employee Actions History",
+            headers,
+            rows,
+        };
+    }
+
     function exportDoc(
         table: ExportTable,
         filenamePrefix = "stocknbook-full-inventory"
@@ -6220,6 +6213,9 @@ export function ReportsWorkspace({
                                     activeFilter={staffModuleFilter}
                                     onFilterChange={setStaffModuleFilter}
                                     showBranchColumn={showBranchColumn}
+                                    onExportPdf={() => exportPdf(getFilteredEmployeeActionsExportTable(), "employee-actions-report")}
+                                    onExportXlsx={() => exportExcel(getFilteredEmployeeActionsExportTable(), "employee-actions-report")}
+                                    onExportDoc={() => exportDoc(getFilteredEmployeeActionsExportTable(), "employee-actions-report")}
                                 />
                             )}
                         </>

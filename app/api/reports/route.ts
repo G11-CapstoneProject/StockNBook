@@ -626,6 +626,106 @@ function bookingRevenue(bookings: Array<Record<string, unknown>>) {
         .reduce((sum, booking) => sum + asNumber(booking.amount), 0);
 }
 
+async function loadEmployeeActions(
+    connection: Connection,
+    storeId: number,
+    branchId: number | null,
+    range: DateRange
+) {
+    let query = `
+        SELECT
+            ea.id,
+            ea.branch_id,
+            ea.employee_name,
+            ea.employee_role,
+            ea.module,
+            ea.reference_number,
+            ea.action,
+            ea.reference_id,
+            ea.details,
+            br.branch_name,
+
+            DATE_FORMAT(
+                    ea.created_at,
+                    '%Y-%m-%d'
+            ) AS action_date,
+
+            DATE_FORMAT(
+                    ea.created_at,
+                    '%H:%i:%s'
+            ) AS action_time
+
+        FROM employee_actions ea
+                 LEFT JOIN branches br
+                           ON br.id = ea.branch_id
+                               AND br.store_id = ea.store_id
+
+        WHERE ea.store_id = ?
+          AND DATE(ea.created_at)
+            BETWEEN ? AND ?
+    `;
+
+    const params: Array<number | string> = [
+        storeId,
+        range.startDate,
+        range.endDate,
+    ];
+
+    if (branchId) {
+        query += `
+            AND ea.branch_id = ?
+        `;
+
+        params.push(branchId);
+    }
+
+    query += `
+        ORDER BY ea.created_at DESC
+    `;
+
+
+    const [rows] = await connection.execute(query, params);
+
+
+    return (rows as Array<Record<string, unknown>>).map((row) => ({
+        id: String(row.id),
+
+        employeeName:
+            asText(row.employee_name) || "Unknown",
+
+        employeeRole:
+            asText(row.employee_role) || "Staff",
+
+        action:
+            asText(row.action),
+
+        module:
+            asText(row.module),
+
+        referenceNumber:
+            asText(row.reference_number) || "-",
+
+        referenceId:
+            asText(row.reference_id) || "-",
+
+        details:
+            asText(row.details),
+
+        branch:
+            asText(row.branch_name) ||
+            (row.branch_id ? `Branch ${row.branch_id}` : "Unassigned Branch"),
+
+        branchId:
+            row.branch_id != null ? String(row.branch_id) : undefined,
+
+        date:
+            asText(row.action_date),
+
+        time:
+            asText(row.action_time),
+    }));
+}
+
 async function loadForecastReport(
     authHeader: string,
     branchId: number | null
@@ -772,6 +872,7 @@ export async function GET(request: NextRequest) {
             salesList,
             bookingList,
             restockHistory,
+            employeeActions,
             forecastReport,
         ] = await Promise.all([
             loadStoreName(connection, storeId),
@@ -780,6 +881,14 @@ export async function GET(request: NextRequest) {
             loadSales(connection, storeId, branchId, range),
             loadBookings(connection, storeId, branchId, range),
             loadRestockHistory(connection, storeId, branchId, range),
+
+            loadEmployeeActions(
+                connection,
+                storeId,
+                branchId,
+                range
+            ),
+
             loadForecastReport(authHeader, branchId),
         ]);
 
@@ -834,8 +943,12 @@ export async function GET(request: NextRequest) {
                 restockHistory,
                 salesList,
                 bookingList,
+
+                employeeActions,
+
                 forecasting: forecastReport.forecasting,
                 seasonalInsights: forecastReport.seasonalInsights,
+
                 staffActivities: [],
             },
         });

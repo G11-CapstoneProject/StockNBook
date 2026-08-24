@@ -1089,7 +1089,7 @@ function generateSlug(storeName) {
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -2657,6 +2657,70 @@ exports.handler = async (event) => {
                 statusCode: 401,
                 headers,
                 body: JSON.stringify({ error: "Invalid email or password" }),
+            };
+        }
+
+        // PLATFORM ADMIN LOGIN
+        if (action === "platform_admin_login") {
+            if (!email || !password) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: "Missing email or password" }),
+                };
+            }
+
+            const [adminRows] = await connection.execute(
+                "SELECT * FROM platform_admins WHERE email = ? AND status = 'active' LIMIT 1",
+                [String(email).trim().toLowerCase()]
+            );
+
+            if (adminRows.length === 0) {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({ error: "Invalid email or password" }),
+                };
+            }
+
+            const admin = adminRows[0];
+            const match = await bcrypt.compare(password, admin.password);
+
+            if (!match) {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({ error: "Invalid email or password" }),
+                };
+            }
+
+            const token = jwt.sign(
+                {
+                    platform_admin_id: admin.platform_admin_id,
+                    email: admin.email,
+                    role: "PLATFORM_ADMIN",
+                },
+                JWT_SECRET,
+                { expiresIn: "8h" }
+            );
+
+            await connection.execute(
+                "UPDATE platform_admins SET updated_at = UTC_TIMESTAMP() WHERE platform_admin_id = ?",
+                [admin.platform_admin_id]
+            );
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    token,
+                    user: {
+                        platform_admin_id: admin.platform_admin_id,
+                        full_name: admin.full_name,
+                        email: admin.email,
+                        role: "PLATFORM_ADMIN",
+                    },
+                }),
             };
         }
 
@@ -4640,6 +4704,37 @@ exports.handler = async (event) => {
                             typeof staff.permissions === "string"
                                 ? JSON.parse(staff.permissions || "{}")
                                 : staff.permissions || {},
+                    }),
+                };
+            }
+
+            if (decoded.role === "PLATFORM_ADMIN") {
+                const [adminRows] = await connection.execute(
+                    `SELECT platform_admin_id, full_name, email, status
+                     FROM platform_admins
+                     WHERE platform_admin_id = ?
+                         LIMIT 1`,
+                    [decoded.platform_admin_id]
+                );
+
+                if (!adminRows.length || adminRows[0].status !== "active") {
+                    return {
+                        statusCode: 403,
+                        headers,
+                        body: JSON.stringify({ error: "Admin account not found or inactive" }),
+                    };
+                }
+
+                const admin = adminRows[0];
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        role: "PLATFORM_ADMIN",
+                        platform_admin_id: admin.platform_admin_id,
+                        full_name: admin.full_name,
+                        email: admin.email,
                     }),
                 };
             }

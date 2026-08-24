@@ -87,9 +87,6 @@ type InvitationEmailSummary = {
     backendConfirmed: boolean;
 };
 
-const PLATFORM_ADMIN_EMAIL = "platformadmin@stocknbook.com";
-const PLATFORM_ADMIN_PASSWORD = "Admin@12345";
-
 const defaultPermissions: Permissions = {
     dashboard: true,
     bookings: true,
@@ -306,29 +303,59 @@ export default function AuthModal({
             }
         }
 
-        if (
-            mode === "login" &&
-            email.trim().toLowerCase() === PLATFORM_ADMIN_EMAIL &&
-            password === PLATFORM_ADMIN_PASSWORD
-        ) {
-            const adminUser = {
-                platform_admin_id: 1,
-                full_name: "Platform Administrator",
-                email: PLATFORM_ADMIN_EMAIL,
-                role: "PLATFORM_ADMIN",
-            };
-
-            sessionStorage.clear();
-            sessionStorage.setItem("token", "platform-admin-ui-demo");
-            sessionStorage.setItem("role", "PLATFORM_ADMIN");
-            sessionStorage.setItem("user", JSON.stringify(adminUser));
-            sessionStorage.setItem("full_name", "Platform Administrator");
-            sessionStorage.setItem("isLoggedIn", "true");
-
+        if (mode === "login") {
+            // Try platform-admin login first. This makes a real network
+            // call to the server — no credentials or role decisions are
+            // ever made in the browser. If the email isn't the admin
+            // account, the server just responds 401/404 and we fall
+            // through to normal owner/manager login below.
             setLoading(true);
-            onClose();
-            router.replace("/platform-admin/dashboard");
-            return;
+
+            try {
+                const adminResponse = await fetch("/api/auth", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        action: "platform_admin_login",
+                        email,
+                        password,
+                    }),
+                });
+
+                if (adminResponse.ok) {
+                    const adminData = await adminResponse.json();
+
+                    if (adminData.token) {
+                        sessionStorage.clear();
+                        sessionStorage.setItem("token", adminData.token);
+                        sessionStorage.setItem("role", "PLATFORM_ADMIN");
+                        sessionStorage.setItem(
+                            "user",
+                            JSON.stringify(adminData.user || {})
+                        );
+                        sessionStorage.setItem(
+                            "full_name",
+                            adminData.user?.full_name ||
+                            "Platform Administrator"
+                        );
+                        sessionStorage.setItem("isLoggedIn", "true");
+
+                        onClose();
+                        router.replace("/platform-admin/dashboard");
+                        setLoading(false);
+                        return;
+                    }
+                }
+                // Any non-OK / non-admin response falls through to the
+                // normal owner/manager login flow below.
+            } catch {
+                // Network error talking to the admin check — fall through
+                // to normal login rather than silently failing.
+            }
+
+            setLoading(false);
         }
 
         if (mode === "signup") {

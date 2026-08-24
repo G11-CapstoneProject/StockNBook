@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import PlatformAdminSidebar from "./PlatformAdminSidebar";
 import {
     Activity,
@@ -20,9 +21,8 @@ import {
     X,
 } from "lucide-react";
 
-type Plan = "Starter" | "Business" | "Enterprise";
+type Plan = "Starter" | "Business" | "Enterprise" | string;
 type PaymentStatus = "PENDING" | "APPROVED" | "REJECTED";
-type ReviewAction = "approve" | "reject" | null;
 
 type GCashPaymentSettings = {
     accountName: string;
@@ -45,8 +45,6 @@ type PaymentRequest = {
     storeName: string;
     ownerName: string;
     ownerEmail: string;
-    businessId: string;
-    currentPlan: Plan;
     requestedPlan: Plan;
     amount: number;
     referenceNumber: string;
@@ -65,133 +63,7 @@ type ExpiringSubscription = {
     initials: string;
 };
 
-const initialPaymentRequests: PaymentRequest[] = [
-    {
-        id: "PAY-20260626-001",
-        storeName: "ABC Party Supplies",
-        ownerName: "Juan Dela Cruz",
-        ownerEmail: "abcparty@gmail.com",
-        businessId: "BUS-00015",
-        currentPlan: "Starter",
-        requestedPlan: "Business",
-        amount: 499,
-        referenceNumber: "1234567890123",
-        paymentDate: "June 26, 2026",
-        submittedAt: "June 26, 2026, 10:30 AM",
-        status: "PENDING",
-        proofFileName: "gcash-proof-abc-party.jpg",
-    },
-    {
-        id: "PAY-20260626-002",
-        storeName: "Happy Events",
-        ownerName: "Maria Santos",
-        ownerEmail: "happyevents@gmail.com",
-        businessId: "BUS-00019",
-        currentPlan: "Business",
-        requestedPlan: "Enterprise",
-        amount: 1299,
-        referenceNumber: "9827345610123",
-        paymentDate: "June 26, 2026",
-        submittedAt: "June 26, 2026, 9:15 AM",
-        status: "PENDING",
-        proofFileName: "gcash-proof-happy-events.jpg",
-    },
-    {
-        id: "PAY-20260625-003",
-        storeName: "Party World",
-        ownerName: "Anne Reyes",
-        ownerEmail: "partyworld@gmail.com",
-        businessId: "BUS-00023",
-        currentPlan: "Starter",
-        requestedPlan: "Business",
-        amount: 499,
-        referenceNumber: "6248091345780",
-        paymentDate: "June 25, 2026",
-        submittedAt: "June 25, 2026, 4:45 PM",
-        status: "PENDING",
-        proofFileName: "gcash-proof-party-world.jpg",
-    },
-    {
-        id: "PAY-20260625-004",
-        storeName: "Fiesta Supplier",
-        ownerName: "Rina Flores",
-        ownerEmail: "fiesta.supplier@gmail.com",
-        businessId: "BUS-00027",
-        currentPlan: "Starter",
-        requestedPlan: "Business",
-        amount: 499,
-        referenceNumber: "7713259874601",
-        paymentDate: "June 25, 2026",
-        submittedAt: "June 25, 2026, 2:20 PM",
-        status: "PENDING",
-        proofFileName: "gcash-proof-fiesta-supplier.jpg",
-    },
-    {
-        id: "PAY-20260625-005",
-        storeName: "J&P Party Needs",
-        ownerName: "Jose Panganiban",
-        ownerEmail: "jnpparty@gmail.com",
-        businessId: "BUS-00031",
-        currentPlan: "Business",
-        requestedPlan: "Enterprise",
-        amount: 1299,
-        referenceNumber: "4561237890412",
-        paymentDate: "June 25, 2026",
-        submittedAt: "June 25, 2026, 1:05 PM",
-        status: "PENDING",
-        proofFileName: "gcash-proof-jp-party-needs.jpg",
-    },
-];
-
-const expiringSubscriptions: ExpiringSubscription[] = [
-    {
-        storeName: "Party World",
-        ownerEmail: "partyworld@gmail.com",
-        plan: "Enterprise",
-        expirationDate: "June 29, 2026",
-        daysLeft: 3,
-        initials: "PW",
-    },
-    {
-        storeName: "CE Events Supply",
-        ownerEmail: "ceevents@gmail.com",
-        plan: "Business",
-        expirationDate: "July 2, 2026",
-        daysLeft: 6,
-        initials: "CE",
-    },
-    {
-        storeName: "ABC Party Supplies",
-        ownerEmail: "abcparty@gmail.com",
-        plan: "Business",
-        expirationDate: "July 3, 2026",
-        daysLeft: 7,
-        initials: "AB",
-    },
-    {
-        storeName: "Fiesta Supplier",
-        ownerEmail: "fiesta.supplier@gmail.com",
-        plan: "Business",
-        expirationDate: "July 4, 2026",
-        daysLeft: 8,
-        initials: "FS",
-    },
-];
-
-type PlanDistributionRow = {
-    plan: Plan;
-    count: number;
-    barColor: string;
-    trackColor: string;
-};
-
-const planDistribution: PlanDistributionRow[] = [
-    { plan: "Starter", count: 8, barColor: "#16834A", trackColor: "#E6F7EE" },
-    { plan: "Business", count: 7, barColor: "#A56607", trackColor: "#FFF8E8" },
-    { plan: "Enterprise", count: 3, barColor: "#6D35D4", trackColor: "#F1EBFF" },
-];
-
-type ActivityTone = "purple" | "green" | "gold";
+type ActivityTone = "purple" | "green" | "gold" | "red";
 
 type ActivityItem = {
     id: string;
@@ -206,50 +78,8 @@ const ACTIVITY_TONE_STYLE: Record<ActivityTone, { bg: string; text: string }> = 
     purple: { bg: "bg-[#F1EBFF]", text: "text-[#6D35D4]" },
     green: { bg: "bg-[#E6F7EE]", text: "text-[#16834A]" },
     gold: { bg: "bg-[#FFF8E8]", text: "text-[#A56607]" },
+    red: { bg: "bg-[#FFF0F0]", text: "text-[#C32F2F]" }
 };
-
-const recentActivity: ActivityItem[] = [
-    {
-        id: "act-1",
-        title: "Fiesta Supplier submitted payment proof",
-        detail: "Requesting upgrade to Business",
-        time: "20 min ago",
-        tone: "purple",
-        icon: <FileImage size={15} />,
-    },
-    {
-        id: "act-2",
-        title: "Happy Events upgraded to Enterprise",
-        detail: "Payment approved by admin",
-        time: "2 hours ago",
-        tone: "green",
-        icon: <CheckCircle2 size={15} />,
-    },
-    {
-        id: "act-3",
-        title: "Party World subscription renewed",
-        detail: "Business plan, valid until June 2027",
-        time: "5 hours ago",
-        tone: "gold",
-        icon: <RefreshCw size={15} />,
-    },
-    {
-        id: "act-4",
-        title: "New store registered: J&P Party Needs",
-        detail: "Starter plan, pending verification",
-        time: "1 day ago",
-        tone: "purple",
-        icon: <Sparkles size={15} />,
-    },
-    {
-        id: "act-5",
-        title: "ABC Party Supplies payment approved",
-        detail: "Upgraded from Starter to Business",
-        time: "1 day ago",
-        tone: "green",
-        icon: <CheckCircle2 size={15} />,
-    },
-];
 
 function PlanBadge({ plan }: { plan: Plan }) {
     const badgeStyle =
@@ -275,7 +105,7 @@ function TopKpiCard({
                     }: {
     title: string;
     value: string | number;
-    trend: string;
+    trend?: string;
     icon: ReactNode;
     iconClass: string;
 }) {
@@ -287,25 +117,170 @@ function TopKpiCard({
             <div className="min-w-0 flex-1">
                 <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">{title}</p>
                 <p className="mt-2 truncate text-[26px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">{value}</p>
-                <div className="mt-2 flex items-center gap-1.5">
-                    <span className="inline-flex items-center gap-1 rounded-md bg-[#E6F7EE] px-2 py-0.5 text-[11px] font-bold text-[#16834A]">
-                        <TrendingUp size={12} /> {trend}
-                    </span>
-                    <span className="text-[11px] text-[#8A7D92]">vs last period</span>
-                </div>
+                {trend && (
+                    <div className="mt-2 flex items-center gap-1.5">
+                        <span className="inline-flex items-center gap-1 rounded-md bg-[#E6F7EE] px-2 py-0.5 text-[11px] font-bold text-[#16834A]">
+                            <TrendingUp size={12} /> {trend}
+                        </span>
+                        <span className="text-[11px] text-[#8A7D92]">vs last period</span>
+                    </div>
+                )}
             </div>
         </article>
     );
 }
 
 export default function PlatformAdminDashboardPage() {
-    const [paymentRequests, setPaymentRequests] = useState(initialPaymentRequests);
-    const [selectedPayment, setSelectedPayment] = useState<PaymentRequest | null>(null);
-    const [reviewAction, setReviewAction] = useState<ReviewAction>(null);
-    const [rejectionReason, setRejectionReason] = useState("");
+    const router = useRouter();
+    const [authChecked, setAuthChecked] = useState(false);
+
+    // Dynamic Backend Data States
+    const [stats, setStats] = useState({ pending: 0, active: 0, expired: 0, approved: 0 });
+    const [paymentRequests, setPaymentRequests] = useState<PaymentRequest[]>([]);
+    const [expiringSubscriptions, setExpiringSubscriptions] = useState<ExpiringSubscription[]>([]);
+    const [recentActivity, setRecentActivity] = useState<ActivityItem[]>([]);
+    const [planDistribution, setPlanDistribution] = useState<any[]>([]);
+
     const [gcashSettings, setGcashSettings] = useState<GCashPaymentSettings>(defaultGcashPaymentSettings);
     const [gcashSettingsForm, setGcashSettingsForm] = useState<GCashPaymentSettings>(defaultGcashPaymentSettings);
     const [isGcashSettingsOpen, setIsGcashSettingsOpen] = useState(false);
+
+    // Provide your actual API Route here
+    const API_ENDPOINT = "/api/subscription-admin";
+
+    useEffect(() => {
+        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+        const role = sessionStorage.getItem("role") || localStorage.getItem("role");
+
+        if (!token || role !== "PLATFORM_ADMIN") {
+            router.replace("/");
+            return;
+        }
+
+        // 1. Verify Auth Token
+        fetch("/api/auth", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ action: "get_current_user" }),
+        })
+            .then(async (response) => {
+                if (!response.ok) throw new Error("Session invalid");
+                const data = await response.json();
+                if (data.role !== "PLATFORM_ADMIN") throw new Error("Not an admin session");
+                setAuthChecked(true);
+
+                // 2. Load Real Backend Dashboard Data
+                loadDashboardData(token);
+            })
+            .catch(() => {
+                sessionStorage.clear();
+                localStorage.clear();
+                router.replace("/");
+            });
+    }, [router]);
+
+    const loadDashboardData = async (token: string) => {
+        try {
+            const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+
+            // Fetch KPI Summary
+            const summaryRes = await fetch(API_ENDPOINT, {
+                method: "POST", headers, body: JSON.stringify({ action: "get_subscription_summary" })
+            });
+            const summaryData = await summaryRes.json();
+            if (summaryData.summary) {
+                setStats({
+                    pending: summaryData.summary.pending_verification,
+                    active: summaryData.summary.active_subscriptions,
+                    expired: summaryData.summary.expired_subscriptions,
+                    approved: summaryData.summary.approved_payments
+                });
+            }
+
+            // Fetch Pending Payments
+            const paymentsRes = await fetch(API_ENDPOINT, {
+                method: "POST", headers, body: JSON.stringify({ action: "list_payment_submissions", status: "PENDING" })
+            });
+            const paymentsData = await paymentsRes.json();
+            if (paymentsData.payments) {
+                setPaymentRequests(paymentsData.payments.map((p: any) => ({
+                    id: p.payment_submission_id,
+                    storeName: p.store_name_snapshot,
+                    ownerName: p.owner_name_snapshot,
+                    ownerEmail: p.owner_name_snapshot || "Owner",
+                    requestedPlan: p.requested_plan_name_snapshot,
+                    amount: Number(p.amount_submitted),
+                    referenceNumber: p.reference_number,
+                    paymentDate: p.payment_date,
+                    submittedAt: p.submitted_at,
+                    status: p.status,
+                    proofFileName: "Receipt File"
+                })));
+            }
+
+            // Fetch Subscriptions / Businesses to determine expiring & distribution
+            const bizRes = await fetch(API_ENDPOINT, {
+                method: "POST", headers, body: JSON.stringify({ action: "list_businesses" })
+            });
+            const bizData = await bizRes.json();
+            if (bizData.businesses) {
+                // Renewal Watch
+                const expiring = bizData.businesses
+                    .filter((b: any) => b.subscription_status === 'ACTIVE' && b.expiration_date)
+                    .map((b: any) => {
+                        const daysLeft = Math.ceil((new Date(b.expiration_date).getTime() - Date.now()) / (1000 * 3600 * 24));
+                        return { ...b, daysLeft };
+                    })
+                    .filter((b: any) => b.daysLeft <= 7 && b.daysLeft >= 0)
+                    .map((b: any) => ({
+                        storeName: b.store_name_snapshot,
+                        ownerEmail: b.owner_name_snapshot || "Owner",
+                        plan: b.plan_name,
+                        expirationDate: new Date(b.expiration_date).toLocaleDateString(),
+                        daysLeft: b.daysLeft,
+                        initials: (b.store_name_snapshot || "ST").substring(0, 2).toUpperCase()
+                    }));
+                setExpiringSubscriptions(expiring);
+
+                // Plan Distribution Calculator
+                const distMap: Record<string, number> = {};
+                bizData.businesses.forEach((b: any) => {
+                    if (b.subscription_status === 'ACTIVE' && b.plan_name) {
+                        distMap[b.plan_name] = (distMap[b.plan_name] || 0) + 1;
+                    }
+                });
+                const planColors: Record<string, {bar: string, track: string}> = {
+                    "Starter": { bar: "#16834A", track: "#E6F7EE" },
+                    "Business": { bar: "#A56607", track: "#FFF8E8" },
+                    "Enterprise": { bar: "#6D35D4", track: "#F1EBFF" }
+                };
+
+                setPlanDistribution(Object.entries(distMap).map(([plan, count]) => ({
+                    plan, count,
+                    barColor: planColors[plan]?.bar || "#2B174C",
+                    trackColor: planColors[plan]?.track || "#E9E0EF"
+                })));
+            }
+
+            // Fetch Audit Logs for Recent Activity
+            const auditRes = await fetch(API_ENDPOINT, {
+                method: "POST", headers, body: JSON.stringify({ action: "list_audit_logs" })
+            });
+            const auditData = await auditRes.json();
+            if (auditData.audit_logs) {
+                setRecentActivity(auditData.audit_logs.map((log: any) => ({
+                    id: log.audit_log_id,
+                    title: log.action.replace(/_/g, ' '),
+                    detail: log.reason || "Action performed by admin",
+                    time: new Date(log.created_at).toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', month: 'short', day: 'numeric' }),
+                    tone: log.action.includes('APPROVED') ? 'green' : (log.action.includes('REJECTED') ? 'red' : 'purple'),
+                    icon: <Activity size={15} />
+                })));
+            }
+        } catch (error) {
+            console.error("Dashboard fetch error:", error);
+        }
+    };
 
     useEffect(() => {
         try {
@@ -348,50 +323,21 @@ export default function PlatformAdminDashboardPage() {
             instruction: gcashSettingsForm.instruction.trim() || defaultGcashPaymentSettings.instruction,
             qrImage: gcashSettingsForm.qrImage || defaultGcashPaymentSettings.qrImage,
         };
-
         setGcashSettings(savedSettings);
         setGcashSettingsForm(savedSettings);
-
-        try {
-            window.localStorage.setItem(PAYMENT_SETTINGS_STORAGE_KEY, JSON.stringify(savedSettings));
-        } catch {}
-
+        try { window.localStorage.setItem(PAYMENT_SETTINGS_STORAGE_KEY, JSON.stringify(savedSettings)); } catch {}
         setIsGcashSettingsOpen(false);
     }
 
-    const pendingCount = paymentRequests.filter((p) => p.status === "PENDING").length;
-
-    const filteredPayments = useMemo(() => {
-        return paymentRequests.filter((p) => p.status === "PENDING");
-    }, [paymentRequests]);
-
-    function openPaymentReview(payment: PaymentRequest) {
-        setSelectedPayment(payment);
-        setReviewAction(null);
-        setRejectionReason("");
-    }
-
-    function closePaymentReview() {
-        setSelectedPayment(null);
-        setReviewAction(null);
-        setRejectionReason("");
-    }
-
-    function confirmApproval() {
-        if (!selectedPayment) return;
-        setPaymentRequests((curr) =>
-            curr.map((p) => (p.id === selectedPayment.id ? { ...p, status: "APPROVED" } : p))
+    if (!authChecked) {
+        return (
+            <div className="flex min-h-screen items-center justify-center bg-[#FFFDF8] font-sans text-sm text-[#7A6A84]">
+                Checking admin session…
+            </div>
         );
-        closePaymentReview();
     }
 
-    function confirmRejection() {
-        if (!selectedPayment || !rejectionReason) return;
-        setPaymentRequests((curr) =>
-            curr.map((p) => (p.id === selectedPayment.id ? { ...p, status: "REJECTED" } : p))
-        );
-        closePaymentReview();
-    }
+    const totalPlanCount = planDistribution.reduce((acc, curr) => acc + curr.count, 0);
 
     return (
         <div className="flex min-h-screen bg-[#FFFDF8] font-sans text-[#1A1220]">
@@ -416,30 +362,26 @@ export default function PlatformAdminDashboardPage() {
 
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                             <TopKpiCard
-                                title="Total Users / Stores"
-                                value="18"
-                                trend="12.0%"
-                                icon={<Users size={22} />}
-                                iconClass="bg-[#F1EBFF] text-[#6D35D4]"
-                            />
-                            <TopKpiCard
                                 title="Active Subscriptions"
-                                value="18"
-                                trend="8.0%"
+                                value={stats.active}
                                 icon={<Package size={22} />}
                                 iconClass="bg-[#E6F7EE] text-[#16834A]"
                             />
                             <TopKpiCard
-                                title="Monthly Revenue"
-                                value="₱10,986"
-                                trend="24.5%"
-                                icon={<DollarSign size={22} />}
+                                title="Approved Payments"
+                                value={stats.approved}
+                                icon={<CheckCircle2 size={22} />}
                                 iconClass="bg-[#FFF8E8] text-[#A56607]"
                             />
                             <TopKpiCard
+                                title="Expired Subscriptions"
+                                value={stats.expired}
+                                icon={<RefreshCw size={22} />}
+                                iconClass="bg-[#F1EBFF] text-[#6D35D4]"
+                            />
+                            <TopKpiCard
                                 title="Pending Verifications"
-                                value={pendingCount}
-                                trend="5.2%"
+                                value={stats.pending}
                                 icon={<Clock3 size={22} />}
                                 iconClass="bg-[#FFF0F0] text-[#C32F2F]"
                             />
@@ -454,6 +396,7 @@ export default function PlatformAdminDashboardPage() {
                                     </div>
                                     <button
                                         type="button"
+                                        onClick={() => router.push('/platform-admin/payments')}
                                         className="shrink-0 rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4] transition hover:bg-[#F3EEFF]"
                                     >
                                         View all
@@ -461,11 +404,12 @@ export default function PlatformAdminDashboardPage() {
                                 </div>
 
                                 <div className="mt-4 space-y-3">
-                                    {filteredPayments.slice(0, 4).map((item) => (
+                                    {paymentRequests.length === 0 && <p className="text-xs text-center text-[#8A7D92] py-4">No pending payments.</p>}
+                                    {paymentRequests.slice(0, 4).map((item) => (
                                         <div key={item.id} className="flex items-center justify-between gap-3 rounded-xl border border-[#E6DDF0] p-3 transition hover:bg-[#FAF8FF]">
                                             <div className="flex min-w-0 flex-1 items-center gap-3">
                                             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-xs font-bold text-[#6D35D4]">
-                                                {item.storeName.substring(0, 2).toUpperCase()}
+                                                {(item.storeName || "ST").substring(0, 2).toUpperCase()}
                                             </span>
                                                 <div className="min-w-0">
                                                     <p className="truncate text-[13px] font-semibold leading-5 text-[#30243A]">{item.storeName}</p>
@@ -476,7 +420,7 @@ export default function PlatformAdminDashboardPage() {
                                                 <PlanBadge plan={item.requestedPlan} />
                                                 <button
                                                     type="button"
-                                                    onClick={() => openPaymentReview(item)}
+                                                    onClick={() => router.push('/platform-admin/payments')}
                                                     className="inline-flex items-center gap-1 rounded-xl bg-[#2B174C] px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                                                 >
                                                     <Eye size={13} /> Review
@@ -495,6 +439,7 @@ export default function PlatformAdminDashboardPage() {
                                     </div>
                                     <button
                                         type="button"
+                                        onClick={() => router.push('/platform-admin/subscriptions')}
                                         className="shrink-0 rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4] transition hover:bg-[#F3EEFF]"
                                     >
                                         View all
@@ -502,8 +447,9 @@ export default function PlatformAdminDashboardPage() {
                                 </div>
 
                                 <div className="mt-4 space-y-3">
-                                    {expiringSubscriptions.map((sub) => (
-                                        <div key={sub.storeName} className="flex items-center justify-between gap-3 rounded-xl border border-[#E6DDF0] p-3 transition hover:bg-[#FAF8FF]">
+                                    {expiringSubscriptions.length === 0 && <p className="text-xs text-center text-[#8A7D92] py-4">No subscriptions expiring soon.</p>}
+                                    {expiringSubscriptions.map((sub, i) => (
+                                        <div key={i} className="flex items-center justify-between gap-3 rounded-xl border border-[#E6DDF0] p-3 transition hover:bg-[#FAF8FF]">
                                             <div className="flex min-w-0 flex-1 items-center gap-3">
                                             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#FFF8E8] text-xs font-bold text-[#A56607]">
                                                 {sub.initials}
@@ -531,17 +477,17 @@ export default function PlatformAdminDashboardPage() {
                                         </span>
                                         <div className="min-w-0">
                                             <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">Plan Distribution</h2>
-                                            <p className="mt-0.5 truncate text-[9px] leading-5 text-[#8A7D92]">How your 18 stores break down by plan</p>
+                                            <p className="mt-0.5 truncate text-[9px] leading-5 text-[#8A7D92]">Breakdown of active plans</p>
                                         </div>
                                     </div>
                                     <span className="shrink-0 rounded-full bg-[#FAF8FF] px-3 py-1 text-[10px] font-bold text-[#6D35D4]">
-                                        18 total
+                                        {totalPlanCount} total
                                     </span>
                                 </div>
 
                                 <div className="mt-5 space-y-4">
                                     {planDistribution.map((row) => {
-                                        const percent = Math.round((row.count / 18) * 100);
+                                        const percent = totalPlanCount > 0 ? Math.round((row.count / totalPlanCount) * 100) : 0;
                                         return (
                                             <div key={row.plan}>
                                                 <div className="flex items-center justify-between text-[12px]">
@@ -563,17 +509,6 @@ export default function PlatformAdminDashboardPage() {
                                         );
                                     })}
                                 </div>
-
-                                <div className="mt-5 grid grid-cols-3 gap-3 border-t border-[#EEE8F2] pt-4">
-                                    {planDistribution.map((row) => (
-                                        <div key={row.plan} className="rounded-xl border border-[#E6DDF0] px-3 py-2.5 text-center">
-                                            <p className="text-[18px] font-bold leading-none" style={{ color: row.barColor }}>
-                                                {row.count}
-                                            </p>
-                                            <p className="mt-1 text-[10px] font-semibold text-[#8A7D92]">{row.plan}</p>
-                                        </div>
-                                    ))}
-                                </div>
                             </div>
 
                             <div className="rounded-[16px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
@@ -590,7 +525,7 @@ export default function PlatformAdminDashboardPage() {
                                 </div>
 
                                 <div className="mt-4 space-y-3">
-                                    {recentActivity.map((item, index) => (
+                                    {recentActivity.slice(0, 5).map((item, index) => (
                                         <div key={item.id} className="relative flex gap-3">
                                             <div className="flex flex-col items-center">
                                                 <span
@@ -598,7 +533,7 @@ export default function PlatformAdminDashboardPage() {
                                                 >
                                                     {item.icon}
                                                 </span>
-                                                {index < recentActivity.length - 1 && (
+                                                {index < Math.min(recentActivity.length, 5) - 1 && (
                                                     <span className="mt-1 w-px flex-1 bg-[#EEE8F2]" />
                                                 )}
                                             </div>
@@ -712,74 +647,6 @@ export default function PlatformAdminDashboardPage() {
                 </div>
             )}
 
-            {selectedPayment && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm">
-                    <div className="w-full max-w-lg rounded-[18px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">
-                        <div className="flex items-center justify-between border-b border-[#EEE8F2] pb-4">
-                            <div>
-                                <h3 className="text-lg font-bold text-[#1A1220]">Review Payment</h3>
-                                <p className="text-xs text-[#8A7D92]">{selectedPayment.storeName} ({selectedPayment.requestedPlan} Plan)</p>
-                            </div>
-                            <button type="button" onClick={closePaymentReview} className="text-[#806A8C] hover:text-[#1A1220]">
-                                <X size={20} />
-                            </button>
-                        </div>
-
-                        <div className="mt-4 space-y-3 text-xs">
-                            <p><span className="font-semibold text-[#8A7D92]">Reference Number:</span> <strong className="text-[#1A1220]">{selectedPayment.referenceNumber}</strong></p>
-                            <p><span className="font-semibold text-[#8A7D92]">Amount Submitted:</span> <strong className="text-[#1A1220]">₱{selectedPayment.amount}</strong></p>
-                            <p><span className="font-semibold text-[#8A7D92]">Payment Date:</span> <strong className="text-[#1A1220]">{selectedPayment.paymentDate}</strong></p>
-
-                            <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FAF8FF] p-4 text-center">
-                                <FileImage size={24} className="mx-auto text-[#6D35D4]" />
-                                <p className="mt-1 font-bold text-[#1A1220]">{selectedPayment.proofFileName}</p>
-                                <p className="text-[10px] text-[#8A7D92]">GCash Receipt Proof</p>
-                            </div>
-                        </div>
-
-                        {reviewAction === null && (
-                            <div className="mt-6 flex justify-end gap-3">
-                                <button type="button" onClick={() => setReviewAction("reject")} className="rounded-xl bg-[#FFF0F0] px-4 py-2 text-xs font-semibold text-[#C32F2F]">
-                                    Reject Payment
-                                </button>
-                                <button type="button" onClick={() => setReviewAction("approve")} className="rounded-xl bg-[#16834A] px-4 py-2 text-xs font-semibold text-white">
-                                    Approve Payment
-                                </button>
-                            </div>
-                        )}
-
-                        {reviewAction === "approve" && (
-                            <div className="mt-6 rounded-xl bg-[#E6F7EE] p-4">
-                                <p className="text-xs font-bold text-[#16834A]">Confirm Plan Activation?</p>
-                                <div className="mt-3 flex justify-end gap-2">
-                                    <button type="button" onClick={() => setReviewAction(null)} className="rounded-lg border border-[#E6DDF0] bg-white px-3 py-1.5 text-xs font-semibold text-[#1A1220]">Cancel</button>
-                                    <button type="button" onClick={confirmApproval} className="rounded-lg bg-[#16834A] px-3 py-1.5 text-xs font-semibold text-white">Confirm</button>
-                                </div>
-                            </div>
-                        )}
-
-                        {reviewAction === "reject" && (
-                            <div className="mt-6 space-y-3 rounded-xl bg-[#FFF0F0] p-4">
-                                <p className="text-xs font-bold text-[#C32F2F]">Select Rejection Reason</p>
-                                <select
-                                    value={rejectionReason}
-                                    onChange={(e) => setRejectionReason(e.target.value)}
-                                    className="w-full rounded-lg border border-[#E6DDF0] bg-white p-2 text-xs outline-none"
-                                >
-                                    <option value="">Select reason...</option>
-                                    <option value="Payment not found">Payment not found</option>
-                                    <option value="Incorrect amount">Incorrect amount</option>
-                                    <option value="Invalid reference number">Invalid reference number</option>
-                                </select>
-                                <div className="flex justify-end gap-2">
-                                    <button type="button" onClick={() => setReviewAction(null)} className="rounded-lg border border-[#E6DDF0] bg-white px-3 py-1.5 text-xs font-semibold text-[#1A1220]">Cancel</button>
-                                    <button type="button" disabled={!rejectionReason} onClick={confirmRejection} className="rounded-lg bg-[#C32F2F] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50">Confirm Rejection</button>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                </div>
-            )}
         </div>
     );
 }

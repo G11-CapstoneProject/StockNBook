@@ -133,7 +133,7 @@ export default function PlatformAdminSidebar({ onOpenSettings }: SidebarProps) {
 
     const managementItems: AdminNavItem[] = [
         { label: "Users", href: "/platform-admin/users", icon: Users },
-        { label: "Packages", href: "/platform-admin/packages", icon: Package },
+        { label: "Plans", href: "/platform-admin/plans", icon: Package },
         { label: "Payments", href: "/platform-admin/payments", icon: CreditCard },
         {
             label: "Subscriptions",

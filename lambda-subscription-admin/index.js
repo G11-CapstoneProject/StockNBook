@@ -1,4 +1,3 @@
-
 // COMPATIBLE VERSION: your subscription_plans primary key is id,
 // and the price column is monthly_price.
 //
@@ -12,6 +11,9 @@
 
 const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
+
+// FIXED: Use fallback secret to match login and prevent token verification failures
+const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 
 const PAYMENT_STATUSES = ["PENDING", "APPROVED", "REJECTED"];
 
@@ -39,10 +41,13 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
+
+const pool = mysql.createPool(dbConfig);
+
 function getOrigin(event) {
     const requestOrigin =
         event.headers?.origin ||
@@ -135,7 +140,8 @@ async function requirePlatformAdmin(event, connection) {
     let payload;
 
     try {
-        payload = jwt.verify(token, process.env.JWT_SECRET);
+        // FIXED: Use JWT_SECRET fallback variable instead of strict process.env lookup
+        payload = jwt.verify(token, JWT_SECRET);
     } catch {
         throw httpError(401, "Invalid or expired token.");
     }
@@ -163,15 +169,15 @@ async function requirePlatformAdmin(event, connection) {
 
     const [adminRows] = await connection.execute(
         `
-SELECT
-platform_admin_id,
-    full_name,
-    email,
-    role,
-    is_active
-FROM platform_admins
-WHERE platform_admin_id = ?
-    LIMIT 1
+            SELECT
+                platform_admin_id,
+                full_name,
+                email,
+                role,
+                is_active
+            FROM platform_admins
+            WHERE platform_admin_id = ?
+                LIMIT 1
         `,
         [adminId]
     );
@@ -263,65 +269,65 @@ function moneyToCents(value) {
 
 async function getSubscriptionSummary(connection) {
     const [[paymentCounts]] = await connection.execute(`
-SELECT
-SUM(
-    CASE
-WHEN status = 'PENDING' THEN 1
-ELSE 0
-END
-) AS pending_verification,
+        SELECT
+            SUM(
+                    CASE
+                        WHEN status = 'PENDING' THEN 1
+                        ELSE 0
+                        END
+            ) AS pending_verification,
 
-    SUM(
-        CASE
-WHEN status = 'APPROVED' THEN 1
-ELSE 0
-END
-) AS approved_payments,
+            SUM(
+                    CASE
+                        WHEN status = 'APPROVED' THEN 1
+                        ELSE 0
+                        END
+            ) AS approved_payments,
 
-    SUM(
-        CASE
-WHEN status = 'REJECTED' THEN 1
-ELSE 0
-END
-) AS rejected_payments
-FROM payment_submissions
+            SUM(
+                    CASE
+                        WHEN status = 'REJECTED' THEN 1
+                        ELSE 0
+                        END
+            ) AS rejected_payments
+        FROM payment_submissions
     `);
 
     const [[subscriptionCounts]] = await connection.execute(`
-SELECT
-SUM(
-    CASE
-WHEN status = 'ACTIVE'
-AND expiration_date >= CURDATE()
-THEN 1
-ELSE 0
-END
-) AS active_subscriptions,
+        SELECT
+            SUM(
+                    CASE
+                        WHEN status = 'ACTIVE'
+                            AND expiration_date >= CURDATE()
+                            THEN 1
+                        ELSE 0
+                        END
+            ) AS active_subscriptions,
 
-    SUM(
-        CASE
-WHEN status = 'ACTIVE'
-AND expiration_date BETWEEN
-CURDATE()
-AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)
-THEN 1
-ELSE 0
-END
-) AS expiring_soon,
+            SUM(
+                    CASE
+                        WHEN status = 'ACTIVE'
+                            AND expiration_date BETWEEN
+                                 CURDATE()
+                                 AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+                            THEN 1
+                        ELSE 0
+                        END
+            ) AS expiring_soon,
 
-    SUM(
-        CASE
-WHEN status = 'EXPIRED'
-OR (
-    status = 'ACTIVE'
-AND expiration_date IS NOT NULL
-AND expiration_date < CURDATE()
-)
-THEN 1
-ELSE 0
-END
-) AS expired_subscriptions
-FROM business_subscriptions
+            SUM(
+                    CASE
+                        WHEN status = 'EXPIRED'
+                            OR (
+                                 status = 'ACTIVE'
+                                     AND expiration_date IS NOT NULL
+                                     AND expiration_date < CURDATE()
+                                 )
+                            THEN 1
+                        ELSE 0
+                        END
+            ) AS expired_subscriptions
+        FROM business_subscriptions
     `);
 
     return {
@@ -398,39 +404,39 @@ async function listPaymentSubmissions(
 
     const [rows] = await connection.execute(
         `
-SELECT
-ps.payment_submission_id,
-    ps.business_id,
-    ps.store_name_snapshot,
-    ps.owner_name_snapshot,
-    ps.business_code_snapshot,
-    ps.current_plan_name_snapshot,
-    ps.requested_plan_name_snapshot,
-    ps.required_amount,
-    ps.amount_submitted,
-    ps.reference_number,
-    ps.payment_date,
-    ps.proof_file_url,
-    ps.status,
-    ps.submitted_at,
-    ps.verified_at,
-    ps.rejection_reason,
-    ps.rejection_explanation,
-    pa.full_name AS verified_by
-FROM payment_submissions ps
-LEFT JOIN platform_admins pa
-ON pa.platform_admin_id =
-    ps.verified_by_admin_id
-${whereClause}
-ORDER BY
-CASE ps.status
-WHEN 'PENDING' THEN 1
-WHEN 'APPROVED' THEN 2
-WHEN 'REJECTED' THEN 3
-ELSE 4
-END,
+            SELECT
+                ps.payment_submission_id,
+                ps.business_id,
+                ps.store_name_snapshot,
+                ps.owner_name_snapshot,
+                ps.business_code_snapshot,
+                ps.current_plan_name_snapshot,
+                ps.requested_plan_name_snapshot,
+                ps.required_amount,
+                ps.amount_submitted,
+                ps.reference_number,
+                ps.payment_date,
+                ps.proof_file_url,
+                ps.status,
+                ps.submitted_at,
+                ps.verified_at,
+                ps.rejection_reason,
+                ps.rejection_explanation,
+                pa.full_name AS verified_by
+            FROM payment_submissions ps
+                     LEFT JOIN platform_admins pa
+                               ON pa.platform_admin_id =
+                                  ps.verified_by_admin_id
+                ${whereClause}
+            ORDER BY
+                CASE ps.status
+                WHEN 'PENDING' THEN 1
+                WHEN 'APPROVED' THEN 2
+                WHEN 'REJECTED' THEN 3
+                ELSE 4
+            END,
     ps.submitted_at DESC
-    `,
+        `,
         values
     );
 
@@ -443,25 +449,25 @@ async function getPaymentSubmission(
 ) {
     const [rows] = await connection.execute(
         `
-SELECT
-ps.*,
-    pa.full_name AS verified_by,
-    bs.subscription_id,
-    bs.status AS subscription_status,
-    bs.start_date,
-    bs.expiration_date,
-    sp.plan_name AS requested_plan_name,
-    'MONTHLY' AS billing_period
-FROM payment_submissions ps
-LEFT JOIN platform_admins pa
-ON pa.platform_admin_id =
-    ps.verified_by_admin_id
-LEFT JOIN business_subscriptions bs
-ON bs.business_id = ps.business_id
-LEFT JOIN subscription_plans sp
-ON sp.id = ps.requested_plan_id
-WHERE ps.payment_submission_id = ?
-    LIMIT 1
+            SELECT
+                ps.*,
+                pa.full_name AS verified_by,
+                bs.subscription_id,
+                bs.status AS subscription_status,
+                bs.start_date,
+                bs.expiration_date,
+                sp.plan_name AS requested_plan_name,
+                'MONTHLY' AS billing_period
+            FROM payment_submissions ps
+                     LEFT JOIN platform_admins pa
+                               ON pa.platform_admin_id =
+                                  ps.verified_by_admin_id
+                     LEFT JOIN business_subscriptions bs
+                               ON bs.business_id = ps.business_id
+                     LEFT JOIN subscription_plans sp
+                               ON sp.id = ps.requested_plan_id
+            WHERE ps.payment_submission_id = ?
+                LIMIT 1
         `,
         [paymentSubmissionId]
     );
@@ -479,27 +485,27 @@ WHERE ps.payment_submission_id = ?
 async function getBusinessSubscription(connection, businessId) {
     const [subscriptionRows] = await connection.execute(
         `
-SELECT
-bs.subscription_id,
-    bs.business_id,
-    bs.status,
-    bs.start_date,
-    bs.expiration_date,
-    sp.id AS plan_id,
-    sp.plan_name,
-    sp.monthly_price AS price,
-    'MONTHLY' AS billing_period,
-    0 AS inventory_limit,
-    sp.booking_limit AS monthly_booking_limit,
-    0 AS staff_limit,
-    0 AS reports_enabled,
-    0 AS analytics_enabled,
-    0 AS forecasting_enabled
-FROM business_subscriptions bs
-INNER JOIN subscription_plans sp
-ON sp.id = bs.plan_id
-WHERE bs.business_id = ?
-    LIMIT 1
+            SELECT
+                bs.subscription_id,
+                bs.business_id,
+                bs.status,
+                bs.start_date,
+                bs.expiration_date,
+                sp.id AS plan_id,
+                sp.plan_name,
+                sp.monthly_price AS price,
+                'MONTHLY' AS billing_period,
+                0 AS inventory_limit,
+                sp.booking_limit AS monthly_booking_limit,
+                0 AS staff_limit,
+                0 AS reports_enabled,
+                0 AS analytics_enabled,
+                0 AS forecasting_enabled
+            FROM business_subscriptions bs
+                     INNER JOIN subscription_plans sp
+                                ON sp.id = bs.plan_id
+            WHERE bs.business_id = ?
+                LIMIT 1
         `,
         [businessId]
     );
@@ -508,23 +514,23 @@ WHERE bs.business_id = ?
 
     const [latestPaymentRows] = await connection.execute(
         `
-SELECT
-ps.payment_submission_id,
-    ps.status,
-    ps.reference_number,
-    ps.requested_plan_name_snapshot,
-    ps.submitted_at,
-    ps.verified_at,
-    ps.rejection_reason,
-    pa.full_name AS verified_by
-FROM payment_submissions ps
-LEFT JOIN platform_admins pa
-ON pa.platform_admin_id =
-    ps.verified_by_admin_id
-WHERE ps.business_id = ?
-    ORDER BY ps.submitted_at DESC
-LIMIT 1
-    `,
+            SELECT
+                ps.payment_submission_id,
+                ps.status,
+                ps.reference_number,
+                ps.requested_plan_name_snapshot,
+                ps.submitted_at,
+                ps.verified_at,
+                ps.rejection_reason,
+                pa.full_name AS verified_by
+            FROM payment_submissions ps
+                     LEFT JOIN platform_admins pa
+                               ON pa.platform_admin_id =
+                                  ps.verified_by_admin_id
+            WHERE ps.business_id = ?
+            ORDER BY ps.submitted_at DESC
+                LIMIT 1
+        `,
         [businessId]
     );
 
@@ -555,44 +561,44 @@ WHERE (
 
     const [rows] = await connection.execute(
         `
-SELECT
-latest_payment.business_id,
-    latest_payment.store_name_snapshot,
-    latest_payment.owner_name_snapshot,
-    latest_payment.business_code_snapshot,
-    bs.subscription_id,
-    bs.status AS subscription_status,
-    bs.start_date,
-    bs.expiration_date,
-    sp.plan_name,
-    latest_payment.status AS latest_payment_status,
-    latest_payment.reference_number AS latest_reference_number,
-    latest_payment.verified_at,
-    pa.full_name AS verified_by
-FROM (
-    SELECT ps1.*
-FROM payment_submissions ps1
-INNER JOIN (
-    SELECT
-business_id,
-    MAX(payment_submission_id)
-AS latest_payment_submission_id
-FROM payment_submissions
-GROUP BY business_id
-) latest
-ON latest.latest_payment_submission_id =
-    ps1.payment_submission_id
-) latest_payment
-LEFT JOIN business_subscriptions bs
-ON bs.business_id = latest_payment.business_id
-LEFT JOIN subscription_plans sp
-ON sp.id = bs.plan_id
-LEFT JOIN platform_admins pa
-ON pa.platform_admin_id =
-    latest_payment.verified_by_admin_id
-${searchFilter}
-ORDER BY latest_payment.store_name_snapshot ASC
-    `,
+            SELECT
+                latest_payment.business_id,
+                latest_payment.store_name_snapshot,
+                latest_payment.owner_name_snapshot,
+                latest_payment.business_code_snapshot,
+                bs.subscription_id,
+                bs.status AS subscription_status,
+                bs.start_date,
+                bs.expiration_date,
+                sp.plan_name,
+                latest_payment.status AS latest_payment_status,
+                latest_payment.reference_number AS latest_reference_number,
+                latest_payment.verified_at,
+                pa.full_name AS verified_by
+            FROM (
+                     SELECT ps1.*
+                     FROM payment_submissions ps1
+                              INNER JOIN (
+                         SELECT
+                             business_id,
+                             MAX(payment_submission_id)
+                                 AS latest_payment_submission_id
+                         FROM payment_submissions
+                         GROUP BY business_id
+                     ) latest
+                                         ON latest.latest_payment_submission_id =
+                                            ps1.payment_submission_id
+                 ) latest_payment
+                     LEFT JOIN business_subscriptions bs
+                               ON bs.business_id = latest_payment.business_id
+                     LEFT JOIN subscription_plans sp
+                               ON sp.id = bs.plan_id
+                     LEFT JOIN platform_admins pa
+                               ON pa.platform_admin_id =
+                                  latest_payment.verified_by_admin_id
+                ${searchFilter}
+            ORDER BY latest_payment.store_name_snapshot ASC
+        `,
         values
     );
 
@@ -616,25 +622,25 @@ async function listAuditLogs(connection, businessId) {
 
     const [rows] = await connection.execute(
         `
-SELECT
-sal.audit_log_id,
-    sal.business_id,
-    sal.subscription_id,
-    sal.payment_submission_id,
-    sal.action,
-    sal.previous_status,
-    sal.new_status,
-    sal.reason,
-    sal.created_at,
-    pa.full_name AS performed_by
-FROM subscription_audit_logs sal
-LEFT JOIN platform_admins pa
-ON pa.platform_admin_id =
-    sal.performed_by_admin_id
-${whereClause}
-ORDER BY sal.created_at DESC
-LIMIT 200
-    `,
+            SELECT
+                sal.audit_log_id,
+                sal.business_id,
+                sal.subscription_id,
+                sal.payment_submission_id,
+                sal.action,
+                sal.previous_status,
+                sal.new_status,
+                sal.reason,
+                sal.created_at,
+                pa.full_name AS performed_by
+            FROM subscription_audit_logs sal
+                     LEFT JOIN platform_admins pa
+                               ON pa.platform_admin_id =
+                                  sal.performed_by_admin_id
+                ${whereClause}
+            ORDER BY sal.created_at DESC
+                LIMIT 200
+        `,
         values
     );
 
@@ -651,11 +657,11 @@ async function approvePaymentSubmission(
     try {
         const [paymentRows] = await connection.execute(
             `
-SELECT *
-FROM payment_submissions
-WHERE payment_submission_id = ?
-    FOR UPDATE
-        `,
+                SELECT *
+                FROM payment_submissions
+                WHERE payment_submission_id = ?
+                    FOR UPDATE
+            `,
             [paymentSubmissionId]
         );
 
@@ -688,13 +694,13 @@ WHERE payment_submission_id = ?
         const [duplicateReferenceRows] =
             await connection.execute(
                 `
-SELECT payment_submission_id
-FROM payment_submissions
-WHERE reference_number = ?
-    AND status = 'APPROVED'
-AND payment_submission_id <> ?
-    LIMIT 1
-        `,
+                    SELECT payment_submission_id
+                    FROM payment_submissions
+                    WHERE reference_number = ?
+                      AND status = 'APPROVED'
+                      AND payment_submission_id <> ?
+                        LIMIT 1
+                `,
                 [
                     payment.reference_number,
                     paymentSubmissionId,
@@ -710,11 +716,11 @@ AND payment_submission_id <> ?
 
         const [subscriptionRows] = await connection.execute(
             `
-SELECT *
-FROM business_subscriptions
-WHERE business_id = ?
-    FOR UPDATE
-        `,
+                SELECT *
+                FROM business_subscriptions
+                WHERE business_id = ?
+                    FOR UPDATE
+            `,
             [payment.business_id]
         );
 
@@ -726,7 +732,7 @@ WHERE business_id = ?
         const isPlanChange =
             !existingSubscription ||
             Number(existingSubscription.plan_id) !==
-                Number(payment.requested_plan_id);
+            Number(payment.requested_plan_id);
 
         let startDate;
         let expirationDate;
@@ -772,15 +778,15 @@ WHERE business_id = ?
         if (existingSubscription) {
             await connection.execute(
                 `
-UPDATE business_subscriptions
-SET
-plan_id = ?,
-    status = 'ACTIVE',
-    start_date = ?,
-    expiration_date = ?,
-    updated_at = NOW()
-WHERE subscription_id = ?
-    `,
+                    UPDATE business_subscriptions
+                    SET
+                        plan_id = ?,
+                        status = 'ACTIVE',
+                        start_date = ?,
+                        expiration_date = ?,
+                        updated_at = NOW()
+                    WHERE subscription_id = ?
+                `,
                 [
                     payment.requested_plan_id,
                     startDate,
@@ -794,15 +800,15 @@ WHERE subscription_id = ?
         } else {
             const [insertResult] = await connection.execute(
                 `
-    INSERT INTO business_subscriptions (
-    business_id,
-    plan_id,
-    status,
-    start_date,
-    expiration_date
-)
-VALUES (?, ?, 'ACTIVE', ?, ?)
-    `,
+                    INSERT INTO business_subscriptions (
+                        business_id,
+                        plan_id,
+                        status,
+                        start_date,
+                        expiration_date
+                    )
+                    VALUES (?, ?, 'ACTIVE', ?, ?)
+                `,
                 [
                     payment.business_id,
                     payment.requested_plan_id,
@@ -816,33 +822,33 @@ VALUES (?, ?, 'ACTIVE', ?, ?)
 
         await connection.execute(
             `
-UPDATE payment_submissions
-SET
-status = 'APPROVED',
-    verified_by_admin_id = ?,
-    verified_at = NOW(),
-    rejection_reason = NULL,
-    rejection_explanation = NULL,
-    updated_at = NOW()
-WHERE payment_submission_id = ?
-    `,
+                UPDATE payment_submissions
+                SET
+                    status = 'APPROVED',
+                    verified_by_admin_id = ?,
+                    verified_at = NOW(),
+                    rejection_reason = NULL,
+                    rejection_explanation = NULL,
+                    updated_at = NOW()
+                WHERE payment_submission_id = ?
+            `,
             [admin.platform_admin_id, paymentSubmissionId]
         );
 
         await connection.execute(
             `
-    INSERT INTO subscription_audit_logs (
-    business_id,
-    subscription_id,
-    payment_submission_id,
-    action,
-    previous_status,
-    new_status,
-    performed_by_admin_id,
-    reason
-)
-VALUES (?, ?, ?, 'PAYMENT_APPROVED', ?, 'ACTIVE', ?, ?)
-    `,
+                INSERT INTO subscription_audit_logs (
+                    business_id,
+                    subscription_id,
+                    payment_submission_id,
+                    action,
+                    previous_status,
+                    new_status,
+                    performed_by_admin_id,
+                    reason
+                )
+                VALUES (?, ?, ?, 'PAYMENT_APPROVED', ?, 'ACTIVE', ?, ?)
+            `,
             [
                 payment.business_id,
                 subscriptionId,
@@ -855,16 +861,16 @@ VALUES (?, ?, ?, 'PAYMENT_APPROVED', ?, 'ACTIVE', ?, ?)
 
         await connection.execute(
             `
-INSERT INTO subscription_notifications (
-    business_id,
-    recipient_role,
-    notification_type,
-    title,
-    message,
-    related_payment_submission_id
-)
-VALUES (?, 'OWNER', 'PAYMENT_APPROVED', ?, ?, ?)
-    `,
+                INSERT INTO subscription_notifications (
+                    business_id,
+                    recipient_role,
+                    notification_type,
+                    title,
+                    message,
+                    related_payment_submission_id
+                )
+                VALUES (?, 'OWNER', 'PAYMENT_APPROVED', ?, ?, ?)
+            `,
             [
                 payment.business_id,
                 "Payment Approved",
@@ -907,11 +913,11 @@ async function rejectPaymentSubmission(
     try {
         const [paymentRows] = await connection.execute(
             `
-SELECT *
-FROM payment_submissions
-WHERE payment_submission_id = ?
-    FOR UPDATE
-        `,
+                SELECT *
+                FROM payment_submissions
+                WHERE payment_submission_id = ?
+                    FOR UPDATE
+            `,
             [paymentSubmissionId]
         );
 
@@ -933,16 +939,16 @@ WHERE payment_submission_id = ?
 
         await connection.execute(
             `
-UPDATE payment_submissions
-SET
-status = 'REJECTED',
-    verified_by_admin_id = ?,
-    verified_at = NOW(),
-    rejection_reason = ?,
-    rejection_explanation = ?,
-    updated_at = NOW()
-WHERE payment_submission_id = ?
-    `,
+                UPDATE payment_submissions
+                SET
+                    status = 'REJECTED',
+                    verified_by_admin_id = ?,
+                    verified_at = NOW(),
+                    rejection_reason = ?,
+                    rejection_explanation = ?,
+                    updated_at = NOW()
+                WHERE payment_submission_id = ?
+            `,
             [
                 admin.platform_admin_id,
                 rejectionReason,
@@ -953,17 +959,17 @@ WHERE payment_submission_id = ?
 
         await connection.execute(
             `
-    INSERT INTO subscription_audit_logs (
-    business_id,
-    payment_submission_id,
-    action,
-    previous_status,
-    new_status,
-    performed_by_admin_id,
-    reason
-)
-VALUES (?, ?, 'PAYMENT_REJECTED', 'PENDING', 'REJECTED', ?, ?)
-    `,
+                INSERT INTO subscription_audit_logs (
+                    business_id,
+                    payment_submission_id,
+                    action,
+                    previous_status,
+                    new_status,
+                    performed_by_admin_id,
+                    reason
+                )
+                VALUES (?, ?, 'PAYMENT_REJECTED', 'PENDING', 'REJECTED', ?, ?)
+            `,
             [
                 payment.business_id,
                 paymentSubmissionId,
@@ -976,16 +982,16 @@ VALUES (?, ?, 'PAYMENT_REJECTED', 'PENDING', 'REJECTED', ?, ?)
 
         await connection.execute(
             `
-INSERT INTO subscription_notifications (
-    business_id,
-    recipient_role,
-    notification_type,
-    title,
-    message,
-    related_payment_submission_id
-)
-VALUES (?, 'OWNER', 'PAYMENT_REJECTED', ?, ?, ?)
-    `,
+                INSERT INTO subscription_notifications (
+                    business_id,
+                    recipient_role,
+                    notification_type,
+                    title,
+                    message,
+                    related_payment_submission_id
+                )
+                VALUES (?, 'OWNER', 'PAYMENT_REJECTED', ?, ?, ?)
+            `,
             [
                 payment.business_id,
                 "Payment Verification Rejected",
@@ -1034,11 +1040,11 @@ async function changeSubscriptionStatus(
     try {
         const [subscriptionRows] = await connection.execute(
             `
-SELECT *
-FROM business_subscriptions
-WHERE business_id = ?
-    FOR UPDATE
-        `,
+                SELECT *
+                FROM business_subscriptions
+                WHERE business_id = ?
+                    FOR UPDATE
+            `,
             [businessId]
         );
 
@@ -1069,28 +1075,28 @@ WHERE business_id = ?
 
         await connection.execute(
             `
-UPDATE business_subscriptions
-SET
-status = ?,
-    updated_at = NOW()
-WHERE subscription_id = ?
-    `,
+                UPDATE business_subscriptions
+                SET
+                    status = ?,
+                    updated_at = NOW()
+                WHERE subscription_id = ?
+            `,
             [nextStatus, subscription.subscription_id]
         );
 
         await connection.execute(
             `
-    INSERT INTO subscription_audit_logs (
-    business_id,
-    subscription_id,
-    action,
-    previous_status,
-    new_status,
-    performed_by_admin_id,
-    reason
-)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-    `,
+                INSERT INTO subscription_audit_logs (
+                    business_id,
+                    subscription_id,
+                    action,
+                    previous_status,
+                    new_status,
+                    performed_by_admin_id,
+                    reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            `,
             [
                 businessId,
                 subscription.subscription_id,
@@ -1139,11 +1145,11 @@ async function extendSubscription(
     try {
         const [subscriptionRows] = await connection.execute(
             `
-SELECT *
-FROM business_subscriptions
-WHERE business_id = ?
-    FOR UPDATE
-        `,
+                SELECT *
+                FROM business_subscriptions
+                WHERE business_id = ?
+                    FOR UPDATE
+            `,
             [businessId]
         );
 
@@ -1171,28 +1177,28 @@ WHERE business_id = ?
 
         await connection.execute(
             `
-UPDATE business_subscriptions
-SET
-expiration_date = ?,
-    updated_at = NOW()
-WHERE subscription_id = ?
-    `,
+                UPDATE business_subscriptions
+                SET
+                    expiration_date = ?,
+                    updated_at = NOW()
+                WHERE subscription_id = ?
+            `,
             [expirationDate, subscription.subscription_id]
         );
 
         await connection.execute(
             `
-    INSERT INTO subscription_audit_logs (
-    business_id,
-    subscription_id,
-    action,
-    previous_status,
-    new_status,
-    performed_by_admin_id,
-    reason
-)
-VALUES (?, ?, 'SUBSCRIPTION_EXTENDED', ?, ?, ?, ?)
-    `,
+                INSERT INTO subscription_audit_logs (
+                    business_id,
+                    subscription_id,
+                    action,
+                    previous_status,
+                    new_status,
+                    performed_by_admin_id,
+                    reason
+                )
+                VALUES (?, ?, 'SUBSCRIPTION_EXTENDED', ?, ?, ?, ?)
+            `,
             [
                 businessId,
                 subscription.subscription_id,
@@ -1418,4 +1424,3 @@ exports.handler = async (event) => {
         }
     }
 };
-

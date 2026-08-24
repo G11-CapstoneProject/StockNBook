@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import PlatformAdminSidebar from "../dashboard/PlatformAdminSidebar";
 import { Check, Eye, FileImage } from "lucide-react";
 import {
@@ -22,7 +22,7 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type Plan = "Starter" | "Business" | "Enterprise";
+type Plan = "Starter" | "Business" | "Enterprise" | string;
 type PaymentStatus = "PENDING" | "APPROVED" | "REJECTED";
 type ReviewAction = "approve" | "reject" | null;
 
@@ -31,94 +31,25 @@ interface Payment {
     storeName: string;
     ownerEmail: string;
     requestedPlan: Plan;
-    amount: number; // PHP
+    amount: number;
     referenceNumber: string;
     paymentDate: string;
-    submittedAt: string; // ISO
+    submittedAt: string;
     status: PaymentStatus;
     proofFileName: string;
     rejectionReason?: string;
     initials: string;
 }
 
-// ---------------------------------------------------------------------------
-// Mock data — same shape as the dashboard's payment queue
-// ---------------------------------------------------------------------------
-
-const MOCK_PAYMENTS: Payment[] = [
-    {
-        id: "PAY-20260819-001",
-        storeName: "ABC Party Supplies",
-        ownerEmail: "abcparty@gmail.com",
-        requestedPlan: "Business",
-        amount: 499,
-        referenceNumber: "1234567890123",
-        paymentDate: "August 19, 2026",
-        submittedAt: "2026-08-19T09:12:00",
-        status: "PENDING",
-        proofFileName: "gcash-proof-abc-party.jpg",
-        initials: "AB",
-    },
-    {
-        id: "PAY-20260820-002",
-        storeName: "Happy Events",
-        ownerEmail: "happyevents@gmail.com",
-        requestedPlan: "Enterprise",
-        amount: 1299,
-        referenceNumber: "9827345610123",
-        paymentDate: "August 20, 2026",
-        submittedAt: "2026-08-20T14:40:00",
-        status: "PENDING",
-        proofFileName: "gcash-proof-happy-events.jpg",
-        initials: "HA",
-    },
-    {
-        id: "PAY-20260818-003",
-        storeName: "Party World",
-        ownerEmail: "partyworld@gmail.com",
-        requestedPlan: "Business",
-        amount: 499,
-        referenceNumber: "6248091345780",
-        paymentDate: "August 18, 2026",
-        submittedAt: "2026-08-18T11:05:00",
-        status: "PENDING",
-        proofFileName: "gcash-proof-party-world.jpg",
-        initials: "PW",
-    },
-    {
-        id: "PAY-20260817-004",
-        storeName: "Fiesta Supplier",
-        ownerEmail: "fiesta.supplier@gmail.com",
-        requestedPlan: "Business",
-        amount: 499,
-        referenceNumber: "7713259874601",
-        paymentDate: "August 17, 2026",
-        submittedAt: "2026-08-17T16:22:00",
-        status: "APPROVED",
-        proofFileName: "gcash-proof-fiesta-supplier.jpg",
-        initials: "FS",
-    },
-    {
-        id: "PAY-20260814-005",
-        storeName: "CE Events Supply",
-        ownerEmail: "ceevents@gmail.com",
-        requestedPlan: "Enterprise",
-        amount: 1299,
-        referenceNumber: "0012349999",
-        paymentDate: "August 14, 2026",
-        submittedAt: "2026-08-14T08:50:00",
-        status: "REJECTED",
-        proofFileName: "gcash-proof-ce-events.jpg",
-        rejectionReason: "Incorrect amount",
-        initials: "CE",
-    },
+const REJECTION_REASONS = [
+    "Payment not found",
+    "Incorrect amount",
+    "Invalid reference number",
+    "Duplicate reference number",
+    "Unclear payment proof",
+    "Payment details do not match",
+    "Other"
 ];
-
-const REJECTION_REASONS = ["Payment not found", "Incorrect amount", "Invalid reference number"];
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 const STATUS_TONE: Record<PaymentStatus, "gold" | "green" | "red"> = {
     PENDING: "gold",
@@ -127,10 +58,12 @@ const STATUS_TONE: Record<PaymentStatus, "gold" | "green" | "red"> = {
 };
 
 function formatDateTime(iso: string) {
+    if (!iso) return "N/A";
     return new Date(iso).toLocaleString("en-PH", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function hoursPending(iso: string) {
+    if (!iso) return 0;
     return Math.floor((Date.now() - new Date(iso).getTime()) / (1000 * 60 * 60));
 }
 
@@ -139,12 +72,58 @@ function hoursPending(iso: string) {
 // ---------------------------------------------------------------------------
 
 export default function PaymentsPage() {
-    const [payments, setPayments] = useState<Payment[]>(MOCK_PAYMENTS);
+    const [payments, setPayments] = useState<Payment[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
     const [query, setQuery] = useState("");
     const [statusFilter, setStatusFilter] = useState("PENDING");
     const [selectedPayment, setSelectedPayment] = useState<Payment | null>(null);
     const [reviewAction, setReviewAction] = useState<ReviewAction>(null);
     const [rejectionReason, setRejectionReason] = useState("");
+
+    // The endpoint that proxies to your lambda-subscription-admin
+    const API_ENDPOINT = "/api/subscription-admin";
+
+    const fetchPayments = async () => {
+        setIsLoading(true);
+        try {
+            const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+            const res = await fetch(API_ENDPOINT, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: JSON.stringify({ action: "list_payment_submissions", status: "ALL" })
+            });
+            const data = await res.json();
+
+            if (data.payments) {
+                const mappedData: Payment[] = data.payments.map((p: any) => ({
+                    id: p.payment_submission_id,
+                    storeName: p.store_name_snapshot,
+                    ownerEmail: p.owner_name_snapshot || "Owner",
+                    requestedPlan: p.requested_plan_name_snapshot,
+                    amount: Number(p.amount_submitted),
+                    referenceNumber: p.reference_number,
+                    paymentDate: p.payment_date ? new Date(p.payment_date).toLocaleDateString() : "N/A",
+                    submittedAt: p.submitted_at,
+                    status: p.status,
+                    proofFileName: "GCash Receipt",
+                    initials: (p.store_name_snapshot || "ST").substring(0, 2).toUpperCase(),
+                    rejectionReason: p.rejection_reason
+                }));
+                setPayments(mappedData);
+            }
+        } catch (error) {
+            console.error("Failed to load payments", error);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchPayments();
+    }, []);
 
     const filtered = useMemo(() => {
         return payments.filter((p) => {
@@ -169,20 +148,61 @@ export default function PaymentsPage() {
         setRejectionReason("");
     }
 
-    function confirmApproval() {
+    async function confirmApproval() {
         if (!selectedPayment) return;
-        setPayments((curr) =>
-            curr.map((p) => (p.id === selectedPayment.id ? { ...p, status: "APPROVED" } : p))
-        );
-        closePaymentReview();
+        try {
+            const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+            const res = await fetch(API_ENDPOINT, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    action: "approve_payment_submission",
+                    payment_submission_id: selectedPayment.id
+                })
+            });
+
+            if (res.ok) {
+                await fetchPayments();
+                closePaymentReview();
+            } else {
+                const err = await res.json();
+                alert(`Approval failed: ${err.message || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error(error);
+        }
     }
 
-    function confirmRejection() {
+    async function confirmRejection() {
         if (!selectedPayment || !rejectionReason) return;
-        setPayments((curr) =>
-            curr.map((p) => (p.id === selectedPayment.id ? { ...p, status: "REJECTED", rejectionReason } : p))
-        );
-        closePaymentReview();
+        try {
+            const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+            const res = await fetch(API_ENDPOINT, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    action: "reject_payment_submission",
+                    payment_submission_id: selectedPayment.id,
+                    rejection_reason: rejectionReason
+                })
+            });
+
+            if (res.ok) {
+                await fetchPayments();
+                closePaymentReview();
+            } else {
+                const err = await res.json();
+                alert(`Rejection failed: ${err.message || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error(error);
+        }
     }
 
     return (
@@ -195,7 +215,7 @@ export default function PaymentsPage() {
                 <AdminSection>
                     {/* Toolbar */}
                     <div className="flex flex-wrap items-center gap-3">
-                        <div className="min-w-55 flex-1">
+                        <div className="min-w-0 flex-1">
                             <SearchInput
                                 value={query}
                                 onChange={setQuery}
@@ -215,65 +235,69 @@ export default function PaymentsPage() {
 
                     {/* Table */}
                     <Card className="overflow-hidden p-0">
-                        <table className="w-full text-left text-xs">
-                            <thead>
-                            <tr className="border-b border-[#EEE8F2] text-[10px] uppercase tracking-wide text-[#8A7D92]">
-                                <th className="px-5 py-3 font-semibold">Store</th>
-                                <th className="px-5 py-3 font-semibold">Plan / Amount</th>
-                                <th className="px-5 py-3 font-semibold">Reference no.</th>
-                                <th className="px-5 py-3 font-semibold">Submitted</th>
-                                <th className="px-5 py-3 font-semibold">Status</th>
-                                <th className="px-5 py-3 text-right font-semibold">Action</th>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {filtered.map((p) => {
-                                const stale = p.status === "PENDING" && hoursPending(p.submittedAt) > 24;
-                                return (
-                                    <tr
-                                        key={p.id}
-                                        className="border-b border-[#F3EFE3] transition last:border-0 hover:bg-[#FAF8FF]"
-                                    >
-                                        <td className="px-5 py-4">
-                                            <div className="flex items-center gap-3">
-                                                <AvatarBadge initials={p.initials} bg="bg-[#F1EBFF]" text="text-[#6D35D4]" />
-                                                <div className="min-w-0">
-                                                    <p className="truncate text-[13px] font-semibold leading-5 text-[#30243A]">
-                                                        {p.storeName}
-                                                    </p>
-                                                    <p className="truncate text-[10px] font-medium text-[#806A8C]">{p.ownerEmail}</p>
+                        {isLoading ? (
+                            <div className="px-6 py-12 text-center text-xs text-[#B0A2BE]">Loading payments...</div>
+                        ) : (
+                            <table className="w-full text-left text-xs">
+                                <thead>
+                                <tr className="border-b border-[#EEE8F2] text-[10px] uppercase tracking-wide text-[#8A7D92]">
+                                    <th className="px-5 py-3 font-semibold">Store</th>
+                                    <th className="px-5 py-3 font-semibold">Plan / Amount</th>
+                                    <th className="px-5 py-3 font-semibold">Reference no.</th>
+                                    <th className="px-5 py-3 font-semibold">Submitted</th>
+                                    <th className="px-5 py-3 font-semibold">Status</th>
+                                    <th className="px-5 py-3 text-right font-semibold">Action</th>
+                                </tr>
+                                </thead>
+                                <tbody>
+                                {filtered.map((p) => {
+                                    const stale = p.status === "PENDING" && hoursPending(p.submittedAt) > 24;
+                                    return (
+                                        <tr
+                                            key={p.id}
+                                            className="border-b border-[#F3EFE3] transition last:border-0 hover:bg-[#FAF8FF]"
+                                        >
+                                            <td className="px-5 py-4">
+                                                <div className="flex items-center gap-3">
+                                                    <AvatarBadge initials={p.initials} bg="bg-[#F1EBFF]" text="text-[#6D35D4]" />
+                                                    <div className="min-w-0">
+                                                        <p className="truncate text-[13px] font-semibold leading-5 text-[#30243A]">
+                                                            {p.storeName}
+                                                        </p>
+                                                        <p className="truncate text-[10px] font-medium text-[#806A8C]">{p.ownerEmail}</p>
+                                                    </div>
                                                 </div>
-                                            </div>
-                                        </td>
-                                        <td className="px-5 py-4">
-                                            <PlanBadge plan={p.requestedPlan} />
-                                            <div className="mt-1 text-[10px] text-[#8A7D92]">
-                                                {"\u20B1"}
-                                                {p.amount.toLocaleString("en-PH")}
-                                            </div>
-                                        </td>
-                                        <td className="px-5 py-4 font-mono text-[10px] text-[#4B3E55]">{p.referenceNumber}</td>
-                                        <td className="px-5 py-4 text-[#4B3E55]">
-                                            {formatDateTime(p.submittedAt)}
-                                            {stale && <div className="text-[9px] text-[#C32F2F]">pending 24h+</div>}
-                                        </td>
-                                        <td className="px-5 py-4">
-                                            <StatusPill label={p.status} tone={STATUS_TONE[p.status]} />
-                                            {p.status === "REJECTED" && p.rejectionReason && (
-                                                <div className="mt-1 text-[9px] text-[#C32F2F]">{p.rejectionReason}</div>
-                                            )}
-                                        </td>
-                                        <td className="px-5 py-4 text-right">
-                                            <PrimaryButton onClick={() => openPaymentReview(p)}>
-                                                <Eye size={13} /> Review
-                                            </PrimaryButton>
-                                        </td>
-                                    </tr>
-                                );
-                            })}
-                            </tbody>
-                        </table>
-                        {filtered.length === 0 && (
+                                            </td>
+                                            <td className="px-5 py-4">
+                                                <PlanBadge plan={p.requestedPlan as any} />
+                                                <div className="mt-1 text-[10px] text-[#8A7D92]">
+                                                    {"\u20B1"}
+                                                    {p.amount.toLocaleString("en-PH")}
+                                                </div>
+                                            </td>
+                                            <td className="px-5 py-4 font-mono text-[10px] text-[#4B3E55]">{p.referenceNumber}</td>
+                                            <td className="px-5 py-4 text-[#4B3E55]">
+                                                {formatDateTime(p.submittedAt)}
+                                                {stale && <div className="text-[9px] text-[#C32F2F]">pending 24h+</div>}
+                                            </td>
+                                            <td className="px-5 py-4">
+                                                <StatusPill label={p.status} tone={STATUS_TONE[p.status]} />
+                                                {p.status === "REJECTED" && p.rejectionReason && (
+                                                    <div className="mt-1 text-[9px] text-[#C32F2F]">{p.rejectionReason}</div>
+                                                )}
+                                            </td>
+                                            <td className="px-5 py-4 text-right">
+                                                <PrimaryButton onClick={() => openPaymentReview(p)}>
+                                                    <Eye size={13} /> Review
+                                                </PrimaryButton>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                                </tbody>
+                            </table>
+                        )}
+                        {!isLoading && filtered.length === 0 && (
                             <div className="px-6 py-12 text-center text-xs text-[#B0A2BE]">
                                 No payments match these filters.
                             </div>
@@ -341,9 +365,9 @@ export default function PaymentsPage() {
                                     onClick={confirmApproval}
                                     className="rounded-lg bg-[#16834A] px-3 py-1.5 text-xs font-semibold text-white"
                                 >
-                  <span className="inline-flex items-center gap-1">
-                    <Check size={13} /> Confirm
-                  </span>
+                                  <span className="inline-flex items-center gap-1">
+                                    <Check size={13} /> Confirm
+                                  </span>
                                 </button>
                             </div>
                         </div>

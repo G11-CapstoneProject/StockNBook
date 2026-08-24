@@ -2,7 +2,6 @@
 
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import {
-    Building2,
     CheckCircle2,
     ChevronDown,
     Clock3,
@@ -651,7 +650,7 @@ export default function ManagerStaffManagementPage() {
                     )}
 
                     <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
                             <div className="flex min-w-0 items-center gap-3">
                                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={21} strokeWidth={2} />
@@ -704,7 +703,7 @@ export default function ManagerStaffManagementPage() {
                                         <thead className="bg-[#FBF8FF]">
                                         <tr className="border-b border-[#E6DDF0]">
                                             <TableHeader>Staff</TableHeader>
-                                            <TableHeader>Access / Role</TableHeader>
+                                            <TableHeader>Access</TableHeader>
                                             <TableHeader>Status</TableHeader>
                                             <TableHeader align="right">
                                                 Actions
@@ -718,52 +717,34 @@ export default function ManagerStaffManagementPage() {
                                                 key={staff.id}
                                                 className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
                                             >
-                                                <td className="px-5 py-4">
-                                                    <div className="flex min-w-0 items-center gap-3">
-                                                            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-sm font-bold text-[#6D35D4]">
-                                                                {getInitials(staff.name)}
-                                                            </span>
+                                                <td className="px-5 py-3">
+                                                    <div className="min-w-0">
+                                                        <p className="truncate text-sm font-bold text-[#1A1220]">
+                                                            {staff.name}
+                                                        </p>
 
-                                                        <div className="min-w-0">
-                                                            <p className="truncate text-sm font-bold text-[#1A1220]">
-                                                                {staff.name}
-                                                            </p>
-                                                            <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-[#7A6A84]">
-                                                                <Mail
-                                                                    size={12}
-                                                                    className="shrink-0 text-[#806A8C]"
-                                                                />
-                                                                <span className="truncate">
-                                                                        {staff.email}
-                                                                    </span>
-                                                            </p>
-                                                        </div>
+                                                        <p className="truncate text-xs text-[#7A6A84]">
+                                                            {staff.email}
+                                                        </p>
                                                     </div>
                                                 </td>
 
-                                                <td className="px-5 py-4">
-                                                    <div className="flex min-w-0 items-center gap-2.5">
-                                                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
-                                                                <Building2
-                                                                    size={17}
-                                                                    strokeWidth={2}
-                                                                />
-                                                            </span>
-
-                                                        <div className="min-w-0">
-                                                            <p className="truncate text-sm font-semibold text-[#1A1220]">
-                                                                {branchName}
-                                                            </p>
-                                                            <p className="mt-1 max-w-[420px] truncate text-xs text-[#7A6A84]">
-                                                                Branch Staff ({formatRoleSummary(
-                                                                staff.permissions
-                                                            )})
-                                                            </p>
-                                                        </div>
+                                                <td className="px-5 py-3">
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {formatRoleSummary(staff.permissions)
+                                                            .split(" & ")
+                                                            .map((access) => (
+                                                                <span
+                                                                    key={access}
+                                                                    className="rounded-full bg-[#F5EEFF] px-2.5 py-1 text-[11px] font-semibold text-[#6D35D4]"
+                                                                >
+                                                                    {access}
+                                                                </span>
+                                                            ))}
                                                     </div>
                                                 </td>
 
-                                                <td className="px-5 py-4">
+                                                <td className="px-5 py-3">
                                                     <StatusBadge
                                                         label={
                                                             staff.status === "Accepted"
@@ -778,42 +759,30 @@ export default function ManagerStaffManagementPage() {
                                                     />
                                                 </td>
 
-                                                <td className="px-5 py-4 text-right">
-                                                    <div className="flex items-center justify-end gap-2.5">
+                                                <td className="px-5 py-3 text-right">
+                                                    <div className="flex justify-end gap-2">
                                                         <button
                                                             type="button"
-                                                            onClick={() =>
-                                                                handleEditStaff(staff)
-                                                            }
-                                                            className="inline-flex h-[38px] items-center justify-center gap-2 rounded-xl border border-[#D7C7E8] bg-white px-4 text-xs font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]"
+                                                            onClick={() => handleEditStaff(staff)}
+                                                            className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg border border-[#D7C7E8] bg-white px-3 text-xs font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]"
                                                         >
-                                                            <Pencil size={14} />
-                                                            Edit Access
+                                                            <Pencil size={13} />
+                                                            Edit
                                                         </button>
 
                                                         <button
                                                             type="button"
-                                                            disabled={
-                                                                updatingStaffStatusId ===
-                                                                staff.id
-                                                            }
-                                                            onClick={() =>
-                                                                void handleUpdateStaffStatus(
-                                                                    staff
-                                                                )
-                                                            }
-                                                            className={`inline-flex h-[38px] min-w-[104px] items-center justify-center rounded-xl px-4 text-xs font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                                                                staff.status ===
-                                                                "Inactive"
-                                                                    ? "border border-[#D7C7E8] bg-white text-[#2B174C] hover:bg-[#F7F1FF]"
+                                                            disabled={updatingStaffStatusId === staff.id}
+                                                            onClick={() => void handleUpdateStaffStatus(staff)}
+                                                            className={`inline-flex h-[34px] items-center justify-center rounded-lg px-3 text-xs font-semibold shadow-sm transition disabled:opacity-60 ${
+                                                                staff.status === "Inactive"
+                                                                    ? "border border-[#D7C7E8] bg-white text-[#2B174C]"
                                                                     : "bg-[#A33E20] text-white hover:bg-[#883117]"
                                                             }`}
                                                         >
-                                                            {updatingStaffStatusId ===
-                                                            staff.id
+                                                            {updatingStaffStatusId === staff.id
                                                                 ? "Saving..."
-                                                                : staff.status ===
-                                                                "Inactive"
+                                                                : staff.status === "Inactive"
                                                                     ? "Reactivate"
                                                                     : "Deactivate"}
                                                         </button>
@@ -836,7 +805,7 @@ export default function ManagerStaffManagementPage() {
                     </section>
 
                     <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
                             <div className="flex min-w-0 items-center gap-3">
                                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]">
                                     <Clock3 size={20} />
@@ -894,22 +863,22 @@ export default function ManagerStaffManagementPage() {
                                                         key={invite.id}
                                                         className="border-b border-[#EEE7F2] bg-white last:border-b-0"
                                                     >
-                                                        <td className="px-5 py-4 text-sm font-semibold text-[#1A1220]">
+                                                        <td className="px-5 py-3 text-sm font-semibold text-[#1A1220]">
                                                             {invite.email}
                                                         </td>
-                                                        <td className="px-5 py-4 text-xs text-[#7A6A84]">
+                                                        <td className="px-5 py-3 text-xs text-[#7A6A84]">
                                                             Invited {invite.invitedAt}
                                                             <br />
                                                             Expires {invite.expiresAt}
                                                         </td>
-                                                        <td className="max-w-[420px] px-5 py-4 text-xs text-[#806A8C]">
+                                                        <td className="max-w-[420px] px-5 py-3 text-xs text-[#806A8C]">
                                                             <p className="truncate">
                                                                 {formatPermissions(
                                                                     invite.permissions
                                                                 )}
                                                             </p>
                                                         </td>
-                                                        <td className="px-5 py-4 text-right">
+                                                        <td className="px-5 py-3 text-right">
                                                             <div className="inline-flex items-center gap-2">
                                                                 <StatusBadge
                                                                     label="Pending"

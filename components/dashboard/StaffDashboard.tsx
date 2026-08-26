@@ -3,18 +3,24 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import * as XLSX from "xlsx";
 import {
     AlertTriangle,
     CalendarClock,
     CalendarDays,
-    Download,
     PackageX,
     RefreshCw,
     ShoppingCart,
     Store,
     TriangleAlert,
 } from "lucide-react";
+import {
+    DashboardExportMenu,
+    exportTableAsDoc,
+    exportTableAsExcel,
+    exportTableAsPdf,
+    type ExportContext,
+    type ExportTable,
+} from "./_shared";
 
 type Branch = {
     id: number;
@@ -334,53 +340,6 @@ function hasDashboardInventoryRestockPermission(user: unknown) {
         userRecord.inventory;
 
     return dashboardPermissionAllowsWrite(directPermission);
-}
-
-function downloadExcel(
-    filename: string,
-    sheetName: string,
-    headers: string[],
-    rows: Array<Array<string | number | null | undefined>>,
-) {
-    const worksheetData = [
-        headers,
-        ...rows.map((row) => row.map((value) => value ?? "")),
-    ];
-
-    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
-
-    worksheet["!cols"] = headers.map((header, columnIndex) => {
-        const longestValue = worksheetData.reduce((maxLength, row) => {
-            const value = String(row[columnIndex] ?? "");
-            return Math.max(maxLength, value.length);
-        }, header.length);
-
-        return {
-            wch: Math.min(Math.max(longestValue + 2, 12), 38),
-        };
-    });
-
-    worksheet["!autofilter"] = {
-        ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}${worksheetData.length}`,
-    };
-
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-        workbook,
-        worksheet,
-        sheetName.slice(0, 31),
-    );
-
-    XLSX.writeFile(
-        workbook,
-        filename.toLowerCase().endsWith(".xlsx")
-            ? filename
-            : `${filename}.xlsx`,
-        {
-            bookType: "xlsx",
-            compression: true,
-        },
-    );
 }
 
 function peso(value: number) {
@@ -926,6 +885,18 @@ function formatDashboardExpirationDate(value: string) {
 
     return expirationDate.toLocaleDateString("en-US", {
         month: "short",
+        day: "numeric",
+        year: "numeric",
+    });
+}
+
+function formatDashboardBookingDate(value?: string | null) {
+    const bookingDate = parseDashboardExpirationDate(value);
+
+    if (!bookingDate) return value || "";
+
+    return bookingDate.toLocaleDateString("en-US", {
+        month: "long",
         day: "numeric",
         year: "numeric",
     });
@@ -1573,6 +1544,66 @@ export default function StaffDashboard() {
         year: "numeric",
     });
 
+    const dashboardStoreName =
+        getUserValue(user, "storeName") ||
+        getUserValue(user, "store_name") ||
+        getUserValue(user, "businessName") ||
+        getUserValue(user, "business_name") ||
+        "Store";
+
+    const dashboardBranchLabel = getAssignedBranchName(user);
+
+    const dashboardExportContext: ExportContext = {
+        storeName: dashboardStoreName,
+        branch: dashboardBranchLabel,
+        dateRange: `As of ${formatCurrentDashboardDateTime(currentDateTime)}`,
+    };
+
+    const dashboardFileDate = currentDateTime.toISOString().slice(0, 10);
+
+    const upcomingBookingsExportTable: ExportTable = {
+        title: "Upcoming Bookings",
+        headers: ["Date", "Booking Number", "Time", "Status"],
+        rows: allUpcomingBookings.map((booking) => [
+            formatDashboardBookingDate(booking.date),
+            booking.bookingNumber ||
+            `BK-${String(booking.id).padStart(6, "0")}`,
+            formatDashboardTime(booking.date, booking.time),
+            booking.status || "Pending",
+        ]),
+    };
+
+    const inventoryAlertsExportTable: ExportTable = {
+        title: "Inventory Alerts",
+        headers: [
+            "Product",
+            "Variant",
+            "Stock Level",
+            "Alert Level",
+            "Status",
+        ],
+        rows: allInventoryAlerts.map((item) => [
+            item.productName,
+            item.variantName,
+            String(item.currentStock),
+            String(item.alertLevel),
+            item.status,
+        ]),
+    };
+
+    const expirationAlertsExportTable: ExportTable = {
+        title: "Expiration Alerts",
+        headers: ["Product", "Stock Level", "Expiration Date", "Status"],
+        rows: allExpirationAlertItems.map((item) => [
+            item.variantName
+                ? `${item.productName} - ${item.variantName}`
+                : item.productName,
+            String(item.stock),
+            formatDashboardExpirationDate(item.expirationDate),
+            item.status,
+        ]),
+    };
+
     return (
         <>
             <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
@@ -1679,18 +1710,26 @@ export default function StaffDashboard() {
                             subtitle="Next 3 upcoming bookings"
                             icon={<CalendarDays size={18} />}
                             action={() => router.push("/bookings")}
-                            onDownload={() =>
-                                downloadExcel(
-                                    "upcoming-bookings.xlsx",
+                            onExportPdf={() =>
+                                exportTableAsPdf(
+                                    upcomingBookingsExportTable,
+                                    dashboardExportContext,
+                                    `upcoming-bookings-${dashboardFileDate}`,
+                                )
+                            }
+                            onExportXlsx={() =>
+                                exportTableAsExcel(
+                                    upcomingBookingsExportTable,
+                                    dashboardExportContext,
+                                    `upcoming-bookings-${dashboardFileDate}`,
                                     "Upcoming Bookings",
-                                    ["Date", "Booking Number", "Time", "Status"],
-                                    allUpcomingBookings.map((booking) => [
-                                        booking.date || "",
-                                        booking.bookingNumber ||
-                                        `BK-${String(booking.id).padStart(6, "0")}`,
-                                        formatDashboardTime(booking.date, booking.time),
-                                        booking.status || "Pending",
-                                    ]),
+                                )
+                            }
+                            onExportDoc={() =>
+                                exportTableAsDoc(
+                                    upcomingBookingsExportTable,
+                                    dashboardExportContext,
+                                    `upcoming-bookings-${dashboardFileDate}`,
                                 )
                             }
                             totalRecords={allUpcomingBookings.length}
@@ -1711,24 +1750,26 @@ export default function StaffDashboard() {
                         <InventoryAlertPanel
                             items={inventoryAlerts}
                             totalAlerts={allInventoryAlerts.length}
-                            onDownload={() =>
-                                downloadExcel(
-                                    "inventory-alerts.xlsx",
+                            onExportPdf={() =>
+                                exportTableAsPdf(
+                                    inventoryAlertsExportTable,
+                                    dashboardExportContext,
+                                    `inventory-alerts-${dashboardFileDate}`,
+                                )
+                            }
+                            onExportXlsx={() =>
+                                exportTableAsExcel(
+                                    inventoryAlertsExportTable,
+                                    dashboardExportContext,
+                                    `inventory-alerts-${dashboardFileDate}`,
                                     "Inventory Alerts",
-                                    [
-                                        "Product",
-                                        "Variant",
-                                        "Stock Level",
-                                        "Alert Level",
-                                        "Status",
-                                    ],
-                                    allInventoryAlerts.map((item) => [
-                                        item.productName,
-                                        item.variantName,
-                                        item.currentStock,
-                                        item.alertLevel,
-                                        item.status,
-                                    ]),
+                                )
+                            }
+                            onExportDoc={() =>
+                                exportTableAsDoc(
+                                    inventoryAlertsExportTable,
+                                    dashboardExportContext,
+                                    `inventory-alerts-${dashboardFileDate}`,
                                 )
                             }
                             onViewAll={() => {
@@ -1740,24 +1781,26 @@ export default function StaffDashboard() {
                         <ExpirationAlertsPanel
                             items={expirationAlertItems}
                             totalItems={allExpirationAlertItems.length}
-                            onDownload={() =>
-                                downloadExcel(
-                                    "expiration-alerts.xlsx",
+                            onExportPdf={() =>
+                                exportTableAsPdf(
+                                    expirationAlertsExportTable,
+                                    dashboardExportContext,
+                                    `expiration-alerts-${dashboardFileDate}`,
+                                )
+                            }
+                            onExportXlsx={() =>
+                                exportTableAsExcel(
+                                    expirationAlertsExportTable,
+                                    dashboardExportContext,
+                                    `expiration-alerts-${dashboardFileDate}`,
                                     "Expiration Alerts",
-                                    [
-                                        "Product",
-                                        "Stock Level",
-                                        "Expiration Date",
-                                    ],
-                                    allExpirationAlertItems.map((item) => [
-                                        item.variantName
-                                            ? `${item.productName} - ${item.variantName}`
-                                            : item.productName,
-                                        item.stock,
-                                        formatDashboardExpirationDate(
-                                            item.expirationDate,
-                                        ),
-                                    ]),
+                                )
+                            }
+                            onExportDoc={() =>
+                                exportTableAsDoc(
+                                    expirationAlertsExportTable,
+                                    dashboardExportContext,
+                                    `expiration-alerts-${dashboardFileDate}`,
                                 )
                             }
                             onViewAll={() =>
@@ -1887,7 +1930,9 @@ function CompactDashboardTable({
                                    subtitle,
                                    icon,
                                    action,
-                                   onDownload,
+                                   onExportPdf,
+                                   onExportXlsx,
+                                   onExportDoc,
                                    totalRecords,
                                    headers,
                                    rows,
@@ -1897,7 +1942,9 @@ function CompactDashboardTable({
     subtitle: string;
     icon: React.ReactNode;
     action: () => void;
-    onDownload: () => void;
+    onExportPdf: () => void;
+    onExportXlsx: () => void;
+    onExportDoc: () => void;
     totalRecords: number;
     headers: [string, string, string, string];
     rows: CompactTableRow[];
@@ -1920,15 +1967,12 @@ function CompactDashboardTable({
                     </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                    <button
-                        type="button"
-                        onClick={onDownload}
-                        aria-label={`Download ${title}`}
-                        title={`Download ${title}`}
-                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
-                    >
-                        <Download size={16} strokeWidth={2} />
-                    </button>
+                    <DashboardExportMenu
+                        label={title}
+                        onExportPdf={onExportPdf}
+                        onExportXlsx={onExportXlsx}
+                        onExportDoc={onExportDoc}
+                    />
 
                     <button
                         type="button"
@@ -2041,12 +2085,16 @@ function CompactDashboardRow({ row }: { row: CompactTableRow }) {
 function InventoryAlertPanel({
                                  items,
                                  totalAlerts,
-                                 onDownload,
+                                 onExportPdf,
+                                 onExportXlsx,
+                                 onExportDoc,
                                  onViewAll,
                              }: {
     items: StockAlertItem[];
     totalAlerts: number;
-    onDownload: () => void;
+    onExportPdf: () => void;
+    onExportXlsx: () => void;
+    onExportDoc: () => void;
     onViewAll: () => void;
 }) {
     return (
@@ -2068,15 +2116,12 @@ function InventoryAlertPanel({
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2">
-                    <button
-                        type="button"
-                        onClick={onDownload}
-                        aria-label="Download Inventory Alerts"
-                        title="Download Inventory Alerts"
-                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
-                    >
-                        <Download size={16} strokeWidth={2} />
-                    </button>
+                    <DashboardExportMenu
+                        label="Inventory Alerts"
+                        onExportPdf={onExportPdf}
+                        onExportXlsx={onExportXlsx}
+                        onExportDoc={onExportDoc}
+                    />
 
                     <button
                         type="button"
@@ -2187,13 +2232,17 @@ function ExpirationAlertsPanel({
                                    items,
                                    totalItems,
                                    showBranch = false,
-                                   onDownload,
+                                   onExportPdf,
+                                   onExportXlsx,
+                                   onExportDoc,
                                    onViewAll,
                                }: {
     items: ExpirationAlertItem[];
     totalItems: number;
     showBranch?: boolean;
-    onDownload: () => void;
+    onExportPdf: () => void;
+    onExportXlsx: () => void;
+    onExportDoc: () => void;
     onViewAll: () => void;
 }) {
     const columnCount = showBranch ? 4 : 3;
@@ -2217,15 +2266,12 @@ function ExpirationAlertsPanel({
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2">
-                    <button
-                        type="button"
-                        onClick={onDownload}
-                        aria-label="Download Expiration Alerts"
-                        title="Download Expiration Alerts"
-                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
-                    >
-                        <Download size={16} strokeWidth={2} />
-                    </button>
+                    <DashboardExportMenu
+                        label="Expiration Alerts"
+                        onExportPdf={onExportPdf}
+                        onExportXlsx={onExportXlsx}
+                        onExportDoc={onExportDoc}
+                    />
 
                     <button
                         type="button"

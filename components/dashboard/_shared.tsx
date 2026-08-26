@@ -17,6 +17,7 @@ import {
     ChevronDown,
     ChevronUp,
     DollarSign,
+    Download,
     FileSpreadsheet,
     FileText,
     MapPin,
@@ -348,10 +349,16 @@ type ReportCard = {
     iconClassName: string;
 };
 
-type ExportTable = {
+export type ExportTable = {
     title: string;
     headers: string[];
     rows: string[][];
+};
+
+export type ExportContext = {
+    storeName: string;
+    branch: string;
+    dateRange: string;
 };
 
 const DEFAULT_BRANCH = "Assigned Branch";
@@ -1395,7 +1402,7 @@ function riskClass(risk: ForecastRecord["riskLevel"]) {
     return "bg-[#E8F6EC] text-[#176C27]";
 }
 
-function escapeHtml(value: string) {
+export function escapeHtml(value: string) {
     return String(value)
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
@@ -1423,7 +1430,7 @@ function escapePdf(value: string) {
         .replace(/\)/g, "\\)");
 }
 
-function downloadFile(filename: string, mimeType: string, content: string) {
+export function downloadFile(filename: string, mimeType: string, content: string) {
     const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -1536,14 +1543,14 @@ function wrapPdfText(value: string, maxCharacters: number, maxLines = 3) {
     return result;
 }
 
-function createTablePdf({
-                            title,
-                            storeName,
-                            branch,
-                            dateRange,
-                            headers,
-                            rows,
-                        }: {
+export function createTablePdf({
+                                   title,
+                                   storeName,
+                                   branch,
+                                   dateRange,
+                                   headers,
+                                   rows,
+                               }: {
     title: string;
     storeName: string;
     branch: string;
@@ -2238,6 +2245,188 @@ function InventoryExportMenu({
                 </div>
             ) : null}
         </div>
+    );
+}
+
+/**
+ * Compact icon-button export menu used on the dashboards (Owner/Manager/Staff).
+ * Same PDF/XLSX/DOC export options as InventoryExportMenu above, but sized to
+ * sit inline in a widget header next to a "View all" button instead of taking
+ * up the full width of a sidebar panel.
+ */
+export function DashboardExportMenu({
+                                        onExportPdf,
+                                        onExportXlsx,
+                                        onExportDoc,
+                                        label,
+                                    }: {
+    onExportPdf: () => void;
+    onExportXlsx: () => void;
+    onExportDoc: () => void;
+    label: string;
+}) {
+    const [isOpen, setIsOpen] = useState(false);
+
+    const runExport = (callback: () => void) => {
+        callback();
+        setIsOpen(false);
+    };
+
+    return (
+        <div
+            className="relative"
+            onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                    setIsOpen(false);
+                }
+            }}
+        >
+            <button
+                type="button"
+                onClick={() => setIsOpen((current) => !current)}
+                aria-expanded={isOpen}
+                aria-haspopup="menu"
+                aria-label={`Download ${label}`}
+                title={`Download ${label}`}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] text-[#6D35D4] transition hover:bg-[#F3EEFF]"
+            >
+                <Download size={16} strokeWidth={2} />
+            </button>
+
+            {isOpen ? (
+                <div
+                    role="menu"
+                    className="absolute right-0 top-[calc(100%+6px)] z-30 w-40 overflow-hidden rounded-xl border border-[#E2D7EA] bg-white p-1.5 shadow-[0_14px_35px_rgba(43,23,76,0.18)]"
+                >
+                    <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => runExport(onExportPdf)}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-[#3C2947] transition hover:bg-[#F6F0FC] hover:text-[#6334D4]"
+                    >
+                        <FileText size={14} />
+                        Export as PDF
+                    </button>
+                    <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => runExport(onExportXlsx)}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-[#3C2947] transition hover:bg-[#F6F0FC] hover:text-[#6334D4]"
+                    >
+                        <FileSpreadsheet size={14} />
+                        Export as XLSX
+                    </button>
+                    <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => runExport(onExportDoc)}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12px] font-semibold text-[#3C2947] transition hover:bg-[#F6F0FC] hover:text-[#6334D4]"
+                    >
+                        <FileText size={14} />
+                        Export as DOC
+                    </button>
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
+/**
+ * Standalone versions of ReportsWorkspace's exportPdf/exportExcel/exportDoc
+ * helpers, parameterized by context (storeName/branch/dateRange) instead of
+ * closing over component state, so the dashboards can produce files in the
+ * exact same PDF/XLSX/DOC format as the Reports pages.
+ */
+export function exportTableAsPdf(
+    table: ExportTable,
+    context: ExportContext,
+    filenamePrefix: string,
+) {
+    const pdf = createTablePdf({
+        title: table.title,
+        storeName: context.storeName,
+        branch: context.branch,
+        dateRange: context.dateRange,
+        headers: table.headers,
+        rows: table.rows,
+    });
+
+    downloadFile(`${filenamePrefix}.pdf`, "application/pdf", pdf);
+}
+
+export function exportTableAsExcel(
+    table: ExportTable,
+    context: ExportContext,
+    filenamePrefix: string,
+    sheetName = "Report",
+) {
+    const worksheet = XLSX.utils.aoa_to_sheet([
+        [table.title],
+        [`Store: ${context.storeName}`],
+        [`Branch: ${context.branch}`],
+        [`Date range: ${context.dateRange}`],
+        [],
+        table.headers,
+        ...table.rows,
+    ]);
+
+    worksheet["!cols"] = table.headers.map((header, columnIndex) => {
+        const longestValue = Math.max(
+            header.length,
+            ...table.rows.map((row) => String(row[columnIndex] ?? "").length),
+        );
+
+        return { wch: Math.min(Math.max(longestValue + 2, 12), 36) };
+    });
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName.slice(0, 31));
+    XLSX.writeFile(workbook, `${filenamePrefix}.xlsx`);
+}
+
+export function exportTableAsDoc(
+    table: ExportTable,
+    context: ExportContext,
+    filenamePrefix: string,
+) {
+    const rows = table.rows
+        .map(
+            (row) =>
+                `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`,
+        )
+        .join("");
+
+    const documentHtml = `
+      <html>
+        <head>
+          <meta charset="UTF-8" />
+          <style>
+            body { font-family: Arial, sans-serif; color: #1A1220; }
+            h1 { color: #2B174C; }
+            table { width: 100%; border-collapse: collapse; margin-top: 18px; }
+            th { background: #2B174C; color: white; }
+            th, td { border: 1px solid #DED3E8; padding: 8px; text-align: left; }
+          </style>
+        </head>
+        <body>
+          <h1>${escapeHtml(table.title)}</h1>
+          <p><strong>Store:</strong> ${escapeHtml(context.storeName)}</p>
+          <p><strong>Branch:</strong> ${escapeHtml(context.branch)}</p>
+          <p><strong>Date range:</strong> ${escapeHtml(context.dateRange)}</p>
+          <table>
+            <thead><tr>${table.headers
+        .map((header) => `<th>${escapeHtml(header)}</th>`)
+        .join("")}</tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </body>
+      </html>
+    `;
+
+    downloadFile(
+        `${filenamePrefix}.doc`,
+        "application/msword;charset=utf-8",
+        documentHtml,
     );
 }
 

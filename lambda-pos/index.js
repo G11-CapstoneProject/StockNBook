@@ -53,6 +53,16 @@ function toNumber(value) {
     return Number.isFinite(number) ? number : null;
 }
 
+// Rounds a monetary value to 2 decimal places while avoiding the classic
+// floating-point artifacts (e.g. 299.99 * 7 => 2099.9299999999998).
+function roundCurrency(value) {
+    const number = Number(value);
+
+    if (!Number.isFinite(number)) return 0;
+
+    return Math.round((number + Number.EPSILON) * 100) / 100;
+}
+
 function toPositiveInteger(value) {
     const number = Number(value);
     return Number.isInteger(number) && number > 0 ? number : null;
@@ -328,7 +338,7 @@ async function insertOrderItems(
             );
         }
 
-        const lineTotal = unitPrice * quantity;
+        const lineTotal = roundCurrency(unitPrice * quantity);
 
         await connection.execute(
             `INSERT INTO order_items
@@ -841,7 +851,7 @@ exports.handler = async (event) => {
                 ) || "Customer";
 
             const total =
-                toNumber(body.total) ?? 0;
+                roundCurrency(toNumber(body.total) ?? 0);
 
             const orderDate =
                 toISODate(body.order_date) ||
@@ -1337,7 +1347,7 @@ exports.handler = async (event) => {
                 );
 
             const total =
-                toNumber(body.total) ?? 0;
+                roundCurrency(toNumber(body.total) ?? 0);
 
             const orderDate =
                 toISODate(body.order_date) ||
@@ -1516,7 +1526,7 @@ exports.handler = async (event) => {
                         referenceNumber: orderId,
                         action: "Deleted POS order",
                         referenceId: orderId,
-                        details: `${deletedOrder.item || "Order"} — Total ₱${deletedOrder.total ?? 0}`,
+                        details: `${deletedOrder.item || "Order"} — Total ₱${roundCurrency(deletedOrder.total ?? 0)}`,
                     }
                 );
 

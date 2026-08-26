@@ -443,8 +443,6 @@ async function loadSales(
             o.order_id,
             o.branch_id,
             br.branch_name,
-            o.customer_name,
-            o.cashier_name,
             DATE_FORMAT(o.order_date, '%Y-%m-%d') AS order_date,
             COALESCE(o.total, 0) AS total,
             COALESCE(SUM(oi.quantity), 0) AS total_quantity,
@@ -481,8 +479,6 @@ async function loadSales(
             o.order_id,
             o.branch_id,
             br.branch_name,
-            o.customer_name,
-            o.cashier_name,
             o.order_date,
             o.total
         ORDER BY o.order_date DESC, o.order_id DESC
@@ -496,7 +492,7 @@ async function loadSales(
         date: asText(row.order_date),
         branch: asText(row.branch_name) || "Unassigned Branch",
         branchId: String(row.branch_id ?? ""),
-        customer: asText(row.customer_name) || "Walk-in Customer",
+        customer: "Walk-in Customer",
         product: asText(row.items_text) || "No items recorded",
         itemsText: asText(row.items_text) || "No items recorded",
         category: "",
@@ -504,7 +500,7 @@ async function loadSales(
         amount: asNumber(row.total),
         revenueSource: "pos",
         statusLabel: "Completed",
-        cashier: asText(row.cashier_name) || undefined,
+        cashier: undefined,
     }));
 }
 

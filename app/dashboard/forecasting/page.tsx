@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import RequirePermission from "@/components/permissions/RequirePermission";
@@ -16,11 +17,16 @@ import {
 export default function ForecastingPage() {
     const { user, loading: userLoading } = useCurrentUser();
     const forecast = useLiveForecasting();
+    const router = useRouter();
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
 
-    const role = String(
-        (user as { role?: string } | null)?.role || ""
-    ).toLowerCase();
+    const currentUser = user as {
+        role?: string;
+        permissions?: Record<string, boolean | string>;
+    } | null;
+
+    const role = String(currentUser?.role || "").toLowerCase();
+    const hasForecastingAccess = currentUser?.permissions?.forecasting === true;
 
     useEffect(() => {
         const updateTime = () => setCurrentDateTime(new Date());
@@ -31,12 +37,24 @@ export default function ForecastingPage() {
         return () => window.clearInterval(timer);
     }, []);
 
+    useEffect(() => {
+        if (userLoading || !currentUser) return;
+
+        if (role === "staff" && !hasForecastingAccess) {
+            router.push("/dashboard");
+        }
+    }, [userLoading, currentUser, role, hasForecastingAccess, router]);
+
     const subtitle =
         role === "owner"
             ? "Compare customer demand, seasonal patterns, and booking demand across branches"
             : role === "staff"
                 ? "Review projected product demand and upcoming booking demand for your assigned branch"
                 : "Review projected product demand, seasonal signals, and upcoming booking demand for your assigned branch";
+
+    if (!userLoading && role === "staff" && !hasForecastingAccess) {
+        return null;
+    }
 
     return (
         <RequirePermission>

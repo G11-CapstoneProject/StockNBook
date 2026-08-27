@@ -46,16 +46,17 @@ type PendingSignup = {
     password: string;
 };
 
+type AccessLevel = "none" | "view" | "full";
+
 type Permissions = {
-    dashboard: boolean;
-    bookings: boolean;
-    packages: boolean;
-    packages_manage: boolean;
-    inventory: boolean;
-    pos: boolean;
-    reports: boolean;
-    staff_management: boolean;
-    branch_settings: boolean;
+    pos: AccessLevel;
+    bookings: AccessLevel;
+    inventory: AccessLevel;
+    packages: AccessLevel;
+    staff_management: AccessLevel;
+    reports: AccessLevel;
+    analytics: AccessLevel;
+    forecasting: AccessLevel;
 };
 
 type ManagerMode = "owner" | "invite";
@@ -88,30 +89,29 @@ type InvitationEmailSummary = {
 };
 
 const defaultPermissions: Permissions = {
-    dashboard: true,
-    bookings: true,
-    packages: true,
-    packages_manage: false,
-    inventory: true,
-    pos: true,
-    reports: false,
-    staff_management: false,
-    branch_settings: false,
+    pos: "full",
+    bookings: "full",
+    inventory: "full",
+    packages: "full",
+    staff_management: "none",
+    reports: "none",
+    analytics: "none",
+    forecasting: "none",
 };
 
 const permissionLabels: Array<{
     key: keyof Permissions;
     label: string;
+    allowView: boolean;
 }> = [
-    { key: "dashboard", label: "Dashboard" },
-    { key: "bookings", label: "Bookings" },
-    { key: "packages", label: "Packages" },
-    { key: "packages_manage", label: "Manage Packages" },
-    { key: "inventory", label: "Inventory" },
-    { key: "pos", label: "Sales / POS" },
-    { key: "reports", label: "Reports" },
-    { key: "staff_management", label: "Staff Management" },
-    { key: "branch_settings", label: "Branch Settings" },
+    { key: "pos", label: "Sales / POS", allowView: true },
+    { key: "bookings", label: "Bookings", allowView: true },
+    { key: "inventory", label: "Inventory", allowView: true },
+    { key: "packages", label: "Packages", allowView: true },
+    { key: "staff_management", label: "Staff Management", allowView: false },
+    { key: "reports", label: "Reports", allowView: false },
+    { key: "analytics", label: "Analytics", allowView: false },
+    { key: "forecasting", label: "Forecasting", allowView: false },
 ];
 
 const createEmptyBranch = (): BranchSetup => ({
@@ -571,7 +571,7 @@ export default function AuthModal({
     const updatePermission = (
         index: number,
         permission: keyof Permissions,
-        value: boolean
+        value: AccessLevel
     ) => {
         setBranches((current) =>
             current.map((branch, branchIndex) =>
@@ -1363,7 +1363,7 @@ export default function AuthModal({
                                                     Access level
                                                 </p>
 
-                                                <div className="grid gap-2 sm:grid-cols-2">
+                                                <div className="grid max-h-[280px] gap-2 overflow-y-auto pr-1">
                                                     {permissionLabels.map(
                                                         (permission) => (
                                                             <AccessToggle
@@ -1373,20 +1373,23 @@ export default function AuthModal({
                                                                 label={
                                                                     permission.label
                                                                 }
-                                                                checked={
+                                                                value={
                                                                     branch
                                                                         .permissions[
                                                                         permission
                                                                             .key
                                                                         ]
                                                                 }
+                                                                allowView={
+                                                                    permission.allowView
+                                                                }
                                                                 onChange={(
-                                                                    checked
+                                                                    value
                                                                 ) =>
                                                                     updatePermission(
                                                                         index,
                                                                         permission.key,
-                                                                        checked
+                                                                        value
                                                                     )
                                                                 }
                                                             />
@@ -1475,14 +1478,6 @@ export default function AuthModal({
 
                                         <div className="mt-4 space-y-3">
                                             {branches.map((branch, index) => {
-                                                const enabledPermissions =
-                                                    permissionLabels.filter(
-                                                        (permission) =>
-                                                            branch.permissions[
-                                                                permission.key
-                                                                ]
-                                                    );
-
                                                 return (
                                                     <div
                                                         key={index}
@@ -1512,7 +1507,7 @@ export default function AuthModal({
                                                                 </div>
                                                             </div>
 
-                                                            <div className="sm:min-w-[170px]">
+                                                            <div className="sm:min-w-[220px]">
                                                                 <p className="text-xs font-semibold text-[#1A1220]">
                                                                     {
                                                                         branch.manager_name
@@ -1525,26 +1520,61 @@ export default function AuthModal({
                                                                 </p>
                                                                 <div className="mt-3">
                                                                     <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#7A6E88]">
-                                                                        Enabled features
+                                                                        Feature access
                                                                     </p>
 
-                                                                    <div className="mt-2 flex max-w-[280px] flex-wrap gap-1.5">
-                                                                        {enabledPermissions.map(
+                                                                    <div className="mt-2 space-y-1">
+                                                                        {permissionLabels.map(
                                                                             (
                                                                                 permission
-                                                                            ) => (
-                                                                                <span
-                                                                                    key={
-                                                                                        permission.key
-                                                                                    }
-                                                                                    className="inline-flex items-center gap-1 rounded-full bg-[#F0E8FA] px-2.5 py-1 text-[11px] font-semibold text-[#5B35A5]"
-                                                                                >
-                                                                                    <Check className="h-3 w-3" />
-                                                                                    {
-                                                                                        permission.label
-                                                                                    }
-                                                                                </span>
-                                                                            )
+                                                                            ) => {
+                                                                                const level =
+                                                                                    branch
+                                                                                        .permissions[
+                                                                                        permission
+                                                                                            .key
+                                                                                        ];
+
+                                                                                const levelLabel =
+                                                                                    level ===
+                                                                                    "full"
+                                                                                        ? "Full access"
+                                                                                        : level ===
+                                                                                        "view"
+                                                                                            ? "View only"
+                                                                                            : "No access";
+
+                                                                                const levelClass =
+                                                                                    level ===
+                                                                                    "full"
+                                                                                        ? "text-[#5B35A5]"
+                                                                                        : level ===
+                                                                                        "view"
+                                                                                            ? "text-[#B8860B]"
+                                                                                            : "text-[#9B90A4]";
+
+                                                                                return (
+                                                                                    <div
+                                                                                        key={
+                                                                                            permission.key
+                                                                                        }
+                                                                                        className="flex items-center justify-between gap-3 rounded-lg bg-[#F7F4FB] px-2.5 py-1.5"
+                                                                                    >
+                                                                                        <span className="text-[11px] font-semibold text-[#2D1B4E]">
+                                                                                            {
+                                                                                                permission.label
+                                                                                            }
+                                                                                        </span>
+                                                                                        <span
+                                                                                            className={`text-[10px] font-bold uppercase tracking-wide ${levelClass}`}
+                                                                                        >
+                                                                                            {
+                                                                                                levelLabel
+                                                                                            }
+                                                                                        </span>
+                                                                                    </div>
+                                                                                );
+                                                                            }
                                                                         )}
                                                                     </div>
 
@@ -1987,24 +2017,31 @@ function OnboardingProgress({ currentStep }: { currentStep: number }) {
 
 function AccessToggle({
                           label,
-                          checked,
+                          value,
                           onChange,
+                          allowView = true,
                       }: {
     label: string;
-    checked: boolean;
-    onChange: (checked: boolean) => void;
+    value: "none" | "view" | "full";
+    onChange: (value: "none" | "view" | "full") => void;
+    allowView?: boolean;
 }) {
     return (
-        <label className="flex cursor-pointer items-center justify-between rounded-xl border border-[#E7DFE9] bg-white px-4 py-3 text-sm text-[#1A1220] transition hover:border-[#BFAED0]">
+        <div className="flex items-center justify-between rounded-xl border border-[#E7DFE9] bg-white px-4 py-3 text-sm text-[#1A1220]">
             <span>{label}</span>
 
-            <input
-                type="checkbox"
-                checked={checked}
-                onChange={(event) => onChange(event.target.checked)}
-                className="h-4 w-4 accent-[#2D1B4E]"
-            />
-        </label>
+            <select
+                value={value}
+                onChange={(event) =>
+                    onChange(event.target.value as "none" | "view" | "full")
+                }
+                className="h-[38px] min-w-[136px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+            >
+                <option value="none">No access</option>
+                {allowView && <option value="view">View only</option>}
+                <option value="full">Full access</option>
+            </select>
+        </div>
     );
 }
 

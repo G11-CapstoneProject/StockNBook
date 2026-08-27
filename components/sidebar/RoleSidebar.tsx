@@ -34,7 +34,17 @@ const lora = Lora({
 
 type Role = "owner" | "manager" | "staff";
 
-type PermissionMap = Record<string, boolean>;
+/*
+ * Access is granular, not just on/off. The owner assigns each module
+ * one of these three levels when setting up a branch/manager, and the
+ * backend stores/returns permissions using these same string values
+ * (see permissionAccessLevel in the API). Legacy boolean `true`/`false`
+ * values (from older invites) are still accepted for backwards
+ * compatibility and treated as "full"/"none".
+ */
+type AccessLevel = "full" | "view" | "none";
+
+type PermissionMap = Record<string, AccessLevel>;
 
 type SidebarItem = {
     label: string;
@@ -94,6 +104,31 @@ function normalizeRole(value: unknown): Role {
     return "owner";
 }
 
+function normalizeAccessLevel(
+    value: unknown,
+): AccessLevel {
+    if (
+        value === true ||
+        value === 1 ||
+        value === "1" ||
+        value === "true" ||
+        value === "full"
+    ) {
+        return "full";
+    }
+
+    if (
+        value === "view" ||
+        value === "view_only" ||
+        value === "viewOnly"
+    ) {
+        return "view";
+    }
+
+    // Covers false, "none", undefined, null, "", 0, etc.
+    return "none";
+}
+
 function normalizePermissions(
     value: unknown,
 ): PermissionMap {
@@ -108,11 +143,7 @@ function normalizePermissions(
     return Object.entries(
         value as Record<string, unknown>,
     ).reduce<PermissionMap>((result, [key, item]) => {
-        result[key] =
-            item === true ||
-            item === 1 ||
-            item === "1" ||
-            item === "true";
+        result[key] = normalizeAccessLevel(item);
 
         return result;
     }, {});
@@ -448,31 +479,36 @@ export default function RoleSidebar() {
                 ? "Manager"
                 : "Staff";
 
-    const canAccess = (
+    /*
+     * A module is accessible (shows up in navigation) as long as the
+     * owner did not set it to "none" — both "full" and "view" grant
+     * entry, the page itself is responsible for read-only behavior
+     * when the level is "view".
+     */
+    const getAccessLevel = (
         permission: string,
-    ) => {
+    ): AccessLevel => {
         if (role === "owner") {
-            return true;
+            return "full";
         }
 
-        return (
-            permissions[permission] === true
-        );
+        return permissions[permission] || "none";
     };
 
+    const canAccess = (
+        permission: string,
+    ) => getAccessLevel(permission) !== "none";
+
     const canViewAnalytics =
-        role === "owner" ||
-        role === "manager" ||
-        role === "staff";
+        role === "owner" || canAccess("analytics");
 
     const canViewForecasting =
-        role === "owner" ||
-        role === "manager" ||
-        role === "staff";
+        role === "owner" || canAccess("forecasting");
 
     const canViewSettings =
         role === "owner" ||
-        canAccess("branch_settings");
+        role === "manager" ||
+        role === "staff";
 
     const handleLogout = () => {
         sessionStorage.clear();

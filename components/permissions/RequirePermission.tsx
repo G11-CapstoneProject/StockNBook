@@ -19,25 +19,44 @@ function getSessionPermissions() {
     }
 }
 
+/*
+ * Each module's permission is stored as ONE value — "full" | "view" | "none"
+ * (see permissionAccessLevel in the API / SetupScreen.tsx). Legacy boolean
+ * `true`/`false` are also accepted for backwards compatibility.
+ *
+ * Previously this function required permissions[permission] to be the
+ * literal boolean `true` AND looked for a separate `${permission}_access`
+ * key that is never actually set anywhere in the app — so any module
+ * granted "full" or "view" access (a string) was always read as "none",
+ * and RequirePermission redirected the user back to /dashboard even
+ * though the owner had granted access.
+ */
 function getAccessLevel(
     permissions: Record<string, boolean | string>,
     permission?: string
 ): AccessLevel {
     if (!permission) return "full";
 
-    const directAccess = permissions[permission];
+    const value = permissions[permission];
 
-    const levelAccess =
-        permissions[`${permission}_access`] ||
-        (permission === "packages" ? permissions.package_access : undefined);
+    if (
+        value === true ||
+        value === "true" ||
+        value === "full"
+    ) {
+        return "full";
+    }
 
-    if (directAccess !== true) return "none";
+    if (
+        value === "view" ||
+        value === "view_only" ||
+        value === "viewOnly"
+    ) {
+        return "view";
+    }
 
-    if (levelAccess === "full") return "full";
-    if (levelAccess === "view") return "view";
-    if (levelAccess === "none") return "none";
-
-    return "full";
+    // Covers false, "none", undefined, null, "", etc.
+    return "none";
 }
 
 function checkAccess(permission?: string, ownerOnly = false) {
@@ -113,4 +132,3 @@ export default function RequirePermission({
 
     return <>{children}</>;
 }
-

@@ -22,16 +22,26 @@ const lora = Lora({
     display: "swap",
 });
 
-const defaultPermissions = {
-    dashboard: true,
-    bookings: true,
-    packages: true,
-    packages_manage: false,
-    inventory: true,
-    pos: true,
-    reports: false,
-    staff_management: false,
-    branch_settings: false,
+type AccessLevel = "none" | "view" | "full";
+
+const defaultPermissions: {
+    pos: AccessLevel;
+    bookings: AccessLevel;
+    inventory: AccessLevel;
+    packages: AccessLevel;
+    staff_management: AccessLevel;
+    reports: AccessLevel;
+    analytics: AccessLevel;
+    forecasting: AccessLevel;
+} = {
+    pos: "full",
+    bookings: "full",
+    inventory: "full",
+    packages: "full",
+    staff_management: "none",
+    reports: "none",
+    analytics: "none",
+    forecasting: "none",
 };
 
 type BranchField =
@@ -114,7 +124,7 @@ export default function SetupScreen() {
     const updatePermission = (
         index: number,
         permission: keyof typeof defaultPermissions,
-        value: boolean
+        value: AccessLevel
     ) => {
         setBranches((prev) => {
             const copy = [...prev];
@@ -547,165 +557,152 @@ export default function SetupScreen() {
                                                                 Feature access
                                                             </p>
 
-                                                            <div className="grid gap-2 sm:grid-cols-2">
+                                                            <div className="grid max-h-[280px] gap-2 overflow-y-auto pr-1">
                                                                 <AccessToggle
-                                                                    label="Dashboard"
-                                                                    checked={
+                                                                    label="Sales / POS"
+                                                                    value={
                                                                         branches[index]
                                                                             ?.permissions
-                                                                            .dashboard ||
-                                                                        false
+                                                                            .pos ||
+                                                                        "none"
                                                                     }
                                                                     onChange={(
-                                                                        checked
+                                                                        value
                                                                     ) =>
                                                                         updatePermission(
                                                                             index,
-                                                                            "dashboard",
-                                                                            checked
+                                                                            "pos",
+                                                                            value
                                                                         )
                                                                     }
                                                                 />
                                                                 <AccessToggle
                                                                     label="Bookings"
-                                                                    checked={
+                                                                    value={
                                                                         branches[index]
                                                                             ?.permissions
                                                                             .bookings ||
-                                                                        false
+                                                                        "none"
                                                                     }
                                                                     onChange={(
-                                                                        checked
+                                                                        value
                                                                     ) =>
                                                                         updatePermission(
                                                                             index,
                                                                             "bookings",
-                                                                            checked
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Packages"
-                                                                    checked={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .packages ||
-                                                                        false
-                                                                    }
-                                                                    onChange={(
-                                                                        checked
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "packages",
-                                                                            checked
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Manage Packages"
-                                                                    checked={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .packages_manage ||
-                                                                        false
-                                                                    }
-                                                                    onChange={(
-                                                                        checked
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "packages_manage",
-                                                                            checked
+                                                                            value
                                                                         )
                                                                     }
                                                                 />
                                                                 <AccessToggle
                                                                     label="Inventory"
-                                                                    checked={
+                                                                    value={
                                                                         branches[index]
                                                                             ?.permissions
                                                                             .inventory ||
-                                                                        false
+                                                                        "none"
                                                                     }
                                                                     onChange={(
-                                                                        checked
+                                                                        value
                                                                     ) =>
                                                                         updatePermission(
                                                                             index,
                                                                             "inventory",
-                                                                            checked
+                                                                            value
                                                                         )
                                                                     }
                                                                 />
                                                                 <AccessToggle
-                                                                    label="Sales / POS"
-                                                                    checked={
+                                                                    label="Packages"
+                                                                    value={
                                                                         branches[index]
                                                                             ?.permissions
-                                                                            .pos || false
+                                                                            .packages ||
+                                                                        "none"
                                                                     }
                                                                     onChange={(
-                                                                        checked
+                                                                        value
                                                                     ) =>
                                                                         updatePermission(
                                                                             index,
-                                                                            "pos",
-                                                                            checked
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Reports"
-                                                                    checked={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .reports ||
-                                                                        false
-                                                                    }
-                                                                    onChange={(
-                                                                        checked
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "reports",
-                                                                            checked
+                                                                            "packages",
+                                                                            value
                                                                         )
                                                                     }
                                                                 />
                                                                 <AccessToggle
                                                                     label="Staff Management"
-                                                                    checked={
+                                                                    allowView={false}
+                                                                    value={
                                                                         branches[index]
                                                                             ?.permissions
                                                                             .staff_management ||
-                                                                        false
+                                                                        "none"
                                                                     }
                                                                     onChange={(
-                                                                        checked
+                                                                        value
                                                                     ) =>
                                                                         updatePermission(
                                                                             index,
                                                                             "staff_management",
-                                                                            checked
+                                                                            value
                                                                         )
                                                                     }
                                                                 />
                                                                 <AccessToggle
-                                                                    label="Branch Settings"
-                                                                    checked={
+                                                                    label="Reports"
+                                                                    allowView={false}
+                                                                    value={
                                                                         branches[index]
                                                                             ?.permissions
-                                                                            .branch_settings ||
-                                                                        false
+                                                                            .reports ||
+                                                                        "none"
                                                                     }
                                                                     onChange={(
-                                                                        checked
+                                                                        value
                                                                     ) =>
                                                                         updatePermission(
                                                                             index,
-                                                                            "branch_settings",
-                                                                            checked
+                                                                            "reports",
+                                                                            value
+                                                                        )
+                                                                    }
+                                                                />
+                                                                <AccessToggle
+                                                                    label="Analytics"
+                                                                    allowView={false}
+                                                                    value={
+                                                                        branches[index]
+                                                                            ?.permissions
+                                                                            .analytics ||
+                                                                        "none"
+                                                                    }
+                                                                    onChange={(
+                                                                        value
+                                                                    ) =>
+                                                                        updatePermission(
+                                                                            index,
+                                                                            "analytics",
+                                                                            value
+                                                                        )
+                                                                    }
+                                                                />
+                                                                <AccessToggle
+                                                                    label="Forecasting"
+                                                                    allowView={false}
+                                                                    value={
+                                                                        branches[index]
+                                                                            ?.permissions
+                                                                            .forecasting ||
+                                                                        "none"
+                                                                    }
+                                                                    onChange={(
+                                                                        value
+                                                                    ) =>
+                                                                        updatePermission(
+                                                                            index,
+                                                                            "forecasting",
+                                                                            value
                                                                         )
                                                                     }
                                                                 />
@@ -938,24 +935,31 @@ function SetupProgress({ currentStep }: { currentStep: number }) {
 
 function AccessToggle({
                           label,
-                          checked,
+                          value,
                           onChange,
+                          allowView = true,
                       }: {
     label: string;
-    checked: boolean;
-    onChange: (checked: boolean) => void;
+    value: AccessLevel;
+    onChange: (value: AccessLevel) => void;
+    allowView?: boolean;
 }) {
     return (
-        <label className="flex cursor-pointer items-center justify-between rounded-xl border border-[#E7DFE9] bg-white px-4 py-3 text-sm text-[#1A1220] transition hover:border-[#BFAED0]">
+        <div className="flex items-center justify-between rounded-xl border border-[#E7DFE9] bg-white px-4 py-3 text-sm text-[#1A1220]">
             <span>{label}</span>
 
-            <input
-                type="checkbox"
-                checked={checked}
-                onChange={(event) => onChange(event.target.checked)}
-                className="h-4 w-4 accent-[#2D1B4E]"
-            />
-        </label>
+            <select
+                value={value}
+                onChange={(event) =>
+                    onChange(event.target.value as AccessLevel)
+                }
+                className="h-[38px] min-w-[136px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+            >
+                <option value="none">No access</option>
+                {allowView && <option value="view">View only</option>}
+                <option value="full">Full access</option>
+            </select>
+        </div>
     );
 }
 

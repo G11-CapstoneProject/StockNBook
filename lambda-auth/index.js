@@ -534,11 +534,31 @@ function permissionLabel(permission) {
         inventory: "Inventory",
         pos: "Sales / POS",
         reports: "Reports",
+        analytics: "Analytics",
+        forecasting: "Forecasting",
         staff_management: "Staff Management",
         branch_settings: "Branch Settings",
     };
 
     return labels[permission] || permission;
+}
+
+// Normalizes a raw permission value (which may be a boolean flag like
+// `staff_management: true`, or a granular access-mode string like
+// `"full" | "view" | "none"`) into a display-ready access level.
+// Returns null when the module is set to no access at all, so callers
+// can filter those out instead of showing them as granted.
+function permissionAccessLevel(value) {
+    if (value === true || value === "full" || value === "true") {
+        return "Full Access";
+    }
+
+    if (value === "view" || value === "view_only" || value === "viewOnly") {
+        return "View Only";
+    }
+
+    // Explicitly covers false, "none", undefined, null, "", 0, etc.
+    return null;
 }
 
 
@@ -644,16 +664,22 @@ function buildManagerInvitationEmail({
     const safeRecipient = escapeHtml(toEmail);
 
     const enabledPermissions = Object.entries(permissions || {})
-        .filter(([, enabled]) => Boolean(enabled))
-        .map(([permission]) => permissionLabel(permission));
+        .map(([permission, value]) => ({
+            label: permissionLabel(permission),
+            access: permissionAccessLevel(value),
+        }))
+        .filter((entry) => entry.access !== null);
 
     const permissionItems =
         enabledPermissions.length > 0
             ? enabledPermissions
-                .map(
-                    (permission) =>
-                        `<span style="display:inline-block;margin:4px 6px 4px 0;padding:7px 10px;border-radius:999px;background:#F1E9FF;color:#4B2380;font-size:12px;font-weight:700;">✓ ${escapeHtml(permission)}</span>`
-                )
+                .map(({ label, access }) => {
+                    const isFullAccess = access === "Full Access";
+                    const background = isFullAccess ? "#F1E9FF" : "#FDF3E3";
+                    const color = isFullAccess ? "#4B2380" : "#946617";
+
+                    return `<span style="display:inline-block;margin:4px 6px 4px 0;padding:7px 10px;border-radius:999px;background:${background};color:${color};font-size:12px;font-weight:700;">✓ ${escapeHtml(label)} — ${escapeHtml(access)}</span>`;
+                })
                 .join("")
             : `<span style="color:#7A6E88;font-size:13px;">Your access will be configured by the store owner.</span>`;
 
@@ -758,16 +784,22 @@ function buildStaffInvitationEmail({
     const safeRecipient = escapeHtml(toEmail);
 
     const enabledPermissions = Object.entries(permissions || {})
-        .filter(([, enabled]) => Boolean(enabled))
-        .map(([permission]) => permissionLabel(permission));
+        .map(([permission, value]) => ({
+            label: permissionLabel(permission),
+            access: permissionAccessLevel(value),
+        }))
+        .filter((entry) => entry.access !== null);
 
     const permissionItems =
         enabledPermissions.length > 0
             ? enabledPermissions
-                .map(
-                    (permission) =>
-                        `<span style="display:inline-block;margin:4px 6px 4px 0;padding:7px 10px;border-radius:999px;background:#F1E9FF;color:#4B2380;font-size:12px;font-weight:700;">✓ ${escapeHtml(permission)}</span>`
-                )
+                .map(({ label, access }) => {
+                    const isFullAccess = access === "Full Access";
+                    const background = isFullAccess ? "#F1E9FF" : "#FDF3E3";
+                    const color = isFullAccess ? "#4B2380" : "#946617";
+
+                    return `<span style="display:inline-block;margin:4px 6px 4px 0;padding:7px 10px;border-radius:999px;background:${background};color:${color};font-size:12px;font-weight:700;">✓ ${escapeHtml(label)} — ${escapeHtml(access)}</span>`;
+                })
                 .join("")
             : `<span style="color:#7A6E88;font-size:13px;">Your access will be configured by your branch manager.</span>`;
 
@@ -2657,70 +2689,6 @@ exports.handler = async (event) => {
                 statusCode: 401,
                 headers,
                 body: JSON.stringify({ error: "Invalid email or password" }),
-            };
-        }
-
-        // PLATFORM ADMIN LOGIN
-        if (action === "platform_admin_login") {
-            if (!email || !password) {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({ error: "Missing email or password" }),
-                };
-            }
-
-            const [adminRows] = await connection.execute(
-                "SELECT * FROM platform_admins WHERE email = ? AND status = 'active' LIMIT 1",
-                [String(email).trim().toLowerCase()]
-            );
-
-            if (adminRows.length === 0) {
-                return {
-                    statusCode: 401,
-                    headers,
-                    body: JSON.stringify({ error: "Invalid email or password" }),
-                };
-            }
-
-            const admin = adminRows[0];
-            const match = await bcrypt.compare(password, admin.password);
-
-            if (!match) {
-                return {
-                    statusCode: 401,
-                    headers,
-                    body: JSON.stringify({ error: "Invalid email or password" }),
-                };
-            }
-
-            const token = jwt.sign(
-                {
-                    platform_admin_id: admin.platform_admin_id,
-                    email: admin.email,
-                    role: "PLATFORM_ADMIN",
-                },
-                JWT_SECRET,
-                { expiresIn: "8h" }
-            );
-
-            await connection.execute(
-                "UPDATE platform_admins SET updated_at = UTC_TIMESTAMP() WHERE platform_admin_id = ?",
-                [admin.platform_admin_id]
-            );
-
-            return {
-                statusCode: 200,
-                headers,
-                body: JSON.stringify({
-                    token,
-                    user: {
-                        platform_admin_id: admin.platform_admin_id,
-                        full_name: admin.full_name,
-                        email: admin.email,
-                        role: "PLATFORM_ADMIN",
-                    },
-                }),
             };
         }
 
@@ -4704,37 +4672,6 @@ exports.handler = async (event) => {
                             typeof staff.permissions === "string"
                                 ? JSON.parse(staff.permissions || "{}")
                                 : staff.permissions || {},
-                    }),
-                };
-            }
-
-            if (decoded.role === "PLATFORM_ADMIN") {
-                const [adminRows] = await connection.execute(
-                    `SELECT platform_admin_id, full_name, email, status
-                     FROM platform_admins
-                     WHERE platform_admin_id = ?
-                         LIMIT 1`,
-                    [decoded.platform_admin_id]
-                );
-
-                if (!adminRows.length || adminRows[0].status !== "active") {
-                    return {
-                        statusCode: 403,
-                        headers,
-                        body: JSON.stringify({ error: "Admin account not found or inactive" }),
-                    };
-                }
-
-                const admin = adminRows[0];
-
-                return {
-                    statusCode: 200,
-                    headers,
-                    body: JSON.stringify({
-                        role: "PLATFORM_ADMIN",
-                        platform_admin_id: admin.platform_admin_id,
-                        full_name: admin.full_name,
-                        email: admin.email,
                     }),
                 };
             }

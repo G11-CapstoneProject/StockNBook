@@ -23,7 +23,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react
 import { useRouter } from "next/navigation";
 
 type AccessMode = "none" | "view" | "full";
-type ReportsAccessMode = "none" | "view";
+type ReportsAccessMode = "none" | "full";
 type StaffStatusFilter = "all" | "active" | "inactive" | "pending";
 
 type StaffPermissions = {
@@ -38,6 +38,10 @@ type StaffPermissions = {
     package_access: AccessMode;
     reports: boolean;
     reports_access: ReportsAccessMode;
+    analytics: boolean;
+    analytics_access: AccessMode;
+    forecasting: boolean;
+    forecasting_access: AccessMode;
 };
 
 type PendingInvite = {
@@ -69,6 +73,10 @@ const defaultPermissions: StaffPermissions = {
     package_access: "none",
     reports: false,
     reports_access: "none",
+    analytics: false,
+    analytics_access: "none",
+    forecasting: false,
+    forecasting_access: "none",
 };
 
 function formatCurrentDateTime(value: Date) {
@@ -227,7 +235,7 @@ export default function ManagerStaffManagementPage() {
     }, [branchName, pendingInvites, staffSearch, statusFilter]);
 
     const updateFeatureAccess = (
-        feature: "pos" | "bookings" | "inventory" | "packages",
+        feature: "pos" | "bookings" | "inventory" | "packages" | "analytics" | "forecasting",
         value: AccessMode
     ) => {
         const accessKey = feature === "packages" ? "package_access" : `${feature}_access`;
@@ -248,7 +256,7 @@ export default function ManagerStaffManagementPage() {
     };
 
     const updateEditFeatureAccess = (
-        feature: "pos" | "bookings" | "inventory" | "packages",
+        feature: "pos" | "bookings" | "inventory" | "packages" | "analytics" | "forecasting",
         value: AccessMode
     ) => {
         const accessKey = feature === "packages" ? "package_access" : `${feature}_access`;
@@ -991,15 +999,6 @@ export default function ManagerStaffManagementPage() {
                                     <p className="mt-1 text-xs text-[#7A6A84]">Choose which modules this staff member can access.</p>
 
                                     <div className="mt-4 space-y-3">
-                                        <DashboardAccessRow
-                                            checked={permissions.dashboard}
-                                            onChange={(checked) =>
-                                                setPermissions((prev) => ({
-                                                    ...prev,
-                                                    dashboard: checked,
-                                                }))
-                                            }
-                                        />
                                         <AccessModeRow
                                             label="POS / Sales"
                                             value={permissions.pos_access}
@@ -1023,8 +1022,20 @@ export default function ManagerStaffManagementPage() {
                                         <AccessModeRow
                                             label="Reports"
                                             value={permissions.reports_access}
-                                            allowFull={false}
+                                            allowView={false}
                                             onChange={(value) => updateReportsAccess(value as ReportsAccessMode)}
+                                        />
+                                        <AccessModeRow
+                                            label="Analytics"
+                                            value={permissions.analytics_access}
+                                            allowView={false}
+                                            onChange={(value) => updateFeatureAccess("analytics", value as AccessMode)}
+                                        />
+                                        <AccessModeRow
+                                            label="Forecasting"
+                                            value={permissions.forecasting_access}
+                                            allowView={false}
+                                            onChange={(value) => updateFeatureAccess("forecasting", value as AccessMode)}
                                         />
                                     </div>
                                 </div>
@@ -1076,15 +1087,6 @@ export default function ManagerStaffManagementPage() {
 
                     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5">
                         <div className="space-y-3">
-                            <DashboardAccessRow
-                                checked={editPermissions.dashboard}
-                                onChange={(checked) =>
-                                    setEditPermissions((prev) => ({
-                                        ...prev,
-                                        dashboard: checked,
-                                    }))
-                                }
-                            />
                             <AccessModeRow
                                 label="POS / Sales"
                                 value={editPermissions.pos_access}
@@ -1108,8 +1110,20 @@ export default function ManagerStaffManagementPage() {
                             <AccessModeRow
                                 label="Reports"
                                 value={editPermissions.reports_access}
-                                allowFull={false}
+                                allowView={false}
                                 onChange={(value) => updateEditReportsAccess(value as ReportsAccessMode)}
+                            />
+                            <AccessModeRow
+                                label="Analytics"
+                                value={editPermissions.analytics_access}
+                                allowView={false}
+                                onChange={(value) => updateEditFeatureAccess("analytics", value as AccessMode)}
+                            />
+                            <AccessModeRow
+                                label="Forecasting"
+                                value={editPermissions.forecasting_access}
+                                allowView={false}
+                                onChange={(value) => updateEditFeatureAccess("forecasting", value as AccessMode)}
                             />
                         </div>
                     </div>
@@ -1176,9 +1190,12 @@ function normalizePermissions(raw: any): StaffPermissions {
     const inventoryAccess = getAccessValue(parsed.inventory_access, parsed.inventory);
     const packageAccess = getAccessValue(parsed.package_access, parsed.packages);
     const reportsAccess = getReportsAccessValue(parsed.reports_access, parsed.reports);
+    const analyticsAccess = getAccessValue(parsed.analytics_access, parsed.analytics);
+    const forecastingAccess = getAccessValue(parsed.forecasting_access, parsed.forecasting);
 
     return {
-        dashboard: Boolean(parsed.dashboard),
+        // Every staff member gets the dashboard — it's no longer a toggle.
+        dashboard: true,
         pos: posAccess !== "none",
         pos_access: posAccess,
         bookings: bookingsAccess !== "none",
@@ -1189,6 +1206,10 @@ function normalizePermissions(raw: any): StaffPermissions {
         package_access: packageAccess,
         reports: reportsAccess !== "none",
         reports_access: reportsAccess,
+        analytics: analyticsAccess !== "none",
+        analytics_access: analyticsAccess,
+        forecasting: forecastingAccess !== "none",
+        forecasting_access: forecastingAccess,
     };
 }
 
@@ -1199,8 +1220,9 @@ function getAccessValue(value: any, legacyBoolean: any): AccessMode {
 }
 
 function getReportsAccessValue(value: any, legacyBoolean: any): ReportsAccessMode {
-    if (value === "view" || value === "none") return value;
-    if (legacyBoolean === true) return "view";
+    if (value === "full" || value === "none") return value;
+    if (value === "view") return "full";
+    if (legacyBoolean === true) return "full";
     return "none";
 }
 
@@ -1308,39 +1330,18 @@ function FormInput({
     );
 }
 
-function DashboardAccessRow({
-                                checked,
-                                onChange,
-                            }: {
-    checked: boolean;
-    onChange: (checked: boolean) => void;
-}) {
-    return (
-        <div className="flex min-h-[58px] items-center justify-between rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-3">
-            <span className="text-sm font-semibold text-[#1A1220]">Dashboard</span>
-            <button
-                type="button"
-                onClick={() => onChange(!checked)}
-                className={`relative h-[26px] w-[48px] rounded-full transition ${checked ? "bg-[#2B174C]" : "bg-[#D8CBE7]"}`}
-            >
-                <span
-                    className={`absolute top-[3px] h-[20px] w-[20px] rounded-full bg-white transition ${checked ? "left-[25px]" : "left-[3px]"}`}
-                />
-            </button>
-        </div>
-    );
-}
-
 function AccessModeRow({
                            label,
                            value,
                            onChange,
                            allowFull = true,
+                           allowView = true,
                        }: {
     label: string;
     value: AccessMode | ReportsAccessMode;
     onChange: (value: AccessMode | ReportsAccessMode) => void;
     allowFull?: boolean;
+    allowView?: boolean;
 }) {
     return (
         <div className="flex min-h-[58px] items-center justify-between rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-3">
@@ -1351,7 +1352,7 @@ function AccessModeRow({
                 className="h-[38px] min-w-[136px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
             >
                 <option value="none">No access</option>
-                <option value="view">View only</option>
+                {allowView && <option value="view">View only</option>}
                 {allowFull && <option value="full">Full access</option>}
             </select>
         </div>
@@ -1402,24 +1403,26 @@ function ModalShell({ children, onClose }: { children: ReactNode; onClose: () =>
 function formatPermissions(permissions: StaffPermissions) {
     const list: string[] = [];
 
-    if (permissions.dashboard) list.push("Dashboard");
     if (permissions.pos_access !== "none") list.push(`POS / Sales: ${formatAccess(permissions.pos_access)}`);
     if (permissions.bookings_access !== "none") list.push(`Bookings: ${formatAccess(permissions.bookings_access)}`);
     if (permissions.inventory_access !== "none") list.push(`Inventory: ${formatAccess(permissions.inventory_access)}`);
     if (permissions.package_access !== "none") list.push(`Packages: ${formatAccess(permissions.package_access)}`);
     if (permissions.reports_access !== "none") list.push(`Reports: ${formatAccess(permissions.reports_access)}`);
+    if (permissions.analytics_access !== "none") list.push(`Analytics: ${formatAccess(permissions.analytics_access)}`);
+    if (permissions.forecasting_access !== "none") list.push(`Forecasting: ${formatAccess(permissions.forecasting_access)}`);
 
     return list.length > 0 ? list.join(", ") : "No access";
 }
 
 function formatRoleSummary(permissions: StaffPermissions) {
     const shortLabels: string[] = [];
-    if (permissions.dashboard) shortLabels.push("Dashboard");
     if (permissions.pos_access !== "none") shortLabels.push("Sales");
     if (permissions.bookings_access !== "none") shortLabels.push("Bookings");
     if (permissions.inventory_access !== "none") shortLabels.push("Inventory");
     if (permissions.package_access !== "none") shortLabels.push("Packages");
     if (permissions.reports_access !== "none") shortLabels.push("Reports");
+    if (permissions.analytics_access !== "none") shortLabels.push("Analytics");
+    if (permissions.forecasting_access !== "none") shortLabels.push("Forecasting");
     return shortLabels.length > 0 ? shortLabels.join(" & ") : "No access";
 }
 

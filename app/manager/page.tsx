@@ -85,7 +85,7 @@ export default function ManagerPage() {
                     },
                     {
                         label: "Packages",
-                        href: "/manager/packages",
+                        href: "/manager/plans",
                         permission: "packages" as PermissionKey,
                         icon: <Boxes className="h-5 w-5" />,
                     },

@@ -37,7 +37,7 @@ async function callLocalPackagesLambda(
         data = {
             error:
                 response.body ||
-                "Invalid response from local packages server.",
+                "Invalid response from local plans server.",
         };
     }
 
@@ -259,7 +259,7 @@ export async function GET(req: NextRequest) {
                 error:
                     error instanceof Error
                         ? error.message
-                        : "Failed to load packages.",
+                        : "Failed to load plans.",
             },
             {
                 status: 500,

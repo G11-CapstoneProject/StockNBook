@@ -82,7 +82,7 @@ export default function StaffPackages() {
             const data = await res.json();
 
             if (!res.ok) {
-                setError(data.error || "Failed to load packages.");
+                setError(data.error || "Failed to load plans.");
                 setPackages([]);
                 return;
             }
@@ -91,7 +91,7 @@ export default function StaffPackages() {
             setError("");
         } catch {
             setPackages([]);
-            setError("Failed to load packages.");
+            setError("Failed to load plans.");
         } finally {
             setLoading(false);
         }
@@ -356,8 +356,8 @@ export default function StaffPackages() {
                             <EmptyState
                                 title={
                                     canManage
-                                        ? "No packages yet."
-                                        : "No packages available."
+                                        ? "No plans yet."
+                                        : "No plans available."
                                 }
                                 detail={
                                     canManage

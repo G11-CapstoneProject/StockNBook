@@ -1670,7 +1670,7 @@ export default function AuthModal({
                                     <div className="mt-4 space-y-3 text-sm text-[#5F556A]">
                                         {[
                                             "Add products and manage inventory",
-                                            "Create packages and accept bookings",
+                                            "Create plans and accept bookings",
                                             "Invite staff and start managing your business",
                                         ].map((item) => (
                                             <p

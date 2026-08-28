@@ -2486,7 +2486,7 @@ function ReportFilterBar({
                         ? "Search booking or customer..."
                         : selectedReport === "staff"
                             ? "Search employee action..."
-                            : "Search packages...";
+                            : "Search plans...";
 
     return (
         <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-12">
@@ -4973,7 +4973,7 @@ export function ReportsWorkspace({
             const payload = (await response.json()) as LivePackagesResponse;
 
             if (!response.ok || (payload as { success?: boolean }).success === false) {
-                throw new Error(payload.error || "Unable to load packages.");
+                throw new Error(payload.error || "Unable to load plans.");
             }
 
             const fallbackBranch = initialRole === "owner" && isAllBranches(branch)
@@ -5121,7 +5121,7 @@ export function ReportsWorkspace({
 
             setLivePackagesState({ ready: true, items: ownerBranchScopedPackages });
         } catch (error) {
-            console.warn("Reports packages loading failed:", error);
+            console.warn("Reports plans loading failed:", error);
             setLivePackagesState({ ready: false, items: [] });
         }
     }, [assignedBranch, branch, initialRole, scopedSalesBranchId]);
@@ -6400,9 +6400,9 @@ export function ReportsWorkspace({
                                 <PackagesReportView
                                     records={displayedPackages}
                                     showBranchColumn={showBranchColumn}
-                                    onExportPdf={() => exportPdf(getFilteredPackageExportTable(), "packages-report")}
-                                    onExportXlsx={() => exportExcel(getFilteredPackageExportTable(), "packages-report")}
-                                    onExportDoc={() => exportDoc(getFilteredPackageExportTable(), "packages-report")}
+                                    onExportPdf={() => exportPdf(getFilteredPackageExportTable(), "plans-report")}
+                                    onExportXlsx={() => exportExcel(getFilteredPackageExportTable(), "plans-report")}
+                                    onExportDoc={() => exportDoc(getFilteredPackageExportTable(), "plans-report")}
                                 />
                             )}
 

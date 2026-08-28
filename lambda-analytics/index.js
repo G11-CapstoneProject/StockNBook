@@ -24,7 +24,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "020820@Steph",
+    password: "BTA5EYVWLfWcebF",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };

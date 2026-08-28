@@ -39,6 +39,7 @@ interface Payment {
     proofFileName: string;
     rejectionReason?: string;
     initials: string;
+    receiptUrl?: string | null;
 }
 
 const REJECTION_REASONS = [
@@ -101,14 +102,15 @@ export default function PaymentsPage() {
                 const mappedData: Payment[] = data.payments.map((p: any) => ({
                     id: p.payment_submission_id,
                     storeName: p.store_name_snapshot,
-                    ownerEmail: p.owner_name_snapshot || "Owner",
+                    ownerEmail: p.owner_email || "Owner",
                     requestedPlan: p.requested_plan_name_snapshot,
                     amount: Number(p.amount_submitted),
                     referenceNumber: p.reference_number,
                     paymentDate: p.payment_date ? new Date(p.payment_date).toLocaleDateString() : "N/A",
                     submittedAt: p.submitted_at,
                     status: p.status,
-                    proofFileName: "GCash Receipt",
+                    proofFileName: p.proof_file_url ? "View GCash Receipt" : "GCash Receipt",
+                    receiptUrl: p.proof_file_url || null,
                     initials: (p.store_name_snapshot || "ST").substring(0, 2).toUpperCase(),
                     rejectionReason: p.rejection_reason
                 }));
@@ -333,6 +335,9 @@ export default function PaymentsPage() {
                             <FileImage size={24} className="mx-auto text-[#6D35D4]" />
                             <p className="mt-1 font-bold text-[#1A1220]">{selectedPayment.proofFileName}</p>
                             <p className="text-[10px] text-[#8A7D92]">GCash Receipt Proof</p>
+                            {selectedPayment.receiptUrl && (
+                                <a href={selectedPayment.receiptUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex rounded-lg bg-[#F1EBFF] px-3 py-1.5 text-[10px] font-semibold text-[#6D35D4]">Open receipt</a>
+                            )}
                         </div>
                     </div>
 

@@ -664,7 +664,7 @@ export default function RoleSidebar() {
                                     label:
                                         "Packages",
                                     href:
-                                        "/packages",
+                                        "/plans",
                                     icon: Package,
                                 }}
                             />

@@ -128,7 +128,7 @@ const heroHighlights = [
     },
     {
         title: "Booking",
-        detail: "Schedules, packages & payments",
+        detail: "Schedules, plans & payments",
         icon: CalendarDays,
         position: "right-[3%] top-[6%] lg:-right-1 xl:-right-3",
         animationDelay: "0.8s",
@@ -169,7 +169,7 @@ const howItWorksGuides = [
         keywords: ["booking link", "customer portal", "public booking", "packages"],
         steps: [
             "Open the Booking Link or Bookings Portal settings and copy the public booking link for your business.",
-            "Share the link with customers so they can view available packages and booking information.",
+            "Share the link with customers so they can view available plans and booking information.",
             "Customers can enter their contact details, event schedule, selected package, and other required information.",
             "Review newly submitted requests in the Bookings module before confirming the reservation.",
         ],
@@ -213,7 +213,7 @@ const howItWorksGuides = [
         ],
     },
     {
-        id: "guide-packages",
+        id: "guide-plans",
         title: "Packages",
         icon: Package,
         keywords: ["package price", "down payment", "included items", "availability"],
@@ -245,9 +245,9 @@ const howItWorksGuides = [
         keywords: ["growth", "peak days", "peak times", "business performance"],
         steps: [
             "Open Analytics to review sales growth, booking trends, and overall business performance.",
-            "Compare performance across selected dates, branches, products, packages, or booking periods.",
+            "Compare performance across selected dates, branches, products, plans, or booking periods.",
             "Identify peak booking days and times to help plan staffing and business operations.",
-            "Use the results to improve promotions, schedules, packages, and inventory decisions.",
+            "Use the results to improve promotions, schedules, plans, and inventory decisions.",
         ],
     },
     {

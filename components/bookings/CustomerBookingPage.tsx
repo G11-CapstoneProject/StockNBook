@@ -1118,7 +1118,7 @@ export default function CustomerBookingPage() {
                     )
                 );
             } catch (err) {
-                console.error("Error loading packages:", err);
+                console.error("Error loading plans:", err);
                 setPackages([]);
             } finally {
                 setLoading(false);

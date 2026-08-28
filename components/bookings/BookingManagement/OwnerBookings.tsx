@@ -615,7 +615,7 @@ function InsightRankingPanel({
         type === "dates"
             ? "Dates with the most bookings appear first."
             : type === "packages"
-                ? "Most booked packages and requests appear first."
+                ? "Most booked plans and requests appear first."
                 : "Branches with the most bookings appear first.";
 
     return (

@@ -3,7 +3,7 @@
 // Copy this file into your existing lambda-auth folder.
 // It is a helper file, not a replacement for your current lambda-auth/index.js.
 //
-// Required npm packages in lambda-auth:
+// Required npm plans in lambda-auth:
 // bcryptjs, jsonwebtoken
 
 const bcrypt = require("bcryptjs");

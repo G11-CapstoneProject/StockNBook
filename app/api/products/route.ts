@@ -3,9 +3,20 @@ import { handler } from "../../../lambda-products/index.js";
 
 export const runtime = "nodejs";
 
+function parseRequestBody(bodyText: string) {
+    if (!bodyText) return {};
+
+    try {
+        return JSON.parse(bodyText);
+    } catch {
+        return {};
+    }
+}
+
 export async function POST(req: NextRequest) {
     try {
-        const body = await req.json();
+        const bodyText = await req.text();
+        const body = parseRequestBody(bodyText);
         const authHeader = req.headers.get("authorization");
 
         const event = {

@@ -20,7 +20,7 @@ const SMTP_PASS = "xokj flbi mavr shyt"
     .replace(/\s/g, "");
 
 const EMAIL_FROM =
-    `"StockNBook No Reply" <${SMTP_USER}>`;
+    `"StockNBook" <${SMTP_USER}>`;
 
 const EMAIL_REPLY_TO = SMTP_USER;
 
@@ -1121,7 +1121,7 @@ function generateSlug(storeName) {
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "020820@Steph",
+    password: "BTA5EYVWLfWcebF",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -2450,6 +2450,116 @@ exports.handler = async (event) => {
                     email_sent: emailSent,
                     email_status: emailSent ? "sent" : "failed",
                     email_error: emailError,
+                }),
+            };
+        }
+
+        // PLATFORM ADMIN LOGIN
+        // Platform administrators are stored in platform_admins,
+        // which uses the `password` column for the bcrypt hash.
+        if (action === "platform_admin_login") {
+            if (!email || !password) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Missing email or password",
+                    }),
+                };
+            }
+
+            const adminEmail = String(email).trim().toLowerCase();
+
+            const [adminRows] = await connection.execute(
+                `SELECT
+                     platform_admin_id,
+                     full_name,
+                     email,
+                     password,
+                     status,
+                     role,
+                     is_active
+                 FROM platform_admins
+                 WHERE LOWER(email) = ?
+                     LIMIT 1`,
+                [adminEmail]
+            );
+
+            if (adminRows.length === 0) {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Invalid email or password",
+                    }),
+                };
+            }
+
+            const admin = adminRows[0];
+            const adminStatus = String(admin.status || "")
+                .trim()
+                .toLowerCase();
+
+            if (adminStatus !== "active" || Number(admin.is_active) !== 1) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Platform administrator account is inactive.",
+                        code: "ACCOUNT_INACTIVE",
+                    }),
+                };
+            }
+
+            if (!admin.password) {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Invalid email or password",
+                    }),
+                };
+            }
+
+            const passwordMatches = await bcrypt.compare(
+                String(password),
+                admin.password
+            );
+
+            if (!passwordMatches) {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Invalid email or password",
+                    }),
+                };
+            }
+
+            const token = jwt.sign(
+                {
+                    platform_admin_id: admin.platform_admin_id,
+                    email: admin.email,
+                    full_name: admin.full_name,
+                    role: "PLATFORM_ADMIN",
+                },
+                JWT_SECRET,
+                { expiresIn: "8h" }
+            );
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    token,
+                    role: "PLATFORM_ADMIN",
+                    user: {
+                        id: admin.platform_admin_id,
+                        platform_admin_id: admin.platform_admin_id,
+                        full_name: admin.full_name,
+                        email: admin.email,
+                        role: "PLATFORM_ADMIN",
+                    },
                 }),
             };
         }
@@ -4522,6 +4632,71 @@ exports.handler = async (event) => {
                     statusCode: 401,
                     headers,
                     body: JSON.stringify({ error: "Invalid token" }),
+                };
+            }
+
+            // Platform administrator sessions do not belong to a store.
+            // Return the admin identity directly so the dashboard's
+            // get_current_user check succeeds instead of treating the token
+            // as an invalid/unknown role and redirecting to the landing page.
+            if (decoded.role === "PLATFORM_ADMIN") {
+                const platformAdminId = Number(decoded.platform_admin_id);
+
+                if (!platformAdminId) {
+                    return {
+                        statusCode: 401,
+                        headers,
+                        body: JSON.stringify({ error: "Invalid platform admin token" }),
+                    };
+                }
+
+                const [adminRows] = await connection.execute(
+                    `SELECT
+                         platform_admin_id,
+                         full_name,
+                         email,
+                         role,
+                         status,
+                         is_active
+                     FROM platform_admins
+                     WHERE platform_admin_id = ?
+                     LIMIT 1`,
+                    [platformAdminId]
+                );
+
+                if (!adminRows.length) {
+                    return {
+                        statusCode: 404,
+                        headers,
+                        body: JSON.stringify({ error: "Platform administrator not found" }),
+                    };
+                }
+
+                const admin = adminRows[0];
+                const adminStatus = String(admin.status || "")
+                    .trim()
+                    .toLowerCase();
+
+                if (adminStatus !== "active" || Number(admin.is_active) !== 1) {
+                    return {
+                        statusCode: 403,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Platform administrator account is inactive.",
+                            code: "ACCOUNT_INACTIVE",
+                        }),
+                    };
+                }
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        role: "PLATFORM_ADMIN",
+                        platform_admin_id: admin.platform_admin_id,
+                        full_name: admin.full_name,
+                        email: admin.email,
+                    }),
                 };
             }
 

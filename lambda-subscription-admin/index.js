@@ -1,28 +1,24 @@
-// COMPATIBLE VERSION: your subscription_plans primary key is id,
-// and the price column is monthly_price.
-//
 // lambda-subscription-admin/index.js
 //
-// Required environment variables:
-// DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, JWT_SECRET
+// Platform-admin backend for the current StockNBook subscription schema:
+//   platform_admins, stores, plans, subscriptions, payments,
+//   subscription_history, platform_settings, subscription_audit_logs
 //
-// Required npm packages:
-// mysql2, jsonwebtoken
+// Required environment variables:
+//   DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, JWT_SECRET
+//
+// Optional:
+//   DB_PORT, DB_SSL, ALLOWED_ORIGINS
 
 const mysql = require("mysql2/promise");
+
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-// FIXED: Use fallback secret to match login and prevent token verification failures
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
-
 const PAYMENT_STATUSES = ["PENDING", "APPROVED", "REJECTED"];
-
-const MANUALLY_CHANGEABLE_SUBSCRIPTION_STATUSES = [
-    "SUSPENDED",
-    "ACTIVE",
-    "CANCELLED",
-];
-
+const SUBSCRIPTION_STATUSES = ["ACTIVE", "EXPIRING", "EXPIRED", "CANCELLED"];
+const CHANGE_TYPES = ["upgrade", "downgrade", "renewal", "cancellation", "admin_override"];
 const REJECTION_REASONS = [
     "Payment not found",
     "Incorrect amount",
@@ -41,31 +37,36 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "020820@Steph",
+    password: "BTA5EYVWLfWcebF",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
 
-const pool = mysql.createPool(dbConfig);
+const pool = mysql.createPool({
+    ...dbConfig,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+});
 
-function getOrigin(event) {
-    const requestOrigin =
-        event.headers?.origin ||
-        event.headers?.Origin ||
-        "";
-
-    if (allowedOrigins.includes(requestOrigin)) {
-        return requestOrigin;
-    }
-
-    return allowedOrigins[0] || "*";
+function httpError(statusCode, message) {
+    const error = new Error(message);
+    error.statusCode = statusCode;
+    return error;
 }
 
 function response(event, statusCode, body) {
+    const origin = event.headers?.origin || event.headers?.Origin || "";
+    const allowOrigin = allowedOrigins.includes("*")
+        ? "*"
+        : allowedOrigins.includes(origin)
+            ? origin
+            : allowedOrigins[0] || "*";
+
     return {
         statusCode,
         headers: {
-            "Access-Control-Allow-Origin": getOrigin(event),
+            "Access-Control-Allow-Origin": allowOrigin,
             "Access-Control-Allow-Headers": "Content-Type, Authorization",
             "Access-Control-Allow-Methods": "OPTIONS, POST",
             "Content-Type": "application/json",
@@ -83,9 +84,7 @@ function getHttpMethod(event) {
 }
 
 function parseBody(event) {
-    if (!event.body) {
-        return {};
-    }
+    if (!event.body) return {};
 
     const rawBody = event.isBase64Encoded
         ? Buffer.from(event.body, "base64").toString("utf8")
@@ -98,795 +97,792 @@ function parseBody(event) {
     }
 }
 
-function httpError(statusCode, message) {
-    const error = new Error(message);
-    error.statusCode = statusCode;
-    return error;
-}
-
-function requireNumber(value, label) {
-    const parsed = Number(value);
-
-    if (!Number.isInteger(parsed) || parsed <= 0) {
-        throw httpError(
-            400,
-            `${label} must be a valid positive number.`
-        );
-    }
-
-    return parsed;
-}
-
-function optionalTrimmedText(value, maxLength = 500) {
+function text(value, maxLength = 500) {
     return String(value ?? "").trim().slice(0, maxLength);
 }
 
-function getBearerToken(headers = {}) {
-    const value =
-        headers.Authorization ||
-        headers.authorization ||
-        "";
+function requiredText(value, label, maxLength = 500) {
+    const result = text(value, maxLength);
+    if (!result) throw httpError(400, `${label} is required.`);
+    return result;
+}
 
+function positiveId(value, label) {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+        throw httpError(400, `${label} must be a valid positive number.`);
+    }
+    return parsed;
+}
+
+function optionalId(value) {
+    if (value === null || value === undefined || value === "") return null;
+    return positiveId(value, "ID");
+}
+
+function normalizeStatus(value) {
+    return String(value || "").trim().toUpperCase();
+}
+
+function normalizeDate(value) {
+    if (!value) return null;
+    const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) throw httpError(400, "Invalid date value.");
+    return date.toISOString().slice(0, 10);
+}
+
+function addMonths(dateOnly, months) {
+    const [year, month, day] = String(dateOnly).split("-").map(Number);
+    const index = month - 1 + Number(months);
+    const targetYear = year + Math.floor(index / 12);
+    const targetMonth = ((index % 12) + 12) % 12;
+    const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    const targetDay = Math.min(day, lastDay);
+    return new Date(Date.UTC(targetYear, targetMonth, targetDay)).toISOString().slice(0, 10);
+}
+
+function addDays(dateOnly, days) {
+    const date = new Date(`${dateOnly}T00:00:00.000Z`);
+    date.setUTCDate(date.getUTCDate() + Number(days));
+    return date.toISOString().slice(0, 10);
+}
+
+function today() {
+    return new Date().toISOString().slice(0, 10);
+}
+
+function moneyCents(value) {
+    return Math.round(Number(value || 0) * 100);
+}
+
+function displaySubscriptionStatus(status, expiresAt) {
+    const normalized = normalizeStatus(status);
+    if (normalized === "CANCELLED") return "CANCELLED";
+    if (!expiresAt) return normalized || "ACTIVE";
+
+    const expiry = normalizeDate(expiresAt);
+    const now = today();
+    if (expiry < now) return "EXPIRED";
+    if (expiry <= addDays(now, 7)) return "EXPIRING";
+    return "ACTIVE";
+}
+
+function lowerStatus(status) {
+    return normalizeStatus(status).toLowerCase();
+}
+
+function changeTypeForPlanChange(oldPlanId, newPlanId) {
+    if (!oldPlanId) return "upgrade";
+    if (Number(newPlanId) === Number(oldPlanId)) return "renewal";
+    return Number(newPlanId) > Number(oldPlanId) ? "upgrade" : "downgrade";
+}
+
+function getBearerToken(headers = {}) {
+    const value = headers.Authorization || headers.authorization || "";
     return value.replace(/^Bearer\s+/i, "").trim();
 }
 
 async function requirePlatformAdmin(event, connection) {
     const token = getBearerToken(event.headers);
-
-    if (!token) {
-        throw httpError(401, "Missing authorization token.");
-    }
+    if (!token) throw httpError(401, "Missing authorization token.");
 
     let payload;
-
     try {
-        // FIXED: Use JWT_SECRET fallback variable instead of strict process.env lookup
         payload = jwt.verify(token, JWT_SECRET);
     } catch {
         throw httpError(401, "Invalid or expired token.");
     }
 
     if (payload.role !== "PLATFORM_ADMIN") {
-        throw httpError(
-            403,
-            "Platform Administrator access is required."
-        );
+        throw httpError(403, "Platform Administrator access is required.");
     }
 
-    const adminId = Number(
-        payload.platform_admin_id ||
-        payload.platformAdminId ||
-        payload.user_id ||
-        payload.id
+    const adminId = positiveId(
+        payload.platform_admin_id || payload.platformAdminId || payload.user_id || payload.id,
+        "Platform Administrator ID"
     );
 
-    if (!Number.isInteger(adminId) || adminId <= 0) {
-        throw httpError(
-            403,
-            "Platform Administrator identity is missing."
-        );
-    }
-
-    const [adminRows] = await connection.execute(
-        `
-            SELECT
-                platform_admin_id,
-                full_name,
-                email,
-                role,
-                is_active
-            FROM platform_admins
-            WHERE platform_admin_id = ?
-                LIMIT 1
-        `,
+    const [rows] = await connection.execute(
+        `SELECT platform_admin_id, full_name, email, role, status, is_active
+         FROM platform_admins
+         WHERE platform_admin_id = ?
+             LIMIT 1`,
         [adminId]
     );
 
-    const admin = adminRows[0];
+    const admin = rows[0];
+    const activeFlag = admin ? Number(admin.is_active) === 1 : false;
+    const statusActive =
+        admin ? String(admin.status || "").trim().toLowerCase() === "active" : false;
+    const roleIsPlatformAdmin =
+        admin ? String(admin.role || "").trim().toLowerCase() === "platform_admin" : false;
 
-    if (
-        !admin ||
-        !admin.is_active ||
-        admin.role !== "PLATFORM_ADMIN"
-    ) {
-        throw httpError(
-            403,
-            "Platform Administrator account is inactive."
-        );
+    if (!admin || !activeFlag || !statusActive || !roleIsPlatformAdmin) {
+        throw httpError(403, "Platform Administrator access is required.");
     }
 
     return admin;
 }
 
-function normalizeDateOnly(value) {
-    if (!value) {
-        return null;
-    }
+async function getPaymentColumns(connection) {
+    const [rows] = await connection.query("SHOW COLUMNS FROM payments");
+    const names = new Set(rows.map((row) => row.Field));
 
-    const match = String(value).match(
-        /^(\d{4})-(\d{2})-(\d{2})/
-    );
-
-    if (match) {
-        return `${match[1]}-${match[2]}-${match[3]}`;
-    }
-
-    const parsed = new Date(value);
-
-    if (Number.isNaN(parsed.getTime())) {
-        throw httpError(400, "Invalid date value.");
-    }
-
-    return parsed.toISOString().slice(0, 10);
-}
-
-function todayDateOnly() {
-    return new Date().toISOString().slice(0, 10);
-}
-
-function compareDateOnly(left, right) {
-    return String(left).localeCompare(String(right));
-}
-
-function addMonthsSafely(dateOnly, months) {
-    const [year, month, day] = String(dateOnly)
-        .split("-")
-        .map(Number);
-
-    const totalMonthIndex = month - 1 + Number(months);
-    const targetYear =
-        year + Math.floor(totalMonthIndex / 12);
-
-    const targetMonthIndex =
-        ((totalMonthIndex % 12) + 12) % 12;
-
-    const lastDayOfTargetMonth = new Date(
-        Date.UTC(targetYear, targetMonthIndex + 1, 0)
-    ).getUTCDate();
-
-    const targetDay = Math.min(day, lastDayOfTargetMonth);
-
-    return new Date(
-        Date.UTC(targetYear, targetMonthIndex, targetDay)
-    )
-        .toISOString()
-        .slice(0, 10);
-}
-
-function addDays(dateOnly, days) {
-    const date = new Date(
-        `${dateOnly}T00:00:00.000Z`
-    );
-
-    date.setUTCDate(date.getUTCDate() + Number(days));
-
-    return date.toISOString().slice(0, 10);
-}
-
-function moneyToCents(value) {
-    return Math.round(Number(value || 0) * 100);
-}
-
-async function getSubscriptionSummary(connection) {
-    const [[paymentCounts]] = await connection.execute(`
-        SELECT
-            SUM(
-                    CASE
-                        WHEN status = 'PENDING' THEN 1
-                        ELSE 0
-                        END
-            ) AS pending_verification,
-
-            SUM(
-                    CASE
-                        WHEN status = 'APPROVED' THEN 1
-                        ELSE 0
-                        END
-            ) AS approved_payments,
-
-            SUM(
-                    CASE
-                        WHEN status = 'REJECTED' THEN 1
-                        ELSE 0
-                        END
-            ) AS rejected_payments
-        FROM payment_submissions
-    `);
-
-    const [[subscriptionCounts]] = await connection.execute(`
-        SELECT
-            SUM(
-                    CASE
-                        WHEN status = 'ACTIVE'
-                            AND expiration_date >= CURDATE()
-                            THEN 1
-                        ELSE 0
-                        END
-            ) AS active_subscriptions,
-
-            SUM(
-                    CASE
-                        WHEN status = 'ACTIVE'
-                            AND expiration_date BETWEEN
-                                 CURDATE()
-                                 AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)
-                            THEN 1
-                        ELSE 0
-                        END
-            ) AS expiring_soon,
-
-            SUM(
-                    CASE
-                        WHEN status = 'EXPIRED'
-                            OR (
-                                 status = 'ACTIVE'
-                                     AND expiration_date IS NOT NULL
-                                     AND expiration_date < CURDATE()
-                                 )
-                            THEN 1
-                        ELSE 0
-                        END
-            ) AS expired_subscriptions
-        FROM business_subscriptions
-    `);
+    const pick = (candidates, required = true) => {
+        const found = candidates.find((candidate) => names.has(candidate));
+        if (!found && required) {
+            throw new Error(`payments table is missing a required column. Expected one of: ${candidates.join(", ")}`);
+        }
+        return found || null;
+    };
 
     return {
-        pending_verification: Number(
-            paymentCounts.pending_verification || 0
-        ),
-        active_subscriptions: Number(
-            subscriptionCounts.active_subscriptions || 0
-        ),
-        expiring_soon: Number(
-            subscriptionCounts.expiring_soon || 0
-        ),
-        expired_subscriptions: Number(
-            subscriptionCounts.expired_subscriptions || 0
-        ),
-        approved_payments: Number(
-            paymentCounts.approved_payments || 0
-        ),
-        rejected_payments: Number(
-            paymentCounts.rejected_payments || 0
-        ),
+        id: pick(["id", "payment_id"]),
+        storeId: pick(["store_id"]),
+        planId: pick(["plan_id", "requested_plan_id"]),
+        amount: pick(["amount", "amount_remitted", "amount_submitted"]),
+        reference: pick(["reference_no", "reference_number", "gcash_reference_no", "gcash_reference"]),
+        receipt: pick(["receipt_url", "proof_file_url", "receipt_file_url"], false),
+        status: pick(["status"]),
+        reviewer: pick(["reviewed_by_admin_id", "verified_by_admin_id", "reviewing_admin_id"], false),
+        createdAt: pick(["created_at", "submitted_at", "payment_date"], false),
+        reviewedAt: pick(["reviewed_at", "verified_at"], false),
     };
 }
 
-async function listPaymentSubmissions(
-    connection,
-    status,
-    search
-) {
-    const requestedStatus = String(
-        status || "PENDING"
-    ).toUpperCase();
-
+async function listPaymentSubmissions(connection, status, search) {
+    const c = await getPaymentColumns(connection);
     const filters = [];
     const values = [];
+    const requestedStatus = String(status || "PENDING").toUpperCase();
 
     if (requestedStatus !== "ALL") {
-        if (!PAYMENT_STATUSES.includes(requestedStatus)) {
-            throw httpError(
-                400,
-                "Invalid payment status filter."
-            );
-        }
-
-        filters.push("ps.status = ?");
+        if (!PAYMENT_STATUSES.includes(requestedStatus)) throw httpError(400, "Invalid payment status filter.");
+        filters.push(`UPPER(p.${c.status}) = ?`);
         values.push(requestedStatus);
     }
 
-    const cleanSearch = optionalTrimmedText(search, 120);
-
+    const cleanSearch = text(search, 120);
     if (cleanSearch) {
-        const likeValue = `%${cleanSearch}%`;
-
-        filters.push(`
-(
-    ps.store_name_snapshot LIKE ?
-    OR ps.owner_name_snapshot LIKE ?
-    OR ps.reference_number LIKE ?
-    OR ps.business_code_snapshot LIKE ?
-)
-`);
-
-        values.push(
-            likeValue,
-            likeValue,
-            likeValue,
-            likeValue
-        );
+        const like = `%${cleanSearch}%`;
+        filters.push(`(s.store_name LIKE ? OR s.owner_name LIKE ? OR s.email LIKE ? OR p.${c.reference} LIKE ?)`);
+        values.push(like, like, like, like);
     }
 
-    const whereClause = filters.length
-        ? `WHERE ${filters.join(" AND ")}`
-        : "";
+    const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    const createdSelect = c.createdAt ? `p.${c.createdAt}` : "NULL";
+    const receiptSelect = c.receipt ? `p.${c.receipt}` : "NULL";
+    const reviewerSelect = c.reviewer ? `p.${c.reviewer}` : "NULL";
+    const reviewedSelect = c.reviewedAt ? `p.${c.reviewedAt}` : "NULL";
 
     const [rows] = await connection.execute(
-        `
-            SELECT
-                ps.payment_submission_id,
-                ps.business_id,
-                ps.store_name_snapshot,
-                ps.owner_name_snapshot,
-                ps.business_code_snapshot,
-                ps.current_plan_name_snapshot,
-                ps.requested_plan_name_snapshot,
-                ps.required_amount,
-                ps.amount_submitted,
-                ps.reference_number,
-                ps.payment_date,
-                ps.proof_file_url,
-                ps.status,
-                ps.submitted_at,
-                ps.verified_at,
-                ps.rejection_reason,
-                ps.rejection_explanation,
-                pa.full_name AS verified_by
-            FROM payment_submissions ps
-                     LEFT JOIN platform_admins pa
-                               ON pa.platform_admin_id =
-                                  ps.verified_by_admin_id
-                ${whereClause}
-            ORDER BY
-                CASE ps.status
-                WHEN 'PENDING' THEN 1
-                WHEN 'APPROVED' THEN 2
-                WHEN 'REJECTED' THEN 3
-                ELSE 4
-            END,
-    ps.submitted_at DESC
-        `,
+        `SELECT
+             p.${c.id} AS payment_id,
+             p.${c.storeId} AS store_id,
+             p.${c.planId} AS requested_plan_id,
+             p.${c.amount} AS amount_submitted,
+             p.${c.reference} AS reference_number,
+             ${receiptSelect} AS receipt_url,
+             p.${c.status} AS raw_status,
+             ${createdSelect} AS submitted_at,
+             ${reviewedSelect} AS reviewed_at,
+             ${reviewerSelect} AS reviewed_by_admin_id,
+             s.store_name,
+             s.owner_name,
+             s.email AS owner_email,
+             pl.name AS requested_plan_name,
+             pl.price AS plan_price
+         FROM payments p
+                  INNER JOIN stores s ON s.id = p.${c.storeId}
+                  LEFT JOIN plans pl ON pl.id = p.${c.planId}
+             ${where}
+         ORDER BY
+             CASE UPPER(p.${c.status}) WHEN 'PENDING' THEN 1 WHEN 'APPROVED' THEN 2 WHEN 'REJECTED' THEN 3 ELSE 4 END,
+        ${createdSelect} DESC,
+        p.${c.id} DESC`,
         values
     );
 
-    return rows;
+    return rows.map((row) => ({
+        payment_submission_id: Number(row.payment_id),
+        business_id: Number(row.store_id),
+        store_id: Number(row.store_id),
+        store_name_snapshot: row.store_name,
+        owner_name_snapshot: row.owner_name,
+        owner_email: row.owner_email,
+        business_code_snapshot: null,
+        current_plan_id: null,
+        requested_plan_id: row.requested_plan_id == null ? null : Number(row.requested_plan_id),
+        current_plan_name_snapshot: null,
+        requested_plan_name_snapshot: row.requested_plan_name || "Unknown Plan",
+        required_amount: Number(row.plan_price || 0),
+        amount_submitted: Number(row.amount_submitted || 0),
+        reference_number: row.reference_number,
+        payment_date: row.submitted_at,
+        proof_file_url: row.receipt_url,
+        status: normalizeStatus(row.raw_status),
+        submitted_at: row.submitted_at,
+        verified_at: row.reviewed_at,
+        verified_by: null,
+        rejection_reason: null,
+        rejection_explanation: null,
+        billing_period: "MONTHLY",
+    }));
 }
 
-async function getPaymentSubmission(
-    connection,
-    paymentSubmissionId
-) {
+async function getPaymentSubmission(connection, paymentId) {
+    const c = await getPaymentColumns(connection);
+    const createdSelect = c.createdAt ? `p.${c.createdAt}` : "NULL";
+    const receiptSelect = c.receipt ? `p.${c.receipt}` : "NULL";
+    const reviewerSelect = c.reviewer ? `p.${c.reviewer}` : "NULL";
+    const reviewedSelect = c.reviewedAt ? `p.${c.reviewedAt}` : "NULL";
+
     const [rows] = await connection.execute(
-        `
-            SELECT
-                ps.*,
-                pa.full_name AS verified_by,
-                bs.subscription_id,
-                bs.status AS subscription_status,
-                bs.start_date,
-                bs.expiration_date,
-                sp.plan_name AS requested_plan_name,
-                'MONTHLY' AS billing_period
-            FROM payment_submissions ps
-                     LEFT JOIN platform_admins pa
-                               ON pa.platform_admin_id =
-                                  ps.verified_by_admin_id
-                     LEFT JOIN business_subscriptions bs
-                               ON bs.business_id = ps.business_id
-                     LEFT JOIN subscription_plans sp
-                               ON sp.id = ps.requested_plan_id
-            WHERE ps.payment_submission_id = ?
-                LIMIT 1
-        `,
-        [paymentSubmissionId]
+        `SELECT
+             p.${c.id} AS payment_id,
+             p.${c.storeId} AS store_id,
+             p.${c.planId} AS requested_plan_id,
+             p.${c.amount} AS amount_submitted,
+             p.${c.reference} AS reference_number,
+             ${receiptSelect} AS receipt_url,
+             p.${c.status} AS raw_status,
+             ${createdSelect} AS submitted_at,
+             ${reviewedSelect} AS reviewed_at,
+             ${reviewerSelect} AS reviewed_by_admin_id,
+             s.store_name,
+             s.owner_name,
+             s.email AS owner_email,
+             pl.name AS requested_plan_name,
+             pl.price AS plan_price,
+             sub.id AS subscription_id,
+             sub.status AS subscription_status,
+             sub.started_at,
+             sub.expires_at,
+             cur.name AS current_plan_name,
+             cur.id AS current_plan_id
+         FROM payments p
+                  INNER JOIN stores s ON s.id = p.${c.storeId}
+                  LEFT JOIN plans pl ON pl.id = p.${c.planId}
+                  LEFT JOIN subscriptions sub ON sub.store_id = s.id
+                  LEFT JOIN plans cur ON cur.id = sub.plan_id
+         WHERE p.${c.id} = ?
+             LIMIT 1`,
+        [paymentId]
     );
 
-    if (!rows[0]) {
-        throw httpError(
-            404,
-            "Payment submission not found."
-        );
-    }
+    if (!rows[0]) throw httpError(404, "Payment not found.");
+    const row = rows[0];
 
-    return rows[0];
+    return {
+        payment_submission_id: Number(row.payment_id),
+        business_id: Number(row.store_id),
+        store_id: Number(row.store_id),
+        store_name_snapshot: row.store_name,
+        owner_name_snapshot: row.owner_name,
+        owner_email: row.owner_email,
+        requested_plan_id: Number(row.requested_plan_id),
+        requested_plan_name_snapshot: row.requested_plan_name || "Unknown Plan",
+        required_amount: Number(row.plan_price || 0),
+        amount_submitted: Number(row.amount_submitted || 0),
+        reference_number: row.reference_number,
+        proof_file_url: row.receipt_url,
+        status: normalizeStatus(row.raw_status),
+        submitted_at: row.submitted_at,
+        verified_at: row.reviewed_at,
+        verified_by_admin_id: row.reviewed_by_admin_id,
+        current_plan_id: row.current_plan_id,
+        current_plan_name_snapshot: row.current_plan_name,
+        subscription_id: row.subscription_id == null ? null : Number(row.subscription_id),
+        subscription_status: row.subscription_status ? displaySubscriptionStatus(row.subscription_status, row.expires_at) : null,
+        start_date: row.started_at,
+        expiration_date: row.expires_at,
+        billing_period: "MONTHLY",
+    };
 }
 
-async function getBusinessSubscription(connection, businessId) {
-    const [subscriptionRows] = await connection.execute(
-        `
-            SELECT
-                bs.subscription_id,
-                bs.business_id,
-                bs.status,
-                bs.start_date,
-                bs.expiration_date,
-                sp.id AS plan_id,
-                sp.plan_name,
-                sp.monthly_price AS price,
-                'MONTHLY' AS billing_period,
-                0 AS inventory_limit,
-                sp.booking_limit AS monthly_booking_limit,
-                0 AS staff_limit,
-                0 AS reports_enabled,
-                0 AS analytics_enabled,
-                0 AS forecasting_enabled
-            FROM business_subscriptions bs
-                     INNER JOIN subscription_plans sp
-                                ON sp.id = bs.plan_id
-            WHERE bs.business_id = ?
-                LIMIT 1
-        `,
-        [businessId]
+async function getSubscriptionSummary(connection) {
+    const c = await getPaymentColumns(connection);
+    const [paymentRows] = await connection.execute(
+        `SELECT
+             SUM(CASE WHEN UPPER(${c.status}) = 'PENDING' THEN 1 ELSE 0 END) AS pending_verification,
+             SUM(CASE WHEN UPPER(${c.status}) = 'APPROVED' THEN 1 ELSE 0 END) AS approved_payments,
+             SUM(CASE WHEN UPPER(${c.status}) = 'REJECTED' THEN 1 ELSE 0 END) AS rejected_payments
+         FROM payments`
     );
 
-    const subscription = subscriptionRows[0] || null;
-
-    const [latestPaymentRows] = await connection.execute(
-        `
-            SELECT
-                ps.payment_submission_id,
-                ps.status,
-                ps.reference_number,
-                ps.requested_plan_name_snapshot,
-                ps.submitted_at,
-                ps.verified_at,
-                ps.rejection_reason,
-                pa.full_name AS verified_by
-            FROM payment_submissions ps
-                     LEFT JOIN platform_admins pa
-                               ON pa.platform_admin_id =
-                                  ps.verified_by_admin_id
-            WHERE ps.business_id = ?
-            ORDER BY ps.submitted_at DESC
-                LIMIT 1
-        `,
-        [businessId]
+    const [subscriptionRows] = await connection.execute(
+        `SELECT
+             SUM(CASE WHEN LOWER(status) <> 'cancelled' AND expires_at >= CURDATE() THEN 1 ELSE 0 END) AS active_subscriptions,
+             SUM(CASE WHEN LOWER(status) <> 'cancelled' AND expires_at BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS expiring_soon,
+             SUM(CASE WHEN LOWER(status) = 'expired' OR (LOWER(status) = 'active' AND expires_at < CURDATE()) THEN 1 ELSE 0 END) AS expired_subscriptions
+         FROM subscriptions`
     );
 
     return {
-        subscription,
-        latest_payment: latestPaymentRows[0] || null,
+        pending_verification: Number(paymentRows[0]?.pending_verification || 0),
+        active_subscriptions: Number(subscriptionRows[0]?.active_subscriptions || 0),
+        expiring_soon: Number(subscriptionRows[0]?.expiring_soon || 0),
+        expired_subscriptions: Number(subscriptionRows[0]?.expired_subscriptions || 0),
+        approved_payments: Number(paymentRows[0]?.approved_payments || 0),
+        rejected_payments: Number(paymentRows[0]?.rejected_payments || 0),
     };
 }
 
 async function listBusinesses(connection, search) {
-    const cleanSearch = optionalTrimmedText(search, 120);
+    const c = await getPaymentColumns(connection);
     const values = [];
-    let searchFilter = "";
+    let where = "";
+    const cleanSearch = text(search, 120);
 
     if (cleanSearch) {
-        const likeValue = `%${cleanSearch}%`;
-
-        searchFilter = `
-WHERE (
-    latest_payment.store_name_snapshot LIKE ?
-    OR latest_payment.owner_name_snapshot LIKE ?
-    OR latest_payment.business_code_snapshot LIKE ?
-)
-`;
-
-        values.push(likeValue, likeValue, likeValue);
+        const like = `%${cleanSearch}%`;
+        where = `WHERE (s.store_name LIKE ? OR s.owner_name LIKE ? OR s.email LIKE ?)`;
+        values.push(like, like, like);
     }
 
     const [rows] = await connection.execute(
-        `
-            SELECT
-                latest_payment.business_id,
-                latest_payment.store_name_snapshot,
-                latest_payment.owner_name_snapshot,
-                latest_payment.business_code_snapshot,
-                bs.subscription_id,
-                bs.status AS subscription_status,
-                bs.start_date,
-                bs.expiration_date,
-                sp.plan_name,
-                latest_payment.status AS latest_payment_status,
-                latest_payment.reference_number AS latest_reference_number,
-                latest_payment.verified_at,
-                pa.full_name AS verified_by
-            FROM (
-                     SELECT ps1.*
-                     FROM payment_submissions ps1
-                              INNER JOIN (
-                         SELECT
-                             business_id,
-                             MAX(payment_submission_id)
-                                 AS latest_payment_submission_id
-                         FROM payment_submissions
-                         GROUP BY business_id
-                     ) latest
-                                         ON latest.latest_payment_submission_id =
-                                            ps1.payment_submission_id
-                 ) latest_payment
-                     LEFT JOIN business_subscriptions bs
-                               ON bs.business_id = latest_payment.business_id
-                     LEFT JOIN subscription_plans sp
-                               ON sp.id = bs.plan_id
-                     LEFT JOIN platform_admins pa
-                               ON pa.platform_admin_id =
-                                  latest_payment.verified_by_admin_id
-                ${searchFilter}
-            ORDER BY latest_payment.store_name_snapshot ASC
-        `,
+        `SELECT
+             s.id AS business_id,
+             s.store_name,
+             s.owner_name,
+             s.email AS owner_email,
+             s.status AS store_status,
+             s.last_active_at,
+             sub.id AS subscription_id,
+             sub.status AS raw_subscription_status,
+             sub.started_at,
+             sub.expires_at,
+             sub.auto_renew,
+             pl.id AS plan_id,
+             pl.name AS plan_name,
+             COALESCE((SELECT SUM(p2.${c.amount}) FROM payments p2 WHERE p2.${c.storeId} = s.id AND UPPER(p2.${c.status}) = 'APPROVED'), 0) AS lifetime_paid,
+             (SELECT COUNT(*) FROM products prod WHERE prod.store_id = s.id) AS inventory_item_count
+         FROM stores s
+                  LEFT JOIN subscriptions sub ON sub.store_id = s.id
+                  LEFT JOIN plans pl ON pl.id = sub.plan_id
+             ${where}
+         ORDER BY s.store_name ASC`,
         values
     );
 
-    return rows;
+    return rows.map((row) => ({
+        business_id: Number(row.business_id),
+        store_id: Number(row.business_id),
+        store_name_snapshot: row.store_name,
+        owner_name_snapshot: row.owner_name,
+        owner_email: row.owner_email,
+        business_code_snapshot: null,
+        store_status: String(row.store_status || "").toUpperCase(),
+        subscription_id: row.subscription_id == null ? null : Number(row.subscription_id),
+        subscription_status: row.subscription_id == null ? null : displaySubscriptionStatus(row.raw_subscription_status, row.expires_at),
+        start_date: row.started_at,
+        expiration_date: row.expires_at,
+        auto_renew: Boolean(row.auto_renew),
+        plan_id: row.plan_id == null ? null : Number(row.plan_id),
+        plan_name: row.plan_name,
+        latest_payment_status: null,
+        latest_reference_number: null,
+        verified_at: null,
+        verified_by: null,
+        last_active_at: row.last_active_at,
+        lifetime_paid: Number(row.lifetime_paid || 0),
+    }));
+}
+
+async function listSubscriptions(connection, search, statusFilter) {
+    const values = [];
+    const filters = [];
+    const cleanSearch = text(search, 120);
+
+    if (cleanSearch) {
+        const like = `%${cleanSearch}%`;
+        filters.push("(s.store_name LIKE ? OR s.owner_name LIKE ? OR s.email LIKE ?)");
+        values.push(like, like, like);
+    }
+
+    const status = String(statusFilter || "ALL").toUpperCase();
+    if (status !== "ALL") {
+        if (!SUBSCRIPTION_STATUSES.includes(status)) throw httpError(400, "Invalid subscription status filter.");
+        if (status === "EXPIRED") {
+            filters.push("(LOWER(sub.status) = 'expired' OR (LOWER(sub.status) = 'active' AND sub.expires_at < CURDATE()))");
+        } else if (status === "EXPIRING") {
+            filters.push("LOWER(sub.status) <> 'cancelled' AND sub.expires_at BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)");
+        } else {
+            filters.push("LOWER(sub.status) = ?");
+            values.push(status.toLowerCase());
+        }
+    }
+
+    const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    const [rows] = await connection.execute(
+        `SELECT
+             sub.id AS subscription_id,
+             sub.store_id,
+             sub.plan_id,
+             sub.status AS raw_status,
+             sub.auto_renew,
+             sub.started_at,
+             sub.expires_at,
+             sub.created_at,
+             s.store_name,
+             s.owner_name,
+             s.email AS owner_email,
+             s.status AS store_status,
+             pl.name AS plan_name,
+             pl.price AS plan_price,
+             (SELECT COUNT(*) FROM subscription_history sh WHERE sh.subscription_id = sub.id) AS history_count
+         FROM subscriptions sub
+                  INNER JOIN stores s ON s.id = sub.store_id
+                  INNER JOIN plans pl ON pl.id = sub.plan_id
+             ${where}
+         ORDER BY sub.expires_at ASC, s.store_name ASC`,
+        values
+    );
+
+    return rows.map((row) => ({
+        subscription_id: Number(row.subscription_id),
+        business_id: Number(row.store_id),
+        store_id: Number(row.store_id),
+        store_name: row.store_name,
+        owner_name: row.owner_name,
+        owner_email: row.owner_email,
+        plan_id: Number(row.plan_id),
+        plan_name: row.plan_name,
+        plan_price: Number(row.plan_price || 0),
+        status: displaySubscriptionStatus(row.raw_status, row.expires_at),
+        auto_renew: Boolean(row.auto_renew),
+        started_at: row.started_at,
+        expires_at: row.expires_at,
+        created_at: row.created_at,
+        history_count: Number(row.history_count || 0),
+        store_status: String(row.store_status || "").toUpperCase(),
+    }));
+}
+
+async function getSubscriptionHistory(connection, subscriptionId) {
+    const [rows] = await connection.execute(
+        `SELECT
+             sh.id,
+             sh.subscription_id,
+             sh.store_id,
+             sh.old_plan_id,
+             old_plan.name AS old_plan_name,
+             sh.new_plan_id,
+             new_plan.name AS new_plan_name,
+             sh.change_type,
+             sh.changed_by,
+             pa.full_name AS changed_by_name,
+             sh.created_at
+         FROM subscription_history sh
+                  LEFT JOIN plans old_plan ON old_plan.id = sh.old_plan_id
+                  LEFT JOIN plans new_plan ON new_plan.id = sh.new_plan_id
+                  LEFT JOIN platform_admins pa ON pa.platform_admin_id = sh.changed_by
+         WHERE sh.subscription_id = ?
+         ORDER BY sh.created_at DESC, sh.id DESC`,
+        [subscriptionId]
+    );
+    return rows.map((row) => ({
+        id: Number(row.id),
+        subscription_id: Number(row.subscription_id),
+        store_id: Number(row.store_id),
+        old_plan_id: row.old_plan_id == null ? null : Number(row.old_plan_id),
+        old_plan_name: row.old_plan_name || "—",
+        new_plan_id: row.new_plan_id == null ? null : Number(row.new_plan_id),
+        new_plan_name: row.new_plan_name || "—",
+        change_type: row.change_type,
+        changed_by: row.changed_by == null ? null : Number(row.changed_by),
+        changed_by_name: row.changed_by_name || "System",
+        created_at: row.created_at,
+    }));
 }
 
 async function listAuditLogs(connection, businessId) {
-    const filters = [];
     const values = [];
-
-    if (businessId) {
-        filters.push("sal.business_id = ?");
-        values.push(
-            requireNumber(businessId, "business_id")
-        );
-    }
-
-    const whereClause = filters.length
-        ? `WHERE ${filters.join(" AND ")}`
-        : "";
+    const where = businessId ? "WHERE sal.business_id = ?" : "";
+    if (businessId) values.push(positiveId(businessId, "business_id"));
 
     const [rows] = await connection.execute(
-        `
-            SELECT
-                sal.audit_log_id,
-                sal.business_id,
-                sal.subscription_id,
-                sal.payment_submission_id,
-                sal.action,
-                sal.previous_status,
-                sal.new_status,
-                sal.reason,
-                sal.created_at,
-                pa.full_name AS performed_by
-            FROM subscription_audit_logs sal
-                     LEFT JOIN platform_admins pa
-                               ON pa.platform_admin_id =
-                                  sal.performed_by_admin_id
-                ${whereClause}
-            ORDER BY sal.created_at DESC
-                LIMIT 200
-        `,
+        `SELECT
+             sal.audit_log_id,
+             sal.business_id,
+             sal.subscription_id,
+             sal.payment_submission_id,
+             sal.action,
+             sal.previous_status,
+             sal.new_status,
+             sal.performed_by_admin_id,
+             sal.reason,
+             sal.created_at,
+             pa.full_name AS performed_by
+         FROM subscription_audit_logs sal
+                  LEFT JOIN platform_admins pa ON pa.platform_admin_id = sal.performed_by_admin_id
+             ${where}
+         ORDER BY sal.created_at DESC, sal.audit_log_id DESC
+             LIMIT 200`,
         values
     );
 
-    return rows;
+    return rows.map((row) => ({
+        audit_log_id: Number(row.audit_log_id),
+        business_id: Number(row.business_id),
+        subscription_id: row.subscription_id == null ? null : Number(row.subscription_id),
+        payment_submission_id: row.payment_submission_id == null ? null : Number(row.payment_submission_id),
+        action: row.action,
+        previous_status: row.previous_status,
+        new_status: row.new_status,
+        reason: row.reason,
+        created_at: row.created_at,
+        performed_by: row.performed_by,
+    }));
 }
 
-async function approvePaymentSubmission(
-    connection,
-    paymentSubmissionId,
-    admin
-) {
+async function getPlans(connection) {
+    const [rows] = await connection.execute(
+        `SELECT
+             p.id,
+             p.name,
+             p.price,
+             p.max_inventory,
+             p.max_bookings,
+             p.max_staff,
+             p.max_branches,
+             p.is_archived,
+             p.created_at,
+             p.has_low_stock_alerts,
+             p.has_analytics,
+             p.has_forecasting,
+             p.has_multi_store,
+             (SELECT COUNT(*) FROM subscriptions s WHERE s.plan_id = p.id AND LOWER(s.status) <> 'cancelled' AND s.expires_at >= CURDATE()) AS active_subscribers
+         FROM plans p
+         ORDER BY p.is_archived ASC, p.price ASC, p.id ASC`
+    );
+
+    return rows.map((row) => ({
+        id: Number(row.id),
+        name: row.name,
+        price: Number(row.price || 0),
+        max_inventory: row.max_inventory == null || Number(row.max_inventory) === 0 ? null : Number(row.max_inventory),
+        max_bookings: row.max_bookings == null || Number(row.max_bookings) === 0 ? null : Number(row.max_bookings),
+        max_staff: row.max_staff == null || Number(row.max_staff) === 0 ? null : Number(row.max_staff),
+        max_branches: row.max_branches == null || Number(row.max_branches) === 0 ? null : Number(row.max_branches),
+        is_archived: Boolean(row.is_archived),
+        created_at: row.created_at,
+        has_low_stock_alerts: Boolean(row.has_low_stock_alerts),
+        has_analytics: Boolean(row.has_analytics),
+        has_forecasting: Boolean(row.has_forecasting),
+        has_multi_store: Boolean(row.has_multi_store),
+        active_subscribers: Number(row.active_subscribers || 0),
+    }));
+}
+
+function normalizeLimit(value, label) {
+    if (value === null || value === undefined || value === "") return 0;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 0) throw httpError(400, `${label} must be a non-negative integer or unlimited.`);
+    return parsed;
+}
+
+async function createPlan(connection, body) {
+    const name = requiredText(body.name, "Plan name", 100);
+    const price = Number(body.price);
+    if (!Number.isFinite(price) || price < 0) throw httpError(400, "Price must be a non-negative number.");
+
+    const limits = {
+        max_inventory: normalizeLimit(body.max_inventory, "Maximum inventory"),
+        max_bookings: normalizeLimit(body.max_bookings, "Maximum bookings"),
+        max_staff: normalizeLimit(body.max_staff, "Maximum staff"),
+        max_branches: normalizeLimit(body.max_branches, "Maximum branches"),
+    };
+
+    const [result] = await connection.execute(
+        `INSERT INTO plans
+         (name, price, max_inventory, max_bookings, max_staff, max_branches,
+          is_archived, has_low_stock_alerts, has_analytics, has_forecasting, has_multi_store)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+        [
+            name,
+            price,
+            limits.max_inventory,
+            limits.max_bookings,
+            limits.max_staff,
+            limits.max_branches,
+            body.has_low_stock_alerts ? 1 : 0,
+            body.has_analytics ? 1 : 0,
+            body.has_forecasting ? 1 : 0,
+            body.has_multi_store ? 1 : 0,
+        ]
+    );
+
+    return { message: "Plan created.", plan_id: Number(result.insertId) };
+}
+
+async function updatePlan(connection, body) {
+    const planId = positiveId(body.plan_id, "plan_id");
+    const name = requiredText(body.name, "Plan name", 100);
+    const price = Number(body.price);
+    if (!Number.isFinite(price) || price < 0) throw httpError(400, "Price must be a non-negative number.");
+
+    const limits = {
+        max_inventory: normalizeLimit(body.max_inventory, "Maximum inventory"),
+        max_bookings: normalizeLimit(body.max_bookings, "Maximum bookings"),
+        max_staff: normalizeLimit(body.max_staff, "Maximum staff"),
+        max_branches: normalizeLimit(body.max_branches, "Maximum branches"),
+    };
+
+    const [result] = await connection.execute(
+        `UPDATE plans SET
+                          name = ?, price = ?, max_inventory = ?, max_bookings = ?, max_staff = ?, max_branches = ?,
+                          has_low_stock_alerts = ?, has_analytics = ?, has_forecasting = ?, has_multi_store = ?
+         WHERE id = ?`,
+        [
+            name,
+            price,
+            limits.max_inventory,
+            limits.max_bookings,
+            limits.max_staff,
+            limits.max_branches,
+            body.has_low_stock_alerts ? 1 : 0,
+            body.has_analytics ? 1 : 0,
+            body.has_forecasting ? 1 : 0,
+            body.has_multi_store ? 1 : 0,
+            planId,
+        ]
+    );
+
+    if (!result.affectedRows) throw httpError(404, "Plan not found.");
+    return { message: "Plan updated.", plan_id: planId };
+}
+
+async function setPlanArchived(connection, planId, archived) {
+    planId = positiveId(planId, "plan_id");
+    const [result] = await connection.execute(
+        "UPDATE plans SET is_archived = ? WHERE id = ?",
+        [archived ? 1 : 0, planId]
+    );
+    if (!result.affectedRows) throw httpError(404, "Plan not found.");
+    return { message: archived ? "Plan archived." : "Plan restored.", plan_id: planId };
+}
+
+async function approvePayment(connection, paymentId, admin) {
+    const c = await getPaymentColumns(connection);
     await connection.beginTransaction();
 
     try {
         const [paymentRows] = await connection.execute(
-            `
-                SELECT *
-                FROM payment_submissions
-                WHERE payment_submission_id = ?
-                    FOR UPDATE
-            `,
-            [paymentSubmissionId]
+            `SELECT p.*, pl.name AS plan_name, pl.price AS plan_price, s.store_name
+             FROM payments p
+                      INNER JOIN plans pl ON pl.id = p.${c.planId}
+                      INNER JOIN stores s ON s.id = p.${c.storeId}
+             WHERE p.${c.id} = ?
+                 FOR UPDATE`,
+            [paymentId]
         );
-
         const payment = paymentRows[0];
+        if (!payment) throw httpError(404, "Payment not found.");
+        if (normalizeStatus(payment[c.status]) !== "PENDING") throw httpError(409, "Only pending payments can be approved.");
 
-        if (!payment) {
-            throw httpError(
-                404,
-                "Payment submission not found."
-            );
+        const [planRows] = await connection.execute("SELECT * FROM plans WHERE id = ? LIMIT 1", [payment[c.planId]]);
+        const plan = planRows[0];
+        if (!plan || Number(plan.is_archived) === 1) throw httpError(409, "The requested plan is unavailable or archived.");
+
+        if (moneyCents(payment[c.amount]) !== moneyCents(plan.price)) {
+            throw httpError(409, "Submitted amount does not match the current plan price.");
         }
 
-        if (payment.status !== "PENDING") {
-            throw httpError(
-                409,
-                "Only pending payments can be approved."
-            );
-        }
-
-        if (
-            moneyToCents(payment.amount_submitted) !==
-            moneyToCents(payment.required_amount)
-        ) {
-            throw httpError(
-                409,
-                "Submitted amount does not match the required payment amount."
-            );
-        }
-
-        const [duplicateReferenceRows] =
-            await connection.execute(
-                `
-                    SELECT payment_submission_id
-                    FROM payment_submissions
-                    WHERE reference_number = ?
-                      AND status = 'APPROVED'
-                      AND payment_submission_id <> ?
-                        LIMIT 1
-                `,
-                [
-                    payment.reference_number,
-                    paymentSubmissionId,
-                ]
-            );
-
-        if (duplicateReferenceRows.length > 0) {
-            throw httpError(
-                409,
-                "This reference number is already used by an approved payment."
-            );
-        }
+        const [duplicates] = await connection.execute(
+            `SELECT ${c.id} AS payment_id FROM payments
+             WHERE ${c.reference} = ? AND UPPER(${c.status}) = 'APPROVED' AND ${c.id} <> ?
+                 LIMIT 1`,
+            [payment[c.reference], paymentId]
+        );
+        if (duplicates.length) throw httpError(409, "This reference number is already used by an approved payment.");
 
         const [subscriptionRows] = await connection.execute(
-            `
-                SELECT *
-                FROM business_subscriptions
-                WHERE business_id = ?
-                    FOR UPDATE
-            `,
-            [payment.business_id]
+            `SELECT * FROM subscriptions WHERE store_id = ? LIMIT 1 FOR UPDATE`,
+            [payment[c.storeId]]
         );
-
-        const existingSubscription =
-            subscriptionRows[0] || null;
-
-        const approvalDate = todayDateOnly();
-
-        const isPlanChange =
-            !existingSubscription ||
-            Number(existingSubscription.plan_id) !==
-            Number(payment.requested_plan_id);
-
-        let startDate;
-        let expirationDate;
+        const existing = subscriptionRows[0] || null;
+        const approvalDate = today();
+        let startDate = approvalDate;
+        let expiresAt = addMonths(approvalDate, 1);
         let subscriptionId;
+        let previousStatus = "FREE";
+        let oldPlanId = null;
+        let changeType = "upgrade";
 
-        const previousStatus =
-            existingSubscription?.status || "FREE";
+        if (existing) {
+            previousStatus = normalizeStatus(existing.status);
+            oldPlanId = Number(existing.plan_id);
+            const samePlan = oldPlanId === Number(payment[c.planId]);
+            const existingExpiry = existing.expires_at ? normalizeDate(existing.expires_at) : null;
+            const usableCurrentPeriod = samePlan && normalizeStatus(existing.status) !== "CANCELLED" && existingExpiry && existingExpiry >= approvalDate;
 
-        if (isPlanChange) {
-            startDate = approvalDate;
-            expirationDate = addMonthsSafely(
-                approvalDate,
-                1
-            );
-        } else if (
-            existingSubscription.status === "ACTIVE" &&
-            existingSubscription.expiration_date &&
-            compareDateOnly(
-                normalizeDateOnly(
-                    existingSubscription.expiration_date
-                ),
-                approvalDate
-            ) >= 0
-        ) {
-            startDate = normalizeDateOnly(
-                existingSubscription.start_date
-            );
+            if (usableCurrentPeriod) {
+                startDate = normalizeDate(existing.started_at) || approvalDate;
+                expiresAt = addMonths(existingExpiry, 1);
+                changeType = "renewal";
+            } else {
+                startDate = approvalDate;
+                expiresAt = addMonths(approvalDate, 1);
+                changeType = changeTypeForPlanChange(oldPlanId, payment[c.planId]);
+            }
 
-            expirationDate = addMonthsSafely(
-                normalizeDateOnly(
-                    existingSubscription.expiration_date
-                ),
-                1
-            );
-        } else {
-            startDate = approvalDate;
-            expirationDate = addMonthsSafely(
-                approvalDate,
-                1
-            );
-        }
-
-        if (existingSubscription) {
             await connection.execute(
-                `
-                    UPDATE business_subscriptions
-                    SET
-                        plan_id = ?,
-                        status = 'ACTIVE',
-                        start_date = ?,
-                        expiration_date = ?,
-                        updated_at = NOW()
-                    WHERE subscription_id = ?
-                `,
-                [
-                    payment.requested_plan_id,
-                    startDate,
-                    expirationDate,
-                    existingSubscription.subscription_id,
-                ]
+                `UPDATE subscriptions
+                 SET plan_id = ?, status = 'active', auto_renew = auto_renew, started_at = ?, expires_at = ?
+                 WHERE id = ?`,
+                [payment[c.planId], startDate, expiresAt, existing.id]
             );
-
-            subscriptionId =
-                existingSubscription.subscription_id;
+            subscriptionId = Number(existing.id);
         } else {
-            const [insertResult] = await connection.execute(
-                `
-                    INSERT INTO business_subscriptions (
-                        business_id,
-                        plan_id,
-                        status,
-                        start_date,
-                        expiration_date
-                    )
-                    VALUES (?, ?, 'ACTIVE', ?, ?)
-                `,
-                [
-                    payment.business_id,
-                    payment.requested_plan_id,
-                    startDate,
-                    expirationDate,
-                ]
+            const [result] = await connection.execute(
+                `INSERT INTO subscriptions (store_id, plan_id, status, auto_renew, started_at, expires_at)
+                 VALUES (?, ?, 'active', 0, ?, ?)`,
+                [payment[c.storeId], payment[c.planId], startDate, expiresAt]
             );
-
-            subscriptionId = insertResult.insertId;
+            subscriptionId = Number(result.insertId);
         }
 
         await connection.execute(
-            `
-                UPDATE payment_submissions
-                SET
-                    status = 'APPROVED',
-                    verified_by_admin_id = ?,
-                    verified_at = NOW(),
-                    rejection_reason = NULL,
-                    rejection_explanation = NULL,
-                    updated_at = NOW()
-                WHERE payment_submission_id = ?
-            `,
-            [admin.platform_admin_id, paymentSubmissionId]
+            `UPDATE payments SET
+                ${c.status} = 'approved'
+                ${c.reviewer ? `, ${c.reviewer} = ?` : ""}
+                ${c.reviewedAt ? `, ${c.reviewedAt} = NOW()` : ""}
+             WHERE ${c.id} = ?`,
+            c.reviewer ? [admin.platform_admin_id, paymentId] : [paymentId]
         );
 
         await connection.execute(
-            `
-                INSERT INTO subscription_audit_logs (
-                    business_id,
-                    subscription_id,
-                    payment_submission_id,
-                    action,
-                    previous_status,
-                    new_status,
-                    performed_by_admin_id,
-                    reason
-                )
-                VALUES (?, ?, ?, 'PAYMENT_APPROVED', ?, 'ACTIVE', ?, ?)
-            `,
+            `INSERT INTO subscription_history
+             (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [subscriptionId, payment[c.storeId], oldPlanId, payment[c.planId], changeType, admin.platform_admin_id]
+        );
+
+        await connection.execute(
+            `INSERT INTO subscription_audit_logs
+             (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
+             VALUES (?, ?, ?, 'PAYMENT_APPROVED', ?, 'ACTIVE', ?, ?)`,
             [
-                payment.business_id,
+                payment[c.storeId],
                 subscriptionId,
-                paymentSubmissionId,
+                paymentId,
                 previousStatus,
                 admin.platform_admin_id,
-                `Approved ${payment.requested_plan_name_snapshot} plan payment.`,
-            ]
-        );
-
-        await connection.execute(
-            `
-                INSERT INTO subscription_notifications (
-                    business_id,
-                    recipient_role,
-                    notification_type,
-                    title,
-                    message,
-                    related_payment_submission_id
-                )
-                VALUES (?, 'OWNER', 'PAYMENT_APPROVED', ?, ?, ?)
-            `,
-            [
-                payment.business_id,
-                "Payment Approved",
-                `The ${payment.requested_plan_name_snapshot} Plan has been activated for ${payment.store_name_snapshot}. Start Date: ${startDate}. Expiration Date: ${expirationDate}.`,
-                paymentSubmissionId,
+                `Approved ${payment.plan_name} plan payment.`,
             ]
         );
 
         await connection.commit();
-
         return {
             message: "Payment Approved",
-            store_name: payment.store_name_snapshot,
-            plan_name: payment.requested_plan_name_snapshot,
+            store_name: payment.store_name,
+            plan_name: payment.plan_name,
             start_date: startDate,
-            expiration_date: expirationDate,
+            expiration_date: expiresAt,
         };
     } catch (error) {
         await connection.rollback();
@@ -894,533 +890,379 @@ async function approvePaymentSubmission(
     }
 }
 
-async function rejectPaymentSubmission(
-    connection,
-    paymentSubmissionId,
-    admin,
-    rejectionReason,
-    rejectionExplanation
-) {
-    if (!REJECTION_REASONS.includes(rejectionReason)) {
-        throw httpError(
-            400,
-            "Select a valid rejection reason."
-        );
-    }
-
+async function rejectPayment(connection, paymentId, admin, rejectionReason, explanation) {
+    if (!REJECTION_REASONS.includes(rejectionReason)) throw httpError(400, "Select a valid rejection reason.");
+    const c = await getPaymentColumns(connection);
     await connection.beginTransaction();
 
     try {
-        const [paymentRows] = await connection.execute(
-            `
-                SELECT *
-                FROM payment_submissions
-                WHERE payment_submission_id = ?
-                    FOR UPDATE
-            `,
-            [paymentSubmissionId]
+        const [rows] = await connection.execute(
+            `SELECT p.*, s.store_name, pl.name AS plan_name
+             FROM payments p
+                      INNER JOIN stores s ON s.id = p.${c.storeId}
+                      LEFT JOIN plans pl ON pl.id = p.${c.planId}
+             WHERE p.${c.id} = ?
+                 FOR UPDATE`,
+            [paymentId]
         );
-
-        const payment = paymentRows[0];
-
-        if (!payment) {
-            throw httpError(
-                404,
-                "Payment submission not found."
-            );
-        }
-
-        if (payment.status !== "PENDING") {
-            throw httpError(
-                409,
-                "Only pending payments can be rejected."
-            );
-        }
+        const payment = rows[0];
+        if (!payment) throw httpError(404, "Payment not found.");
+        if (normalizeStatus(payment[c.status]) !== "PENDING") throw httpError(409, "Only pending payments can be rejected.");
 
         await connection.execute(
-            `
-                UPDATE payment_submissions
-                SET
-                    status = 'REJECTED',
-                    verified_by_admin_id = ?,
-                    verified_at = NOW(),
-                    rejection_reason = ?,
-                    rejection_explanation = ?,
-                    updated_at = NOW()
-                WHERE payment_submission_id = ?
-            `,
-            [
-                admin.platform_admin_id,
-                rejectionReason,
-                rejectionExplanation || null,
-                paymentSubmissionId,
-            ]
+            `UPDATE payments SET
+                ${c.status} = 'rejected'
+                ${c.reviewer ? `, ${c.reviewer} = ?` : ""}
+                ${c.reviewedAt ? `, ${c.reviewedAt} = NOW()` : ""}
+             WHERE ${c.id} = ?`,
+            c.reviewer ? [admin.platform_admin_id, paymentId] : [paymentId]
         );
 
+        const reason = [rejectionReason, text(explanation, 500)].filter(Boolean).join(": ");
         await connection.execute(
-            `
-                INSERT INTO subscription_audit_logs (
-                    business_id,
-                    payment_submission_id,
-                    action,
-                    previous_status,
-                    new_status,
-                    performed_by_admin_id,
-                    reason
-                )
-                VALUES (?, ?, 'PAYMENT_REJECTED', 'PENDING', 'REJECTED', ?, ?)
-            `,
-            [
-                payment.business_id,
-                paymentSubmissionId,
-                admin.platform_admin_id,
-                [rejectionReason, rejectionExplanation]
-                    .filter(Boolean)
-                    .join(": "),
-            ]
-        );
-
-        await connection.execute(
-            `
-                INSERT INTO subscription_notifications (
-                    business_id,
-                    recipient_role,
-                    notification_type,
-                    title,
-                    message,
-                    related_payment_submission_id
-                )
-                VALUES (?, 'OWNER', 'PAYMENT_REJECTED', ?, ?, ?)
-            `,
-            [
-                payment.business_id,
-                "Payment Verification Rejected",
-                `Your payment for the ${payment.requested_plan_name_snapshot} Plan could not be verified. Reason: ${rejectionReason}. Submit a new payment proof to continue.`,
-                paymentSubmissionId,
-            ]
+            `INSERT INTO subscription_audit_logs
+             (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
+             VALUES (?, NULL, ?, 'PAYMENT_REJECTED', 'PENDING', 'REJECTED', ?, ?)`,
+            [payment[c.storeId], paymentId, admin.platform_admin_id, reason]
         );
 
         await connection.commit();
-
-        return {
-            message: "Payment Verification Rejected",
-            store_name: payment.store_name_snapshot,
-            reason: rejectionReason,
-        };
+        return { message: "Payment Verification Rejected", store_name: payment.store_name, reason: rejectionReason };
     } catch (error) {
         await connection.rollback();
         throw error;
     }
 }
 
-async function changeSubscriptionStatus(
-    connection,
-    businessId,
-    admin,
-    nextStatus,
-    reason
-) {
-    if (
-        !MANUALLY_CHANGEABLE_SUBSCRIPTION_STATUSES.includes(
-            nextStatus
-        )
-    ) {
-        throw httpError(
-            400,
-            "Invalid subscription status action."
-        );
-    }
-
-    if (!reason) {
-        throw httpError(400, "A reason is required.");
-    }
+async function changeSubscriptionStatus(connection, subscriptionId, admin, nextStatus, reason) {
+    if (!SUBSCRIPTION_STATUSES.includes(nextStatus)) throw httpError(400, "Invalid subscription status.");
+    if (!reason) throw httpError(400, "A reason is required.");
 
     await connection.beginTransaction();
-
     try {
-        const [subscriptionRows] = await connection.execute(
-            `
-                SELECT *
-                FROM business_subscriptions
-                WHERE business_id = ?
-                    FOR UPDATE
-            `,
-            [businessId]
+        const [rows] = await connection.execute(
+            `SELECT sub.*, s.store_name FROM subscriptions sub
+                                                 INNER JOIN stores s ON s.id = sub.store_id
+             WHERE sub.id = ? FOR UPDATE`,
+            [subscriptionId]
         );
+        const sub = rows[0];
+        if (!sub) throw httpError(404, "Subscription not found.");
 
-        const subscription = subscriptionRows[0];
-
-        if (!subscription) {
-            throw httpError(
-                404,
-                "Business subscription not found."
-            );
+        if (nextStatus === "ACTIVE" && sub.expires_at && normalizeDate(sub.expires_at) < today()) {
+            throw httpError(409, "An expired subscription must be renewed or extended before it can be reactivated.");
         }
 
-        const today = todayDateOnly();
+        const previousStatus = normalizeStatus(sub.status);
+        await connection.execute("UPDATE subscriptions SET status = ? WHERE id = ?", [lowerStatus(nextStatus), subscriptionId]);
 
-        if (
-            nextStatus === "ACTIVE" &&
-            subscription.expiration_date &&
-            compareDateOnly(
-                normalizeDateOnly(subscription.expiration_date),
-                today
-            ) < 0
-        ) {
-            throw httpError(
-                409,
-                "An expired subscription must be renewed or extended before it can be reactivated."
-            );
+        if (nextStatus === "CANCELLED") {
+            await connection.execute("UPDATE stores SET status = 'suspended' WHERE id = ?", [sub.store_id]);
+        } else if (nextStatus === "ACTIVE") {
+            await connection.execute("UPDATE stores SET status = 'active', last_active_at = NOW() WHERE id = ?", [sub.store_id]);
         }
 
         await connection.execute(
-            `
-                UPDATE business_subscriptions
-                SET
-                    status = ?,
-                    updated_at = NOW()
-                WHERE subscription_id = ?
-            `,
-            [nextStatus, subscription.subscription_id]
+            `INSERT INTO subscription_history
+             (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [subscriptionId, sub.store_id, sub.plan_id, sub.plan_id, nextStatus === "CANCELLED" ? "cancellation" : "admin_override", admin.platform_admin_id]
         );
 
         await connection.execute(
-            `
-                INSERT INTO subscription_audit_logs (
-                    business_id,
-                    subscription_id,
-                    action,
-                    previous_status,
-                    new_status,
-                    performed_by_admin_id,
-                    reason
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            `,
-            [
-                businessId,
-                subscription.subscription_id,
-                `SUBSCRIPTION_${nextStatus}`,
-                subscription.status,
-                nextStatus,
-                admin.platform_admin_id,
-                reason,
-            ]
+            `INSERT INTO subscription_audit_logs
+             (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
+             VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
+            [sub.store_id, subscriptionId, `SUBSCRIPTION_${nextStatus}`, previousStatus, nextStatus, admin.platform_admin_id, reason]
         );
 
         await connection.commit();
-
-        return {
-            message: `Subscription status changed to ${nextStatus}.`,
-            status: nextStatus,
-        };
+        return { message: `Subscription status changed to ${nextStatus}.`, status: nextStatus };
     } catch (error) {
         await connection.rollback();
         throw error;
     }
 }
 
-async function extendSubscription(
-    connection,
-    businessId,
-    admin,
-    extensionDays,
-    reason
-) {
+async function extendSubscription(connection, subscriptionId, admin, extensionDays, reason) {
     const days = Number(extensionDays);
-
-    if (!Number.isInteger(days) || days < 1 || days > 365) {
-        throw httpError(
-            400,
-            "extension_days must be from 1 to 365."
-        );
-    }
-
-    if (!reason) {
-        throw httpError(400, "A reason is required.");
-    }
+    if (!Number.isInteger(days) || days < 1 || days > 365) throw httpError(400, "extension_days must be from 1 to 365.");
+    if (!reason) throw httpError(400, "A reason is required.");
 
     await connection.beginTransaction();
-
     try {
-        const [subscriptionRows] = await connection.execute(
-            `
-                SELECT *
-                FROM business_subscriptions
-                WHERE business_id = ?
-                    FOR UPDATE
-            `,
-            [businessId]
-        );
+        const [rows] = await connection.execute("SELECT * FROM subscriptions WHERE id = ? FOR UPDATE", [subscriptionId]);
+        const sub = rows[0];
+        if (!sub) throw httpError(404, "Subscription not found.");
 
-        const subscription = subscriptionRows[0];
+        const currentExpiry = sub.expires_at ? normalizeDate(sub.expires_at) : null;
+        const baseDate = currentExpiry && currentExpiry >= today() ? currentExpiry : today();
+        const expiresAt = addDays(baseDate, days);
+        const previousStatus = normalizeStatus(sub.status);
 
-        if (!subscription) {
-            throw httpError(
-                404,
-                "Business subscription not found."
-            );
-        }
-
-        const today = todayDateOnly();
-
-        const baseDate =
-            subscription.expiration_date &&
-            compareDateOnly(
-                normalizeDateOnly(subscription.expiration_date),
-                today
-            ) >= 0
-                ? normalizeDateOnly(subscription.expiration_date)
-                : today;
-
-        const expirationDate = addDays(baseDate, days);
+        await connection.execute("UPDATE subscriptions SET expires_at = ?, status = 'active' WHERE id = ?", [expiresAt, subscriptionId]);
+        await connection.execute("UPDATE stores SET status = 'active' WHERE id = ?", [sub.store_id]);
 
         await connection.execute(
-            `
-                UPDATE business_subscriptions
-                SET
-                    expiration_date = ?,
-                    updated_at = NOW()
-                WHERE subscription_id = ?
-            `,
-            [expirationDate, subscription.subscription_id]
+            `INSERT INTO subscription_history
+             (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
+             VALUES (?, ?, ?, ?, 'admin_override', ?)`,
+            [subscriptionId, sub.store_id, sub.plan_id, sub.plan_id, admin.platform_admin_id]
         );
 
         await connection.execute(
-            `
-                INSERT INTO subscription_audit_logs (
-                    business_id,
-                    subscription_id,
-                    action,
-                    previous_status,
-                    new_status,
-                    performed_by_admin_id,
-                    reason
-                )
-                VALUES (?, ?, 'SUBSCRIPTION_EXTENDED', ?, ?, ?, ?)
-            `,
-            [
-                businessId,
-                subscription.subscription_id,
-                subscription.status,
-                subscription.status,
-                admin.platform_admin_id,
-                `${days} day(s): ${reason}`,
-            ]
+            `INSERT INTO subscription_audit_logs
+             (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
+             VALUES (?, ?, NULL, 'SUBSCRIPTION_EXTENDED', ?, 'ACTIVE', ?, ?)`,
+            [sub.store_id, subscriptionId, previousStatus, admin.platform_admin_id, `${days} day(s): ${reason}`]
         );
 
         await connection.commit();
-
-        return {
-            message: "Subscription extended.",
-            expiration_date: expirationDate,
-        };
+        return { message: "Subscription extended.", expires_at: expiresAt };
     } catch (error) {
         await connection.rollback();
         throw error;
     }
+}
+
+async function getPlatformSettings(connection) {
+    const [rows] = await connection.execute("SELECT `key`, value, updated_at FROM platform_settings ORDER BY `key` ASC");
+    const settings = {};
+    for (const row of rows) settings[row.key] = row.value;
+    return { settings, rows };
+}
+
+async function updatePlatformSettings(connection, values) {
+    if (!values || typeof values !== "object") throw httpError(400, "settings must be an object.");
+    await connection.beginTransaction();
+    try {
+        for (const [key, value] of Object.entries(values)) {
+            const cleanKey = text(key, 100);
+            if (!cleanKey) continue;
+            await connection.execute(
+                "INSERT INTO platform_settings (`key`, value, updated_at) " +
+                "VALUES (?, ?, NOW()) " +
+                "ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = NOW()",
+                [cleanKey, String(value ?? "")]
+            );
+        }
+        await connection.commit();
+        return { message: "Platform settings updated." };
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    }
+}
+
+async function listStores(connection, search, planName, storeStatus) {
+    const values = [];
+    const filters = [];
+    const cleanSearch = text(search, 120);
+
+    if (cleanSearch) {
+        const like = `%${cleanSearch}%`;
+        filters.push("(s.store_name LIKE ? OR s.owner_name LIKE ? OR s.email LIKE ?)");
+        values.push(like, like, like);
+    }
+    if (planName && planName !== "All plans") {
+        filters.push("pl.name = ?");
+        values.push(planName);
+    }
+    if (storeStatus && storeStatus !== "All statuses") {
+        filters.push("LOWER(s.status) = ?");
+        values.push(String(storeStatus).toLowerCase());
+    }
+
+    const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    const c = await getPaymentColumns(connection);
+    const [rows] = await connection.execute(
+        `SELECT
+             s.id,
+             s.store_name,
+             s.owner_name,
+             s.email,
+             s.status,
+             s.last_active_at,
+             sub.id AS subscription_id,
+             sub.status AS raw_subscription_status,
+             sub.started_at,
+             sub.expires_at,
+             sub.auto_renew,
+             pl.id AS plan_id,
+             pl.name AS plan_name,
+             (SELECT MIN(sub2.created_at) FROM subscriptions sub2 WHERE sub2.store_id = s.id) AS signup_date,
+             COALESCE((SELECT SUM(p2.${c.amount}) FROM payments p2 WHERE p2.${c.storeId} = s.id AND UPPER(p2.${c.status}) = 'APPROVED'), 0) AS lifetime_paid,
+             (SELECT COUNT(*) FROM products prod WHERE prod.store_id = s.id) AS inventory_item_count
+         FROM stores s
+                  LEFT JOIN subscriptions sub ON sub.store_id = s.id
+                  LEFT JOIN plans pl ON pl.id = sub.plan_id
+             ${where}
+         ORDER BY s.id DESC`,
+        values
+    );
+
+    return rows.map((row) => ({
+        id: Number(row.id),
+        store_name: row.store_name,
+        owner_name: row.owner_name,
+        email: row.email,
+        status: String(row.status || "").toUpperCase(),
+        last_active_at: row.last_active_at,
+        signup_date: row.signup_date,
+        subscription_id: row.subscription_id == null ? null : Number(row.subscription_id),
+        plan_id: row.plan_id == null ? null : Number(row.plan_id),
+        plan_name: row.plan_name || "Starter",
+        subscription_status: row.subscription_id == null ? "EXPIRED" : displaySubscriptionStatus(row.raw_subscription_status, row.expires_at),
+        started_at: row.started_at,
+        expires_at: row.expires_at,
+        auto_renew: Boolean(row.auto_renew),
+        lifetime_paid: Number(row.lifetime_paid || 0),
+        inventory_item_count: Number(row.inventory_item_count || 0),
+    }));
+}
+
+async function setStoreStatus(connection, storeId, status, admin, reason) {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (!["active", "trial", "suspended"].includes(normalized)) throw httpError(400, "Invalid store status.");
+    if (!reason) throw httpError(400, "A reason is required.");
+
+    const [rows] = await connection.execute("SELECT id, status FROM stores WHERE id = ? LIMIT 1", [storeId]);
+    if (!rows[0]) throw httpError(404, "Store not found.");
+    const previous = String(rows[0].status || "").toUpperCase();
+
+    await connection.execute("UPDATE stores SET status = ?, last_active_at = CASE WHEN ? = 'active' THEN NOW() ELSE last_active_at END WHERE id = ?", [normalized, normalized, storeId]);
+    await connection.execute(
+        `INSERT INTO subscription_audit_logs
+         (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
+         VALUES (?, NULL, NULL, 'STORE_STATUS_CHANGED', ?, ?, ?, ?)`,
+        [storeId, previous, normalized.toUpperCase(), admin.platform_admin_id, reason]
+    );
+    return { message: `Store status changed to ${normalized}.` };
 }
 
 exports.handler = async (event) => {
     let connection;
-
     try {
-        if (getHttpMethod(event) === "OPTIONS") {
-            return response(event, 204, {});
-        }
-
-        if (getHttpMethod(event) !== "POST") {
-            return response(event, 405, {
-                message: "Only POST requests are allowed.",
-            });
-        }
+        const method = getHttpMethod(event);
+        if (method === "OPTIONS") return response(event, 204, {});
+        if (method !== "POST") return response(event, 405, { message: "Only POST requests are allowed." });
 
         const body = parseBody(event);
-        const action = optionalTrimmedText(body.action, 80);
-
-        if (!action) {
-            throw httpError(400, "Missing action.");
-        }
+        const action = text(body.action, 100);
+        if (!action) throw httpError(400, "Missing action.");
 
         connection = await pool.getConnection();
-
-        const admin = await requirePlatformAdmin(
-            event,
-            connection
-        );
+        const admin = await requirePlatformAdmin(event, connection);
 
         switch (action) {
             case "get_subscription_summary":
-                return response(event, 200, {
-                    summary: await getSubscriptionSummary(
-                        connection
-                    ),
-                });
+                return response(event, 200, { summary: await getSubscriptionSummary(connection) });
 
             case "list_payment_submissions":
-                return response(event, 200, {
-                    payments: await listPaymentSubmissions(
-                        connection,
-                        body.status,
-                        body.search
-                    ),
-                });
+                return response(event, 200, { payments: await listPaymentSubmissions(connection, body.status, body.search) });
 
             case "get_payment_submission":
-                return response(event, 200, {
-                    payment: await getPaymentSubmission(
-                        connection,
-                        requireNumber(
-                            body.payment_submission_id,
-                            "payment_submission_id"
-                        )
-                    ),
-                });
+                return response(event, 200, { payment: await getPaymentSubmission(connection, positiveId(body.payment_submission_id, "payment_submission_id")) });
 
             case "approve_payment_submission":
-                return response(
-                    event,
-                    200,
-                    await approvePaymentSubmission(
-                        connection,
-                        requireNumber(
-                            body.payment_submission_id,
-                            "payment_submission_id"
-                        ),
-                        admin
-                    )
-                );
+                return response(event, 200, await approvePayment(connection, positiveId(body.payment_submission_id, "payment_submission_id"), admin));
 
             case "reject_payment_submission":
-                return response(
-                    event,
-                    200,
-                    await rejectPaymentSubmission(
-                        connection,
-                        requireNumber(
-                            body.payment_submission_id,
-                            "payment_submission_id"
-                        ),
-                        admin,
-                        optionalTrimmedText(
-                            body.rejection_reason,
-                            100
-                        ),
-                        optionalTrimmedText(
-                            body.rejection_explanation,
-                            500
-                        )
-                    )
-                );
-
-            case "get_business_subscription":
-                return response(event, 200, {
-                    ...(await getBusinessSubscription(
-                        connection,
-                        requireNumber(
-                            body.business_id,
-                            "business_id"
-                        )
-                    )),
-                });
+                return response(event, 200, await rejectPayment(
+                    connection,
+                    positiveId(body.payment_submission_id, "payment_submission_id"),
+                    admin,
+                    text(body.rejection_reason, 100),
+                    text(body.rejection_explanation, 500)
+                ));
 
             case "list_businesses":
-                return response(event, 200, {
-                    businesses: await listBusinesses(
-                        connection,
-                        body.search
-                    ),
-                });
+                return response(event, 200, { businesses: await listBusinesses(connection, body.search) });
+
+            case "list_subscriptions":
+                return response(event, 200, { subscriptions: await listSubscriptions(connection, body.search, body.status) });
+
+            case "get_subscription_history":
+                return response(event, 200, { history: await getSubscriptionHistory(connection, positiveId(body.subscription_id, "subscription_id")) });
+
+            case "get_business_subscription": {
+                const storeId = positiveId(body.business_id || body.store_id, "business_id");
+                const rows = await listSubscriptions(connection, "", "ALL");
+                const match = rows.find((row) => row.store_id === storeId) || null;
+                return response(event, 200, { subscription: match });
+            }
 
             case "list_audit_logs":
-                return response(event, 200, {
-                    audit_logs: await listAuditLogs(
-                        connection,
-                        body.business_id
-                    ),
-                });
+                return response(event, 200, { audit_logs: await listAuditLogs(connection, body.business_id) });
 
-            case "suspend_subscription":
-                return response(
-                    event,
-                    200,
-                    await changeSubscriptionStatus(
-                        connection,
-                        requireNumber(
-                            body.business_id,
-                            "business_id"
-                        ),
-                        admin,
-                        "SUSPENDED",
-                        optionalTrimmedText(body.reason, 500)
-                    )
-                );
+            case "suspend_subscription": {
+                const storeId = positiveId(body.business_id || body.store_id, "business_id");
+                return response(event, 200, await setStoreStatus(connection, storeId, "suspended", admin, text(body.reason, 500)));
+            }
 
-            case "reactivate_subscription":
-                return response(
-                    event,
-                    200,
-                    await changeSubscriptionStatus(
-                        connection,
-                        requireNumber(
-                            body.business_id,
-                            "business_id"
-                        ),
-                        admin,
-                        "ACTIVE",
-                        optionalTrimmedText(body.reason, 500)
-                    )
-                );
+            case "reactivate_subscription": {
+                const storeId = positiveId(body.business_id || body.store_id, "business_id");
+                return response(event, 200, await setStoreStatus(connection, storeId, "active", admin, text(body.reason, 500)));
+            }
 
             case "cancel_subscription":
-                return response(
-                    event,
-                    200,
-                    await changeSubscriptionStatus(
-                        connection,
-                        requireNumber(
-                            body.business_id,
-                            "business_id"
-                        ),
-                        admin,
-                        "CANCELLED",
-                        optionalTrimmedText(body.reason, 500)
-                    )
-                );
+                return response(event, 200, await changeSubscriptionStatus(
+                    connection,
+                    positiveId(body.subscription_id, "subscription_id"),
+                    admin,
+                    "CANCELLED",
+                    text(body.reason, 500)
+                ));
 
             case "extend_subscription":
-                return response(
-                    event,
-                    200,
-                    await extendSubscription(
-                        connection,
-                        requireNumber(
-                            body.business_id,
-                            "business_id"
-                        ),
-                        admin,
-                        body.extension_days,
-                        optionalTrimmedText(body.reason, 500)
-                    )
-                );
+                return response(event, 200, await extendSubscription(
+                    connection,
+                    positiveId(body.subscription_id, "subscription_id"),
+                    admin,
+                    body.extension_days,
+                    text(body.reason, 500)
+                ));
+
+            case "list_plans":
+            case "get_plans":
+                return response(event, 200, { plans: await getPlans(connection) });
+
+            case "create_plan":
+                return response(event, 201, await createPlan(connection, body));
+
+            case "update_plan":
+                return response(event, 200, await updatePlan(connection, body));
+
+            case "archive_plan":
+                return response(event, 200, await setPlanArchived(connection, body.plan_id, true));
+
+            case "restore_plan":
+                return response(event, 200, await setPlanArchived(connection, body.plan_id, false));
+
+            case "get_platform_settings":
+                return response(event, 200, await getPlatformSettings(connection));
+
+            case "update_platform_settings":
+                return response(event, 200, await updatePlatformSettings(connection, body.settings));
+
+            case "list_stores":
+                return response(event, 200, { stores: await listStores(connection, body.search, body.plan, body.status) });
+
+            case "suspend_store":
+                return response(event, 200, await setStoreStatus(connection, positiveId(body.store_id, "store_id"), "suspended", admin, text(body.reason, 500)));
+
+            case "reactivate_store":
+                return response(event, 200, await setStoreStatus(connection, positiveId(body.store_id, "store_id"), "active", admin, text(body.reason, 500)));
 
             default:
-                throw httpError(400, "Unsupported action.");
+                throw httpError(400, `Unknown action: ${action}`);
         }
     } catch (error) {
-        console.error(
-            "Subscription admin Lambda error:",
-            error
-        );
-
+        console.error("subscription-admin error:", error);
         return response(event, error.statusCode || 500, {
-            message:
-                error.message ||
-                "Subscription administrator request failed.",
+            message: error.message || "Internal server error.",
         });
     } finally {
-        if (connection) {
-            connection.release();
-        }
+        if (connection) connection.release();
     }
 };

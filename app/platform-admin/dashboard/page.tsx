@@ -207,7 +207,7 @@ export default function PlatformAdminDashboardPage() {
                     id: p.payment_submission_id,
                     storeName: p.store_name_snapshot,
                     ownerName: p.owner_name_snapshot,
-                    ownerEmail: p.owner_name_snapshot || "Owner",
+                    ownerEmail: p.owner_email || "Owner",
                     requestedPlan: p.requested_plan_name_snapshot,
                     amount: Number(p.amount_submitted),
                     referenceNumber: p.reference_number,
@@ -234,7 +234,7 @@ export default function PlatformAdminDashboardPage() {
                     .filter((b: any) => b.daysLeft <= 7 && b.daysLeft >= 0)
                     .map((b: any) => ({
                         storeName: b.store_name_snapshot,
-                        ownerEmail: b.owner_name_snapshot || "Owner",
+                        ownerEmail: b.owner_email || "Owner",
                         plan: b.plan_name,
                         expirationDate: new Date(b.expiration_date).toLocaleDateString(),
                         daysLeft: b.daysLeft,
@@ -277,20 +277,33 @@ export default function PlatformAdminDashboardPage() {
                     icon: <Activity size={15} />
                 })));
             }
+
+            // Load platform-wide GCash settings from platform_settings.
+            const settingsRes = await fetch(API_ENDPOINT, {
+                method: "POST",
+                headers,
+                body: JSON.stringify({ action: "get_platform_settings" }),
+            });
+            const settingsData = await settingsRes.json();
+            if (settingsData.settings) {
+                const settings = settingsData.settings as Record<string, string>;
+                const resolvedSettings: GCashPaymentSettings = {
+                    accountName: settings.gcash_account_name || defaultGcashPaymentSettings.accountName,
+                    gcashNumber: settings.gcash_number || defaultGcashPaymentSettings.gcashNumber,
+                    instruction: settings.gcash_instruction || defaultGcashPaymentSettings.instruction,
+                    qrImage: settings.gcash_qr_image || defaultGcashPaymentSettings.qrImage,
+                };
+                setGcashSettings(resolvedSettings);
+                setGcashSettingsForm(resolvedSettings);
+            }
         } catch (error) {
             console.error("Dashboard fetch error:", error);
         }
     };
 
+    // GCash settings are loaded by loadDashboardData from platform_settings.
     useEffect(() => {
-        try {
-            const savedSettings = window.localStorage.getItem(PAYMENT_SETTINGS_STORAGE_KEY);
-            if (!savedSettings) return;
-            const parsedSettings = JSON.parse(savedSettings) as Partial<GCashPaymentSettings>;
-            const resolvedSettings = { ...defaultGcashPaymentSettings, ...parsedSettings };
-            setGcashSettings(resolvedSettings);
-            setGcashSettingsForm(resolvedSettings);
-        } catch {}
+        window.localStorage.removeItem(PAYMENT_SETTINGS_STORAGE_KEY);
     }, []);
 
     function openGcashSettings() {
@@ -316,16 +329,37 @@ export default function PlatformAdminDashboardPage() {
         fileReader.readAsDataURL(file);
     }
 
-    function saveGcashSettings() {
+    async function saveGcashSettings() {
         const savedSettings: GCashPaymentSettings = {
             accountName: gcashSettingsForm.accountName.trim() || defaultGcashPaymentSettings.accountName,
             gcashNumber: gcashSettingsForm.gcashNumber.trim() || defaultGcashPaymentSettings.gcashNumber,
             instruction: gcashSettingsForm.instruction.trim() || defaultGcashPaymentSettings.instruction,
             qrImage: gcashSettingsForm.qrImage || defaultGcashPaymentSettings.qrImage,
         };
+
+        const token = sessionStorage.getItem("token") || localStorage.getItem("token") || "";
+        const response = await fetch(API_ENDPOINT, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+                action: "update_platform_settings",
+                settings: {
+                    gcash_account_name: savedSettings.accountName,
+                    gcash_number: savedSettings.gcashNumber,
+                    gcash_instruction: savedSettings.instruction,
+                    gcash_qr_image: savedSettings.qrImage,
+                },
+            }),
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            window.alert(error.message || "Unable to save GCash settings.");
+            return;
+        }
+
         setGcashSettings(savedSettings);
         setGcashSettingsForm(savedSettings);
-        try { window.localStorage.setItem(PAYMENT_SETTINGS_STORAGE_KEY, JSON.stringify(savedSettings)); } catch {}
         setIsGcashSettingsOpen(false);
     }
 

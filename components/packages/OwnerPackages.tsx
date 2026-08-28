@@ -251,7 +251,7 @@ export default function OwnerPackages() {
             const data = (await response.json()) as PackagesResponse;
 
             if (!response.ok) {
-                throw new Error(data.error || "Unable to load packages.");
+                throw new Error(data.error || "Unable to load plans.");
             }
 
             if (signal?.aborted) return [];
@@ -283,7 +283,7 @@ export default function OwnerPackages() {
                 setPackages([]);
                 setLoadedPackageScope(branchId);
                 setError(
-                    "Unable to load packages for this branch. Please try again."
+                    "Unable to load plans for this branch. Please try again."
                 );
             } finally {
                 if (!signal?.aborted) {
@@ -323,7 +323,7 @@ export default function OwnerPackages() {
                 setPackages([]);
                 setLoadedPackageScope("all");
                 setError(
-                    "Unable to load packages for all branches. Please try again."
+                    "Unable to load plans for all branches. Please try again."
                 );
             } finally {
                 if (!signal?.aborted) {
@@ -570,7 +570,7 @@ export default function OwnerPackages() {
                                 }
                                 placeholder={
                                     isAllBranchesView || selectedBranchId
-                                        ? "Search packages..."
+                                        ? "Search plans..."
                                         : "Select a branch first"
                                 }
                                 className="w-full rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C] disabled:cursor-not-allowed disabled:bg-[#FCFAFD] disabled:text-[#9B8AAA]"
@@ -807,8 +807,8 @@ export default function OwnerPackages() {
                                     search || selectedCategory !== "All"
                                         ? "Try a different search or category."
                                         : isAllBranchesView
-                                            ? "No packages are available across branches yet."
-                                            : "This branch does not have packages yet."
+                                            ? "No plans are available across branches yet."
+                                            : "This branch does not have plans yet."
                                 }
                             />
                         ) : (

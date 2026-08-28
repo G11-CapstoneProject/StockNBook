@@ -6,7 +6,7 @@
  *   - 3 retail party-supply stores
  *   - 1 owner, 3 managers, and 6 staff per store (3 staff per first 2 branches)
  *   - 1,000 direct-sale inventory products per store
- *   - 5 retail party packages per store
+ *   - 5 retail party plans per store
  *   - POS sales from 2016 through 2026 with seasonality and growth
  *   - Realistic booking volumes and distributions (not fixed-16)
  *   - Booking windows span near-term and long-range through 2031

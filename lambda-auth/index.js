@@ -5,6 +5,184 @@ const crypto = require("crypto");
 const tls = require("tls");
 const fs = require("fs");
 
+/*
+ * Shared subscription entitlement checks.
+ *
+ * Subscription management belongs to the store owner, but plan limits are
+ * enforced at the API boundary so managers/staff (and public booking pages)
+ * cannot bypass the active store plan.
+ */
+
+function normalizeLimit(value) {
+    if (value === null || value === undefined || Number(value) === 0) {
+        return null;
+    }
+
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function getActivePlan(connection, storeId) {
+    const [rows] = await connection.execute(
+        `SELECT
+             p.id,
+             p.name,
+             p.max_inventory,
+             p.max_bookings,
+             p.max_staff,
+             p.max_branches
+         FROM subscriptions s
+                  INNER JOIN plans p ON p.id = s.plan_id
+         WHERE s.store_id = ?
+           AND LOWER(s.status) = 'active'
+           AND (s.expires_at IS NULL OR s.expires_at >= CURDATE())
+         ORDER BY s.id DESC
+             LIMIT 1`,
+        [Number(storeId)]
+    );
+
+    if (rows.length > 0) {
+        const plan = rows[0];
+        return {
+            id: Number(plan.id),
+            name: String(plan.name || "Current plan"),
+            max_inventory: normalizeLimit(plan.max_inventory),
+            max_bookings: normalizeLimit(plan.max_bookings),
+            max_staff: normalizeLimit(plan.max_staff),
+            max_branches: normalizeLimit(plan.max_branches),
+        };
+    }
+
+    // New stores begin on Starter before a paid subscription record exists.
+    const [starterRows] = await connection.execute(
+        `SELECT
+             id,
+             name,
+             max_inventory,
+             max_bookings,
+             max_staff,
+             max_branches
+         FROM plans
+         WHERE is_archived = 0
+           AND (LOWER(name) = 'starter' OR price = 0)
+         ORDER BY price ASC, id ASC
+             LIMIT 1`
+    );
+
+    if (starterRows.length === 0) {
+        return null;
+    }
+
+    const plan = starterRows[0];
+    return {
+        id: Number(plan.id),
+        name: String(plan.name || "Starter"),
+        max_inventory: normalizeLimit(plan.max_inventory),
+        max_bookings: normalizeLimit(plan.max_bookings),
+        max_staff: normalizeLimit(plan.max_staff),
+        max_branches: normalizeLimit(plan.max_branches),
+    };
+}
+
+async function getStoreUsage(connection, storeId) {
+    const [inventoryRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM products
+         WHERE store_id = ?
+           AND deleted_at IS NULL`,
+        [Number(storeId)]
+    );
+
+    const [bookingRows] = await connection.execute(
+        "SELECT COUNT(*) AS total FROM bookings WHERE store_id = ?",
+        [Number(storeId)]
+    );
+
+    const [staffRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM staff
+         WHERE store_id = ?
+           AND status IN ('active', 'pending')`,
+        [Number(storeId)]
+    );
+
+    const [branchRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM branches
+         WHERE store_id = ?
+           AND COALESCE(status, 'active') <> 'deleted'`,
+        [Number(storeId)]
+    );
+
+    return {
+        inventory: Number(inventoryRows[0]?.total || 0),
+        bookings: Number(bookingRows[0]?.total || 0),
+        staff: Number(staffRows[0]?.total || 0),
+        branches: Number(branchRows[0]?.total || 0),
+    };
+}
+
+function makeLimitError(resource, plan, current, limit, increment = 1, role = "") {
+    const labels = {
+        inventory: "inventory items",
+        bookings: "bookings",
+        staff: "staff accounts",
+        branches: "branches",
+    };
+
+    const label = labels[resource] || resource;
+    const isOwner = role === "owner";
+    const ownerAction = isOwner
+        ? "Upgrade your plan to add more."
+        : "Contact your account owner to upgrade.";
+
+    const error = new Error(
+        `Plan limit reached: your ${plan?.name || "current"} plan allows up to ${limit} ${label}. ${ownerAction}`
+    );
+    error.statusCode = 409;
+    error.code = `${String(resource).toUpperCase()}_LIMIT_REACHED`;
+    error.plan_name = plan?.name || "Current plan";
+    error.resource = resource;
+    error.current = current;
+    error.limit = limit;
+    error.requested = current + increment;
+    return error;
+}
+
+async function assertPlanLimit(
+    connection,
+    storeId,
+    resource,
+    increment = 1,
+    role = ""
+) {
+    const plan = await getActivePlan(connection, storeId);
+
+    if (!plan) {
+        const error = new Error("No active subscription plan is configured for this store.");
+        error.statusCode = 500;
+        error.code = "PLAN_NOT_CONFIGURED";
+        throw error;
+    }
+
+    const usage = await getStoreUsage(connection, storeId);
+    const current = Number(usage[resource] || 0);
+    const limit = plan[`max_${resource}`];
+
+    if (limit !== null && current + Number(increment) > limit) {
+        throw makeLimitError(resource, plan, current, limit, Number(increment), role);
+    }
+
+    return { plan, usage, current, limit };
+}
+
+module.exports = {
+    getActivePlan,
+    getStoreUsage,
+    assertPlanLimit,
+};
+
+
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 
 const OTP_EXPIRY_SECONDS = 90;
@@ -1126,7 +1304,354 @@ const dbConfig = {
     ssl: { rejectUnauthorized: false },
 };
 
-exports.handler = async (event) => {
+
+
+function getBearerTokenFromEvent(event) {
+    const authHeader =
+        event.headers?.Authorization || event.headers?.authorization || "";
+    return String(authHeader).replace(/^Bearer\s+/i, "").trim();
+}
+
+async function getPlanColumnsForOwner(connection) {
+    const [rows] = await connection.query("SHOW COLUMNS FROM payments");
+    const names = new Set(rows.map((row) => row.Field));
+    const pick = (candidates, required = true) => {
+        const found = candidates.find((candidate) => names.has(candidate));
+        if (!found && required) {
+            const error = new Error(
+                `payments table is missing a required column. Expected one of: ${candidates.join(", ")}`
+            );
+            error.statusCode = 500;
+            throw error;
+        }
+        return found || null;
+    };
+
+    return {
+        id: pick(["id", "payment_id"]),
+        storeId: pick(["store_id"]),
+        planId: pick(["plan_id", "requested_plan_id"]),
+        amount: pick(["amount", "amount_remitted", "amount_submitted"]),
+        reference: pick(["reference_no", "reference_number", "gcash_reference_no", "gcash_reference"]),
+        receipt: pick(["receipt_url", "proof_file_url", "receipt_file_url"], false),
+        status: pick(["status"]),
+        createdAt: pick(["created_at", "submitted_at", "payment_date"], false),
+    };
+}
+
+function normalizePlanLimit(value) {
+    if (value === null || value === undefined || Number(value) === 0) return null;
+    return Number(value);
+}
+
+async function getStoreSubscriptionSnapshot(connection, storeId) {
+    const [subscriptionRows] = await connection.execute(
+        `SELECT
+             s.id AS subscription_id,
+             s.plan_id,
+             s.status,
+             s.started_at,
+             s.expires_at,
+             p.id AS plan_id_joined,
+             p.name,
+             p.price,
+             p.max_inventory,
+             p.max_bookings,
+             p.max_staff,
+             p.max_branches,
+             p.has_low_stock_alerts,
+             p.has_analytics,
+             p.has_forecasting,
+             p.has_multi_store,
+             p.is_archived
+         FROM subscriptions s
+                  INNER JOIN plans p ON p.id = s.plan_id
+         WHERE s.store_id = ?
+         ORDER BY s.id DESC
+             LIMIT 1`,
+        [storeId]
+    );
+
+    let subscription = subscriptionRows[0] || null;
+
+    if (!subscription) {
+        const [starterRows] = await connection.execute(
+            `SELECT
+                 id AS plan_id,
+                 name,
+                 price,
+                 max_inventory,
+                 max_bookings,
+                 max_staff,
+                 max_branches,
+                 has_low_stock_alerts,
+                 has_analytics,
+                 has_forecasting,
+                 has_multi_store,
+                 is_archived
+             FROM plans
+             WHERE is_archived = 0
+               AND (LOWER(name) = 'starter' OR price = 0)
+             ORDER BY price ASC, id ASC
+                 LIMIT 1`
+        );
+
+        subscription = starterRows[0]
+            ? {
+                ...starterRows[0],
+                subscription_id: null,
+                status: "active",
+                started_at: null,
+                expires_at: null,
+            }
+            : null;
+    }
+
+    if (!subscription) {
+        const error = new Error("No active plan is configured for this platform.");
+        error.statusCode = 500;
+        throw error;
+    }
+
+    const [inventoryRows] = await connection.execute(
+        "SELECT COUNT(*) AS total FROM products WHERE store_id = ?",
+        [storeId]
+    );
+    const [branchRows] = await connection.execute(
+        "SELECT COUNT(*) AS total FROM branches WHERE store_id = ?",
+        [storeId]
+    );
+    const [staffRows] = await connection.execute(
+        "SELECT COUNT(*) AS total FROM staff WHERE store_id = ? AND status = 'active'",
+        [storeId]
+    );
+
+    let bookingCount = 0;
+    try {
+        const [bookingRows] = await connection.execute(
+            "SELECT COUNT(*) AS total FROM bookings WHERE store_id = ?",
+            [storeId]
+        );
+        bookingCount = Number(bookingRows[0]?.total || 0);
+    } catch {
+        // Keep the subscription page usable if an older database has no bookings table.
+        bookingCount = 0;
+    }
+
+    const [pendingPaymentRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM payments
+         WHERE store_id = ?
+           AND UPPER(status) = 'PENDING'`,
+        [storeId]
+    );
+
+    const expiresAt = subscription.expires_at
+        ? new Date(subscription.expires_at).toISOString().slice(0, 10)
+        : null;
+
+    return {
+        subscription_id:
+            subscription.subscription_id == null
+                ? null
+                : Number(subscription.subscription_id),
+        status: String(subscription.status || "active").toUpperCase(),
+        started_at: subscription.started_at || null,
+        expires_at: expiresAt,
+        plan: {
+            id: Number(subscription.plan_id || subscription.plan_id_joined),
+            name: subscription.name,
+            price: Number(subscription.price || 0),
+            max_inventory: normalizePlanLimit(subscription.max_inventory),
+            max_bookings: normalizePlanLimit(subscription.max_bookings),
+            max_staff: normalizePlanLimit(subscription.max_staff),
+            max_branches: normalizePlanLimit(subscription.max_branches),
+            has_low_stock_alerts: Boolean(subscription.has_low_stock_alerts),
+            has_analytics: Boolean(subscription.has_analytics),
+            has_forecasting: Boolean(subscription.has_forecasting),
+            has_multi_store: Boolean(subscription.has_multi_store),
+        },
+        usage: {
+            inventory: Number(inventoryRows[0]?.total || 0),
+            bookings: bookingCount,
+            staff: Number(staffRows[0]?.total || 0),
+            branches: Number(branchRows[0]?.total || 0),
+        },
+        pending_payment: Number(pendingPaymentRows[0]?.total || 0) > 0,
+    };
+}
+
+async function getOwnerSubscription(connection, storeId) {
+    const snapshot = await getStoreSubscriptionSnapshot(connection, storeId);
+
+    const [planRows] = await connection.execute(
+        `SELECT
+             id,
+             name,
+             price,
+             max_inventory,
+             max_bookings,
+             max_staff,
+             max_branches,
+             has_low_stock_alerts,
+             has_analytics,
+             has_forecasting,
+             has_multi_store
+         FROM plans
+         WHERE is_archived = 0
+         ORDER BY price ASC, id ASC`
+    );
+
+    return {
+        ...snapshot,
+        available_plans: planRows.map((row) => ({
+            id: Number(row.id),
+            name: row.name,
+            price: Number(row.price || 0),
+            max_inventory: normalizePlanLimit(row.max_inventory),
+            max_bookings: normalizePlanLimit(row.max_bookings),
+            max_staff: normalizePlanLimit(row.max_staff),
+            max_branches: normalizePlanLimit(row.max_branches),
+            has_low_stock_alerts: Boolean(row.has_low_stock_alerts),
+            has_analytics: Boolean(row.has_analytics),
+            has_forecasting: Boolean(row.has_forecasting),
+            has_multi_store: Boolean(row.has_multi_store),
+        })),
+    };
+}
+
+async function submitOwnerPlanPayment(connection, decoded, body) {
+    if (decoded.role !== "owner" || !decoded.store_id) {
+        const error = new Error("Only the store owner can change the subscription.");
+        error.statusCode = 403;
+        throw error;
+    }
+
+    const storeId = Number(decoded.store_id);
+    const planId = Number(body.plan_id);
+    const referenceNumber = String(body.reference_number || "").trim();
+    const receiptUrl = String(body.receipt_url || "").trim();
+
+    if (!Number.isInteger(planId) || planId <= 0) {
+        const error = new Error("Select a valid plan.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    if (!referenceNumber || referenceNumber.length < 4 || referenceNumber.length > 120) {
+        const error = new Error("Enter a valid GCash reference number.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const [planRows] = await connection.execute(
+        `SELECT * FROM plans WHERE id = ? AND is_archived = 0 LIMIT 1`,
+        [planId]
+    );
+    const targetPlan = planRows[0];
+
+    if (!targetPlan) {
+        const error = new Error("The selected plan is no longer available.");
+        error.statusCode = 404;
+        throw error;
+    }
+
+    if (Number(targetPlan.price || 0) <= 0) {
+        const error = new Error("Starter does not require a payment submission.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const snapshot = await getStoreSubscriptionSnapshot(connection, storeId);
+    const currentPrice = Number(snapshot.plan.price || 0);
+    const currentExpiry = snapshot.expires_at;
+    const currentIsActive =
+        String(snapshot.status || "").toUpperCase() === "ACTIVE" &&
+        (!currentExpiry || currentExpiry >= new Date().toISOString().slice(0, 10));
+
+    if (Number(targetPlan.price) < currentPrice) {
+        const error = new Error("Downgrades are not available from the subscription screen. Contact the account owner or platform administrator.");
+        error.statusCode = 409;
+        throw error;
+    }
+
+    if (Number(targetPlan.price) === currentPrice && currentIsActive) {
+        // Same-plan renewal is allowed, but only if there is no unresolved payment.
+        // This keeps the owner from accidentally creating duplicate requests.
+    }
+
+    const columns = await getPlanColumnsForOwner(connection);
+
+    const [pendingRows] = await connection.execute(
+        `SELECT ${columns.id} AS payment_id
+         FROM payments
+         WHERE ${columns.storeId} = ?
+           AND UPPER(${columns.status}) = 'PENDING'
+             LIMIT 1`,
+        [storeId]
+    );
+
+    if (pendingRows.length) {
+        const error = new Error("You already have a payment awaiting platform admin review.");
+        error.statusCode = 409;
+        throw error;
+    }
+
+    const [duplicateRows] = await connection.execute(
+        `SELECT ${columns.id} AS payment_id
+         FROM payments
+         WHERE ${columns.reference} = ?
+           AND UPPER(${columns.status}) IN ('PENDING', 'APPROVED')
+             LIMIT 1`,
+        [referenceNumber]
+    );
+
+    if (duplicateRows.length) {
+        const error = new Error("That GCash reference number has already been submitted.");
+        error.statusCode = 409;
+        throw error;
+    }
+
+    const insertColumns = [
+        columns.storeId,
+        columns.planId,
+        columns.amount,
+        columns.reference,
+        columns.status,
+    ];
+    const insertValues = [
+        storeId,
+        planId,
+        Number(targetPlan.price),
+        referenceNumber,
+        "pending",
+    ];
+
+    if (columns.receipt && receiptUrl) {
+        insertColumns.push(columns.receipt);
+        insertValues.push(receiptUrl);
+    }
+
+    if (columns.createdAt) {
+        insertColumns.push(columns.createdAt);
+        insertValues.push(new Date());
+    }
+
+    const placeholders = insertColumns.map(() => "?").join(", ");
+    const [result] = await connection.execute(
+        `INSERT INTO payments (${insertColumns.join(", ")}) VALUES (${placeholders})`,
+        insertValues
+    );
+
+    return {
+        message: "Payment submitted for platform admin review.",
+        payment_submission_id: Number(result.insertId),
+        plan_name: targetPlan.name,
+        amount: Number(targetPlan.price),
+    };
+}
+
+module.exports.handler = async (event) => {
     const headers = {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
@@ -1160,6 +1685,64 @@ exports.handler = async (event) => {
 
     try {
         connection = await mysql.createConnection(dbConfig);
+
+        if (action === "get_subscription") {
+            const token = getBearerTokenFromEvent(event);
+            if (!token) {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Missing token" }) };
+            }
+
+            let decoded;
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid token" }) };
+            }
+
+            const subscriptionRole = String(decoded.role || "").toLowerCase();
+            const allowedSubscriptionRoles = ["owner", "manager", "staff"];
+
+            if (!allowedSubscriptionRoles.includes(subscriptionRole) || !decoded.store_id) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error: "You do not have access to this store's plan and usage details.",
+                        code: "SUBSCRIPTION_VIEW_FORBIDDEN",
+                    }),
+                };
+            }
+
+            // Managers and staff receive the same store-level plan snapshot for
+            // visibility, but only the owner receives management permission.
+            const subscription = await getOwnerSubscription(connection, Number(decoded.store_id));
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    role: subscriptionRole,
+                    can_manage_subscription: subscriptionRole === "owner",
+                    subscription,
+                }),
+            };
+        }
+
+        if (action === "submit_subscription_payment") {
+            const token = getBearerTokenFromEvent(event);
+            if (!token) {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Missing token" }) };
+            }
+
+            let decoded;
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid token" }) };
+            }
+
+            const result = await submitOwnerPlanPayment(connection, decoded, body);
+            return { statusCode: 201, headers, body: JSON.stringify(result) };
+        }
 
         // SEND SIGNUP OTP
         if (action === "send_signup_otp") {
@@ -1603,6 +2186,31 @@ exports.handler = async (event) => {
                     statusCode: 400,
                     headers,
                     body: JSON.stringify({ error: "No branches provided" }),
+                };
+            }
+
+            // Enforce the branch entitlement using the current active plan.
+            // This covers both first-time onboarding and later single-branch
+            // additions because the endpoint receives the new branch list.
+            try {
+                await assertPlanLimit(
+                    connection,
+                    Number(storeId),
+                    "branches",
+                    branches.length,
+                    decoded.role
+                );
+            } catch (limitError) {
+                return {
+                    statusCode: limitError?.statusCode || 409,
+                    headers,
+                    body: JSON.stringify({
+                        error: limitError?.message || "Plan limit reached.",
+                        code: limitError?.code || "BRANCHES_LIMIT_REACHED",
+                        plan_name: limitError?.plan_name,
+                        current: limitError?.current,
+                        limit: limitError?.limit,
+                    }),
                 };
             }
 
@@ -2367,6 +2975,28 @@ exports.handler = async (event) => {
                 };
             }
 
+            try {
+                await assertPlanLimit(
+                    connection,
+                    Number(storeId),
+                    "staff",
+                    1,
+                    decoded.role
+                );
+            } catch (limitError) {
+                return {
+                    statusCode: limitError?.statusCode || 409,
+                    headers,
+                    body: JSON.stringify({
+                        error: limitError?.message || "Plan limit reached.",
+                        code: limitError?.code || "STAFF_LIMIT_REACHED",
+                        plan_name: limitError?.plan_name,
+                        current: limitError?.current,
+                        limit: limitError?.limit,
+                    }),
+                };
+            }
+
             const inviteToken = jwt.sign(
                 {
                     store_id: storeId,
@@ -3112,6 +3742,28 @@ exports.handler = async (event) => {
                     10
                 );
 
+                try {
+                    await assertPlanLimit(
+                        connection,
+                        Number(staff.store_id),
+                        "staff",
+                        1,
+                        "staff"
+                    );
+                } catch (limitError) {
+                    return {
+                        statusCode: limitError?.statusCode || 409,
+                        headers,
+                        body: JSON.stringify({
+                            error: limitError?.message || "Plan limit reached.",
+                            code: limitError?.code || "STAFF_LIMIT_REACHED",
+                            plan_name: limitError?.plan_name,
+                            current: limitError?.current,
+                            limit: limitError?.limit,
+                        }),
+                    };
+                }
+
                 const [result] = await connection.execute(
                     `UPDATE staff
                      SET staff_name = ?,
@@ -3449,6 +4101,32 @@ exports.handler = async (event) => {
                 action === "reactivate_staff"
                     ? "active"
                     : "inactive";
+
+            if (nextStatus === "active") {
+                try {
+                    // Re-activation consumes a staff seat too. This prevents
+                    // an inactive account from being used to bypass the plan.
+                    await assertPlanLimit(
+                        connection,
+                        Number(storeId),
+                        "staff",
+                        1,
+                        decoded.role
+                    );
+                } catch (limitError) {
+                    return {
+                        statusCode: limitError?.statusCode || 409,
+                        headers,
+                        body: JSON.stringify({
+                            error: limitError?.message || "Plan limit reached.",
+                            code: limitError?.code || "STAFF_LIMIT_REACHED",
+                            plan_name: limitError?.plan_name,
+                            current: limitError?.current,
+                            limit: limitError?.limit,
+                        }),
+                    };
+                }
+            }
 
             let result;
 
@@ -4660,7 +5338,7 @@ exports.handler = async (event) => {
                          is_active
                      FROM platform_admins
                      WHERE platform_admin_id = ?
-                     LIMIT 1`,
+                         LIMIT 1`,
                     [platformAdminId]
                 );
 

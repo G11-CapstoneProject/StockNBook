@@ -3,6 +3,184 @@ const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
 
+/*
+ * Shared subscription entitlement checks.
+ *
+ * Subscription management belongs to the store owner, but plan limits are
+ * enforced at the API boundary so managers/staff (and public booking pages)
+ * cannot bypass the active store plan.
+ */
+
+function normalizeLimit(value) {
+    if (value === null || value === undefined || Number(value) === 0) {
+        return null;
+    }
+
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function getActivePlan(connection, storeId) {
+    const [rows] = await connection.execute(
+        `SELECT
+             p.id,
+             p.name,
+             p.max_inventory,
+             p.max_bookings,
+             p.max_staff,
+             p.max_branches
+         FROM subscriptions s
+                  INNER JOIN plans p ON p.id = s.plan_id
+         WHERE s.store_id = ?
+           AND LOWER(s.status) = 'active'
+           AND (s.expires_at IS NULL OR s.expires_at >= CURDATE())
+         ORDER BY s.id DESC
+             LIMIT 1`,
+        [Number(storeId)]
+    );
+
+    if (rows.length > 0) {
+        const plan = rows[0];
+        return {
+            id: Number(plan.id),
+            name: String(plan.name || "Current plan"),
+            max_inventory: normalizeLimit(plan.max_inventory),
+            max_bookings: normalizeLimit(plan.max_bookings),
+            max_staff: normalizeLimit(plan.max_staff),
+            max_branches: normalizeLimit(plan.max_branches),
+        };
+    }
+
+    // New stores begin on Starter before a paid subscription record exists.
+    const [starterRows] = await connection.execute(
+        `SELECT
+             id,
+             name,
+             max_inventory,
+             max_bookings,
+             max_staff,
+             max_branches
+         FROM plans
+         WHERE is_archived = 0
+           AND (LOWER(name) = 'starter' OR price = 0)
+         ORDER BY price ASC, id ASC
+             LIMIT 1`
+    );
+
+    if (starterRows.length === 0) {
+        return null;
+    }
+
+    const plan = starterRows[0];
+    return {
+        id: Number(plan.id),
+        name: String(plan.name || "Starter"),
+        max_inventory: normalizeLimit(plan.max_inventory),
+        max_bookings: normalizeLimit(plan.max_bookings),
+        max_staff: normalizeLimit(plan.max_staff),
+        max_branches: normalizeLimit(plan.max_branches),
+    };
+}
+
+async function getStoreUsage(connection, storeId) {
+    const [inventoryRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM products
+         WHERE store_id = ?
+           AND deleted_at IS NULL`,
+        [Number(storeId)]
+    );
+
+    const [bookingRows] = await connection.execute(
+        "SELECT COUNT(*) AS total FROM bookings WHERE store_id = ?",
+        [Number(storeId)]
+    );
+
+    const [staffRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM staff
+         WHERE store_id = ?
+           AND status IN ('active', 'pending')`,
+        [Number(storeId)]
+    );
+
+    const [branchRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM branches
+         WHERE store_id = ?
+           AND COALESCE(status, 'active') <> 'deleted'`,
+        [Number(storeId)]
+    );
+
+    return {
+        inventory: Number(inventoryRows[0]?.total || 0),
+        bookings: Number(bookingRows[0]?.total || 0),
+        staff: Number(staffRows[0]?.total || 0),
+        branches: Number(branchRows[0]?.total || 0),
+    };
+}
+
+function makeLimitError(resource, plan, current, limit, increment = 1, role = "") {
+    const labels = {
+        inventory: "inventory items",
+        bookings: "bookings",
+        staff: "staff accounts",
+        branches: "branches",
+    };
+
+    const label = labels[resource] || resource;
+    const isOwner = role === "owner";
+    const ownerAction = isOwner
+        ? "Upgrade your plan to add more."
+        : "Contact your account owner to upgrade.";
+
+    const error = new Error(
+        `Plan limit reached: your ${plan?.name || "current"} plan allows up to ${limit} ${label}. ${ownerAction}`
+    );
+    error.statusCode = 409;
+    error.code = `${String(resource).toUpperCase()}_LIMIT_REACHED`;
+    error.plan_name = plan?.name || "Current plan";
+    error.resource = resource;
+    error.current = current;
+    error.limit = limit;
+    error.requested = current + increment;
+    return error;
+}
+
+async function assertPlanLimit(
+    connection,
+    storeId,
+    resource,
+    increment = 1,
+    role = ""
+) {
+    const plan = await getActivePlan(connection, storeId);
+
+    if (!plan) {
+        const error = new Error("No active subscription plan is configured for this store.");
+        error.statusCode = 500;
+        error.code = "PLAN_NOT_CONFIGURED";
+        throw error;
+    }
+
+    const usage = await getStoreUsage(connection, storeId);
+    const current = Number(usage[resource] || 0);
+    const limit = plan[`max_${resource}`];
+
+    if (limit !== null && current + Number(increment) > limit) {
+        throw makeLimitError(resource, plan, current, limit, Number(increment), role);
+    }
+
+    return { plan, usage, current, limit };
+}
+
+module.exports = {
+    getActivePlan,
+    getStoreUsage,
+    assertPlanLimit,
+};
+
+
 const JWT_SECRET = "stocknbook-secret-key";
 
 const dbConfig = {
@@ -35,11 +213,17 @@ function notFound(headers, message) {
 
 function serverError(headers, err) {
     const message = err instanceof Error ? err.message : "Internal server error";
+    const statusCode = Number(err?.statusCode) || 500;
 
     console.error("Lambda error:", err);
 
-    return jsonResponse(500, headers, {
+    return jsonResponse(statusCode, headers, {
         error: message,
+        ...(err?.code ? { code: err.code } : {}),
+        ...(err?.plan_name ? { plan_name: err.plan_name } : {}),
+        ...(err?.resource ? { resource: err.resource } : {}),
+        ...(err?.current !== undefined ? { current: err.current } : {}),
+        ...(err?.limit !== undefined ? { limit: err.limit } : {}),
     });
 }
 
@@ -801,7 +985,7 @@ function getTotalStock(product) {
     return Number(product.stock || 0);
 }
 
-exports.handler = async (event) => {
+module.exports.handler = async (event) => {
     const headers = {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
@@ -949,6 +1133,16 @@ exports.handler = async (event) => {
                     `Variant "${duplicateVariantLabel}" already exists in this product.`
                 );
             }
+
+            // Plan limits are enforced on the server so managers/staff cannot
+            // bypass the owner's subscription by calling the API directly.
+            await assertPlanLimit(
+                connection,
+                storeId,
+                "inventory",
+                1,
+                tokenRole
+            );
 
             const stock = hasVariants
                 ? getVariantTotalStock(incomingVariants)

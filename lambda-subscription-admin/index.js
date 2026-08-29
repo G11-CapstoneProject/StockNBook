@@ -639,6 +639,40 @@ async function listAuditLogs(connection, businessId) {
     }));
 }
 
+async function getPublicPlans() {
+    const [rows] = await pool.execute(
+        `SELECT
+             p.id,
+             p.name,
+             p.price,
+             p.max_inventory,
+             p.max_bookings,
+             p.max_staff,
+             p.max_branches,
+             p.has_low_stock_alerts,
+             p.has_analytics,
+             p.has_forecasting,
+             p.has_multi_store
+         FROM plans p
+         WHERE p.is_archived = 0
+         ORDER BY p.price ASC, p.id ASC`
+    );
+
+    return rows.map((row) => ({
+        id: Number(row.id),
+        name: row.name,
+        price: Number(row.price || 0),
+        max_inventory: row.max_inventory == null || Number(row.max_inventory) === 0 ? null : Number(row.max_inventory),
+        max_bookings: row.max_bookings == null || Number(row.max_bookings) === 0 ? null : Number(row.max_bookings),
+        max_staff: row.max_staff == null || Number(row.max_staff) === 0 ? null : Number(row.max_staff),
+        max_branches: row.max_branches == null || Number(row.max_branches) === 0 ? null : Number(row.max_branches),
+        has_low_stock_alerts: Boolean(row.has_low_stock_alerts),
+        has_analytics: Boolean(row.has_analytics),
+        has_forecasting: Boolean(row.has_forecasting),
+        has_multi_store: Boolean(row.has_multi_store),
+    }));
+}
+
 async function getPlans(connection) {
     const [rows] = await connection.execute(
         `SELECT
@@ -1265,4 +1299,83 @@ exports.handler = async (event) => {
     } finally {
         if (connection) connection.release();
     }
+};
+async function tryPlatformAdminLogin({
+                                         connection,
+                                         email,
+                                         password,
+                                     }) {
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    const enteredPassword = String(password || "");
+
+    if (!normalizedEmail || !enteredPassword) {
+        return null;
+    }
+
+    const [rows] = await connection.execute(
+        `
+            SELECT
+                platform_admin_id,
+                full_name,
+                email,
+                password,
+                role,
+                is_active
+            FROM platform_admins
+            WHERE email = ?
+                LIMIT 1
+        `,
+        [normalizedEmail]
+    );
+
+    const admin = rows[0];
+
+    if (!admin) {
+        return null;
+    }
+
+    if (!admin.is_active) {
+        const error = new Error("Platform Administrator account is inactive.");
+        error.statusCode = 403;
+        throw error;
+    }
+
+    const passwordMatches = await bcrypt.compare(
+        enteredPassword,
+        admin.password
+    );
+
+    if (!passwordMatches) {
+        const error = new Error("Invalid email or password.");
+        error.statusCode = 401;
+        throw error;
+    }
+
+    const token = jwt.sign(
+        {
+            platform_admin_id: admin.platform_admin_id,
+            email: admin.email,
+            full_name: admin.full_name,
+            role: "PLATFORM_ADMIN",
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: "8h" }
+    );
+
+    return {
+        token,
+        user: {
+            id: admin.platform_admin_id,
+            platform_admin_id: admin.platform_admin_id,
+            full_name: admin.full_name,
+            email: admin.email,
+            role: "PLATFORM_ADMIN",
+        },
+    };
+}
+
+module.exports = {
+    handler: exports.handler,
+    tryPlatformAdminLogin,
+    getPublicPlans,
 };

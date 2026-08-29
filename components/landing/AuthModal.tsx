@@ -20,12 +20,10 @@ import {
     Package,
     PartyPopper,
     Phone,
-    Plus,
     RefreshCw,
     ShieldCheck,
     Sparkles,
     Store,
-    Trash2,
     UserRound,
     X,
 } from "lucide-react";
@@ -529,28 +527,6 @@ export default function AuthModal({
         onSwitch(mode === "login" ? "signup" : "login");
     };
 
-    const addBranch = () => {
-        setBranches((current) => {
-            if (current.length >= 10) {
-                alert("You can add up to 10 branches during setup.");
-                return current;
-            }
-
-            return [...current, createEmptyBranch()];
-        });
-    };
-
-    const removeBranch = (index: number) => {
-        setBranches((current) => {
-            if (current.length === 1) {
-                alert("At least one branch is required.");
-                return current;
-            }
-
-            return current.filter((_, branchIndex) => branchIndex !== index);
-        });
-    };
-
     const updateBranch = (
         index: number,
         field: keyof Omit<BranchSetup, "permissions" | "manager_mode">,
@@ -753,7 +729,7 @@ export default function AuthModal({
                 : signupStep === 1
                     ? "Create account"
                     : signupStep === 2
-                        ? "Add your branches"
+                        ? "Set up your first branch"
                         : signupStep === 3
                             ? "Assign managers"
                             : "Review your setup";
@@ -762,14 +738,14 @@ export default function AuthModal({
         mode === "login"
             ? "Enter your credentials to access your dashboard."
             : setupComplete
-                ? "Your account, branches, and manager access are ready."
+                ? "Your account, first branch, and manager access are ready."
                 : signupStep === 1
                     ? "Set up your business in under 3 minutes."
                     : signupStep === 2
-                        ? "Add at least one location where your business operates."
+                        ? "Start with your first branch. You can add more later after upgrading your plan."
                         : signupStep === 3
                             ? "Choose who will manage each branch and keep the same access controls."
-                            : "Check your information before creating the branches and invitation links.";
+                            : "Check your information before creating your first branch and optional manager access.";
 
     return (
         <>
@@ -1198,18 +1174,7 @@ export default function AuthModal({
                                                     Branch {index + 1}
                                                 </h3>
 
-                                                {branches.length > 1 && (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() =>
-                                                            removeBranch(index)
-                                                        }
-                                                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#8F4960] transition hover:text-red-600"
-                                                    >
-                                                        <Trash2 className="h-4 w-4" />
-                                                        Remove
-                                                    </button>
-                                                )}
+
                                             </div>
 
                                             <div className="grid gap-4 sm:grid-cols-2">
@@ -1265,19 +1230,14 @@ export default function AuthModal({
                                     ))}
                                 </div>
 
-                                <button
-                                    type="button"
-                                    onClick={addBranch}
-                                    className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-[#CFC3D8] bg-white px-4 py-3 text-sm font-semibold text-[#2D1B4E] transition hover:border-[#7B58A8] hover:bg-[#FBF8FD]"
-                                >
-                                    <Plus className="h-4 w-4" />
-                                    Add another branch
-                                </button>
-
                                 <div className="mt-4 flex items-start gap-2 rounded-xl border border-[#EEDFC0] bg-[#FFFAEF] px-4 py-3 text-xs leading-5 text-[#766342]">
                                     <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#C9951A]" />
-                                    You can always add more branches later from
-                                    the Branches page.
+                                    <span>
+                                        Your first branch is included with the Starter
+                                        plan. You can add more branches later from the
+                                        Branches page after upgrading to a plan that
+                                        supports additional branches.
+                                    </span>
                                 </div>
 
                                 <div className="mt-6 grid grid-cols-2 gap-3">
@@ -1619,7 +1579,7 @@ export default function AuthModal({
                                     >
                                         {setupLoading
                                             ? "Creating setup..."
-                                            : "Create branches & send invitations"}
+                                            : "Create branch & send invitations"}
                                     </button>
                                 </div>
                             </div>
@@ -1639,11 +1599,7 @@ export default function AuthModal({
                                 </h1>
 
                                 <p className="mt-3 text-sm font-semibold text-[#2D1B4E]">
-                                    {branches.length}{" "}
-                                    {branches.length === 1
-                                        ? "branch was"
-                                        : "branches were"}{" "}
-                                    created successfully.
+                                    Your first branch was created successfully.
                                 </p>
 
                                 <p className="mt-1 text-sm text-[#7A6E88]">
@@ -1952,7 +1908,7 @@ export default function AuthModal({
 function OnboardingProgress({ currentStep }: { currentStep: number }) {
     const steps = [
         { number: 1, label: "Business info" },
-        { number: 2, label: "Branches" },
+        { number: 2, label: "First branch" },
         { number: 3, label: "Managers (optional)" },
         { number: 4, label: "Review" },
     ];

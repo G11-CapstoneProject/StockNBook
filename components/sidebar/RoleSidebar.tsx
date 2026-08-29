@@ -15,6 +15,7 @@ import {
     BarChart3,
     Boxes,
     CalendarDays,
+    CreditCard,
     FileText,
     GitBranch,
     LayoutDashboard,
@@ -664,7 +665,7 @@ export default function RoleSidebar() {
                                     label:
                                         "Packages",
                                     href:
-                                        "/plans",
+                                        "/packages",
                                     icon: Package,
                                 }}
                             />
@@ -784,8 +785,18 @@ export default function RoleSidebar() {
                     </SidebarSection>
                 )}
 
-                {/* Settings and Logout */}
+                {/* Every role can view the store's current plan and usage.
+                 * Only the owner can manage billing, submit payment proof, or upgrade. */}
                 <SidebarSection label="System">
+                    <NavItem
+                        pathname={pathname}
+                        item={{
+                            label: role === "owner" ? "Subscription" : "Plan & Usage",
+                            href: "/subscription",
+                            icon: CreditCard,
+                        }}
+                    />
+
                     {canViewSettings && (
                         <NavItem
                             pathname={pathname}

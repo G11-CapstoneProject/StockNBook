@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import RequirePermission from "@/components/permissions/RequirePermission";
+import PlanFeatureGate from "@/components/permissions/PlanFeatureGate";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import ManagerForecast from "@/components/forecasting/ManagerForecast";
 import OwnerForecast from "@/components/forecasting/OwnerForecast";
@@ -103,12 +104,16 @@ export default function ForecastingPage() {
                             <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-6 text-sm text-[#7A6A84] shadow-sm">
                                 Loading your forecast access...
                             </div>
-                        ) : role === "owner" ? (
-                            <OwnerForecast {...forecast} />
-                        ) : role === "staff" ? (
-                            <StaffForecast {...forecast} />
                         ) : (
-                            <ManagerForecast {...forecast} />
+                            <PlanFeatureGate feature="forecasting">
+                                {role === "owner" ? (
+                                    <OwnerForecast {...forecast} />
+                                ) : role === "staff" ? (
+                                    <StaffForecast {...forecast} />
+                                ) : (
+                                    <ManagerForecast {...forecast} />
+                                )}
+                            </PlanFeatureGate>
                         )}
                     </section>
                 </main>

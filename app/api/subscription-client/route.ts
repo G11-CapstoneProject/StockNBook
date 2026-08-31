@@ -4,6 +4,14 @@ import { handler } from "../../../lambda-auth/index.js";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// Only these two actions may be triggered by this route. Anything else in
+// body.action is ignored and falls back to submit_subscription_payment, so a
+// client can't use this proxy to invoke arbitrary lambda-auth actions.
+const ALLOWED_POST_ACTIONS = new Set([
+    "send_payment_otp",
+    "submit_subscription_payment",
+]);
+
 function parseBody(body: string | undefined) {
     if (!body) return {};
 
@@ -50,6 +58,10 @@ export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
 
+        const requestedAction = ALLOWED_POST_ACTIONS.has(body?.action)
+            ? body.action
+            : "submit_subscription_payment";
+
         const response = await handler({
             headers: {
                 "Content-Type": "application/json",
@@ -57,7 +69,7 @@ export async function POST(req: NextRequest) {
             },
             body: JSON.stringify({
                 ...body,
-                action: "submit_subscription_payment",
+                action: requestedAction,
             }),
             requestContext: { http: { method: "POST" } },
         });

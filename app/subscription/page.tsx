@@ -140,6 +140,11 @@ export default function SubscriptionPage() {
     const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
     const [referenceNumber, setReferenceNumber] = useState("");
     const [receiptUrl, setReceiptUrl] = useState("");
+    const [otp, setOtp] = useState("");
+    const [otpSent, setOtpSent] = useState(false);
+    const [otpSending, setOtpSending] = useState(false);
+    const [otpSecondsRemaining, setOtpSecondsRemaining] = useState(0);
+    const [otpEmailHint, setOtpEmailHint] = useState("");
     const [submitting, setSubmitting] = useState(false);
     const [message, setMessage] = useState("");
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
@@ -189,8 +194,79 @@ export default function SubscriptionPage() {
         }
     }, [userLoading, user, token]);
 
+    useEffect(() => {
+        if (!otpSent || otpSecondsRemaining <= 0) return;
+
+        const interval = window.setInterval(() => {
+            setOtpSecondsRemaining((seconds) => Math.max(0, seconds - 1));
+        }, 1000);
+
+        return () => window.clearInterval(interval);
+    }, [otpSent, otpSecondsRemaining]);
+
+    function resetPaymentModal() {
+        setSelectedPlan(null);
+        setReferenceNumber("");
+        setReceiptUrl("");
+        setOtp("");
+        setOtpSent(false);
+        setOtpSending(false);
+        setOtpSecondsRemaining(0);
+        setOtpEmailHint("");
+        setSubmitting(false);
+    }
+
+    async function sendPaymentOtp() {
+        if (!selectedPlan || otpSending) return;
+
+        setOtpSending(true);
+        setError("");
+        setMessage("");
+
+        try {
+            const res = await fetch("/api/subscription-client", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    action: "send_payment_otp",
+                    plan_id: selectedPlan.id,
+                }),
+            });
+
+            const body = await res.json();
+            if (!res.ok) throw new Error(body.error || "Unable to send the verification code.");
+
+            setOtpSent(true);
+            setOtp("");
+            setOtpEmailHint(body.email_hint || "your registered email");
+            setOtpSecondsRemaining(Number(body.expires_in) || 300);
+            setMessage(body.message || "Verification code sent to your email.");
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Unable to send the verification code.");
+        } finally {
+            setOtpSending(false);
+        }
+    }
+
     async function submitPayment() {
         if (!selectedPlan) return;
+
+        const cleanOtp = otp.replace(/\D/g, "");
+        if (!otpSent) {
+            setError("Send the verification code before submitting your payment.");
+            return;
+        }
+        if (!/^\d{6}$/.test(cleanOtp)) {
+            setError("Enter the complete 6-digit verification code.");
+            return;
+        }
+        if (!referenceNumber.trim()) {
+            setError("Enter your GCash reference number.");
+            return;
+        }
 
         setSubmitting(true);
         setError("");
@@ -204,18 +280,18 @@ export default function SubscriptionPage() {
                     Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
+                    action: "submit_subscription_payment",
                     plan_id: selectedPlan.id,
                     reference_number: referenceNumber.trim(),
                     receipt_url: receiptUrl.trim(),
+                    otp: cleanOtp,
                 }),
             });
 
             const body = await res.json();
             if (!res.ok) throw new Error(body.error || "Unable to submit payment.");
 
-            setSelectedPlan(null);
-            setReferenceNumber("");
-            setReceiptUrl("");
+            resetPaymentModal();
             setMessage("Your payment proof has been submitted. The platform admin will review it before your plan changes.");
             await loadSubscription();
         } catch (err) {
@@ -639,19 +715,21 @@ export default function SubscriptionPage() {
             </main>
 
             {selectedPlan && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#1A1220]/55 px-4 py-6 backdrop-blur-sm">
+                <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-[#1A1220]/55 px-4 py-6 backdrop-blur-sm">
                     <div className="w-full max-w-xl rounded-2xl border border-[#E7DCEB] bg-white p-6 shadow-[0_18px_60px_rgba(26,18,32,0.22)]">
                         <div className="flex items-start justify-between gap-4">
                             <div>
-                                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#9A7A25]">Payment proof</p>
+                                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#9A7A25]">Subscription upgrade</p>
                                 <h2 className="mt-2 text-2xl font-bold text-[#1A1220]">Upgrade to {selectedPlan.name}</h2>
                                 <p className="mt-1 text-sm leading-6 text-[#7A6E88]">
-                                    Pay {formatPrice(selectedPlan.price)} for one month, then submit your GCash reference and receipt link for platform admin review.
+                                    {otpSent
+                                        ? "Enter the verification code and payment proof below. The code confirms that you are the account owner submitting this request."
+                                        : "First verify your account by email. After the code is sent, you can submit your GCash payment proof for platform admin review."}
                                 </p>
                             </div>
                             <button
                                 type="button"
-                                onClick={() => setSelectedPlan(null)}
+                                onClick={resetPaymentModal}
                                 className="rounded-full p-2 text-[#7A6E88] hover:bg-[#F5F0F7]"
                                 aria-label="Close payment dialog"
                             >
@@ -670,45 +748,107 @@ export default function SubscriptionPage() {
                             </div>
                         </div>
 
-                        <label className="mt-5 block text-xs font-semibold text-[#4B3E55]">
-                            GCash reference number
-                            <input
-                                value={referenceNumber}
-                                onChange={(event) => setReferenceNumber(event.target.value)}
-                                placeholder="Enter the reference number from GCash"
-                                className="mt-2 h-11 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-sm font-medium text-[#1A1220] outline-none transition placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10"
-                            />
-                        </label>
+                        {!otpSent ? (
+                            <div className="mt-5 rounded-2xl border border-[#E5DCF2] bg-[#FAF7FF] p-5">
+                                <div className="flex items-start gap-3">
+                                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#EDE3FF] text-[#6D35D4]">
+                                        <ShieldCheck className="h-5 w-5" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-sm font-bold text-[#2D1B4E]">Verify your account first</h3>
+                                        <p className="mt-1 text-xs leading-5 text-[#7A6E88]">
+                                            We will send a 6-digit verification code to the email registered to your owner account.
+                                        </p>
+                                    </div>
+                                </div>
 
-                        <label className="mt-4 block text-xs font-semibold text-[#4B3E55]">
-                            Receipt / proof link
-                            <input
-                                value={receiptUrl}
-                                onChange={(event) => setReceiptUrl(event.target.value)}
-                                placeholder="Paste the uploaded receipt link"
-                                className="mt-2 h-11 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-sm font-medium text-[#1A1220] outline-none transition placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10"
-                            />
-                            <span className="mt-1.5 block text-[11px] font-normal leading-5 text-[#8A7D92]">
-                                Your current project does not include a file-storage service, so this field accepts the receipt URL used by the admin payment-review screen.
-                            </span>
-                        </label>
+                                <button
+                                    type="button"
+                                    disabled={otpSending}
+                                    onClick={sendPaymentOtp}
+                                    className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#412563] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    <ShieldCheck className="h-4 w-4" />
+                                    {otpSending ? "Sending verification code..." : "Send verification code"}
+                                </button>
+                            </div>
+                        ) : (
+                            <>
+                                <div className="mt-5 rounded-2xl border border-[#DDEFE5] bg-[#F4FBF7] p-4">
+                                    <div className="flex items-start justify-between gap-4">
+                                        <div>
+                                            <p className="text-xs font-bold text-[#17643D]">Verification code sent</p>
+                                            <p className="mt-1 text-[11px] leading-5 text-[#5E7569]">
+                                                Check {otpEmailHint || "your registered email"}. The code expires in {Math.floor(otpSecondsRemaining / 60)}:{String(otpSecondsRemaining % 60).padStart(2, "0")}.
+                                            </p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            disabled={otpSending || otpSecondsRemaining > 0}
+                                            onClick={sendPaymentOtp}
+                                            className="shrink-0 rounded-lg border border-[#B9DCC8] bg-white px-3 py-2 text-[11px] font-semibold text-[#17643D] disabled:cursor-not-allowed disabled:opacity-45"
+                                        >
+                                            {otpSending ? "Sending..." : otpSecondsRemaining > 0 ? "Resend" : "Send again"}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <label className="mt-5 block text-xs font-semibold text-[#4B3E55]">
+                                    6-digit verification code
+                                    <input
+                                        value={otp}
+                                        onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                                        inputMode="numeric"
+                                        autoComplete="one-time-code"
+                                        maxLength={6}
+                                        placeholder="Enter the code from your email"
+                                        className="mt-2 h-12 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-center text-lg font-bold tracking-[0.35em] text-[#1A1220] outline-none transition placeholder:text-sm placeholder:font-normal placeholder:tracking-normal placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10"
+                                    />
+                                </label>
+
+                                <label className="mt-4 block text-xs font-semibold text-[#4B3E55]">
+                                    GCash reference number
+                                    <input
+                                        value={referenceNumber}
+                                        onChange={(event) => setReferenceNumber(event.target.value)}
+                                        placeholder="Enter the reference number from GCash"
+                                        className="mt-2 h-11 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-sm font-medium text-[#1A1220] outline-none transition placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10"
+                                    />
+                                </label>
+
+                                <label className="mt-4 block text-xs font-semibold text-[#4B3E55]">
+                                    Receipt / proof link
+                                    <input
+                                        value={receiptUrl}
+                                        onChange={(event) => setReceiptUrl(event.target.value)}
+                                        placeholder="Paste the uploaded receipt link"
+                                        className="mt-2 h-11 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-sm font-medium text-[#1A1220] outline-none transition placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10"
+                                    />
+                                    <span className="mt-1.5 block text-[11px] font-normal leading-5 text-[#8A7D92]">
+                                        This link is stored with the payment so the platform admin can inspect your GCash proof.
+                                    </span>
+                                </label>
+                            </>
+                        )}
 
                         <div className="mt-6 flex justify-end gap-3">
                             <button
                                 type="button"
-                                onClick={() => setSelectedPlan(null)}
+                                onClick={resetPaymentModal}
                                 className="rounded-xl border border-[#DCCFE8] bg-white px-5 py-2.5 text-sm font-semibold text-[#4B3E55] hover:bg-[#FAF7FC]"
                             >
                                 Cancel
                             </button>
-                            <button
-                                type="button"
-                                disabled={submitting || !referenceNumber.trim()}
-                                onClick={submitPayment}
-                                className="rounded-xl bg-[#2D1B4E] px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                                {submitting ? "Submitting..." : "Submit for review"}
-                            </button>
+                            {otpSent && (
+                                <button
+                                    type="button"
+                                    disabled={submitting || otp.length !== 6 || !referenceNumber.trim()}
+                                    onClick={submitPayment}
+                                    className="rounded-xl bg-[#2D1B4E] px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    {submitting ? "Submitting..." : "Verify & submit for review"}
+                                </button>
+                            )}
                         </div>
                     </div>
                 </div>

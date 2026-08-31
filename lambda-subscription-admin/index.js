@@ -1,15 +1,3 @@
-// lambda-subscription-admin/index.js
-//
-// Platform-admin backend for the current StockNBook subscription schema:
-//   platform_admins, stores, plans, subscriptions, payments,
-//   subscription_history, platform_settings, subscription_audit_logs
-//
-// Required environment variables:
-//   DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, JWT_SECRET
-//
-// Optional:
-//   DB_PORT, DB_SSL, ALLOWED_ORIGINS
-
 const mysql = require("mysql2/promise");
 
 const bcrypt = require("bcryptjs");
@@ -174,10 +162,16 @@ function lowerStatus(status) {
     return normalizeStatus(status).toLowerCase();
 }
 
-function changeTypeForPlanChange(oldPlanId, newPlanId) {
+function changeTypeForPlanChange(oldPlanId, newPlanId, oldPlanPrice, newPlanPrice) {
     if (!oldPlanId) return "upgrade";
     if (Number(newPlanId) === Number(oldPlanId)) return "renewal";
-    return Number(newPlanId) > Number(oldPlanId) ? "upgrade" : "downgrade";
+
+    // Plan IDs are database identifiers, not guaranteed to represent pricing
+    // tiers. Compare prices so subscription history records the real direction
+    // of the change even if plan rows are reordered or recreated.
+    return moneyCents(newPlanPrice) >= moneyCents(oldPlanPrice)
+        ? "upgrade"
+        : "downgrade";
 }
 
 function getBearerToken(headers = {}) {
@@ -449,8 +443,6 @@ async function listBusinesses(connection, search) {
              s.store_name,
              s.owner_name,
              s.email AS owner_email,
-             s.status AS store_status,
-             s.last_active_at,
              sub.id AS subscription_id,
              sub.status AS raw_subscription_status,
              sub.started_at,
@@ -475,7 +467,7 @@ async function listBusinesses(connection, search) {
         owner_name_snapshot: row.owner_name,
         owner_email: row.owner_email,
         business_code_snapshot: null,
-        store_status: String(row.store_status || "").toUpperCase(),
+        store_status: row.subscription_id == null ? "EXPIRED" : displaySubscriptionStatus(row.raw_subscription_status, row.expires_at),
         subscription_id: row.subscription_id == null ? null : Number(row.subscription_id),
         subscription_status: row.subscription_id == null ? null : displaySubscriptionStatus(row.raw_subscription_status, row.expires_at),
         start_date: row.started_at,
@@ -487,7 +479,7 @@ async function listBusinesses(connection, search) {
         latest_reference_number: null,
         verified_at: null,
         verified_by: null,
-        last_active_at: row.last_active_at,
+        last_active_at: null,
         lifetime_paid: Number(row.lifetime_paid || 0),
     }));
 }
@@ -530,7 +522,6 @@ async function listSubscriptions(connection, search, statusFilter) {
              s.store_name,
              s.owner_name,
              s.email AS owner_email,
-             s.status AS store_status,
              pl.name AS plan_name,
              pl.price AS plan_price,
              (SELECT COUNT(*) FROM subscription_history sh WHERE sh.subscription_id = sub.id) AS history_count
@@ -835,10 +826,23 @@ async function approvePayment(connection, paymentId, admin) {
         if (duplicates.length) throw httpError(409, "This reference number is already used by an approved payment.");
 
         const [subscriptionRows] = await connection.execute(
-            `SELECT * FROM subscriptions WHERE store_id = ? LIMIT 1 FOR UPDATE`,
+            `SELECT s.*, old_plan.price AS old_plan_price
+             FROM subscriptions s
+             LEFT JOIN plans old_plan ON old_plan.id = s.plan_id
+             WHERE s.store_id = ?
+             LIMIT 1
+             FOR UPDATE`,
             [payment[c.storeId]]
         );
         const existing = subscriptionRows[0] || null;
+
+        // The owner-facing subscription screen only permits upgrades/renewals.
+        // Keep the same rule on the approval side so an old or manually crafted
+        // payment submission cannot downgrade an already higher-priced plan.
+        if (existing && moneyCents(plan.price) < moneyCents(existing.old_plan_price)) {
+            throw httpError(409, "The submitted plan is lower than the store's current plan and cannot be approved from this payment flow.");
+        }
+
         const approvalDate = today();
         let startDate = approvalDate;
         let expiresAt = addMonths(approvalDate, 1);
@@ -861,7 +865,12 @@ async function approvePayment(connection, paymentId, admin) {
             } else {
                 startDate = approvalDate;
                 expiresAt = addMonths(approvalDate, 1);
-                changeType = changeTypeForPlanChange(oldPlanId, payment[c.planId]);
+                changeType = changeTypeForPlanChange(
+                    oldPlanId,
+                    payment[c.planId],
+                    existing.old_plan_price,
+                    plan.price
+                );
             }
 
             await connection.execute(
@@ -990,12 +999,6 @@ async function changeSubscriptionStatus(connection, subscriptionId, admin, nextS
         const previousStatus = normalizeStatus(sub.status);
         await connection.execute("UPDATE subscriptions SET status = ? WHERE id = ?", [lowerStatus(nextStatus), subscriptionId]);
 
-        if (nextStatus === "CANCELLED") {
-            await connection.execute("UPDATE stores SET status = 'suspended' WHERE id = ?", [sub.store_id]);
-        } else if (nextStatus === "ACTIVE") {
-            await connection.execute("UPDATE stores SET status = 'active', last_active_at = NOW() WHERE id = ?", [sub.store_id]);
-        }
-
         await connection.execute(
             `INSERT INTO subscription_history
              (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
@@ -1035,8 +1038,6 @@ async function extendSubscription(connection, subscriptionId, admin, extensionDa
         const previousStatus = normalizeStatus(sub.status);
 
         await connection.execute("UPDATE subscriptions SET expires_at = ?, status = 'active' WHERE id = ?", [expiresAt, subscriptionId]);
-        await connection.execute("UPDATE stores SET status = 'active' WHERE id = ?", [sub.store_id]);
-
         await connection.execute(
             `INSERT INTO subscription_history
              (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
@@ -1092,6 +1093,14 @@ async function listStores(connection, search, planName, storeStatus) {
     const values = [];
     const filters = [];
     const cleanSearch = text(search, 120);
+    const c = await getPaymentColumns(connection);
+    const latestPaymentStatusSql = `UPPER(COALESCE((
+        SELECT pstatus.${c.status}
+        FROM payments pstatus
+        WHERE pstatus.${c.storeId} = s.id
+        ORDER BY ${c.createdAt ? `pstatus.${c.createdAt}` : `pstatus.${c.id}`} DESC, pstatus.${c.id} DESC
+        LIMIT 1
+    ), ''))`;
 
     if (cleanSearch) {
         const like = `%${cleanSearch}%`;
@@ -1099,79 +1108,166 @@ async function listStores(connection, search, planName, storeStatus) {
         values.push(like, like, like);
     }
     if (planName && planName !== "All plans") {
-        filters.push("pl.name = ?");
+        filters.push(`COALESCE(pl.name, (
+            SELECT starter_filter.name
+            FROM plans starter_filter
+            WHERE starter_filter.is_archived = 0
+              AND (LOWER(starter_filter.name) = 'starter' OR starter_filter.price = 0)
+            ORDER BY starter_filter.price ASC, starter_filter.id ASC
+            LIMIT 1
+        )) = ?`);
         values.push(planName);
     }
     if (storeStatus && storeStatus !== "All statuses") {
-        filters.push("LOWER(s.status) = ?");
-        values.push(String(storeStatus).toLowerCase());
+        const requestedStatus = String(storeStatus).trim().toUpperCase();
+
+        if (requestedStatus === "PENDING") {
+            filters.push(`${latestPaymentStatusSql} = 'PENDING'`);
+        } else if (requestedStatus === "SUSPENDED") {
+            filters.push("LOWER(COALESCE(sub.status, '')) = 'cancelled'");
+        } else if (requestedStatus === "ACTIVE") {
+            filters.push(`(
+                (sub.id IS NULL AND EXISTS (
+                    SELECT 1
+                    FROM plans starter_active
+                    WHERE starter_active.is_archived = 0
+                      AND (LOWER(starter_active.name) = 'starter' OR starter_active.price = 0)
+                ))
+                OR
+                (COALESCE(pl.price, 0) <= 0)
+                OR
+                (LOWER(COALESCE(sub.status, '')) = 'active' AND (sub.expires_at IS NULL OR sub.expires_at >= CURDATE()))
+            ) AND ${latestPaymentStatusSql} <> 'PENDING'`);
+        } else if (requestedStatus === "EXPIRED") {
+            filters.push(`sub.id IS NOT NULL AND COALESCE(pl.price, 0) > 0 AND (LOWER(COALESCE(sub.status, 'expired')) = 'expired' OR (LOWER(sub.status) = 'active' AND sub.expires_at < CURDATE())) AND ${latestPaymentStatusSql} <> 'PENDING'`);
+        }
     }
 
     const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-    const c = await getPaymentColumns(connection);
     const [rows] = await connection.execute(
         `SELECT
              s.id,
              s.store_name,
              s.owner_name,
              s.email,
-             s.status,
-             s.last_active_at,
              sub.id AS subscription_id,
              sub.status AS raw_subscription_status,
              sub.started_at,
              sub.expires_at,
              sub.auto_renew,
-             pl.id AS plan_id,
-             pl.name AS plan_name,
-             (SELECT MIN(sub2.created_at) FROM subscriptions sub2 WHERE sub2.store_id = s.id) AS signup_date,
+             COALESCE(pl.id, (
+                 SELECT starter_plan.id
+                 FROM plans starter_plan
+                 WHERE starter_plan.is_archived = 0
+                   AND (LOWER(starter_plan.name) = 'starter' OR starter_plan.price = 0)
+                 ORDER BY starter_plan.price ASC, starter_plan.id ASC
+                      LIMIT 1
+                 )) AS plan_id,
+             COALESCE(pl.name, (
+                 SELECT starter_plan.name
+                 FROM plans starter_plan
+                 WHERE starter_plan.is_archived = 0
+                   AND (LOWER(starter_plan.name) = 'starter' OR starter_plan.price = 0)
+                 ORDER BY starter_plan.price ASC, starter_plan.id ASC
+                      LIMIT 1
+                 )) AS plan_name,
+             s.created_at AS signup_date,
+             s.last_active_at,
+             (SELECT UPPER(p3.${c.status})
+              FROM payments p3
+              WHERE p3.${c.storeId} = s.id
+              ORDER BY ${c.createdAt ? `p3.${c.createdAt}` : `p3.${c.id}`} DESC, p3.${c.id} DESC
+                 LIMIT 1) AS latest_payment_status,
              COALESCE((SELECT SUM(p2.${c.amount}) FROM payments p2 WHERE p2.${c.storeId} = s.id AND UPPER(p2.${c.status}) = 'APPROVED'), 0) AS lifetime_paid,
              (SELECT COUNT(*) FROM products prod WHERE prod.store_id = s.id) AS inventory_item_count
          FROM stores s
-                  LEFT JOIN subscriptions sub ON sub.store_id = s.id
-                  LEFT JOIN plans pl ON pl.id = sub.plan_id
+             LEFT JOIN subscriptions sub ON sub.store_id = s.id
+             LEFT JOIN plans pl ON pl.id = sub.plan_id
              ${where}
          ORDER BY s.id DESC`,
         values
     );
 
-    return rows.map((row) => ({
-        id: Number(row.id),
-        store_name: row.store_name,
-        owner_name: row.owner_name,
-        email: row.email,
-        status: String(row.status || "").toUpperCase(),
-        last_active_at: row.last_active_at,
-        signup_date: row.signup_date,
-        subscription_id: row.subscription_id == null ? null : Number(row.subscription_id),
-        plan_id: row.plan_id == null ? null : Number(row.plan_id),
-        plan_name: row.plan_name || "Starter",
-        subscription_status: row.subscription_id == null ? "EXPIRED" : displaySubscriptionStatus(row.raw_subscription_status, row.expires_at),
-        started_at: row.started_at,
-        expires_at: row.expires_at,
-        auto_renew: Boolean(row.auto_renew),
-        lifetime_paid: Number(row.lifetime_paid || 0),
-        inventory_item_count: Number(row.inventory_item_count || 0),
-    }));
+    return rows.map((row) => {
+        const hasSubscription = row.subscription_id != null;
+        const isStarterPlan = Number(row.plan_price || 0) <= 0;
+        const subscriptionStatus = !hasSubscription || isStarterPlan
+            ? "ACTIVE"
+            : displaySubscriptionStatus(row.raw_subscription_status, row.expires_at);
+        const latestPaymentStatus = normalizeStatus(row.latest_payment_status);
+
+        let status = subscriptionStatus;
+        if (normalizeStatus(row.raw_subscription_status) === "CANCELLED") {
+            status = "SUSPENDED";
+        } else if (latestPaymentStatus === "PENDING") {
+            status = "PENDING";
+        } else if (subscriptionStatus === "EXPIRING") {
+            status = "ACTIVE";
+        }
+
+        return {
+            id: Number(row.id),
+            store_name: row.store_name,
+            owner_name: row.owner_name,
+            email: row.email,
+            status,
+            last_active_at: row.last_active_at,
+            signup_date: row.signup_date,
+            subscription_id: row.subscription_id == null ? null : Number(row.subscription_id),
+            plan_id: row.plan_id == null ? null : Number(row.plan_id),
+            plan_name: row.plan_name || "Starter",
+            subscription_status: subscriptionStatus,
+            started_at: row.started_at,
+            expires_at: row.expires_at,
+            auto_renew: Boolean(row.auto_renew),
+            lifetime_paid: Number(row.lifetime_paid || 0),
+            inventory_item_count: Number(row.inventory_item_count || 0),
+            latest_payment_status: latestPaymentStatus || null,
+        };
+    });
 }
 
 async function setStoreStatus(connection, storeId, status, admin, reason) {
     const normalized = String(status || "").trim().toLowerCase();
-    if (!["active", "trial", "suspended"].includes(normalized)) throw httpError(400, "Invalid store status.");
+    if (!["active", "suspended"].includes(normalized)) {
+        throw httpError(400, "Invalid store status. Use active or suspended.");
+    }
     if (!reason) throw httpError(400, "A reason is required.");
 
-    const [rows] = await connection.execute("SELECT id, status FROM stores WHERE id = ? LIMIT 1", [storeId]);
-    if (!rows[0]) throw httpError(404, "Store not found.");
-    const previous = String(rows[0].status || "").toUpperCase();
+    const [rows] = await connection.execute(
+        `SELECT id, store_id, status, expires_at
+         FROM subscriptions
+         WHERE store_id = ?
+         ORDER BY id DESC
+             LIMIT 1`,
+        [storeId]
+    );
+    const subscription = rows[0];
+    if (!subscription) throw httpError(404, "No subscription found for this store.");
 
-    await connection.execute("UPDATE stores SET status = ?, last_active_at = CASE WHEN ? = 'active' THEN NOW() ELSE last_active_at END WHERE id = ?", [normalized, normalized, storeId]);
+    const previous = displaySubscriptionStatus(subscription.status, subscription.expires_at);
+    const nextStatus = normalized === "suspended" ? "cancelled" : "active";
+
+    if (nextStatus === "active" && subscription.expires_at && normalizeDate(subscription.expires_at) < today()) {
+        throw httpError(409, "An expired subscription must be renewed or extended before it can be reactivated.");
+    }
+
+    await connection.execute(
+        "UPDATE subscriptions SET status = ? WHERE id = ?",
+        [nextStatus, subscription.id]
+    );
+
     await connection.execute(
         `INSERT INTO subscription_audit_logs
          (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
-         VALUES (?, NULL, NULL, 'STORE_STATUS_CHANGED', ?, ?, ?, ?)`,
-        [storeId, previous, normalized.toUpperCase(), admin.platform_admin_id, reason]
+         VALUES (?, ?, NULL, 'STORE_STATUS_CHANGED', ?, ?, ?, ?)`,
+        [storeId, subscription.id, previous, displaySubscriptionStatus(nextStatus, subscription.expires_at), admin.platform_admin_id, reason]
     );
-    return { message: `Store status changed to ${normalized}.` };
+
+    return {
+        message: `Store subscription changed to ${normalized}.`,
+        status: displaySubscriptionStatus(nextStatus, subscription.expires_at),
+    };
 }
 
 exports.handler = async (event) => {

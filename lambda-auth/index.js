@@ -188,6 +188,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 const OTP_EXPIRY_SECONDS = 90;
 const MANAGER_INVITE_OTP_EXPIRY_SECONDS = OTP_EXPIRY_SECONDS;
 const STAFF_INVITE_OTP_EXPIRY_SECONDS = OTP_EXPIRY_SECONDS;
+const PAYMENT_OTP_EXPIRY_SECONDS = 300;
 
 const SMTP_USER = "noreplystocknbook@gmail.com";
 
@@ -240,6 +241,28 @@ async function ensureSignupOtpsTable(connection) {
                                              expires_at
                                          )
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+}
+
+
+async function ensurePaymentOtpsTable(connection) {
+    await connection.execute(`
+        CREATE TABLE IF NOT EXISTS payment_otps (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            store_id BIGINT NOT NULL,
+            email VARCHAR(255) NOT NULL,
+            otp_hash CHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            used TINYINT(1) NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_payment_otps_store (store_id),
+            INDEX idx_payment_otps_lookup (
+                store_id,
+                otp_hash,
+                used,
+                expires_at
+            )
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 }
 
@@ -676,6 +699,59 @@ function buildOtpEmail(toEmail, otp) {
         `From: ${EMAIL_FROM}`,
         `To: ${toEmail}`,
         "Subject: StockNBook Email Verification Code",
+        `Date: ${new Date().toUTCString()}`,
+        "MIME-Version: 1.0",
+        'Content-Type: text/html; charset="UTF-8"',
+        "Content-Transfer-Encoding: 8bit",
+        "",
+        html,
+    ].join("\r\n");
+
+    return message.replace(/^\./gm, "..");
+}
+
+
+function buildPaymentOtpEmail(toEmail, otp, planName) {
+    const planLabel = planName ? escapeHtml(planName) : "your selected";
+
+    const html = `
+        <div style="font-family: Arial, sans-serif; background:#FDFAF4; padding:24px;">
+            <div style="max-width:520px; margin:auto; background:#ffffff; border:1px solid #EBE4F0; border-radius:16px; padding:28px;">
+                <h2 style="margin:0; color:#2D1B4E;">StockNBook</h2>
+
+                <p style="margin-top:18px; color:#3F354C;">Hello,</p>
+
+                <p style="color:#3F354C;">
+                    Use the verification code below to confirm your subscription
+                    payment submission for the <strong>${planLabel}</strong> plan.
+                </p>
+
+                <div style="margin:24px 0; padding:18px; text-align:center; background:#F8F5FF; border-radius:12px;">
+                    <div style="font-size:32px; font-weight:bold; letter-spacing:6px; color:#2D1B4E;">
+                        ${otp}
+                    </div>
+                </div>
+
+                <p style="color:#7A6E88;">
+                    This code will expire in <strong>5 minutes</strong>.
+                </p>
+
+                <p style="margin-top:24px; color:#7A6E88; font-size:13px;">
+                    If you did not request this, you can safely ignore this email
+                    — no changes will be made to your account or subscription.
+                </p>
+
+                <p style="margin-top:24px; color:#2D1B4E; font-weight:bold;">
+                    — StockNBook Team
+                </p>
+            </div>
+        </div>
+    `;
+
+    const message = [
+        `From: ${EMAIL_FROM}`,
+        `To: ${toEmail}`,
+        "Subject: StockNBook Payment Verification Code",
         `Date: ${new Date().toUTCString()}`,
         "MIME-Version: 1.0",
         'Content-Type: text/html; charset="UTF-8"',
@@ -1280,6 +1356,15 @@ async function sendStaffInviteOtpEmail(toEmail, otp, staffName) {
     );
 }
 
+async function sendPaymentOtpEmail(toEmail, otp, planName) {
+    return sendGmailHtmlEmail(
+        toEmail,
+        buildPaymentOtpEmail(toEmail, otp, planName),
+        "payment verification OTP"
+    );
+}
+
+
 function generateSlug(storeName) {
     return storeName
         .toLowerCase()
@@ -1612,6 +1697,51 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
         throw error;
     }
 
+    // Require a verification code sent to the owner's own email before the
+    // payment proof is recorded. This confirms the person submitting the GCash
+    // reference is really the account owner — it does not confirm the GCash
+    // transfer itself, which is still checked manually by a platform admin.
+    await ensurePaymentOtpsTable(connection);
+
+    const otp = String(body.otp || "").trim();
+
+    if (!/^\d{6}$/.test(otp)) {
+        const error = new Error("Enter the 6-digit verification code sent to your email.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const otpHash = hashOtp(otp);
+
+    await connection.execute(
+        `UPDATE payment_otps
+         SET used = 1
+         WHERE store_id = ?
+           AND used = 0
+           AND expires_at <= UTC_TIMESTAMP()`,
+        [storeId]
+    );
+
+    const [otpRows] = await connection.execute(
+        `SELECT id
+         FROM payment_otps
+         WHERE store_id = ?
+           AND otp_hash = ?
+           AND used = 0
+           AND expires_at > UTC_TIMESTAMP()
+         ORDER BY id DESC
+             LIMIT 1`,
+        [storeId, otpHash]
+    );
+
+    if (!otpRows.length) {
+        const error = new Error("That verification code is invalid or has expired. Request a new one.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    await connection.execute(`UPDATE payment_otps SET used = 1 WHERE id = ?`, [otpRows[0].id]);
+
     const insertColumns = [
         columns.storeId,
         columns.planId,
@@ -1723,6 +1853,125 @@ module.exports.handler = async (event) => {
                     role: subscriptionRole,
                     can_manage_subscription: subscriptionRole === "owner",
                     subscription,
+                }),
+            };
+        }
+
+        // SEND PAYMENT VERIFICATION OTP
+        // Triggered when the owner opens the "Upgrade" payment-proof modal, before
+        // they can submit a GCash reference number. Confirms it is really the
+        // account owner (not just whoever is holding an open session) submitting
+        // the proof of payment.
+        if (action === "send_payment_otp") {
+            const token = getBearerTokenFromEvent(event);
+            if (!token) {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Missing token" }) };
+            }
+
+            let decoded;
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid token" }) };
+            }
+
+            if (decoded.role !== "owner" || !decoded.store_id) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Only the store owner can submit a subscription payment.",
+                    }),
+                };
+            }
+
+            const storeId = Number(decoded.store_id);
+            await ensurePaymentOtpsTable(connection);
+
+            let ownerEmail = String(decoded.email || "").trim().toLowerCase();
+            if (!ownerEmail) {
+                const [storeRows] = await connection.execute(
+                    "SELECT email FROM stores WHERE id = ? LIMIT 1",
+                    [storeId]
+                );
+                ownerEmail = String(storeRows[0]?.email || "").trim().toLowerCase();
+            }
+
+            if (!ownerEmail) {
+                return {
+                    statusCode: 500,
+                    headers,
+                    body: JSON.stringify({ error: "No email is on file for this account." }),
+                };
+            }
+
+            // Rate limit: at most 5 codes per store every 10 minutes, so a stuck
+            // client (or someone poking the endpoint) can't run up the email bill
+            // or be used to brute-force guess a valid code by requesting fresh ones.
+            const [recentRows] = await connection.execute(
+                `SELECT COUNT(*) AS total
+                 FROM payment_otps
+                 WHERE store_id = ?
+                   AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 10 MINUTE)`,
+                [storeId]
+            );
+
+            if (Number(recentRows[0]?.total || 0) >= 5) {
+                return {
+                    statusCode: 429,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Too many codes requested. Please wait a few minutes and try again.",
+                    }),
+                };
+            }
+
+            let planName = null;
+            if (body.plan_id) {
+                const [planRows] = await connection.execute(
+                    "SELECT name FROM plans WHERE id = ? LIMIT 1",
+                    [Number(body.plan_id)]
+                );
+                planName = planRows[0]?.name || null;
+            }
+
+            const otp = generateOtp();
+            const otpHash = hashOtp(otp);
+
+            // Only one live code per store at a time — requesting a new one
+            // invalidates whatever was sent before.
+            await connection.execute(
+                `UPDATE payment_otps SET used = 1 WHERE store_id = ? AND used = 0`,
+                [storeId]
+            );
+
+            await connection.execute(
+                `INSERT INTO payment_otps (store_id, email, otp_hash, expires_at, used)
+                 VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
+                [storeId, ownerEmail, otpHash, PAYMENT_OTP_EXPIRY_SECONDS]
+            );
+
+            try {
+                await sendPaymentOtpEmail(ownerEmail, otp, planName);
+            } catch (emailError) {
+                await connection.execute(
+                    `UPDATE payment_otps
+                     SET used = 1
+                     WHERE store_id = ?
+                       AND otp_hash = ?
+                       AND used = 0`,
+                    [storeId, otpHash]
+                );
+                throw emailError;
+            }
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    message: "Verification code sent to your email.",
+                    expires_in: PAYMENT_OTP_EXPIRY_SECONDS,
+                    email_hint: ownerEmail.replace(/^(.{2}).+(@.+)$/, "$1***$2"),
                 }),
             };
         }
@@ -3221,6 +3470,15 @@ module.exports.handler = async (event) => {
                         body: JSON.stringify({ error: "Invalid email or password" }),
                     };
                 }
+
+                // Record the owner's successful login so Platform Admin can show
+                // a real last-active timestamp for this store.
+                await connection.execute(
+                    `UPDATE stores
+                     SET last_active_at = NOW()
+                     WHERE id = ?`,
+                    [store.id]
+                );
 
                 const token = jwt.sign(
                     {
@@ -5396,6 +5654,15 @@ module.exports.handler = async (event) => {
                 }
 
                 const store = storeRows[0];
+
+                // The client may verify the existing owner token when the app
+                // loads. Treat that successful authenticated check as activity.
+                await connection.execute(
+                    `UPDATE stores
+                     SET last_active_at = NOW()
+                     WHERE id = ?`,
+                    [store.id]
+                );
 
                 return {
                     statusCode: 200,

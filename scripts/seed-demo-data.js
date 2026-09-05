@@ -2,14 +2,10 @@
 /**
  * StockNBook demo seeder (realistic high-volume version).
  *
- * Default dataset:
- *   - 3 retail party-supply stores
- *   - 1 owner, 3 managers, and 6 staff per store (3 staff per first 2 branches)
- *   - 1,000 direct-sale inventory products per store
- *   - 5 retail party plans per store
- *   - POS sales from 2016 through 2026 with seasonality and growth
- *   - Realistic booking volumes and distributions (not fixed-16)
- *   - Booking windows span near-term and long-range through 2031
+ * This variant includes:
+ *  - deterministic 3x-per-plan store assignment (9 Starter, 9 Growth, 9 Scale)
+ *  - defensive insertRows that sanitizes NaN/Infinity and normalizes booleans/objects
+ *  - defensive math when building order line totals and order totals to avoid NaN being injected
  *
  * Usage:
  *   node seed-demo-data.js
@@ -235,15 +231,11 @@ const BOOKING_DAY_FACTORS = { 0:2.25,1:0.55,2:0.70,3:0.78,4:0.90,5:1.45,6:2.55 }
 
 function dbConfig() {
     return {
-        host: "gateway01.ap-southeast-1.prod.aws.tidbcloud.com",
-        user: "4VMJYNRD5H472NK.root",
-        password: "rH9a9Tj2r7uJpQqf",
-        database: "stocknbook",
-        ssl: {
-            ca: fs.readFileSync('./certs/isrgrootx1.pem')
-        },
-        charset: "utf8mb4",
-        supportBigNumbers: true,
+        host: "127.0.0.1",
+        user: "root",
+        password: process.env.DB_ROOT_PASSWORD || "BTA5EYVWLfWcebF",
+        database: process.env.DB_NAME || "stocknbook",
+        ssl: { rejectUnauthorized: false },
     };
 }
 
@@ -570,6 +562,7 @@ async function ensureSeederSchema(db) {
     const requiredTables = [
         "stores", "branches", "managers", "staff", "categories",
         "products", "packages", "bookings", "orders", "order_items",
+        "plans", "platform_admins",
     ];
 
     for (const tableName of requiredTables) {
@@ -589,10 +582,10 @@ async function ensureSeederSchema(db) {
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS product_variants (
-                                                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                        product_id INT NOT NULL,
-                                                        variant_values JSON NULL,
-                                                        sku VARCHAR(120) NULL,
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            product_id INT NOT NULL,
+            variant_values JSON NULL,
+            sku VARCHAR(120) NULL,
             barcode VARCHAR(32) NULL,
             stock INT NOT NULL DEFAULT 0,
             alert_level INT NOT NULL DEFAULT 0,
@@ -601,7 +594,7 @@ async function ensureSeederSchema(db) {
             status VARCHAR(30) NOT NULL DEFAULT 'active',
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     await getTableColumns(db, "product_variants", true);
 
@@ -615,52 +608,79 @@ async function ensureSeederSchema(db) {
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS booking_items (
-                                                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                     booking_id BIGINT NOT NULL,
-                                                     product_id INT NOT NULL,
-                                                     variant_id INT NULL,
-                                                     product_name VARCHAR(255) NOT NULL,
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            booking_id BIGINT NOT NULL,
+            product_id INT NOT NULL,
+            variant_id INT NULL,
+            product_name VARCHAR(255) NOT NULL,
             quantity INT NOT NULL DEFAULT 1,
             unit_price DECIMAL(14,2) NOT NULL DEFAULT 0.00,
             line_total DECIMAL(14,2) NOT NULL DEFAULT 0.00,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     await getTableColumns(db, "booking_items", true);
 
+    // Fallback definitions only — on a real StockNBook database these tables
+    // already exist (see stocknbook_subscriptions.sql, stocknbook_payments.sql,
+    // stocknbook_subscription_history.sql, stocknbook_subscription_audit_logs.sql)
+    // and CREATE TABLE IF NOT EXISTS is a no-op against them. Real plan/admin
+    // rows come from the `plans` and `platform_admins` tables, never from here.
     await db.query(`
-        CREATE TABLE IF NOT EXISTS subscription_plans (
-                                                          id INT AUTO_INCREMENT PRIMARY KEY,
-                                                          plan_code VARCHAR(30) NOT NULL UNIQUE,
-            plan_name VARCHAR(50) NOT NULL,
-            plan_label VARCHAR(50) NOT NULL,
-            monthly_price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-            inventory_limit INT NULL,
-            booking_limit INT NULL,
-            staff_limit INT NOT NULL DEFAULT 1,
-            features JSON NULL,
-            is_active TINYINT NOT NULL DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            store_id BIGINT NOT NULL,
+            plan_id INT NOT NULL,
+            status ENUM('active','expiring','expired','cancelled') NOT NULL DEFAULT 'active',
+            auto_renew TINYINT(1) NOT NULL DEFAULT 0,
+            started_at TIMESTAMP NULL DEFAULT NULL,
+            expires_at TIMESTAMP NULL DEFAULT NULL,
+            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
     await db.query(`
-        CREATE TABLE IF NOT EXISTS subscriptions (
-                                                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                     store_id INT NOT NULL,
-                                                     plan_id INT NOT NULL,
-                                                     status VARCHAR(30) NOT NULL DEFAULT 'active',
-            amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-            billing_period VARCHAR(20) NOT NULL DEFAULT 'monthly',
-            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            approved_at DATETIME NULL,
-            starts_at DATE NULL,
-            ends_at DATE NULL,
-            admin_notes TEXT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        CREATE TABLE IF NOT EXISTS payments (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            store_id BIGINT NOT NULL,
+            plan_id INT NOT NULL,
+            amount DECIMAL(10,2) NOT NULL,
+            reference_no VARCHAR(100) NOT NULL,
+            receipt_url VARCHAR(500) NULL,
+            status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+            submitted_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+            reviewed_by BIGINT NULL,
+            reviewed_at TIMESTAMP NULL DEFAULT NULL,
+            UNIQUE KEY uniq_reference_no (reference_no)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS subscription_history (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            subscription_id INT NOT NULL,
+            store_id BIGINT NOT NULL,
+            old_plan_id INT NULL,
+            new_plan_id INT NOT NULL,
+            change_type ENUM('upgrade','downgrade','renewal','cancellation','admin_override') NOT NULL,
+            changed_by BIGINT NOT NULL,
+            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS subscription_audit_logs (
+            audit_log_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            business_id BIGINT NOT NULL,
+            subscription_id INT NULL,
+            payment_submission_id INT NULL,
+            action VARCHAR(100) NOT NULL,
+            previous_status VARCHAR(50) NULL,
+            new_status VARCHAR(50) NULL,
+            performed_by_admin_id BIGINT NULL,
+            reason TEXT NULL,
+            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
     tableColumnCache.clear();
@@ -700,6 +720,10 @@ async function ensurePerformanceIndexes(db) {
         ["booking_items", "idx_perf_booking_items_booking", ["booking_id"]],
         ["booking_items", "idx_perf_booking_items_product", ["product_id"]],
         ["subscriptions", "idx_perf_subscriptions_store", ["store_id"]],
+        ["payments", "idx_perf_payments_store", ["store_id"]],
+        ["payments", "idx_perf_payments_status", ["status"]],
+        ["subscription_history", "idx_perf_subscription_history_store", ["store_id"]],
+        ["subscription_audit_logs", "idx_perf_subscription_audit_business", ["business_id"]],
     ];
 
     for (const [tableName, indexName, columns] of indexDefinitions) {
@@ -707,6 +731,9 @@ async function ensurePerformanceIndexes(db) {
     }
 }
 
+// ---------------------
+// Defensive insertRows
+// ---------------------
 async function insertRows(db, tableName, rows, batchSize = CONFIG.batchSize) {
     if (!rows.length) return 0;
 
@@ -729,7 +756,23 @@ async function insertRows(db, tableName, rows, batchSize = CONFIG.batchSize) {
 
         for (const row of chunk) {
             for (const column of columns) {
-                values.push(row[column] === undefined ? null : row[column]);
+                let val = row[column] === undefined ? null : row[column];
+
+                // Protect MySQL from NaN / Infinity (these would be sent unquoted and break SQL)
+                if (typeof val === "number") {
+                    if (!Number.isFinite(val)) val = null;
+                } else if (typeof val === "boolean") {
+                    // normalize booleans to tinyint(1)
+                    val = val ? 1 : 0;
+                } else if (val instanceof Date) {
+                    // Date -> `YYYY-MM-DD HH:mm:ss`
+                    val = sqlDateTime(val, val.getHours(), val.getMinutes(), val.getSeconds());
+                } else if (val && typeof val === "object" && !Buffer.isBuffer(val)) {
+                    // try to stringify plain objects (useful for JSON columns)
+                    try { val = JSON.stringify(val); } catch (e) { val = String(val); }
+                }
+
+                values.push(val);
             }
         }
 
@@ -745,6 +788,9 @@ async function insertRows(db, tableName, rows, batchSize = CONFIG.batchSize) {
     return inserted;
 }
 
+// ---------------------
+// rest of helper functions (no change)
+// ---------------------
 async function prepareSeedStoreTempTable(db) {
     await db.query("DROP TEMPORARY TABLE IF EXISTS tmp_perf_seed_store_ids");
     await db.query(`
@@ -778,20 +824,12 @@ async function prepareSeedStoreTempTable(db) {
 async function deleteChildByParent(db, relation) {
     const { childTable, childColumn, parentTable, parentColumn } = relation;
 
-    if (!(await tableExists(db, childTable)) || !(await tableExists(db, parentTable))) {
-        return;
-    }
+    if (!(await tableExists(db, childTable)) || !(await tableExists(db, parentTable))) return;
 
     const childColumns = await getTableColumns(db, childTable);
     const parentColumns = await getTableColumns(db, parentTable);
 
-    if (
-        !childColumns.has(childColumn) ||
-        !parentColumns.has(parentColumn) ||
-        !parentColumns.has("store_id")
-    ) {
-        return;
-    }
+    if (!childColumns.has(childColumn) || !parentColumns.has(parentColumn) || !parentColumns.has("store_id")) return;
 
     const [result] = await db.query(
         `DELETE child
@@ -802,9 +840,23 @@ async function deleteChildByParent(db, relation) {
         ON parent.store_id = seeded.id`
     );
 
-    if (result.affectedRows) {
-        console.log(`Removed ${result.affectedRows.toLocaleString()} rows from ${childTable}.`);
-    }
+    console.log(`Deleted ${Number(result.affectedRows || 0).toLocaleString()} rows from ${childTable}.`);
+}
+
+async function deleteRowsScopedByColumn(db, tableName, columnName, tempTableName) {
+    if (!(await tableExists(db, tableName))) return;
+
+    const columns = await getTableColumns(db, tableName);
+    if (!columns.has(columnName)) return;
+
+    const [result] = await db.query(
+        `DELETE scoped
+         FROM ${quoteIdentifier(tableName)} AS scoped
+        INNER JOIN ${quoteIdentifier(tempTableName)} AS seeded
+        ON scoped.${quoteIdentifier(columnName)} = seeded.id`
+    );
+
+    console.log(`Deleted ${Number(result.affectedRows || 0).toLocaleString()} rows from ${tableName}.`);
 }
 
 async function removeExistingSeedRun(db) {
@@ -839,6 +891,15 @@ async function removeExistingSeedRun(db) {
             await deleteChildByParent(db, relation);
         }
 
+        // subscription_audit_logs scopes to a store via `business_id`, not
+        // `store_id`, so the generic store_id column scan below never finds it.
+        await deleteRowsScopedByColumn(
+            db,
+            "subscription_audit_logs",
+            "business_id",
+            "tmp_perf_seed_store_ids"
+        );
+
         const [storeTables] = await db.execute(
             `SELECT DISTINCT TABLE_NAME
              FROM INFORMATION_SCHEMA.COLUMNS
@@ -858,7 +919,7 @@ async function removeExistingSeedRun(db) {
             );
 
             if (result.affectedRows) {
-                console.log(`Removed ${result.affectedRows.toLocaleString()} rows from ${tableName}.`);
+                console.log(`Deleted ${result.affectedRows.toLocaleString()} rows from ${tableName}.`);
             }
         }
 
@@ -869,77 +930,77 @@ async function removeExistingSeedRun(db) {
                 ON store_row.id = seeded.id`
         );
 
-        console.log(`Removed ${storeResult.affectedRows} existing seeded stores.`);
+        console.log(`Deleted ${Number(storeResult.affectedRows || 0).toLocaleString()} existing seeded stores.`);
     } finally {
         await db.query("SET FOREIGN_KEY_CHECKS = 1");
         await db.query("DROP TEMPORARY TABLE IF EXISTS tmp_perf_seed_store_ids");
     }
 }
 
-async function ensureEnterprisePlan(db) {
-    const features = JSON.stringify([
-        "Inventory", "Bookings", "POS", "Analytics",
-        "Reports", "Forecasting", "Branches", "Staff Management",
-    ]);
-
-    await db.execute(
-        `INSERT INTO subscription_plans
-         (
-             plan_code,
-             plan_name,
-             plan_label,
-             monthly_price,
-             inventory_limit,
-             booking_limit,
-             staff_limit,
-             features,
-             is_active
-         )
-         VALUES ('enterprise', 'Enterprise', 'Performance Test', 1299.00, 200000, NULL, 100, ?, 1)
-             ON DUPLICATE KEY UPDATE
-                                  plan_name = VALUES(plan_name),
-                                  plan_label = VALUES(plan_label),
-                                  monthly_price = VALUES(monthly_price),
-                                  inventory_limit = VALUES(inventory_limit),
-                                  booking_limit = VALUES(booking_limit),
-                                  staff_limit = VALUES(staff_limit),
-                                  features = VALUES(features),
-                                  is_active = 1`,
-        [features]
-    );
-
+async function fetchRealPlans(db) {
     const [rows] = await db.execute(
-        `SELECT id, monthly_price
-         FROM subscription_plans
-         WHERE plan_code = 'enterprise'
-             LIMIT 1`
+        `SELECT id, name, price
+         FROM plans
+         WHERE is_archived = 0
+         ORDER BY price ASC`
     );
 
-    if (!rows.length) throw new Error("Unable to create or retrieve enterprise plan.");
+    if (!rows.length) {
+        throw new Error(
+            "No active rows found in the `plans` table. Seed at least one real plan " +
+            "(e.g. via the Plans admin page) before running the demo seeder."
+        );
+    }
 
-    return {
-        id: Number(rows[0].id),
-        price: Number(rows[0].monthly_price),
-    };
+    return rows.map((row) => ({
+        id: Number(row.id),
+        name: String(row.name),
+        price: Number(row.price),
+    }));
 }
 
-async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelNames) {
+async function fetchPlatformAdminIds(db) {
+    const [rows] = await db.execute(
+        `SELECT platform_admin_id
+         FROM platform_admins
+         WHERE is_active = 1
+         ORDER BY platform_admin_id`
+    );
+
+    if (!rows.length) {
+        throw new Error(
+            "No active rows found in the `platform_admins` table. Create at least one " +
+            "platform admin account before running the demo seeder."
+        );
+    }
+
+    return rows.map((row) => Number(row.platform_admin_id));
+}
+
+async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelNames, planProfile) {
     const identity = storeIdentity(storeIndex);
     const rng = createRng(`${CONFIG.runTag}:people:${storeIndex}`);
     const ownerName = realisticName(rng, usedPersonnelNames);
 
     const [storeResult] = await db.execute(
         `INSERT INTO stores
-             (store_name, owner_name, email, password, slug)
-         VALUES (?, ?, ?, ?, ?)`,
-        [identity.name, ownerName, identity.ownerEmail, passwordHash, identity.slug]
+             (store_name, owner_name, email, password, slug, plan)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [identity.name, ownerName, identity.ownerEmail, passwordHash, identity.slug, planProfile.name]
     );
 
     const storeId = Number(storeResult.insertId);
     const branches = [];
-    const branchLabels = ["Main Retail Branch", "North Retail Branch", "South Retail Branch"];
+    const branchLabels = [];
 
-    for (let branchIndex = 0; branchIndex < CONFIG.managersPerStore; branchIndex += 1) {
+    // Plan-driven branch count (Starter:1, Growth: up to 3, Scale: 4+)
+    const branchCount = planProfile.branches;
+
+    for (let branchIndex = 0; branchIndex < branchCount; branchIndex += 1) {
+        branchLabels.push(`${branchIndex === 0 ? "Main" : (branchIndex === 1 ? "North" : branchIndex === 2 ? "South" : `Branch ${branchIndex+1}`)} Retail Branch`);
+    }
+
+    for (let branchIndex = 0; branchIndex < branchLabels.length; branchIndex += 1) {
         const location = PH_LOCATIONS[(storeIndex * 5 + branchIndex * 3) % PH_LOCATIONS.length];
         const [branchResult] = await db.execute(
             `INSERT INTO branches
@@ -973,7 +1034,7 @@ async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelN
         branch_settings: true,
     });
 
-    for (let managerIndex = 0; managerIndex < CONFIG.managersPerStore; managerIndex += 1) {
+    for (let managerIndex = 0; managerIndex < Math.min(CONFIG.managersPerStore, branches.length); managerIndex += 1) {
         const managerName = realisticName(rng, usedPersonnelNames);
         const managerEmail = `${emailSlug(managerName)}.s${identity.code}.m${managerIndex + 1}@${STORE_EMAIL_DOMAIN}`;
 
@@ -1023,17 +1084,21 @@ async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelN
         },
     ];
 
-    const staffDistribution = [0, 0, 0, 1, 1, 1];
+    const staffCount = planProfile.staff;
+    const staffDistribution = [];
+    // distribute staff across managers/branches
+    for (let i = 0; i < staffCount; i += 1) staffDistribution.push(i % Math.max(1, managers.length));
+
     const staffRows = [];
 
-    for (let staffIndex = 0; staffIndex < CONFIG.staffPerStore; staffIndex += 1) {
+    for (let staffIndex = 0; staffIndex < staffCount; staffIndex += 1) {
         const managerIndex = staffDistribution[staffIndex];
         const staffName = realisticName(rng, usedPersonnelNames);
 
         staffRows.push({
             store_id: storeId,
-            branch_id: managers[managerIndex].branchId,
-            manager_id: managers[managerIndex].id,
+            branch_id: managers[managerIndex] ? managers[managerIndex].branchId : branches[0].id,
+            manager_id: managers[managerIndex] ? managers[managerIndex].id : null,
             staff_name: staffName,
             staff_email: `${emailSlug(staffName)}.s${identity.code}.e${staffIndex + 1}@${STORE_EMAIL_DOMAIN}`,
             password: passwordHash,
@@ -1042,7 +1107,7 @@ async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelN
         });
     }
 
-    await insertRows(db, "staff", staffRows, 10);
+    if (staffRows.length) await insertRows(db, "staff", staffRows, 10);
 
     return { storeId, identity, ownerName, branches };
 }
@@ -1060,14 +1125,16 @@ async function createCategories(db, storeId) {
     );
 }
 
-async function createProducts(db, storeId, storeIndex, branches) {
+async function createProducts(db, storeId, storeIndex, branches, planProfile) {
+    // Plan-specific product count (Starter up to 50, Growth up to 800, Scale up to 2000)
+    const desiredProducts = planProfile.productsPerStore || CONFIG.productsPerStore;
     const rng = createRng(`${CONFIG.runTag}:products:${storeIndex}`);
     const rows = [];
     const pendingVariants = [];
 
-    for (let itemIndex = 1; itemIndex <= CONFIG.productsPerStore; itemIndex += 1) {
+    for (let itemIndex = 1; itemIndex <= desiredProducts; itemIndex += 1) {
         const product = productName(storeIndex, itemIndex);
-        const hasVariants = itemIndex % 2 === 1;
+        const hasVariants = itemIndex % 2 === 1 && desiredProducts > 10; // small stores can have no variants sometimes
         const priceVariance = 0.80 + rng() * 0.55;
         const baseSalesPrice = Math.max(35, Math.round((product.basePrice * priceVariance) / 5) * 5);
         const baseOriginalPrice = Math.max(20, Math.round((baseSalesPrice * (0.54 + rng() * 0.18)) / 5) * 5);
@@ -1097,7 +1164,7 @@ async function createProducts(db, storeId, storeIndex, branches) {
         }
 
         const stock = hasVariants
-            ? variantTemplates.reduce((sum, variant) => sum + variant.stock, 0)
+            ? variantTemplates.reduce((sum, variant) => sum + (Number.isFinite(Number(variant.stock)) ? Number(variant.stock) : 0), 0)
             : productStock(rng, itemIndex);
 
         const salesPrice = hasVariants
@@ -1135,6 +1202,7 @@ async function createProducts(db, storeId, storeIndex, branches) {
 
     await insertRows(db, "products", rows);
 
+    // Fetch inserted products for this store
     const [products] = await db.execute(
         `SELECT id, branch_id, name, category, sales_price, has_variants
          FROM products
@@ -1143,28 +1211,15 @@ async function createProducts(db, storeId, storeIndex, branches) {
         [storeId]
     );
 
-    if (products.length !== CONFIG.productsPerStore) {
-        throw new Error(`Store ${storeId} expected ${CONFIG.productsPerStore} products but found ${products.length}.`);
-    }
-
-    const variantProductCount = products.filter((row) => dbBoolean(row.has_variants)).length;
-    const simpleProductCount = products.length - variantProductCount;
-
-    if (variantProductCount !== VARIANT_PRODUCTS_PER_STORE || simpleProductCount !== SIMPLE_PRODUCTS_PER_STORE) {
-        throw new Error(
-            `Store ${storeId} expected ${VARIANT_PRODUCTS_PER_STORE} variant products and ${SIMPLE_PRODUCTS_PER_STORE} simple products, but found ${variantProductCount} and ${simpleProductCount}.`
-        );
-    }
-
     const variantRows = [];
     for (let i = 0; i < products.length; i += 1) {
         const productId = Number(products[i].id);
-        for (const template of pendingVariants[i]) {
+        for (const template of pendingVariants[i] || []) {
             variantRows.push({ product_id: productId, ...template });
         }
     }
 
-    await insertRows(db, "product_variants", variantRows, Math.max(CONFIG.batchSize, 800));
+    if (variantRows.length) await insertRows(db, "product_variants", variantRows, Math.max(CONFIG.batchSize, 800));
 
     const [storedVariants] = await db.execute(
         `SELECT
@@ -1182,11 +1237,6 @@ async function createProducts(db, storeId, storeIndex, branches) {
          ORDER BY pv.product_id, pv.id`,
         [storeId]
     );
-
-    const expectedVariantRows = VARIANT_PRODUCTS_PER_STORE * VARIANTS_PER_PRODUCT;
-    if (storedVariants.length !== expectedVariantRows) {
-        throw new Error(`Store ${storeId} expected ${expectedVariantRows} product variants but found ${storedVariants.length}.`);
-    }
 
     const variantsByProduct = new Map();
 
@@ -1296,7 +1346,7 @@ async function createPackages(db, storeId, storeIndex, branches, products) {
         });
 
         const originalValue = roundMoney(
-            inclusions.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0)
+            inclusions.reduce((sum, item) => sum + (Number.isFinite(Number(item.unitPrice)) ? Number(item.unitPrice) * Number(item.quantity) : 0), 0)
         );
         const packagePrice = roundMoney(originalValue * (1 - definition.discountRate));
 
@@ -1304,7 +1354,7 @@ async function createPackages(db, storeId, storeIndex, branches, products) {
             store_id: storeId,
             branch_id: branch.id,
             name: definition.name,
-            description: `${definition.description} All contents are sold to the customer; no rental items are included.`,
+            description: `${definition.description}`,
             original_value: originalValue,
             discount_type: "amount",
             discount_value: roundMoney(originalValue - packagePrice),
@@ -1348,28 +1398,394 @@ async function createPackages(db, storeId, storeIndex, branches, products) {
     });
 }
 
-async function createSubscription(db, storeId, enterprisePlan) {
-    const start = isoDate(TODAY);
-    const end = isoDate(addDays(TODAY, 3650));
+// For demo runs we group stores by plan and within each group of 3 stores
+// provide a predictable mix of subscription states so every plan has:
+//   - one active store
+//   - one pending-verification store
+//   - one expired store
+// This keeps all other demo data (inventory, POS orders, bookings, etc.)
+// unchanged while making subscription rows easy to inspect.
+function subscriptionScenarioForStoreInTriplet(pos) {
+    // pos is 0..2
+    if (pos === 0) return "active_current";
+    if (pos === 1) return "pending_verification";
+    return "expired";
+}
 
-    await insertRows(
-        db,
-        "subscriptions",
-        [
-            {
-                store_id: storeId,
-                plan_id: enterprisePlan.id,
-                status: "active",
-                amount: enterprisePlan.price,
-                billing_period: "annual",
-                approved_at: sqlDateTime(TODAY, 9, 0, 0),
-                starts_at: start,
-                ends_at: end,
-                admin_notes: `Performance-test subscription for seed run ${CONFIG.runTag}.`,
-            },
-        ],
-        1
-    );
+function pickBillingCycleDays(rng) {
+    return weightedChoice(rng, [
+        { value: 30, weight: 0.55 },
+        { value: 90, weight: 0.20 },
+        { value: 365, weight: 0.25 },
+    ]);
+}
+
+function choosePaidPlan(rng, paidPlans) {
+    if (paidPlans.length === 1) return paidPlans[0];
+
+    // Slightly favor the lower-priced paid tiers, same shape as real-world
+    // plan distributions (most stores sit on the entry paid plan).
+    const weighted = paidPlans.map((plan, index) => ({
+        value: plan,
+        weight: paidPlans.length - index,
+    }));
+
+    return weightedChoice(rng, weighted);
+}
+
+function gcashReferenceNumber(storeIndex, seq, rng) {
+    let tail = "";
+    for (let i = 0; i < 7; i += 1) tail += String(randomInt(rng, 0, 9));
+    return `${String(storeIndex).padStart(3, "0")}${String(seq).padStart(2, "0")}${tail}`;
+}
+
+function paymentReceiptUrl(storeIndex, seq) {
+    return `/uploads/payments/${CONFIG.runTag}-store${storeIndex}-payment${seq}.jpg`;
+}
+
+// Accept an optional forcedPlan object so the caller can pin a specific plan
+// to this store (we use that to create 3 stores per-plan deterministically).
+async function createSubscriptionLifecycle(db, store, plans, adminIds, counters, forcedPlan = null, tripletPos = 0) {
+    const { storeId, storeIndex } = store;
+    const rng = createRng(`${CONFIG.runTag}:subscription:${storeIndex}`);
+    // scenario selected from triplet position guarantees distribution 3-per-plan group
+    const scenario = subscriptionScenarioForStoreInTriplet(tripletPos);
+
+    const freePlan = plans.find((plan) => plan.price === 0) || plans[0];
+    const paidPlans = plans.filter((plan) => plan.price > 0);
+    const anyPaidPlan = paidPlans.length ? paidPlans : plans;
+
+    // If a forcedPlan was provided, prefer it for this store's subscription.
+    const pickPlanForThisStore = (rngParam) => {
+        if (forcedPlan) return forcedPlan;
+        return choosePaidPlan(rngParam, anyPaidPlan);
+    };
+
+    const pickAdmin = () => randomChoice(rng, adminIds);
+
+    let paymentSeq = 0;
+
+    async function insertPayment({ planId, amount, status, submittedAt, reviewedAt = null, reviewedBy = null }) {
+        paymentSeq += 1;
+        const [result] = await db.execute(
+            `INSERT INTO payments
+                 (store_id, plan_id, amount, reference_no, receipt_url, status, submitted_at, reviewed_by, reviewed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                storeId,
+                planId,
+                amount,
+                gcashReferenceNumber(storeIndex, paymentSeq, rng),
+                paymentReceiptUrl(storeIndex, paymentSeq),
+                status,
+                submittedAt ? sqlDateTime(submittedAt, randomInt(rng, 8, 20), randomInt(rng, 0, 59)) : null,
+                reviewedBy,
+                reviewedAt ? sqlDateTime(reviewedAt, randomInt(rng, 8, 20), randomInt(rng, 0, 59)) : null,
+            ]
+        );
+        counters.payments += 1;
+        return Number(result.insertId);
+    }
+
+    async function insertSubscription({ planId, status, autoRenew, startedAt, expiresAt }) {
+        const [result] = await db.execute(
+            `INSERT INTO subscriptions
+                 (store_id, plan_id, status, auto_renew, started_at, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                storeId,
+                planId,
+                status,
+                autoRenew ? 1 : 0,
+                startedAt ? sqlDateTime(startedAt, 9, 0, 0) : null,
+                expiresAt ? sqlDateTime(expiresAt, 23, 59, 59) : null,
+                sqlDateTime(startedAt || TODAY, 9, 0, 0),
+            ]
+        );
+        counters.subscriptions += 1;
+        return Number(result.insertId);
+    }
+
+    async function insertHistory(subscriptionId, { oldPlanId, newPlanId, changeType, changedBy, createdAt }) {
+        await db.execute(
+            `INSERT INTO subscription_history
+                 (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [subscriptionId, storeId, oldPlanId, newPlanId, changeType, changedBy, sqlDateTime(createdAt, 9, 0, 0)]
+        );
+        counters.subscriptionHistory += 1;
+    }
+
+    async function insertAudit(subscriptionId, {
+        paymentId = null, action, previousStatus = null, newStatus = null,
+        adminId = null, reason, createdAt,
+    }) {
+        await db.execute(
+            `INSERT INTO subscription_audit_logs
+                 (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                storeId,
+                subscriptionId,
+                paymentId,
+                action,
+                previousStatus,
+                newStatus,
+                adminId,
+                reason,
+                sqlDateTime(createdAt, randomInt(rng, 8, 20), randomInt(rng, 0, 59)),
+            ]
+        );
+        counters.subscriptionAuditLogs += 1;
+    }
+
+    if (scenario === "active_current") {
+        const currentPlan = pickPlanForThisStore(rng);
+        const cycleDays = pickBillingCycleDays(rng);
+        const expiresAt = addDays(TODAY, randomInt(rng, 20, 300));
+        const startedAt = addDays(expiresAt, -cycleDays);
+        const autoRenew = rng() < 0.8;
+        const hasRenewedBefore = rng() < 0.5;
+        const signupDate = hasRenewedBefore
+            ? addDays(startedAt, -cycleDays * randomInt(rng, 1, 3))
+            : startedAt;
+        const signupReviewer = pickAdmin();
+
+        const subscriptionId = await insertSubscription({
+            planId: currentPlan.id, status: "active", autoRenew, startedAt, expiresAt,
+        });
+
+        const signupPayment = await insertPayment({
+            planId: currentPlan.id, amount: currentPlan.price, status: "approved",
+            submittedAt: signupDate, reviewedAt: addDays(signupDate, randomInt(rng, 0, 1)), reviewedBy: signupReviewer,
+        });
+        await insertHistory(subscriptionId, {
+            oldPlanId: freePlan.id, newPlanId: currentPlan.id, changeType: "upgrade",
+            changedBy: signupReviewer, createdAt: signupDate,
+        });
+        await insertAudit(subscriptionId, {
+            paymentId: signupPayment, action: "payment_approved",
+            previousStatus: "pending", newStatus: "approved", adminId: signupReviewer,
+            reason: `GCash payment verified; subscription upgraded to ${currentPlan.name}.`,
+            createdAt: signupDate,
+        });
+
+        if (hasRenewedBefore) {
+            const renewReviewer = pickAdmin();
+            const renewPayment = await insertPayment({
+                planId: currentPlan.id, amount: currentPlan.price, status: "approved",
+                submittedAt: startedAt, reviewedAt: addDays(startedAt, randomInt(rng, 0, 1)), reviewedBy: renewReviewer,
+            });
+            await insertHistory(subscriptionId, {
+                oldPlanId: currentPlan.id, newPlanId: currentPlan.id, changeType: "renewal",
+                changedBy: renewReviewer, createdAt: startedAt,
+            });
+            await insertAudit(subscriptionId, {
+                paymentId: renewPayment, action: "payment_approved",
+                previousStatus: "pending", newStatus: "approved", adminId: renewReviewer,
+                reason: `GCash renewal payment verified for the ${currentPlan.name} plan.`,
+                createdAt: startedAt,
+            });
+        }
+    } else if (scenario === "pending_verification") {
+        const currentPlan = pickPlanForThisStore(rng);
+        const cycleDays = pickBillingCycleDays(rng);
+        const expiresAt = addDays(TODAY, randomInt(rng, 2, 9));
+        const startedAt = addDays(expiresAt, -cycleDays);
+        const signupDate = addDays(startedAt, -cycleDays * randomInt(rng, 1, 3));
+        const signupReviewer = pickAdmin();
+
+        const subscriptionId = await insertSubscription({
+            planId: currentPlan.id, status: "active", autoRenew: false, startedAt, expiresAt,
+        });
+
+        const signupPayment = await insertPayment({
+            planId: currentPlan.id, amount: currentPlan.price, status: "approved",
+            submittedAt: signupDate, reviewedAt: addDays(signupDate, randomInt(rng, 0, 1)), reviewedBy: signupReviewer,
+        });
+        await insertHistory(subscriptionId, {
+            oldPlanId: freePlan.id, newPlanId: currentPlan.id, changeType: "upgrade",
+            changedBy: signupReviewer, createdAt: signupDate,
+        });
+        await insertAudit(subscriptionId, {
+            paymentId: signupPayment, action: "payment_approved",
+            previousStatus: "pending", newStatus: "approved", adminId: signupReviewer,
+            reason: `GCash payment verified; subscription upgraded to ${currentPlan.name}.`,
+            createdAt: signupDate,
+        });
+
+        const submittedAt = addDays(TODAY, -randomInt(rng, 0, 2));
+        const pendingPayment = await insertPayment({
+            planId: currentPlan.id, amount: currentPlan.price, status: "pending",
+            submittedAt,
+        });
+        await insertAudit(subscriptionId, {
+            paymentId: pendingPayment, action: "payment_submitted",
+            previousStatus: null, newStatus: "pending", adminId: null,
+            reason: `Store submitted GCash proof to renew the ${currentPlan.name} plan.`,
+            createdAt: submittedAt,
+        });
+    } else if (scenario === "expiring_soon") {
+        const currentPlan = pickPlanForThisStore(rng);
+        const cycleDays = pickBillingCycleDays(rng);
+        const expiresAt = addDays(TODAY, randomInt(rng, 1, 7));
+        const startedAt = addDays(expiresAt, -cycleDays);
+        const reviewer = pickAdmin();
+
+        const subscriptionId = await insertSubscription({
+            planId: currentPlan.id, status: "expiring", autoRenew: false, startedAt, expiresAt,
+        });
+
+        const payment = await insertPayment({
+            planId: currentPlan.id, amount: currentPlan.price, status: "approved",
+            submittedAt: startedAt, reviewedAt: addDays(startedAt, randomInt(rng, 0, 1)), reviewedBy: reviewer,
+        });
+        await insertHistory(subscriptionId, {
+            oldPlanId: freePlan.id, newPlanId: currentPlan.id, changeType: "renewal",
+            changedBy: reviewer, createdAt: startedAt,
+        });
+        await insertAudit(subscriptionId, {
+            paymentId: payment, action: "payment_approved",
+            previousStatus: "pending", newStatus: "approved", adminId: reviewer,
+            reason: `GCash payment verified; subscription active on the ${currentPlan.name} plan.`,
+            createdAt: startedAt,
+        });
+        await insertAudit(subscriptionId, {
+            action: "subscription_expiring_flagged",
+            previousStatus: "active", newStatus: "expiring", adminId: null,
+            reason: "Subscription flagged as expiring within 7 days.",
+            createdAt: addDays(TODAY, -randomInt(rng, 0, 2)),
+        });
+    } else if (scenario === "expired") {
+        const currentPlan = pickPlanForThisStore(rng);
+        const cycleDays = pickBillingCycleDays(rng);
+        const expiresAt = addDays(TODAY, -randomInt(rng, 5, 60));
+        const startedAt = addDays(expiresAt, -cycleDays);
+        const reviewer = pickAdmin();
+
+        const subscriptionId = await insertSubscription({
+            planId: currentPlan.id, status: "expired", autoRenew: false, startedAt, expiresAt,
+        });
+
+        const payment = await insertPayment({
+            planId: currentPlan.id, amount: currentPlan.price, status: "approved",
+            submittedAt: startedAt, reviewedAt: addDays(startedAt, randomInt(rng, 0, 1)), reviewedBy: reviewer,
+        });
+        await insertHistory(subscriptionId, {
+            oldPlanId: freePlan.id, newPlanId: currentPlan.id, changeType: "renewal",
+            changedBy: reviewer, createdAt: startedAt,
+        });
+        await insertAudit(subscriptionId, {
+            paymentId: payment, action: "payment_approved",
+            previousStatus: "pending", newStatus: "approved", adminId: reviewer,
+            reason: `GCash payment verified; subscription active on the ${currentPlan.name} plan.`,
+            createdAt: startedAt,
+        });
+        await insertAudit(subscriptionId, {
+            action: "subscription_expired",
+            previousStatus: "expiring", newStatus: "expired", adminId: null,
+            reason: "Subscription auto-expired after the grace period lapsed with no renewal payment.",
+            createdAt: addDays(expiresAt, randomInt(rng, 1, 3)),
+        });
+    } else if (scenario === "cancelled") {
+        const currentPlan = pickPlanForThisStore(rng);
+        const cycleDays = pickBillingCycleDays(rng);
+        const cancelledAt = addDays(TODAY, -randomInt(rng, 10, 200));
+        const startedAt = addDays(cancelledAt, -randomInt(rng, 5, cycleDays));
+        const reviewer = pickAdmin();
+
+        const subscriptionId = await insertSubscription({
+            planId: currentPlan.id, status: "cancelled", autoRenew: false, startedAt, expiresAt: cancelledAt,
+        });
+
+        const payment = await insertPayment({
+            planId: currentPlan.id, amount: currentPlan.price, status: "approved",
+            submittedAt: startedAt, reviewedAt: addDays(startedAt, randomInt(rng, 0, 1)), reviewedBy: reviewer,
+        });
+        await insertHistory(subscriptionId, {
+            oldPlanId: freePlan.id, newPlanId: currentPlan.id, changeType: "upgrade",
+            changedBy: reviewer, createdAt: startedAt,
+        });
+        await insertAudit(subscriptionId, {
+            paymentId: payment, action: "payment_approved",
+            previousStatus: "pending", newStatus: "approved", adminId: reviewer,
+            reason: `GCash payment verified; subscription upgraded to ${currentPlan.name}.`,
+            createdAt: startedAt,
+        });
+
+        const cancelledBy = pickAdmin();
+        await insertHistory(subscriptionId, {
+            oldPlanId: currentPlan.id, newPlanId: currentPlan.id, changeType: "cancellation",
+            changedBy: cancelledBy, createdAt: cancelledAt,
+        });
+        await insertAudit(subscriptionId, {
+            action: "subscription_cancelled",
+            previousStatus: "active", newStatus: "cancelled", adminId: cancelledBy,
+            reason: "Cancelled at the store owner's request.",
+            createdAt: cancelledAt,
+        });
+    } else {
+        // rejected_then_approved (fallback)
+        const toPlan = forcedPlan || (anyPaidPlan.length > 1 ? anyPaidPlan[1] : anyPaidPlan[0]);
+        let fromPlan = freePlan;
+        if (!forcedPlan && anyPaidPlan.length > 1) {
+            fromPlan = anyPaidPlan[0];
+        } else if (forcedPlan && anyPaidPlan.length > 1) {
+            fromPlan = anyPaidPlan.find((p) => p.id !== toPlan.id) || freePlan;
+        }
+        const cycleDays = pickBillingCycleDays(rng);
+        const expiresAt = addDays(TODAY, randomInt(rng, 20, 300));
+        const startedAt = addDays(expiresAt, -cycleDays);
+        const reviewer = pickAdmin();
+
+        const subscriptionId = await insertSubscription({
+            planId: toPlan.id, status: "active", autoRenew: rng() < 0.7, startedAt, expiresAt,
+        });
+
+        const baselineDate = addDays(startedAt, -randomInt(rng, 60, 260));
+        const baselinePayment = await insertPayment({
+            planId: fromPlan.id, amount: fromPlan.price, status: "approved",
+            submittedAt: baselineDate, reviewedAt: addDays(baselineDate, randomInt(rng, 0, 1)), reviewedBy: reviewer,
+        });
+        await insertHistory(subscriptionId, {
+            oldPlanId: freePlan.id, newPlanId: fromPlan.id, changeType: "upgrade",
+            changedBy: reviewer, createdAt: baselineDate,
+        });
+        await insertAudit(subscriptionId, {
+            paymentId: baselinePayment, action: "payment_approved",
+            previousStatus: "pending", newStatus: "approved", adminId: reviewer,
+            reason: `GCash payment verified; subscription upgraded to ${fromPlan.name}.`,
+            createdAt: baselineDate,
+        });
+
+        const rejectedDate = addDays(startedAt, -randomInt(rng, 3, 6));
+        const rejectReviewer = pickAdmin();
+        const rejectedPayment = await insertPayment({
+            planId: toPlan.id, amount: toPlan.price, status: "rejected",
+            submittedAt: rejectedDate, reviewedAt: addDays(rejectedDate, randomInt(rng, 0, 1)), reviewedBy: rejectReviewer,
+        });
+        await insertAudit(subscriptionId, {
+            paymentId: rejectedPayment, action: "payment_rejected",
+            previousStatus: "pending", newStatus: "rejected", adminId: rejectReviewer,
+            reason: "Reference number did not match GCash transaction records.",
+            createdAt: addDays(rejectedDate, randomInt(rng, 0, 1)),
+        });
+
+        const approvedPayment = await insertPayment({
+            planId: toPlan.id, amount: toPlan.price, status: "approved",
+            submittedAt: startedAt, reviewedAt: addDays(startedAt, randomInt(rng, 0, 1)), reviewedBy: reviewer,
+        });
+        await insertHistory(subscriptionId, {
+            oldPlanId: fromPlan.id, newPlanId: toPlan.id, changeType: "upgrade",
+            changedBy: reviewer, createdAt: startedAt,
+        });
+        await insertAudit(subscriptionId, {
+            paymentId: approvedPayment, action: "payment_approved",
+            previousStatus: "pending", newStatus: "approved", adminId: reviewer,
+            reason: `GCash payment verified after resubmission; subscription upgraded to ${toPlan.name}.`,
+            createdAt: startedAt,
+        });
+    }
 }
 
 function buildProductCatalog(products) {
@@ -1415,6 +1831,9 @@ function orderLineCount(rng) {
     ]);
 }
 
+// ---------------------
+// Defensive createHistoricalOrders
+// ---------------------
 async function createHistoricalOrders(db, context, counters) {
     const { storeId, storeIndex, branches, catalog } = context;
     const orderRows = [];
@@ -1424,6 +1843,15 @@ async function createHistoricalOrders(db, context, counters) {
 
     const flush = async () => {
         if (!orderRows.length) return;
+        // ensure numeric fields are numeric / not NaN
+        for (const r of orderRows) {
+            if (!Number.isFinite(Number(r.total))) r.total = 0;
+        }
+        for (const it of orderItemRows) {
+            if (!Number.isFinite(Number(it.unit_price))) it.unit_price = 0;
+            if (!Number.isFinite(Number(it.line_total))) it.line_total = 0;
+        }
+
         await insertRows(db, "orders", orderRows);
         await insertRows(db, "order_items", orderItemRows, Math.max(CONFIG.batchSize, 800));
         counters.orders += orderRows.length;
@@ -1457,21 +1885,35 @@ async function createHistoricalOrders(db, context, counters) {
 
             const lines = selectedProducts.map((product, lineIndex) => {
                 const selected = saleSelectionForProduct(rng, product);
+
+                // Defensive numeric handling: ensure salesPrice is numeric
+                const rawSalesPrice = Number(selected.salesPrice || 0);
+                const safeSalesPrice = Number.isFinite(rawSalesPrice) ? rawSalesPrice : 0;
+
                 const quantity = Math.min(
                     20,
                     randomInt(rng, 1, 4 + eventBoost) +
                     (lineIndex === 0 && rng() < 0.22 ? randomInt(rng, 2, 6) : 0)
                 );
-                const unitPrice = roundMoney(selected.salesPrice * (0.96 + rng() * 0.08));
+
+                const unitPrice = roundMoney(safeSalesPrice * (0.96 + rng() * 0.08));
+                const lineTotal = roundMoney(quantity * unitPrice);
+
                 return {
                     product: selected,
                     quantity,
                     unitPrice,
-                    lineTotal: roundMoney(quantity * unitPrice),
+                    lineTotal,
                 };
             });
 
-            const total = roundMoney(lines.reduce((sum, line) => sum + line.lineTotal, 0));
+            // compute total defensively
+            let total = lines.reduce((sum, line) => {
+                const lt = Number(line.lineTotal);
+                return sum + (Number.isFinite(lt) ? lt : 0);
+            }, 0);
+            total = Number.isFinite(total) ? roundMoney(total) : 0;
+
             const compactDate = dayKey.replace(/-/g, "");
             const orderId = `PERF-${String(storeIndex).padStart(3, "0")}-${compactDate}-${String(orderSequence).padStart(6, "0")}`;
             const hour = randomInt(rng, 9, 20);
@@ -1497,8 +1939,8 @@ async function createHistoricalOrders(db, context, counters) {
                     variant_id: line.product.variantId,
                     product_name: line.product.saleName,
                     quantity: line.quantity,
-                    unit_price: line.unitPrice,
-                    line_total: line.lineTotal,
+                    unit_price: Number.isFinite(Number(line.unitPrice)) ? line.unitPrice : 0,
+                    line_total: Number.isFinite(Number(line.lineTotal)) ? line.lineTotal : 0,
                     created_at: sqlDateTime(cursor, hour, minute, randomInt(rng, 0, 59)),
                 });
             }
@@ -1512,6 +1954,7 @@ async function createHistoricalOrders(db, context, counters) {
     await flush();
 }
 
+// booking helper functions unchanged:
 function buildWeightedDates(start, end, mode) {
     const entries = [];
     let cursor = new Date(start.getTime());
@@ -1872,7 +2315,8 @@ function estimateOrdersPerStore() {
     return Math.round(expected);
 }
 
-function printConfiguration() {
+// Modified printConfiguration to accept storeCount (not mutate CONFIG)
+function printConfiguration(storeCount) {
     const estimatedOrders = estimateOrdersPerStore();
     const estimatedOrderItems = Math.round(estimatedOrders * 2.9);
     const bookingsPerStore =
@@ -1884,32 +2328,23 @@ function printConfiguration() {
     console.log("\nStockNBook demo seeder configuration");
     console.log("------------------------------------");
     console.log(`Run tag:                     ${CONFIG.runTag}`);
-    console.log(`Stores:                      ${CONFIG.storeCount.toLocaleString()}`);
-    console.log(`Owners:                      ${CONFIG.storeCount.toLocaleString()}`);
-    console.log(`Managers:                    ${(CONFIG.storeCount * 3).toLocaleString()}`);
-    console.log(`Staff:                       ${(CONFIG.storeCount * 6).toLocaleString()} (3 per first 2 branches/store)`);
-    console.log(`Products:                    ${(CONFIG.storeCount * CONFIG.productsPerStore).toLocaleString()}`);
-    console.log(`Products with variants:      ${(CONFIG.storeCount * VARIANT_PRODUCTS_PER_STORE).toLocaleString()} (${VARIANT_PRODUCTS_PER_STORE.toLocaleString()} per store)`);
-    console.log(`Products without variants:   ${(CONFIG.storeCount * SIMPLE_PRODUCTS_PER_STORE).toLocaleString()} (${SIMPLE_PRODUCTS_PER_STORE.toLocaleString()} per store)`);
-    console.log(`Product variant rows:        ${(CONFIG.storeCount * VARIANT_PRODUCTS_PER_STORE * VARIANTS_PER_PRODUCT).toLocaleString()}`);
-    console.log(`Packages:                    ${(CONFIG.storeCount * 5).toLocaleString()}`);
-    console.log(`Sales period:                ${isoDate(CONFIG.salesStart)} to ${isoDate(CONFIG.salesEnd)}`);
-    console.log(`Estimated POS orders:        ${(estimatedOrders * CONFIG.storeCount).toLocaleString()}`);
-    console.log(`Estimated POS order items:   ${(estimatedOrderItems * CONFIG.storeCount).toLocaleString()}`);
-    console.log(`Bookings/store:              ${bookingsPerStore.toLocaleString()} realistic mix (completed-heavy history + active upcoming pipeline)`);
-    console.log(`Total bookings:              ${(bookingsPerStore * CONFIG.storeCount).toLocaleString()}`);
-    console.log(`Estimated booking items:     ${(estimatedBookingItems * CONFIG.storeCount).toLocaleString()}`);
-    console.log(`Batch size:                  ${CONFIG.batchSize}`);
-    console.log(`Create query indexes:        ${CONFIG.createIndexes}`);
-    console.log(`Reset matching seed run:     ${CONFIG.resetExistingRun}`);
+    console.log(`Target stores:               ${storeCount} (will create 9 Starter, 9 Growth, 9 Scale if plans exist)`);
     console.log(`Default test password:       ${CONFIG.defaultPassword}`);
+    console.log("");
+    console.log(`Stores used for estimates:   ${storeCount}`);
+    console.log(`Products per store (default): ${CONFIG.productsPerStore}`);
+    console.log(`Estimated POS orders:        ${(estimatedOrders * storeCount).toLocaleString()}`);
+    console.log(`Estimated POS order items:   ${(estimatedOrderItems * storeCount).toLocaleString()}`);
+    console.log(`Bookings/store (configured): ${bookingsPerStore.toLocaleString()}`);
+    console.log(`Total bookings:              ${(bookingsPerStore * storeCount).toLocaleString()}`);
     console.log("");
 }
 
 async function main() {
-    printConfiguration();
-
+    // Dry run shortcut (no DB connection / writes)
     if (CONFIG.dryRun) {
+        // If dry run and store count env override present, just show
+        printConfiguration(CONFIG.storeCount);
         console.log("Dry run complete. No database connection or writes were performed.");
         return;
     }
@@ -1928,34 +2363,76 @@ async function main() {
         orderItems: 0,
         bookings: 0,
         bookingItems: 0,
+        subscriptions: 0,
+        payments: 0,
+        subscriptionHistory: 0,
+        subscriptionAuditLogs: 0,
     };
 
     try {
+        // Ensure schema/tables exist so we can fetch plans
         await ensureSeederSchema(db);
+
+        const plans = await fetchRealPlans(db);
+
+        // Expecting three plans: Starter (0), Growth (500), Scale (1299)
+        // Build assignedPlans with 3 stores per plan, then repeat to 9 per plan (total 27).
+        // We will map each plan to 9 stores.
+        const planMap = {};
+        for (const p of plans) planMap[p.name.toLowerCase()] = p;
+
+        // Determine "Starter", "Growth", "Scale" plan objects (case-insensitive)
+        const starter = plans.find(p => /starter/i.test(p.name)) || plans[0];
+        const growth = plans.find(p => /growth/i.test(p.name)) || plans[1] || starter;
+        const scale = plans.find(p => /scale/i.test(p.name) || /enterprise|pro/i.test(p.name)) || plans[2] || growth;
+
+        const planOrder = [starter, growth, scale];
+
+        // Build assignedPlans (9 stores per plan => 27 total)
+        const assignedPlans = [];
+        for (const p of planOrder) {
+            for (let i = 0; i < 9; i += 1) assignedPlans.push(p);
+        }
+
+        const STORE_COUNT = assignedPlans.length || CONFIG.storeCount;
+        printConfiguration(STORE_COUNT);
+
         await ensureSeederLookupIndexes(db);
         await removeExistingSeedRun(db);
 
-        const enterprisePlan = await ensureEnterprisePlan(db);
+        const platformAdminIds = await fetchPlatformAdminIds(db);
         const passwordHash = await bcrypt.hash(CONFIG.defaultPassword, 10);
         const usedPersonnelNames = new Set();
         const datePools = buildDatePools();
 
-        for (let storeIndex = 1; storeIndex <= CONFIG.storeCount; storeIndex += 1) {
+        // Plan profiles define how heavy the generated demo data should be per store
+        const planProfiles = {};
+        planProfiles[starter.id] = { name: starter.name, productsPerStore: 50, bookingsPerMonth: 20, staff: 1, branches: 1 };
+        planProfiles[growth.id] = { name: growth.name, productsPerStore: 800, bookingsPerMonth: 20, staff: 3, branches: 3 };
+        planProfiles[scale.id] = { name: scale.name, productsPerStore: 2000, bookingsPerMonth: 999, staff: 10, branches: 4 };
+
+        // For distribution of subscription states and renewal-watch etc we'll seed triplet pattern per-plan group
+        for (let storeIndex = 1; storeIndex <= STORE_COUNT; storeIndex += 1) {
             const startedAt = Date.now();
             const identity = storeIdentity(storeIndex);
-            console.log(`[${storeIndex}/${CONFIG.storeCount}] Seeding ${identity.name}...`);
+            const planForStore = assignedPlans[storeIndex - 1];
+            const planProfile = planProfiles[planForStore.id] || { name: planForStore.name, productsPerStore: CONFIG.productsPerStore, bookingsPerMonth: CONFIG.historicalBookingsPerStore, staff: CONFIG.staffPerStore, branches: CONFIG.managersPerStore };
+
+            console.log(`[${storeIndex}/${STORE_COUNT}] Seeding store (plan: ${planProfile.name})...`);
 
             await db.beginTransaction();
 
             try {
-                const store = await createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelNames);
+                const store = await createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelNames, planProfile);
                 counters.stores += 1;
-                counters.managers += CONFIG.managersPerStore;
-                counters.staff += CONFIG.staffPerStore;
+                counters.managers += Math.min(CONFIG.managersPerStore, store.branches.length);
+                counters.staff += planProfile.staff;
 
+                // categories
                 await createCategories(db, store.storeId);
 
-                const products = await createProducts(db, store.storeId, storeIndex, store.branches);
+                // products
+                const products = await createProducts(db, store.storeId, storeIndex, store.branches, planProfile);
                 counters.products += products.length;
                 counters.productVariants += products.reduce(
                     (sum, product) => sum + product.variants.length,
@@ -1964,6 +2441,7 @@ async function main() {
 
                 const productCatalog = buildProductCatalog(products);
 
+                // packages
                 const packages = await createPackages(
                     db,
                     store.storeId,
@@ -1973,8 +2451,24 @@ async function main() {
                 );
                 counters.packages += packages.length;
 
-                await createSubscription(db, store.storeId, enterprisePlan);
+                // determine triplet pos (0,1,2) inside each plan's group of 9 -> we cycle group-of-3 pattern to get desired states
+                // We'll map the 9 stores per plan to 3 triplets: indices 0..8 -> pos = i % 3
+                const planIndex = Math.floor((storeIndex - 1) / 9); // 0,1,2
+                const withinPlanIndex = (storeIndex - 1) % 9; // 0..8
+                const tripletPos = withinPlanIndex % 3; // 0..2 -> active, pending, expired mapping
 
+                // create subscription lifecycle with forced plan and tripletPos to control status distribution
+                await createSubscriptionLifecycle(
+                    db,
+                    { storeId: store.storeId, storeIndex },
+                    plans,
+                    platformAdminIds,
+                    counters,
+                    planForStore,
+                    tripletPos
+                );
+
+                // historical orders (defensive math inside)
                 await createHistoricalOrders(
                     db,
                     {
@@ -1986,6 +2480,7 @@ async function main() {
                     counters
                 );
 
+                // bookings
                 await createBookings(
                     db,
                     {
@@ -2027,6 +2522,10 @@ async function main() {
         console.log(`POS order items: ${counters.orderItems.toLocaleString()}`);
         console.log(`Bookings:        ${counters.bookings.toLocaleString()}`);
         console.log(`Booking items:   ${counters.bookingItems.toLocaleString()}`);
+        console.log(`Subscriptions:   ${counters.subscriptions.toLocaleString()}`);
+        console.log(`Payments:        ${counters.payments.toLocaleString()}`);
+        console.log(`Sub. history:    ${counters.subscriptionHistory.toLocaleString()}`);
+        console.log(`Sub. audit logs: ${counters.subscriptionAuditLogs.toLocaleString()}`);
         console.log("");
         console.log(`Owner 001 login: owner001@${STORE_EMAIL_DOMAIN}`);
         console.log(`Password:        ${CONFIG.defaultPassword}`);

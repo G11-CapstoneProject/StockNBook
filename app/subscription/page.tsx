@@ -10,10 +10,13 @@ import {
     CalendarDays,
     Check,
     CreditCard,
+    Clock3,
     GitBranch,
     LockKeyhole,
+    Mail,
     RefreshCw,
     ShieldCheck,
+    Sparkles,
     TrendingUp,
     Users,
     X,
@@ -138,6 +141,7 @@ export default function SubscriptionPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
+    const [upgradeStep, setUpgradeStep] = useState<"details" | "otp" | "payment">("details");
     const [referenceNumber, setReferenceNumber] = useState("");
     const [receiptUrl, setReceiptUrl] = useState("");
     const [otp, setOtp] = useState("");
@@ -206,6 +210,7 @@ export default function SubscriptionPage() {
 
     function resetPaymentModal() {
         setSelectedPlan(null);
+        setUpgradeStep("details");
         setReferenceNumber("");
         setReceiptUrl("");
         setOtp("");
@@ -240,6 +245,7 @@ export default function SubscriptionPage() {
             if (!res.ok) throw new Error(body.error || "Unable to send the verification code.");
 
             setOtpSent(true);
+            setUpgradeStep("otp");
             setOtp("");
             setOtpEmailHint(body.email_hint || "your registered email");
             setOtpSecondsRemaining(Number(body.expires_in) || 300);
@@ -249,6 +255,23 @@ export default function SubscriptionPage() {
         } finally {
             setOtpSending(false);
         }
+    }
+
+    function continueToPayment() {
+        const cleanOtp = otp.replace(/\D/g, "");
+
+        if (!/^\d{6}$/.test(cleanOtp)) {
+            setError("Enter the complete 6-digit verification code.");
+            return;
+        }
+
+        if (otpSecondsRemaining <= 0) {
+            setError("This verification code has expired. Please resend a new code.");
+            return;
+        }
+
+        setError("");
+        setUpgradeStep("payment");
     }
 
     async function submitPayment() {
@@ -692,7 +715,10 @@ export default function SubscriptionPage() {
                                                 <button
                                                     type="button"
                                                     disabled={!canChoose}
-                                                    onClick={() => setSelectedPlan(plan)}
+                                                    onClick={() => {
+                                                        setSelectedPlan(plan);
+                                                        setUpgradeStep("details");
+                                                    }}
                                                     className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#412563] focus:outline-none focus:ring-4 focus:ring-[#6D35D4]/15 disabled:cursor-not-allowed disabled:opacity-50"
                                                 >
                                                     <CreditCard className="h-4 w-4" />
@@ -714,142 +740,67 @@ export default function SubscriptionPage() {
                 </div>
             </main>
 
-            {selectedPlan && (
+            {selectedPlan && upgradeStep === "details" && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-[#1A1220]/55 px-4 py-6 backdrop-blur-sm">
                     <div className="w-full max-w-xl rounded-2xl border border-[#E7DCEB] bg-white p-6 shadow-[0_18px_60px_rgba(26,18,32,0.22)]">
                         <div className="flex items-start justify-between gap-4">
                             <div>
                                 <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#9A7A25]">Subscription upgrade</p>
                                 <h2 className="mt-2 text-2xl font-bold text-[#1A1220]">Upgrade to {selectedPlan.name}</h2>
-                                <p className="mt-1 text-sm leading-6 text-[#7A6E88]">
-                                    {otpSent
-                                        ? "Enter the verification code and payment proof below. The code confirms that you are the account owner submitting this request."
-                                        : "First verify your account by email. After the code is sent, you can submit your GCash payment proof for platform admin review."}
-                                </p>
+                                <p className="mt-1 text-sm leading-6 text-[#7A6E88]">First verify your account by email before continuing to the GCash payment checkout.</p>
                             </div>
-                            <button
-                                type="button"
-                                onClick={resetPaymentModal}
-                                className="rounded-full p-2 text-[#7A6E88] hover:bg-[#F5F0F7]"
-                                aria-label="Close payment dialog"
-                            >
-                                <X className="h-5 w-5" />
-                            </button>
+                            <button type="button" onClick={resetPaymentModal} className="rounded-full p-2 text-[#7A6E88] hover:bg-[#F5F0F7]" aria-label="Close subscription upgrade dialog"><X className="h-5 w-5" /></button>
                         </div>
 
                         <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                            <div className="rounded-xl border border-[#E7DCEB] bg-[#FBF9FD] p-4">
-                                <span className="text-xs text-[#8A7D92]">Selected plan</span>
-                                <strong className="mt-1 block text-sm text-[#2D1B4E]">{selectedPlan.name}</strong>
-                            </div>
-                            <div className="rounded-xl border border-[#E7DCEB] bg-[#FBF9FD] p-4">
-                                <span className="text-xs text-[#8A7D92]">Amount to pay</span>
-                                <strong className="mt-1 block text-sm text-[#2D1B4E]">{formatPrice(selectedPlan.price)}</strong>
-                            </div>
+                            <div className="rounded-xl border border-[#E7DCEB] bg-[#FBF9FD] p-4"><span className="text-xs text-[#8A7D92]">Selected plan</span><strong className="mt-1 block text-sm text-[#2D1B4E]">{selectedPlan.name}</strong></div>
+                            <div className="rounded-xl border border-[#E7DCEB] bg-[#FBF9FD] p-4"><span className="text-xs text-[#8A7D92]">Amount to pay</span><strong className="mt-1 block text-sm text-[#2D1B4E]">{formatPrice(selectedPlan.price)}</strong></div>
                         </div>
 
-                        {!otpSent ? (
-                            <div className="mt-5 rounded-2xl border border-[#E5DCF2] bg-[#FAF7FF] p-5">
-                                <div className="flex items-start gap-3">
-                                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#EDE3FF] text-[#6D35D4]">
-                                        <ShieldCheck className="h-5 w-5" />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-sm font-bold text-[#2D1B4E]">Verify your account first</h3>
-                                        <p className="mt-1 text-xs leading-5 text-[#7A6E88]">
-                                            We will send a 6-digit verification code to the email registered to your owner account.
-                                        </p>
-                                    </div>
-                                </div>
-
-                                <button
-                                    type="button"
-                                    disabled={otpSending}
-                                    onClick={sendPaymentOtp}
-                                    className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#412563] disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                    <ShieldCheck className="h-4 w-4" />
-                                    {otpSending ? "Sending verification code..." : "Send verification code"}
-                                </button>
+                        <div className="mt-5 rounded-2xl border border-[#E5DCF2] bg-[#FAF7FF] p-5">
+                            <div className="flex items-start gap-3">
+                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#EDE3FF] text-[#6D35D4]"><ShieldCheck className="h-5 w-5" /></div>
+                                <div><h3 className="text-sm font-bold text-[#2D1B4E]">Verify your account first</h3><p className="mt-1 text-xs leading-5 text-[#7A6E88]">We will send a 6-digit verification code to the email registered to your owner account.</p></div>
                             </div>
-                        ) : (
-                            <>
-                                <div className="mt-5 rounded-2xl border border-[#DDEFE5] bg-[#F4FBF7] p-4">
-                                    <div className="flex items-start justify-between gap-4">
-                                        <div>
-                                            <p className="text-xs font-bold text-[#17643D]">Verification code sent</p>
-                                            <p className="mt-1 text-[11px] leading-5 text-[#5E7569]">
-                                                Check {otpEmailHint || "your registered email"}. The code expires in {Math.floor(otpSecondsRemaining / 60)}:{String(otpSecondsRemaining % 60).padStart(2, "0")}.
-                                            </p>
-                                        </div>
-                                        <button
-                                            type="button"
-                                            disabled={otpSending || otpSecondsRemaining > 0}
-                                            onClick={sendPaymentOtp}
-                                            className="shrink-0 rounded-lg border border-[#B9DCC8] bg-white px-3 py-2 text-[11px] font-semibold text-[#17643D] disabled:cursor-not-allowed disabled:opacity-45"
-                                        >
-                                            {otpSending ? "Sending..." : otpSecondsRemaining > 0 ? "Resend" : "Send again"}
-                                        </button>
-                                    </div>
-                                </div>
-
-                                <label className="mt-5 block text-xs font-semibold text-[#4B3E55]">
-                                    6-digit verification code
-                                    <input
-                                        value={otp}
-                                        onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                                        inputMode="numeric"
-                                        autoComplete="one-time-code"
-                                        maxLength={6}
-                                        placeholder="Enter the code from your email"
-                                        className="mt-2 h-12 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-center text-lg font-bold tracking-[0.35em] text-[#1A1220] outline-none transition placeholder:text-sm placeholder:font-normal placeholder:tracking-normal placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10"
-                                    />
-                                </label>
-
-                                <label className="mt-4 block text-xs font-semibold text-[#4B3E55]">
-                                    GCash reference number
-                                    <input
-                                        value={referenceNumber}
-                                        onChange={(event) => setReferenceNumber(event.target.value)}
-                                        placeholder="Enter the reference number from GCash"
-                                        className="mt-2 h-11 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-sm font-medium text-[#1A1220] outline-none transition placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10"
-                                    />
-                                </label>
-
-                                <label className="mt-4 block text-xs font-semibold text-[#4B3E55]">
-                                    Receipt / proof link
-                                    <input
-                                        value={receiptUrl}
-                                        onChange={(event) => setReceiptUrl(event.target.value)}
-                                        placeholder="Paste the uploaded receipt link"
-                                        className="mt-2 h-11 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-sm font-medium text-[#1A1220] outline-none transition placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10"
-                                    />
-                                    <span className="mt-1.5 block text-[11px] font-normal leading-5 text-[#8A7D92]">
-                                        This link is stored with the payment so the platform admin can inspect your GCash proof.
-                                    </span>
-                                </label>
-                            </>
-                        )}
-
-                        <div className="mt-6 flex justify-end gap-3">
-                            <button
-                                type="button"
-                                onClick={resetPaymentModal}
-                                className="rounded-xl border border-[#DCCFE8] bg-white px-5 py-2.5 text-sm font-semibold text-[#4B3E55] hover:bg-[#FAF7FC]"
-                            >
-                                Cancel
-                            </button>
-                            {otpSent && (
-                                <button
-                                    type="button"
-                                    disabled={submitting || otp.length !== 6 || !referenceNumber.trim()}
-                                    onClick={submitPayment}
-                                    className="rounded-xl bg-[#2D1B4E] px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                    {submitting ? "Submitting..." : "Verify & submit for review"}
-                                </button>
-                            )}
+                            <button type="button" disabled={otpSending} onClick={sendPaymentOtp} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#412563] disabled:cursor-not-allowed disabled:opacity-50"><ShieldCheck className="h-4 w-4" />{otpSending ? "Sending verification code..." : "Send verification code"}</button>
                         </div>
+
+                        <div className="mt-6 flex justify-end"><button type="button" onClick={resetPaymentModal} className="rounded-xl border border-[#DCCFE8] bg-white px-5 py-2.5 text-sm font-semibold text-[#4B3E55] hover:bg-[#FAF7FC]">Cancel</button></div>
+                    </div>
+                </div>
+            )}
+
+            {selectedPlan && upgradeStep === "otp" && (
+                <div role="dialog" aria-modal="true" aria-labelledby="upgrade-otp-title" className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-4 py-6 backdrop-blur-md">
+                    <div className="relative my-auto w-full max-w-[430px] overflow-hidden rounded-[28px] border border-white/70 bg-white px-7 pb-7 pt-8 text-center shadow-[0_28px_80px_rgba(22,12,39,0.32)] sm:px-9">
+                        <button type="button" onClick={resetPaymentModal} disabled={otpSending} aria-label="Close OTP verification" className="absolute right-4 top-4 rounded-full p-2 text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E] disabled:cursor-not-allowed disabled:opacity-50"><X className="h-5 w-5" /></button>
+                        <div className="relative mx-auto flex h-[86px] w-[86px] items-center justify-center"><div className="absolute inset-0 rounded-full bg-[#EEE5FF]" /><div className="absolute inset-[11px] rounded-full bg-[#DCCBFF]" /><div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#2D1B4E] text-white shadow-lg"><Mail className="h-7 w-7" /></div><Sparkles className="absolute -right-1 top-1 h-4 w-4 text-[#C9951A]" /><Sparkles className="absolute -left-1 bottom-3 h-3.5 w-3.5 text-[#C9951A]" /></div>
+                        <h2 id="upgrade-otp-title" className="mt-4 font-serif text-[32px] font-semibold leading-tight text-[#2D1B4E]">Verify your email</h2>
+                        <p className="mt-2 text-sm leading-6 text-[#7A6E88]">We&apos;ve sent a 6-digit verification code to</p>
+                        <p className="mt-0.5 break-all text-sm font-bold text-[#2D1B4E]">{otpEmailHint || "your registered email"}</p>
+                        <div className="mt-6 flex justify-center gap-2 sm:gap-3">
+                            {Array.from({ length: 6 }, (_, index) => (
+                                <input key={index} id={`upgrade-otp-${index}`} value={otp[index] || ""} type="text" inputMode="numeric" pattern="[0-9]*" autoComplete={index === 0 ? "one-time-code" : "off"} maxLength={1} disabled={otpSending || otpSecondsRemaining <= 0} aria-label={`OTP digit ${index + 1}`} onChange={(event) => { const digit = event.target.value.replace(/\D/g, "").slice(-1); const nextOtp = otp.split(""); nextOtp[index] = digit; setOtp(nextOtp.join("").slice(0, 6)); if (digit && index < 5) document.getElementById(`upgrade-otp-${index + 1}`)?.focus(); }} onKeyDown={(event) => { if (event.key === "Backspace") { if (otp[index]) { const nextOtp = otp.split(""); nextOtp[index] = ""; setOtp(nextOtp.join("")); return; } if (index > 0) { document.getElementById(`upgrade-otp-${index - 1}`)?.focus(); const nextOtp = otp.split(""); nextOtp[index - 1] = ""; setOtp(nextOtp.join("")); } } if (event.key === "ArrowLeft" && index > 0) document.getElementById(`upgrade-otp-${index - 1}`)?.focus(); if (event.key === "ArrowRight" && index < 5) document.getElementById(`upgrade-otp-${index + 1}`)?.focus(); }} onPaste={(event) => { event.preventDefault(); const pasted = event.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6); if (!pasted) return; setOtp(pasted); document.getElementById(`upgrade-otp-${Math.max(0, Math.min(pasted.length, 6) - 1)}`)?.focus(); }} onFocus={(event) => event.target.select()} className={["h-14 w-11 rounded-xl border bg-white text-center text-2xl font-bold text-[#2D1B4E] outline-none transition sm:w-12", "focus:border-[#6F45B8] focus:ring-4 focus:ring-[#6F45B8]/15", otp[index] ? "border-[#B99AEF] shadow-sm" : "border-[#DED3EE]", otpSecondsRemaining <= 0 ? "cursor-not-allowed bg-[#F7F4FA] text-[#A79CAF]" : ""].join(" ")} />
+                            ))}
+                        </div>
+                        <div className="mx-auto mt-5 inline-flex items-center gap-2 rounded-full bg-[#F1E9FF] px-4 py-2 text-sm font-semibold text-[#6F45B8]"><Clock3 className="h-4 w-4" />{otpSecondsRemaining > 0 ? `Code expires in ${String(Math.floor(otpSecondsRemaining / 60)).padStart(2, "0")}:${String(otpSecondsRemaining % 60).padStart(2, "0")}` : "Code expired"}</div>
+                        <button type="button" disabled={otpSending || otpSecondsRemaining <= 0 || otp.length !== 6} onClick={continueToPayment} className="mt-6 w-full rounded-xl bg-[#3B1768] px-5 py-3.5 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(59,23,104,0.22)] transition hover:bg-[#4B2180] disabled:cursor-not-allowed disabled:opacity-50">Continue to payment</button>
+                        <div className="mt-6 flex items-center gap-3"><div className="h-px flex-1 bg-[#EBE4F0]" /><span className="text-xs text-[#7A6E88]">Didn&apos;t receive the code?</span><div className="h-px flex-1 bg-[#EBE4F0]" /></div>
+                        <button type="button" disabled={otpSending || otpSecondsRemaining > 0} onClick={sendPaymentOtp} className="mx-auto mt-3 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-[#6F35C5] transition hover:bg-[#F5EFFF] disabled:cursor-not-allowed disabled:text-[#B9AFCA] disabled:hover:bg-transparent"><RefreshCw className={otpSending ? "h-4 w-4 animate-spin" : "h-4 w-4"} />{otpSending ? "Sending..." : otpSecondsRemaining <= 0 ? "Resend OTP" : `Resend available in ${String(Math.floor(otpSecondsRemaining / 60)).padStart(2, "0")}:${String(otpSecondsRemaining % 60).padStart(2, "0")}`}</button>
+                        <div className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-[#FAF8FC] px-4 py-3 text-xs text-[#7A6E88]"><ShieldCheck className="h-4 w-4 shrink-0 text-[#6F45B8]" /><span>For your security, never share this code with anyone.</span></div>
+                    </div>
+                </div>
+            )}
+
+            {selectedPlan && upgradeStep === "payment" && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-[#1A1220]/55 px-4 py-6 backdrop-blur-sm">
+                    <div className="my-auto w-full max-w-xl rounded-2xl border border-[#E7DCEB] bg-white p-6 shadow-[0_18px_60px_rgba(26,18,32,0.22)]">
+                        <div className="flex items-start justify-between gap-4"><div><p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#9A7A25]">GCash checkout</p><h2 className="mt-2 text-2xl font-bold text-[#1A1220]">Complete your {selectedPlan.name} upgrade</h2><p className="mt-1 text-sm leading-6 text-[#7A6E88]">Your email verification is complete. Send your GCash payment, then enter the payment details below for platform admin review.</p></div><button type="button" onClick={resetPaymentModal} className="rounded-full p-2 text-[#7A6E88] hover:bg-[#F5F0F7]" aria-label="Close GCash checkout"><X className="h-5 w-5" /></button></div>
+                        <div className="mt-6 grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-[#E7DCEB] bg-[#FBF9FD] p-4"><span className="text-xs text-[#8A7D92]">Selected plan</span><strong className="mt-1 block text-sm text-[#2D1B4E]">{selectedPlan.name}</strong></div><div className="rounded-xl border border-[#E7DCEB] bg-[#FBF9FD] p-4"><span className="text-xs text-[#8A7D92]">Amount to pay</span><strong className="mt-1 block text-sm text-[#2D1B4E]">{formatPrice(selectedPlan.price)}</strong></div></div>
+                        <div className="mt-5 rounded-2xl border border-[#DDEFE5] bg-[#F4FBF7] p-4"><p className="text-xs font-bold text-[#17643D]">GCash payment</p><p className="mt-1 text-[11px] leading-5 text-[#5E7569]">Complete your GCash payment for the amount shown above, then provide the reference number and receipt or proof link below.</p></div>
+                        <label className="mt-5 block text-xs font-semibold text-[#4B3E55]">GCash reference number<input value={referenceNumber} onChange={(event) => setReferenceNumber(event.target.value)} placeholder="Enter the reference number from GCash" className="mt-2 h-11 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-sm font-medium text-[#1A1220] outline-none transition placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10" /></label>
+                        <label className="mt-4 block text-xs font-semibold text-[#4B3E55]">Receipt / proof link<input value={receiptUrl} onChange={(event) => setReceiptUrl(event.target.value)} placeholder="Paste the uploaded receipt link" className="mt-2 h-11 w-full rounded-xl border border-[#DCCFE8] bg-white px-3 text-sm font-medium text-[#1A1220] outline-none transition placeholder:text-[#9C91A6] focus:border-[#6D35D4] focus:ring-4 focus:ring-[#6D35D4]/10" /><span className="mt-1.5 block text-[11px] font-normal leading-5 text-[#8A7D92]">This link is stored with the payment so the platform admin can inspect your GCash proof.</span></label>
+                        <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={resetPaymentModal} className="rounded-xl border border-[#DCCFE8] bg-white px-5 py-2.5 text-sm font-semibold text-[#4B3E55] hover:bg-[#FAF7FC]">Cancel</button><button type="button" disabled={submitting || otp.length !== 6 || !referenceNumber.trim()} onClick={submitPayment} className="rounded-xl bg-[#2D1B4E] px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">{submitting ? "Submitting..." : "Submit payment for review"}</button></div>
                     </div>
                 </div>
             )}

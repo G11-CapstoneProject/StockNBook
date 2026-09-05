@@ -32,15 +32,11 @@ const STORE_EMAIL_DOMAIN = `${RUN_TAG}.seed.stocknbook.test`;
 
 function dbConfig() {
     return {
-        host: "gateway01.ap-southeast-1.prod.aws.tidbcloud.com",
-        user: "4VMJYNRD5H472NK.root",
-        password: "rH9a9Tj2r7uJpQqf",
+        host: "127.0.0.1",
+        user: "root",
+        password: "BTA5EYVWLfWcebF",
         database: "stocknbook",
-        ssl: {
-            ca: fs.readFileSync('./certs/isrgrootx1.pem')
-        },
-        charset: "utf8mb4",
-        supportBigNumbers: true,
+        ssl: { rejectUnauthorized: false },
     };
 }
 
@@ -122,6 +118,22 @@ async function deleteChildByParent(db, relation) {
     console.log(`Deleted ${Number(result.affectedRows || 0).toLocaleString()} rows from ${childTable}.`);
 }
 
+async function deleteRowsScopedByColumn(db, tableName, columnName, tempTableName) {
+    if (!(await tableExists(db, tableName))) return;
+
+    const columns = await getTableColumns(db, tableName);
+    if (!columns.has(columnName)) return;
+
+    const [result] = await db.query(
+        `DELETE scoped
+         FROM ${quoteIdentifier(tableName)} AS scoped
+        INNER JOIN ${quoteIdentifier(tempTableName)} AS seeded
+        ON scoped.${quoteIdentifier(columnName)} = seeded.id`
+    );
+
+    console.log(`Deleted ${Number(result.affectedRows || 0).toLocaleString()} rows from ${tableName}.`);
+}
+
 async function deleteStoreScopedTables(db) {
     const [tables] = await db.execute(
         `SELECT DISTINCT TABLE_NAME
@@ -184,6 +196,15 @@ async function main() {
         for (const relation of childRelations) {
             await deleteChildByParent(db, relation);
         }
+
+        // subscription_audit_logs scopes to a store via `business_id`, not
+        // `store_id`, so the generic store_id column scan below never finds it.
+        await deleteRowsScopedByColumn(
+            db,
+            "subscription_audit_logs",
+            "business_id",
+            "tmp_perf_destroy_store_ids"
+        );
 
         await deleteStoreScopedTables(db);
 

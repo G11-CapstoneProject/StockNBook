@@ -19,6 +19,7 @@ import {
     UsersRound,
     X,
     XCircle,
+    LockKeyhole, ArrowUpRight,
 } from "lucide-react";
 
 type Permissions = {
@@ -87,6 +88,14 @@ type BranchBooking = {
 };
 
 type ApiRecord = Record<string, unknown>;
+
+type SubscriptionResponse = {
+    subscription?: {
+        plan?: {
+            name?: string | null;
+        };
+    };
+};
 
 const inactiveReasonOptions = [
     "Temporarily closed",
@@ -435,6 +444,56 @@ function formatCurrentDateTime(value: Date) {
     return `${dateLabel} | ${timeLabel}`;
 }
 
+type SubscriptionPlan = "starter" | "growth" | "scale";
+
+function normalizeSubscriptionPlan(value: unknown): SubscriptionPlan {
+    const plan = String(value || "").trim().toLowerCase();
+
+    if (plan.includes("scale")) return "scale";
+    if (plan.includes("growth")) return "growth";
+    return "starter";
+}
+
+function getStoredSubscriptionPlan(): SubscriptionPlan {
+    if (typeof window === "undefined") return "starter";
+
+    const keys = [
+        "subscription_plan",
+        "current_plan",
+        "plan",
+        "plan_name",
+        "planName",
+        "store_plan",
+    ];
+
+    for (const storage of [sessionStorage, localStorage]) {
+        for (const key of keys) {
+            const value = storage.getItem(key);
+            if (value) return normalizeSubscriptionPlan(value);
+        }
+
+        for (const key of ["subscription", "current_subscription", "active_subscription", "subscriptionData"]) {
+            const raw = storage.getItem(key);
+            if (!raw) continue;
+            try {
+                const parsed = JSON.parse(raw) as Record<string, unknown>;
+                const plan = parsed.plan ?? parsed.plan_name ?? parsed.planName ?? parsed.name;
+                if (plan) return normalizeSubscriptionPlan(plan);
+            } catch {
+                // Ignore non-JSON storage values.
+            }
+        }
+    }
+
+    return "starter";
+}
+
+function getBranchLimit(plan: SubscriptionPlan) {
+    if (plan === "scale") return Number.POSITIVE_INFINITY;
+    if (plan === "growth") return 3;
+    return 1;
+}
+
 export default function BranchesPage() {
     const router = useRouter();
 
@@ -459,6 +518,8 @@ export default function BranchesPage() {
     const [addPermissions, setAddPermissions] =
         useState<Permissions>(defaultPermissions);
     const [adding, setAdding] = useState(false);
+    const [showPlanLimitDialog, setShowPlanLimitDialog] = useState(false);
+    const [subscriptionPlan, setSubscriptionPlan] = useState<SubscriptionPlan>("starter");
 
     const [showEditModal, setShowEditModal] = useState(false);
     const [editingBranch, setEditingBranch] = useState<Branch | null>();
@@ -476,6 +537,55 @@ export default function BranchesPage() {
     const [editPermissions, setEditPermissions] =
         useState<Permissions>(defaultPermissions);
     const [saving, setSaving] = useState(false);
+
+    const loadSubscriptionPlan = useCallback(async () => {
+        const token =
+            sessionStorage.getItem("token") ||
+            localStorage.getItem("token");
+
+        if (!token) {
+            setSubscriptionPlan(getStoredSubscriptionPlan());
+            return;
+        }
+
+        try {
+            const response = await fetch("/api/subscription-client", {
+                method: "GET",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    Accept: "application/json",
+                },
+                cache: "no-store",
+            });
+
+            const rawText = await response.text();
+
+            let data: SubscriptionResponse = {};
+            try {
+                data = rawText ? (JSON.parse(rawText) as SubscriptionResponse) : {};
+            } catch {
+                data = {};
+            }
+
+            if (!response.ok) {
+                setSubscriptionPlan(getStoredSubscriptionPlan());
+                return;
+            }
+
+            const planName = data.subscription?.plan?.name;
+            if (planName) {
+                const normalized = normalizeSubscriptionPlan(planName);
+                setSubscriptionPlan(normalized);
+                sessionStorage.setItem("subscription_plan", normalized);
+                localStorage.setItem("subscription_plan", normalized);
+                return;
+            }
+
+            setSubscriptionPlan(getStoredSubscriptionPlan());
+        } catch {
+            setSubscriptionPlan(getStoredSubscriptionPlan());
+        }
+    }, []);
 
     const loadBranches = useCallback(async () => {
         const token =
@@ -627,6 +737,11 @@ export default function BranchesPage() {
     }, [router]);
 
     useEffect(() => {
+        setSubscriptionPlan(getStoredSubscriptionPlan());
+        void loadSubscriptionPlan();
+    }, [loadSubscriptionPlan]);
+
+    useEffect(() => {
         void loadBranches();
     }, [loadBranches]);
 
@@ -698,6 +813,13 @@ export default function BranchesPage() {
     };
 
     const openAddModal = () => {
+        const limit = getBranchLimit(subscriptionPlan);
+
+        if (Number.isFinite(limit) && branches.length >= limit) {
+            setShowPlanLimitDialog(true);
+            return;
+        }
+
         resetAddForm();
         setShowAddModal(true);
     };
@@ -710,6 +832,14 @@ export default function BranchesPage() {
     };
 
     const handleCreateBranch = async () => {
+        const branchLimit = getBranchLimit(subscriptionPlan);
+
+        if (Number.isFinite(branchLimit) && branches.length >= branchLimit) {
+            setShowAddModal(false);
+            setShowPlanLimitDialog(true);
+            return;
+        }
+
         if (
             !addBranchName.trim() ||
             !addContactNumber.trim() ||
@@ -761,7 +891,9 @@ export default function BranchesPage() {
             return;
         }
 
-        const token = sessionStorage.getItem("token");
+        const token =
+            sessionStorage.getItem("token") ||
+            localStorage.getItem("token");
 
         if (!token) {
             router.push("/");
@@ -902,7 +1034,9 @@ export default function BranchesPage() {
             return;
         }
 
-        const token = sessionStorage.getItem("token");
+        const token =
+            sessionStorage.getItem("token") ||
+            localStorage.getItem("token");
 
         if (!token) {
             router.push("/");
@@ -958,7 +1092,9 @@ export default function BranchesPage() {
 
         if (!confirmed) return;
 
-        const token = sessionStorage.getItem("token");
+        const token =
+            sessionStorage.getItem("token") ||
+            localStorage.getItem("token");
 
         if (!token) {
             router.push("/");
@@ -1011,7 +1147,10 @@ export default function BranchesPage() {
 
                             <button
                                 type="button"
-                                onClick={() => void loadBranches()}
+                                onClick={() => {
+                                    void loadSubscriptionPlan();
+                                    void loadBranches();
+                                }}
                                 disabled={loading}
                                 aria-label="Refresh branches"
                                 title="Refresh branches"
@@ -1492,6 +1631,17 @@ export default function BranchesPage() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {showPlanLimitDialog && (
+                <PlanLimitDialog
+                    title="Branch limit reached"
+                    plan={subscriptionPlan}
+                    currentCount={branches.length}
+                    limit={getBranchLimit(subscriptionPlan)}
+                    onClose={() => setShowPlanLimitDialog(false)}
+                    onViewPlans={() => router.push("/subscription")}
+                />
             )}
 
             {showEditModal && editingBranch && (
@@ -2284,5 +2434,76 @@ function AccessToggle({
                 className="h-4 w-4 accent-[#2B174C]"
             />
         </label>
+    );
+}
+
+function PlanLimitDialog({
+                             title,
+                             plan,
+                             currentCount,
+                             limit,
+                             onClose,
+                             onViewPlans,
+                         }: {
+    title: string;
+    plan: SubscriptionPlan;
+    currentCount: number;
+    limit: number;
+    onClose: () => void;
+    onViewPlans: () => void;
+}) {
+    const planLabel = plan.charAt(0).toUpperCase() + plan.slice(1);
+
+    return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[#120A1F]/45 px-4 backdrop-blur-[2px]">
+            <div className="w-full max-w-[620px] rounded-[16px] border border-[#E6DDF0] bg-[#FFFCF7] p-8 text-center shadow-[0_24px_60px_rgba(20,10,35,0.22)] sm:p-10">
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-[#F1E9FA] text-[#5E32A7]">
+                    <LockKeyhole size={28} strokeWidth={1.9} />
+                </div>
+
+                <div className="mt-5">
+                    <span className="inline-flex items-center rounded-full border border-[#E9DDB8] bg-[#FFF7DF] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8B6B1B]">
+                        {planLabel} plan
+                    </span>
+
+                    <h2 className="mt-4 text-[24px] font-bold tracking-[-0.02em] text-[#1A1220]">
+                        {title}
+                    </h2>
+
+                    <p className="mx-auto mt-3 max-w-[500px] text-sm leading-6 text-[#7A6A84]">
+                        Your current <span className="font-semibold text-[#4A315E]">{planLabel}</span> plan allows up to{" "}
+                        <span className="font-semibold text-[#4A315E]">{Number.isFinite(limit) ? limit : "unlimited"}</span>{" "}
+                        {Number.isFinite(limit) ? "branch" : "branches"}. You are currently using{" "}
+                        <span className="font-semibold text-[#4A315E]">{currentCount}</span>.
+                    </p>
+
+                    <div className="mx-auto mt-6 max-w-[500px] rounded-xl border border-[#E9E0EF] bg-[#FDFAF4] px-5 py-4 text-left">
+                        <p className="text-sm font-semibold text-[#2B174C]">Want to add more?</p>
+                        <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
+                            Upgrade your store plan to increase your branch limit.
+                        </p>
+                    </div>
+
+                    <div className="mt-6 flex flex-col justify-center gap-2.5 sm:flex-row">
+                        <button
+                            type="button"
+                            onClick={onViewPlans}
+                            className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                        >
+                            View plans
+                            <ArrowUpRight size={15} />
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="inline-flex h-[42px] items-center justify-center rounded-xl border border-[#E6DDF0] bg-white px-5 text-sm font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#FBF8FF]"
+                        >
+                            Close
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
     );
 }

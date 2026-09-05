@@ -18,14 +18,11 @@ import {
     Lightbulb,
     Maximize2,
     Minus,
-    RefreshCw,
     TrendingDown,
     TrendingUp,
     UsersRound,
     X,
 } from "lucide-react";
-import RoleSidebar from "@/components/sidebar/RoleSidebar";
-import RequirePermission from "@/components/permissions/RequirePermission";
 
 export type AnalyticsRole = "owner" | "manager" | "staff";
 
@@ -137,23 +134,6 @@ function getToken() {
     return sessionStorage.getItem("token") || localStorage.getItem("token") || "";
 }
 
-function formatCurrentDateTime(value: Date) {
-    const dateLabel = value.toLocaleDateString("en-PH", {
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-    });
-
-    const timeLabel = value
-        .toLocaleTimeString("en-PH", {
-            hour: "numeric",
-            minute: "2-digit",
-            hour12: true,
-        })
-        .toLowerCase();
-
-    return `${dateLabel} | ${timeLabel}`;
-}
 
 function peso(value: number) {
     return new Intl.NumberFormat("en-PH", {
@@ -964,16 +944,6 @@ function RevenueLegend({
     );
 }
 
-function AnalyticsShell({ children }: { children: ReactNode }) {
-    return (
-        <RequirePermission>
-            <div className="flex min-h-screen overflow-x-hidden font-sans text-[#1A1220]" style={{ backgroundColor: "#FDFAF4" }}>
-                <RoleSidebar />
-                <div className="min-w-0 flex-1 overflow-x-hidden">{children}</div>
-            </div>
-        </RequirePermission>
-    );
-}
 
 function OwnerAnalyticsBranchSelector({
                                           branches,
@@ -1119,7 +1089,6 @@ export function AnalyticsWorkspace({
     ownerBranchesLoading?: boolean;
 }) {
     const initialRange = useMemo(() => lastTwelveMonthsRange(), []);
-    const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
     const [periodMode, setPeriodMode] = useState<AnalyticsPeriodMode>("12m");
     const [customStart, setCustomStart] = useState(initialRange.start);
     const [customEnd, setCustomEnd] = useState(initialRange.end);
@@ -1222,13 +1191,6 @@ export function AnalyticsWorkspace({
         }
     }, [appliedCustomRange, isOwner, periodMode, selectedOwnerBranchId]);
 
-    useEffect(() => {
-        const updateCurrentTime = () => setCurrentDateTime(new Date());
-        updateCurrentTime();
-        const timer = window.setInterval(updateCurrentTime, 30_000);
-
-        return () => window.clearInterval(timer);
-    }, []);
 
     useEffect(() => {
         void loadAnalytics();
@@ -1311,262 +1273,608 @@ export function AnalyticsWorkspace({
     }
 
     return (
-        <AnalyticsShell>
-            <main className="min-h-screen bg-[#FDFAF4]">
-                <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
-                    <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3">
-                        <h1 className="text-[25px] font-bold text-[#1A1220]">Analytics</h1>
-
-                        <div className="flex flex-wrap items-center gap-2.5">
-                            <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-                                {currentDateTime ? formatCurrentDateTime(currentDateTime) : "Loading date..."}
-                            </span>
-                            <button
-                                type="button"
-                                onClick={loadAnalytics}
-                                disabled={loading}
-                                className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                                <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-                                Refresh
-                            </button>
+        <div className="space-y-3">
+            {isOwner && (
+                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div className="flex min-w-0 items-start gap-3">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EFE8F8] text-[#4E2C66]">
+                                <Building2 size={18} />
+                            </div>
+                            <div>
+                                <h2 className="text-[16px] font-bold text-[#1A1220]">Analytics Scope</h2>
+                                <p className="mt-0.5 text-xs leading-5 text-[#7A6A84]">
+                                    All Branches is the default. Select one branch to view only that branch’s authorized analytics.
+                                </p>
+                            </div>
                         </div>
-                    </div>
-                </header>
 
-                <div className="space-y-3 px-6 py-4">
-                    {isOwner && (
-                        <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-                            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                                <div className="flex min-w-0 items-start gap-3">
-                                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EFE8F8] text-[#4E2C66]">
-                                        <Building2 size={18} />
-                                    </div>
-                                    <div>
-                                        <h2 className="text-[16px] font-bold text-[#1A1220]">Analytics Scope</h2>
-                                        <p className="mt-0.5 text-xs leading-5 text-[#7A6A84]">
-                                            All Branches is the default. Select one branch to view only that branch’s authorized analytics.
-                                        </p>
+                        <OwnerAnalyticsBranchSelector
+                            branches={ownerBranches}
+                            selectedBranchId={selectedOwnerBranchId}
+                            loading={ownerBranchesLoading}
+                            onSelectBranch={setSelectedOwnerBranchId}
+                        />
+                    </div>
+                </section>
+            )}
+
+            <PeriodSelector
+                periodMode={periodMode}
+                customStart={customStart}
+                customEnd={customEnd}
+                onPeriodChange={setPeriodMode}
+                onCustomStartChange={setCustomStart}
+                onCustomEndChange={setCustomEnd}
+                onApplyCustomRange={applyCustomRange}
+                disabled={loading}
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm text-[#7A6A84]">{scopeDescription}</p>
+                <p className="text-xs text-[#806A8C]">
+                    {data ? `Updated ${new Date(data.generatedAt).toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" })}` : ""}
+                </p>
+            </div>
+
+            {error && (
+                <div className="rounded-xl border border-[#F2C4C4] bg-[#FFF6F6] px-4 py-3 text-sm text-[#8E2D2D]">
+                    <p className="font-semibold">Unable to load live analytics.</p>
+                    <p className="mt-1">{error}</p>
+                </div>
+            )}
+
+            {loading && !data ? (
+                <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-8 text-center text-sm text-[#7A6A84] shadow-sm">
+                    Loading live analytics records...
+                </div>
+            ) : data ? (
+                <>
+                    {!data.hasData && (
+                        <EmptyPanel
+                            title="No authorized analytics records are available."
+                            message={`No POS orders or accepted booking records were found for ${data.scope.branchName} during ${data.period.label}. Choose another reporting period or record new transactions.`}
+                        />
+                    )}
+
+                    <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                        <Card
+                            title="Sales Growth"
+                            onExpand={() => setExpandedPanel("sales-growth")}
+                        >
+                            <div className="grid gap-4 md:grid-cols-[190px_minmax(0,1fr)]">
+                                <div className="border-b border-[#EEE8F3] pb-4 md:border-b-0 md:border-r md:pb-0 md:pr-4">
+                                    <p className="text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
+                                        Overall sales growth
+                                    </p>
+                                    <p className="mt-2 text-[28px] font-bold tracking-tight text-[#7B3FE4]">
+                                        {data.salesGrowth.value > 0 ? "+" : ""}
+                                        {data.salesGrowth.value}%
+                                    </p>
+                                    <p className="mt-1 text-[10px] leading-4 text-[#806D91]">
+                                        {data.salesGrowth.comparisonLabel}
+                                    </p>
+
+                                    <div className="mt-5 border-t border-[#EEE8F3] pt-3 text-[11px] leading-5 text-[#6F5A82]">
+                                        <p>Current sales: <strong>{peso(data.salesGrowth.currentSales)}</strong></p>
+                                        <p>Previous period: <strong>{peso(data.salesGrowth.previousSales)}</strong></p>
                                     </div>
                                 </div>
 
-                                <OwnerAnalyticsBranchSelector
-                                    branches={ownerBranches}
-                                    selectedBranchId={selectedOwnerBranchId}
-                                    loading={ownerBranchesLoading}
-                                    onSelectBranch={setSelectedOwnerBranchId}
+                                <div>
+                                    <p className="mb-1 text-center text-[10px] font-semibold text-[#4D2A74]">
+                                        {data.salesGrowth.monthlyGrowthLabel || "Selected reporting period only"}
+                                    </p>
+                                    <p className="mb-2 text-center text-[10px] font-medium text-[#806D91]">
+                                        Monthly sales change <span className="text-[#A38FB4]">(vs prior month shown)</span>
+                                    </p>
+                                    <GrowthBarChart data={data.salesGrowth.monthlyGrowth} />
+                                </div>
+                            </div>
+                        </Card>
+
+                        <Card
+                            title="Sales Trend"
+                            onExpand={() => setExpandedPanel("sales-trend")}
+                            action={
+                                <div className="flex flex-wrap items-center justify-end gap-2">
+                                    <div
+                                        className="flex rounded-xl border border-[#E6DDF0] bg-white p-1 text-xs font-semibold shadow-sm"
+                                        aria-label="Sales trend view"
+                                    >
+                                        <button
+                                            type="button"
+                                            onClick={() => setSalesView("month")}
+                                            className={`rounded-md px-2.5 py-1.5 transition ${
+                                                salesView === "month"
+                                                    ? "bg-[#2D1B4E] text-white"
+                                                    : "text-[#765D8B] hover:bg-[#F0E9F8]"
+                                            }`}
+                                        >
+                                            Monthly Overview
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSalesView("day")}
+                                            className={`rounded-md px-2.5 py-1.5 transition ${
+                                                salesView === "day"
+                                                    ? "bg-[#2D1B4E] text-white"
+                                                    : "text-[#765D8B] hover:bg-[#F0E9F8]"
+                                            }`}
+                                        >
+                                            Daily Breakdown
+                                        </button>
+                                    </div>
+
+                                    {salesView === "day" && (
+                                        <label className="grid gap-1 text-[9px] font-semibold uppercase tracking-wide text-[#806D91]">
+                                            Month to inspect
+                                            <select
+                                                value={resolvedSalesMonth}
+                                                onChange={(event) =>
+                                                    setSelectedSalesMonth(event.target.value)
+                                                }
+                                                className="h-[32px] rounded-xl border border-[#E6DDF0] bg-white px-2.5 text-xs font-medium normal-case tracking-normal text-[#2B174C] outline-none shadow-sm"
+                                                aria-label="Select month for daily sales chart"
+                                            >
+                                                {availableSalesMonths.map((month) => (
+                                                    <option key={month} value={month}>
+                                                        {month}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </label>
+                                    )}
+                                </div>
+                            }
+                        >
+                            <div className="mb-3">
+                                <p className="text-[12px] font-semibold text-[#4D2A74]">
+                                    {salesView === "month"
+                                        ? `Monthly POS Sales — ${data.period.label}`
+                                        : `Daily POS Sales — ${resolvedSalesMonth || data.period.label}`}
+                                </p>
+                                <p className="mt-1 text-[11px] leading-5 text-[#806D91]">
+                                    {salesView === "month"
+                                        ? salesMonthGroupingNote
+                                        : `Each point represents one calendar day in ${resolvedSalesMonth || "the selected month"}. A ₱0 point means no completed POS sale was recorded on that day.`}
+                                </p>
+                            </div>
+
+                            <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                <div className="rounded-lg border border-[#EEE8F3] bg-[#FFFEFC] px-3 py-2">
+                                    <p className="text-[9px] font-semibold uppercase tracking-wide text-[#806D91]">
+                                        {salesView === "month"
+                                            ? "Period total"
+                                            : "Selected month total"}
+                                    </p>
+                                    <p className="mt-1 text-[16px] font-bold text-[#2B174C]">
+                                        {peso(activeSalesTotal)}
+                                    </p>
+                                </div>
+
+                                <div className="rounded-lg border border-[#EEE8F3] bg-[#FFFEFC] px-3 py-2">
+                                    <p className="text-[9px] font-semibold uppercase tracking-wide text-[#806D91]">
+                                        {salesView === "month"
+                                            ? "Highest-sales month"
+                                            : "Highest-sales day"}
+                                    </p>
+                                    <p className="mt-1 text-[13px] font-bold text-[#2B174C]">
+                                        {highestSalesPoint
+                                            ? `${highestSalesPoint.label} · ${peso(highestSalesPoint.value)}`
+                                            : "—"}
+                                    </p>
+                                </div>
+
+                                <div className="rounded-lg border border-[#EEE8F3] bg-[#FFFEFC] px-3 py-2">
+                                    <p className="text-[9px] font-semibold uppercase tracking-wide text-[#806D91]">
+                                        {salesView === "month"
+                                            ? "Lowest-sales month"
+                                            : "No-sales days"}
+                                    </p>
+                                    <p className="mt-1 text-[13px] font-bold text-[#2B174C]">
+                                        {salesView === "month"
+                                            ? lowestSalesPoint
+                                                ? `${lowestSalesPoint.label} · ${peso(lowestSalesPoint.value)}`
+                                                : "—"
+                                            : `${formatNumber(noSalesDays)} day(s)`}
+                                    </p>
+                                </div>
+                            </div>
+
+                            <SalesLineChart
+                                data={activeSalesData}
+                                granularity={salesView}
+                                ariaLabel={
+                                    salesView === "month"
+                                        ? "Monthly completed POS sales trend"
+                                        : `Daily completed POS sales trend for ${resolvedSalesMonth}`
+                                }
+                            />
+
+                        </Card>
+                    </div>
+                    <Card
+                        title="Booking Patterns"
+                        onExpand={() => setExpandedPanel("peak-bookings")}
+                        action={
+                            <div
+                                className="flex rounded-xl border border-[#E6DDF0] bg-white p-1 text-xs font-semibold shadow-sm"
+                                aria-label="Booking pattern view"
+                            >
+                                <button
+                                    type="button"
+                                    onClick={() => setBookingView("month")}
+                                    className={`rounded-md px-2.5 py-1.5 transition ${
+                                        bookingView === "month"
+                                            ? "bg-[#2D1B4E] text-white"
+                                            : "text-[#765D8B] hover:bg-[#F0E9F8]"
+                                    }`}
+                                >
+                                    Monthly Overview
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setBookingView("weekday")}
+                                    className={`rounded-md px-2.5 py-1.5 transition ${
+                                        bookingView === "weekday"
+                                            ? "bg-[#2D1B4E] text-white"
+                                            : "text-[#765D8B] hover:bg-[#F0E9F8]"
+                                    }`}
+                                >
+                                    Weekday Pattern
+                                </button>
+                            </div>
+                        }
+                    >
+                        <div className="grid divide-y divide-[#EEE8F3] rounded-xl border border-[#E8DDF4] md:grid-cols-4 md:divide-x md:divide-y-0">
+                            <div className="flex items-center gap-3 p-3.5">
+                                <span className="rounded-full bg-[#F1E9FE] p-2.5 text-[#7B3FE4]"><CalendarDays size={20} /></span>
+                                <div>
+                                    <p className="text-[10px] text-[#806D91]">Peak booking month</p>
+                                    <p className="text-[15px] font-bold text-[#6B2AC6]">{data.peakBookings.peakMonth}</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-3 p-3.5">
+                                <span className="rounded-full bg-[#F1E9FE] p-2.5 text-[#7B3FE4]"><CalendarDays size={20} /></span>
+                                <div>
+                                    <p className="text-[10px] text-[#806D91]">Peak booking weekday</p>
+                                    <p className="text-[15px] font-bold text-[#6B2AC6]">{data.peakBookings.peakDay}</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-3 p-3.5">
+                                <span className="rounded-full bg-[#F1E9FE] p-2.5 text-[#7B3FE4]"><Clock3 size={20} /></span>
+                                <div>
+                                    <p className="text-[10px] text-[#806D91]">Peak booking time</p>
+                                    <p className="text-[15px] font-bold text-[#6B2AC6]">{data.peakBookings.peakTime}</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-3 p-3.5">
+                                <span className="rounded-full bg-[#F1E9FE] p-2.5 text-[#7B3FE4]"><BarChart3 size={20} /></span>
+                                <div>
+                                    <p className="text-[10px] text-[#806D91]">Accepted bookings</p>
+                                    <p className="text-[15px] font-bold text-[#6B2AC6]">{data.peakBookings.totalBookings}</p>
+                                    <p className="text-[9px] text-[#806D91]">Confirmed, Preparing, Completed</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_290px]">
+                            <div>
+                                <p className="text-[11px] font-semibold text-[#4D2A74]">
+                                    {bookingView === "month"
+                                        ? `Accepted bookings by event month · ${selectedPeriodDateRange}`
+                                        : `Accepted bookings by event weekday · ${data.period.label}`}
+                                </p>
+                                <p className="mt-1 text-[10px] leading-5 text-[#806D91]">
+                                    {bookingView === "month"
+                                        ? "Every calendar month in the selected period is included. A 0 means no accepted booking was scheduled in that month."
+                                        : `This pattern combines all accepted bookings from ${selectedPeriodDateRange} by their event weekday. It does not show booking volume by month.`}
+                                </p>
+                                <BookingBars
+                                    data={activeBookingData}
+                                    granularity={bookingView}
                                 />
                             </div>
-                        </section>
-                    )}
 
-                    <PeriodSelector
-                        periodMode={periodMode}
-                        customStart={customStart}
-                        customEnd={customEnd}
-                        onPeriodChange={setPeriodMode}
-                        onCustomStartChange={setCustomStart}
-                        onCustomEndChange={setCustomEnd}
-                        onApplyCustomRange={applyCustomRange}
-                        disabled={loading}
-                    />
+                            <div className="flex gap-3 rounded-xl border border-[#F0DFC1] bg-[#FFFDF8] p-4">
+                                <span className="h-fit rounded-full bg-[#FFF0CB] p-2.5 text-[#C88812]"><Lightbulb size={18} /></span>
+                                <div>
+                                    <p className="text-xs font-semibold text-[#7A4B09]">Booking insight</p>
+                                    <p className="mt-1 text-[11px] leading-5 text-[#806D91]">
+                                        {data.peakBookings.totalBookings > 0
+                                            ? bookingView === "month"
+                                                ? `${data.peakBookings.peakMonth} has the highest accepted booking volume. Switch to Weekday Pattern to see the most frequently scheduled day.`
+                                                : `${data.peakBookings.peakDay} is the most frequently scheduled booking weekday across the selected period. Weekend bookings account for ${data.peakBookings.weekendPercentage}% of accepted bookings.`
+                                            : "No accepted bookings are available for this reporting period."}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </Card>
 
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-sm text-[#7A6A84]">{scopeDescription}</p>
-                        <p className="text-xs text-[#806A8C]">
-                            {data ? `Updated ${new Date(data.generatedAt).toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" })}` : ""}
-                        </p>
+                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
+                        <Card
+                            title="Product Revenue Analytics"
+                            onExpand={() => setExpandedPanel("product-revenue")}
+                            className="min-h-[454px]"
+                        >
+                            <div className="flex min-h-[410px] flex-col">
+                                <p className="min-h-[40px] text-xs leading-5 text-[#7A6A84]">
+                                    {data.dataNotes.products}
+                                </p>
+
+                                <div className="mt-3 grid flex-1 items-center gap-4 sm:grid-cols-[190px_minmax(0,1fr)]">
+                                    <div className="flex justify-center">
+                                        <DonutChart
+                                            items={data.productRevenue}
+                                            totalLabel={peso(total(data.productRevenue))}
+                                            centerLabel="POS product revenue"
+                                        />
+                                    </div>
+
+                                    <RevenueLegend
+                                        items={data.productRevenue}
+                                        emptyMessage="No product revenue is available. POS orders must include order-item details with product prices."
+                                        maxVisibleItems={12}
+                                    />
+                                </div>
+                            </div>
+                        </Card>
+
+                        <Card
+                            title="Package Revenue Analytics"
+                            onExpand={() => setExpandedPanel("package-revenue")}
+                            className="min-h-[454px]"
+                        >
+                            <div className="flex min-h-[410px] flex-col">
+                                <p className="min-h-[40px] text-xs leading-5 text-[#7A6A84]">
+                                    {data.dataNotes.packages}
+                                </p>
+
+                                <div className="mt-3 grid flex-1 items-center gap-4 sm:grid-cols-[190px_minmax(0,1fr)]">
+                                    <div className="flex justify-center">
+                                        <DonutChart
+                                            items={data.packageRevenue}
+                                            totalLabel={peso(total(data.packageRevenue))}
+                                            centerLabel="Accepted package booking value"
+                                        />
+                                    </div>
+
+                                    <RevenueLegend
+                                        items={data.packageRevenue}
+                                        emptyMessage="No accepted package booking value is available for this reporting period."
+                                        maxVisibleItems={12}
+                                    />
+                                </div>
+                            </div>
+                        </Card>
                     </div>
 
-                    {error && (
-                        <div className="rounded-xl border border-[#F2C4C4] bg-[#FFF6F6] px-4 py-3 text-sm text-[#8E2D2D]">
-                            <p className="font-semibold">Unable to load live analytics.</p>
-                            <p className="mt-1">{error}</p>
-                        </div>
-                    )}
 
-                    {loading && !data ? (
-                        <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-8 text-center text-sm text-[#7A6A84] shadow-sm">
-                            Loading live analytics records...
-                        </div>
-                    ) : data ? (
-                        <>
-                            {!data.hasData && (
-                                <EmptyPanel
-                                    title="No authorized analytics records are available."
-                                    message={`No POS orders or accepted booking records were found for ${data.scope.branchName} during ${data.period.label}. Choose another reporting period or record new transactions.`}
-                                />
-                            )}
+                    <Card
+                        title="Analytics Insights"
+                        onExpand={() => setExpandedPanel("insights")}
+                    >
+                        {data.insights.length > 0 ? (
+                            <div className="grid gap-2 md:grid-cols-2">
+                                {data.insights.map((insight) => (
+                                    <div key={insight} className="rounded-xl border border-[#EAE2F1] bg-[#FFFEFC] px-3 py-3 text-sm leading-6 text-[#5F4A73]">
+                                        {insight}
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <EmptyPanel
+                                title="No generated insight is available."
+                                message="Record authorized POS sales or accepted bookings, then refresh analytics."
+                            />
+                        )}
+                    </Card>
 
-                            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                                <Card
-                                    title="Sales Growth"
-                                    onExpand={() => setExpandedPanel("sales-growth")}
-                                >
-                                    <div className="grid gap-4 md:grid-cols-[190px_minmax(0,1fr)]">
-                                        <div className="border-b border-[#EEE8F3] pb-4 md:border-b-0 md:border-r md:pb-0 md:pr-4">
-                                            <p className="text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
-                                                Overall sales growth
-                                            </p>
-                                            <p className="mt-2 text-[28px] font-bold tracking-tight text-[#7B3FE4]">
-                                                {data.salesGrowth.value > 0 ? "+" : ""}
-                                                {data.salesGrowth.value}%
-                                            </p>
-                                            <p className="mt-1 text-[10px] leading-4 text-[#806D91]">
-                                                {data.salesGrowth.comparisonLabel}
-                                            </p>
+                    <AnalyticsExpandDialog
+                        open={expandedPanel !== null}
+                        title={
+                            expandedPanel === "sales-growth"
+                                ? "Sales Growth"
+                                : expandedPanel === "sales-trend"
+                                    ? "Sales Trend"
+                                    : expandedPanel === "peak-bookings"
+                                        ? "Booking Patterns"
+                                        : expandedPanel === "product-revenue"
+                                            ? "Product Revenue Analytics"
+                                            : expandedPanel === "package-revenue"
+                                                ? "Package Revenue Analytics"
+                                                : "Analytics Insights"
+                        }
+                        subtitle={`${scopeLabel} · ${data.period.label}`}
+                        onClose={() => setExpandedPanel(null)}
+                    >
+                        {expandedPanel === "sales-growth" && (
+                            <div className="rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-6">
+                                <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
+                                    <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-5">
+                                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#806D91]">
+                                            Sales change
+                                        </p>
+                                        <p className="mt-2 text-4xl font-bold tracking-tight text-[#7B3FE4]">
+                                            {data.salesGrowth.value > 0 ? "+" : ""}
+                                            {data.salesGrowth.value}%
+                                        </p>
+                                        <p className="mt-2 text-sm leading-6 text-[#6F5A82]">
+                                            {data.salesGrowth.comparisonLabel}
+                                        </p>
 
-                                            <div className="mt-5 border-t border-[#EEE8F3] pt-3 text-[11px] leading-5 text-[#6F5A82]">
-                                                <p>Current sales: <strong>{peso(data.salesGrowth.currentSales)}</strong></p>
-                                                <p>Previous period: <strong>{peso(data.salesGrowth.previousSales)}</strong></p>
+                                        <div className="mt-6 space-y-3 border-t border-[#EEE8F3] pt-4 text-sm text-[#5F4A73]">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <span>Current sales</span>
+                                                <strong className="text-[#2B174C]">
+                                                    {peso(data.salesGrowth.currentSales)}
+                                                </strong>
                                             </div>
-                                        </div>
-
-                                        <div>
-                                            <p className="mb-1 text-center text-[10px] font-semibold text-[#4D2A74]">
-                                                {data.salesGrowth.monthlyGrowthLabel || "Selected reporting period only"}
-                                            </p>
-                                            <p className="mb-2 text-center text-[10px] font-medium text-[#806D91]">
-                                                Monthly sales change <span className="text-[#A38FB4]">(vs prior month shown)</span>
-                                            </p>
-                                            <GrowthBarChart data={data.salesGrowth.monthlyGrowth} />
+                                            <div className="flex items-center justify-between gap-3">
+                                                <span>Previous period</span>
+                                                <strong className="text-[#2B174C]">
+                                                    {peso(data.salesGrowth.previousSales)}
+                                                </strong>
+                                            </div>
                                         </div>
                                     </div>
-                                </Card>
 
-                                <Card
-                                    title="Sales Trend"
-                                    onExpand={() => setExpandedPanel("sales-trend")}
-                                    action={
-                                        <div className="flex flex-wrap items-center justify-end gap-2">
-                                            <div
-                                                className="flex rounded-xl border border-[#E6DDF0] bg-white p-1 text-xs font-semibold shadow-sm"
-                                                aria-label="Sales trend view"
-                                            >
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setSalesView("month")}
-                                                    className={`rounded-md px-2.5 py-1.5 transition ${
-                                                        salesView === "month"
-                                                            ? "bg-[#2D1B4E] text-white"
-                                                            : "text-[#765D8B] hover:bg-[#F0E9F8]"
-                                                    }`}
-                                                >
-                                                    Monthly Overview
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setSalesView("day")}
-                                                    className={`rounded-md px-2.5 py-1.5 transition ${
-                                                        salesView === "day"
-                                                            ? "bg-[#2D1B4E] text-white"
-                                                            : "text-[#765D8B] hover:bg-[#F0E9F8]"
-                                                    }`}
-                                                >
-                                                    Daily Breakdown
-                                                </button>
-                                            </div>
+                                    <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-4 sm:p-5">
+                                        <p className="mb-1 text-center text-xs font-semibold text-[#4D2A74]">
+                                            {data.salesGrowth.monthlyGrowthLabel || "Selected reporting period only"}
+                                        </p>
+                                        <p className="mb-2 text-center text-xs font-medium text-[#806D91]">
+                                            Monthly sales change (vs prior month shown)
+                                        </p>
+                                        <GrowthBarChart
+                                            data={data.salesGrowth.monthlyGrowth}
+                                            expanded
+                                        />
+                                        <p className="mt-7 border-t border-[#EEE8F3] pt-3 text-xs leading-5 text-[#806D91]">
+                                            {data.salesGrowth.monthlyGrowthDescription ||
+                                                "Every calendar month in the selected reporting period is included. Months without completed POS sales appear as ₱0."}
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
 
-                                            {salesView === "day" && (
-                                                <label className="grid gap-1 text-[9px] font-semibold uppercase tracking-wide text-[#806D91]">
-                                                    Month to inspect
-                                                    <select
-                                                        value={resolvedSalesMonth}
-                                                        onChange={(event) =>
-                                                            setSelectedSalesMonth(event.target.value)
-                                                        }
-                                                        className="h-[32px] rounded-xl border border-[#E6DDF0] bg-white px-2.5 text-xs font-medium normal-case tracking-normal text-[#2B174C] outline-none shadow-sm"
-                                                        aria-label="Select month for daily sales chart"
-                                                    >
-                                                        {availableSalesMonths.map((month) => (
-                                                            <option key={month} value={month}>
-                                                                {month}
-                                                            </option>
-                                                        ))}
-                                                    </select>
-                                                </label>
-                                            )}
-                                        </div>
-                                    }
-                                >
-                                    <div className="mb-3">
-                                        <p className="text-[12px] font-semibold text-[#4D2A74]">
+                        {expandedPanel === "sales-trend" && (
+                            <div className="space-y-4 rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-6">
+                                <div className="flex flex-col gap-3 border-b border-[#EEE8F3] pb-4 lg:flex-row lg:items-end lg:justify-between">
+                                    <div>
+                                        <p className="text-sm font-bold text-[#4D2A74]">
                                             {salesView === "month"
                                                 ? `Monthly POS Sales — ${data.period.label}`
                                                 : `Daily POS Sales — ${resolvedSalesMonth || data.period.label}`}
                                         </p>
-                                        <p className="mt-1 text-[11px] leading-5 text-[#806D91]">
+                                        <p className="mt-1 text-xs leading-5 text-[#806D91]">
                                             {salesView === "month"
                                                 ? salesMonthGroupingNote
                                                 : `Each point represents one calendar day in ${resolvedSalesMonth || "the selected month"}. A ₱0 point means no completed POS sale was recorded on that day.`}
                                         </p>
                                     </div>
 
-                                    <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                                        <div className="rounded-lg border border-[#EEE8F3] bg-[#FFFEFC] px-3 py-2">
-                                            <p className="text-[9px] font-semibold uppercase tracking-wide text-[#806D91]">
-                                                {salesView === "month"
-                                                    ? "Period total"
-                                                    : "Selected month total"}
-                                            </p>
-                                            <p className="mt-1 text-[16px] font-bold text-[#2B174C]">
-                                                {peso(activeSalesTotal)}
-                                            </p>
+                                    <div className="flex flex-wrap items-end gap-2">
+                                        <div className="flex rounded-xl border border-[#E6DDF0] bg-white p-1 text-xs font-semibold shadow-sm">
+                                            <button
+                                                type="button"
+                                                onClick={() => setSalesView("month")}
+                                                className={`rounded-md px-3 py-2 transition ${
+                                                    salesView === "month"
+                                                        ? "bg-[#2D1B4E] text-white"
+                                                        : "text-[#765D8B] hover:bg-[#F0E9F8]"
+                                                }`}
+                                            >
+                                                Monthly Overview
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setSalesView("day")}
+                                                className={`rounded-md px-3 py-2 transition ${
+                                                    salesView === "day"
+                                                        ? "bg-[#2D1B4E] text-white"
+                                                        : "text-[#765D8B] hover:bg-[#F0E9F8]"
+                                                }`}
+                                            >
+                                                Daily Breakdown
+                                            </button>
                                         </div>
 
-                                        <div className="rounded-lg border border-[#EEE8F3] bg-[#FFFEFC] px-3 py-2">
-                                            <p className="text-[9px] font-semibold uppercase tracking-wide text-[#806D91]">
-                                                {salesView === "month"
-                                                    ? "Highest-sales month"
-                                                    : "Highest-sales day"}
-                                            </p>
-                                            <p className="mt-1 text-[13px] font-bold text-[#2B174C]">
-                                                {highestSalesPoint
-                                                    ? `${highestSalesPoint.label} · ${peso(highestSalesPoint.value)}`
-                                                    : "—"}
-                                            </p>
-                                        </div>
-
-                                        <div className="rounded-lg border border-[#EEE8F3] bg-[#FFFEFC] px-3 py-2">
-                                            <p className="text-[9px] font-semibold uppercase tracking-wide text-[#806D91]">
-                                                {salesView === "month"
-                                                    ? "Lowest-sales month"
-                                                    : "No-sales days"}
-                                            </p>
-                                            <p className="mt-1 text-[13px] font-bold text-[#2B174C]">
-                                                {salesView === "month"
-                                                    ? lowestSalesPoint
-                                                        ? `${lowestSalesPoint.label} · ${peso(lowestSalesPoint.value)}`
-                                                        : "—"
-                                                    : `${formatNumber(noSalesDays)} day(s)`}
-                                            </p>
-                                        </div>
+                                        {salesView === "day" && (
+                                            <label className="grid gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
+                                                Month to inspect
+                                                <select
+                                                    value={resolvedSalesMonth}
+                                                    onChange={(event) =>
+                                                        setSelectedSalesMonth(event.target.value)
+                                                    }
+                                                    className="h-[38px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm font-medium normal-case tracking-normal text-[#2B174C] outline-none shadow-sm"
+                                                >
+                                                    {availableSalesMonths.map((month) => (
+                                                        <option key={month} value={month}>
+                                                            {month}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </label>
+                                        )}
                                     </div>
+                                </div>
 
+                                <div className="grid gap-3 md:grid-cols-3">
+                                    <div className="rounded-xl border border-[#EEE8F3] bg-[#FFFEFC] px-4 py-3">
+                                        <p className="text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
+                                            {salesView === "month"
+                                                ? "Period total"
+                                                : "Selected month total"}
+                                        </p>
+                                        <p className="mt-1 text-xl font-bold text-[#2B174C]">
+                                            {peso(activeSalesTotal)}
+                                        </p>
+                                    </div>
+                                    <div className="rounded-xl border border-[#EEE8F3] bg-[#FFFEFC] px-4 py-3">
+                                        <p className="text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
+                                            {salesView === "month"
+                                                ? "Highest-sales month"
+                                                : "Highest-sales day"}
+                                        </p>
+                                        <p className="mt-1 text-sm font-bold text-[#2B174C]">
+                                            {highestSalesPoint
+                                                ? `${highestSalesPoint.label} · ${peso(highestSalesPoint.value)}`
+                                                : "—"}
+                                        </p>
+                                    </div>
+                                    <div className="rounded-xl border border-[#EEE8F3] bg-[#FFFEFC] px-4 py-3">
+                                        <p className="text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
+                                            {salesView === "month"
+                                                ? "Lowest-sales month"
+                                                : "No-sales days"}
+                                        </p>
+                                        <p className="mt-1 text-sm font-bold text-[#2B174C]">
+                                            {salesView === "month"
+                                                ? lowestSalesPoint
+                                                    ? `${lowestSalesPoint.label} · ${peso(lowestSalesPoint.value)}`
+                                                    : "—"
+                                                : `${formatNumber(noSalesDays)} day(s)`}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-3 sm:p-5">
                                     <SalesLineChart
                                         data={activeSalesData}
                                         granularity={salesView}
+                                        expanded
                                         ariaLabel={
                                             salesView === "month"
                                                 ? "Monthly completed POS sales trend"
                                                 : `Daily completed POS sales trend for ${resolvedSalesMonth}`
                                         }
                                     />
-
-                                </Card>
+                                </div>
                             </div>
-                            <Card
-                                title="Booking Patterns"
-                                onExpand={() => setExpandedPanel("peak-bookings")}
-                                action={
+                        )}
+
+                        {expandedPanel === "peak-bookings" && (
+                            <div className="space-y-6 rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-7 xl:min-h-[calc(100vh-190px)]">
+                                <div className="flex flex-col gap-3 border-b border-[#EEE8F3] pb-5 lg:flex-row lg:items-end lg:justify-between">
+                                    <div>
+                                        <p className="text-base font-bold text-[#4D2A74]">Accepted booking patterns</p>
+                                        <p className="mt-1 max-w-3xl text-xs leading-6 text-[#806D91]">
+                                            Monthly Overview shows when accepted bookings occurred by event month. Weekday Pattern combines the full selected period by weekday to reveal the most commonly scheduled day.
+                                        </p>
+                                    </div>
                                     <div
-                                        className="flex rounded-xl border border-[#E6DDF0] bg-white p-1 text-xs font-semibold shadow-sm"
-                                        aria-label="Booking pattern view"
+                                        className="flex rounded-xl border border-[#E6DDF0] bg-white p-1 text-sm font-semibold shadow-sm"
+                                        aria-label="Expanded booking pattern view"
                                     >
                                         <button
                                             type="button"
                                             onClick={() => setBookingView("month")}
-                                            className={`rounded-md px-2.5 py-1.5 transition ${
+                                            className={`rounded-md px-3 py-2 transition ${
                                                 bookingView === "month"
                                                     ? "bg-[#2D1B4E] text-white"
                                                     : "text-[#765D8B] hover:bg-[#F0E9F8]"
@@ -1577,7 +1885,7 @@ export function AnalyticsWorkspace({
                                         <button
                                             type="button"
                                             onClick={() => setBookingView("weekday")}
-                                            className={`rounded-md px-2.5 py-1.5 transition ${
+                                            className={`rounded-md px-3 py-2 transition ${
                                                 bookingView === "weekday"
                                                     ? "bg-[#2D1B4E] text-white"
                                                     : "text-[#765D8B] hover:bg-[#F0E9F8]"
@@ -1586,141 +1894,168 @@ export function AnalyticsWorkspace({
                                             Weekday Pattern
                                         </button>
                                     </div>
-                                }
-                            >
-                                <div className="grid divide-y divide-[#EEE8F3] rounded-xl border border-[#E8DDF4] md:grid-cols-4 md:divide-x md:divide-y-0">
-                                    <div className="flex items-center gap-3 p-3.5">
-                                        <span className="rounded-full bg-[#F1E9FE] p-2.5 text-[#7B3FE4]"><CalendarDays size={20} /></span>
+                                </div>
+
+                                <div className="grid divide-y divide-[#EEE8F3] rounded-2xl border border-[#E8DDF4] md:grid-cols-4 md:divide-x md:divide-y-0">
+                                    <div className="flex items-center gap-3 p-4">
+                                        <span className="rounded-full bg-[#F1E9FE] p-3 text-[#7B3FE4]"><CalendarDays size={22} /></span>
                                         <div>
-                                            <p className="text-[10px] text-[#806D91]">Peak booking month</p>
-                                            <p className="text-[15px] font-bold text-[#6B2AC6]">{data.peakBookings.peakMonth}</p>
+                                            <p className="text-[11px] text-[#806D91]">Peak booking month</p>
+                                            <p className="text-lg font-bold text-[#6B2AC6]">{data.peakBookings.peakMonth}</p>
                                         </div>
                                     </div>
-                                    <div className="flex items-center gap-3 p-3.5">
-                                        <span className="rounded-full bg-[#F1E9FE] p-2.5 text-[#7B3FE4]"><CalendarDays size={20} /></span>
+                                    <div className="flex items-center gap-3 p-4">
+                                        <span className="rounded-full bg-[#F1E9FE] p-3 text-[#7B3FE4]"><CalendarDays size={22} /></span>
                                         <div>
-                                            <p className="text-[10px] text-[#806D91]">Peak booking weekday</p>
-                                            <p className="text-[15px] font-bold text-[#6B2AC6]">{data.peakBookings.peakDay}</p>
+                                            <p className="text-[11px] text-[#806D91]">Peak booking weekday</p>
+                                            <p className="text-lg font-bold text-[#6B2AC6]">{data.peakBookings.peakDay}</p>
                                         </div>
                                     </div>
-                                    <div className="flex items-center gap-3 p-3.5">
-                                        <span className="rounded-full bg-[#F1E9FE] p-2.5 text-[#7B3FE4]"><Clock3 size={20} /></span>
+                                    <div className="flex items-center gap-3 p-4">
+                                        <span className="rounded-full bg-[#F1E9FE] p-3 text-[#7B3FE4]"><Clock3 size={22} /></span>
                                         <div>
-                                            <p className="text-[10px] text-[#806D91]">Peak booking time</p>
-                                            <p className="text-[15px] font-bold text-[#6B2AC6]">{data.peakBookings.peakTime}</p>
+                                            <p className="text-[11px] text-[#806D91]">Peak booking time</p>
+                                            <p className="text-lg font-bold text-[#6B2AC6]">{data.peakBookings.peakTime}</p>
                                         </div>
                                     </div>
-                                    <div className="flex items-center gap-3 p-3.5">
-                                        <span className="rounded-full bg-[#F1E9FE] p-2.5 text-[#7B3FE4]"><BarChart3 size={20} /></span>
+                                    <div className="flex items-center gap-3 p-4">
+                                        <span className="rounded-full bg-[#F1E9FE] p-3 text-[#7B3FE4]"><BarChart3 size={22} /></span>
                                         <div>
-                                            <p className="text-[10px] text-[#806D91]">Accepted bookings</p>
-                                            <p className="text-[15px] font-bold text-[#6B2AC6]">{data.peakBookings.totalBookings}</p>
-                                            <p className="text-[9px] text-[#806D91]">Confirmed, Preparing, Completed</p>
+                                            <p className="text-[11px] text-[#806D91]">Accepted bookings</p>
+                                            <p className="text-lg font-bold text-[#6B2AC6]">{data.peakBookings.totalBookings}</p>
+                                            <p className="text-[10px] text-[#806D91]">Confirmed, Preparing, Completed</p>
                                         </div>
                                     </div>
                                 </div>
 
-                                <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_290px]">
-                                    <div>
-                                        <p className="text-[11px] font-semibold text-[#4D2A74]">
+                                <div className="grid gap-6 pt-2 xl:grid-cols-[minmax(0,1fr)_340px]">
+                                    <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-5 sm:p-7">
+                                        <p className="text-base font-bold text-[#4D2A74]">
                                             {bookingView === "month"
                                                 ? `Accepted bookings by event month · ${selectedPeriodDateRange}`
                                                 : `Accepted bookings by event weekday · ${data.period.label}`}
                                         </p>
-                                        <p className="mt-1 text-[10px] leading-5 text-[#806D91]">
+                                        <p className="mt-1 text-xs leading-6 text-[#806D91]">
                                             {bookingView === "month"
                                                 ? "Every calendar month in the selected period is included. A 0 means no accepted booking was scheduled in that month."
-                                                : `This pattern combines all accepted bookings from ${selectedPeriodDateRange} by their event weekday. It does not show booking volume by month.`}
+                                                : `This view combines all accepted bookings from ${selectedPeriodDateRange} by event weekday. It identifies scheduling preference, not monthly booking volume.`}
                                         </p>
                                         <BookingBars
                                             data={activeBookingData}
                                             granularity={bookingView}
+                                            expanded
                                         />
                                     </div>
 
-                                    <div className="flex gap-3 rounded-xl border border-[#F0DFC1] bg-[#FFFDF8] p-4">
-                                        <span className="h-fit rounded-full bg-[#FFF0CB] p-2.5 text-[#C88812]"><Lightbulb size={18} /></span>
-                                        <div>
-                                            <p className="text-xs font-semibold text-[#7A4B09]">Booking insight</p>
-                                            <p className="mt-1 text-[11px] leading-5 text-[#806D91]">
-                                                {data.peakBookings.totalBookings > 0
-                                                    ? bookingView === "month"
-                                                        ? `${data.peakBookings.peakMonth} has the highest accepted booking volume. Switch to Weekday Pattern to see the most frequently scheduled day.`
-                                                        : `${data.peakBookings.peakDay} is the most frequently scheduled booking weekday across the selected period. Weekend bookings account for ${data.peakBookings.weekendPercentage}% of accepted bookings.`
-                                                    : "No accepted bookings are available for this reporting period."}
-                                            </p>
+                                    <div className="space-y-4">
+                                        <div className="flex gap-3 rounded-2xl border border-[#F0DFC1] bg-[#FFFDF8] p-4">
+                                            <span className="h-fit rounded-full bg-[#FFF0CB] p-2.5 text-[#C88812]"><Lightbulb size={18} /></span>
+                                            <div>
+                                                <p className="text-sm font-semibold text-[#7A4B09]">Booking insight</p>
+                                                <p className="mt-1 text-xs leading-6 text-[#806D91]">
+                                                    {data.peakBookings.totalBookings > 0
+                                                        ? bookingView === "month"
+                                                            ? `${data.peakBookings.peakMonth} recorded the most accepted bookings. Use this monthly view to plan capacity across the calendar.`
+                                                            : `${data.peakBookings.peakDay} is the most frequently scheduled weekday across all accepted bookings in this period. Weekend bookings make up ${data.peakBookings.weekendPercentage}% of the total.`
+                                                        : "No accepted bookings are available for this reporting period."}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-4">
+                                            <p className="text-sm font-bold text-[#4D2A74]">Top booked packages</p>
+                                            {data.peakBookings.topPackages.length > 0 ? (
+                                                <div className="mt-3 space-y-2">
+                                                    {data.peakBookings.topPackages.map((item, index) => (
+                                                        <div
+                                                            key={item.name}
+                                                            className="flex items-center justify-between gap-3 rounded-xl border border-[#EEE8F3] bg-white px-3 py-2.5 text-sm"
+                                                        >
+                                                                    <span className="flex min-w-0 items-center gap-2 font-medium text-[#5F4A73]">
+                                                                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#F1E9FE] text-[11px] font-bold text-[#6B2AC6]">
+                                                                            {index + 1}
+                                                                        </span>
+                                                                        <span className="truncate">{item.name}</span>
+                                                                    </span>
+                                                            <strong className="shrink-0 text-[#2B174C]">
+                                                                {formatNumber(item.value)}
+                                                            </strong>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <p className="mt-2 text-xs leading-5 text-[#806D91]">
+                                                    No package bookings were recorded for this period.
+                                                </p>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
-                            </Card>
-
-                            <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
-                                <Card
-                                    title="Product Revenue Analytics"
-                                    onExpand={() => setExpandedPanel("product-revenue")}
-                                    className="min-h-[454px]"
-                                >
-                                    <div className="flex min-h-[410px] flex-col">
-                                        <p className="min-h-[40px] text-xs leading-5 text-[#7A6A84]">
-                                            {data.dataNotes.products}
-                                        </p>
-
-                                        <div className="mt-3 grid flex-1 items-center gap-4 sm:grid-cols-[190px_minmax(0,1fr)]">
-                                            <div className="flex justify-center">
-                                                <DonutChart
-                                                    items={data.productRevenue}
-                                                    totalLabel={peso(total(data.productRevenue))}
-                                                    centerLabel="POS product revenue"
-                                                />
-                                            </div>
-
-                                            <RevenueLegend
-                                                items={data.productRevenue}
-                                                emptyMessage="No product revenue is available. POS orders must include order-item details with product prices."
-                                                maxVisibleItems={12}
-                                            />
-                                        </div>
-                                    </div>
-                                </Card>
-
-                                <Card
-                                    title="Package Revenue Analytics"
-                                    onExpand={() => setExpandedPanel("package-revenue")}
-                                    className="min-h-[454px]"
-                                >
-                                    <div className="flex min-h-[410px] flex-col">
-                                        <p className="min-h-[40px] text-xs leading-5 text-[#7A6A84]">
-                                            {data.dataNotes.packages}
-                                        </p>
-
-                                        <div className="mt-3 grid flex-1 items-center gap-4 sm:grid-cols-[190px_minmax(0,1fr)]">
-                                            <div className="flex justify-center">
-                                                <DonutChart
-                                                    items={data.packageRevenue}
-                                                    totalLabel={peso(total(data.packageRevenue))}
-                                                    centerLabel="Accepted package booking value"
-                                                />
-                                            </div>
-
-                                            <RevenueLegend
-                                                items={data.packageRevenue}
-                                                emptyMessage="No accepted package booking value is available for this reporting period."
-                                                maxVisibleItems={12}
-                                            />
-                                        </div>
-                                    </div>
-                                </Card>
                             </div>
+                        )}
 
+                        {expandedPanel === "product-revenue" && (
+                            <div className="rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-8 xl:min-h-[calc(100vh-190px)]">
+                                <p className="max-w-5xl text-base leading-7 text-[#7A6A84]">
+                                    {data.dataNotes.products}
+                                </p>
+                                <div className="mt-8 grid items-center gap-10 lg:grid-cols-[300px_minmax(0,1fr)]">
+                                    <div className="flex justify-center">
+                                        <DonutChart
+                                            items={data.productRevenue}
+                                            totalLabel={peso(total(data.productRevenue))}
+                                            centerLabel="POS product revenue"
+                                            expanded
+                                        />
+                                    </div>
+                                    <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-5 sm:p-6">
+                                        <RevenueLegend
+                                            items={data.productRevenue}
+                                            emptyMessage="No product revenue is available. POS orders must include order-item details with product prices."
+                                            expanded
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
 
-                            <Card
-                                title="Analytics Insights"
-                                onExpand={() => setExpandedPanel("insights")}
-                            >
+                        {expandedPanel === "package-revenue" && (
+                            <div className="rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-8 xl:min-h-[calc(100vh-190px)]">
+                                <p className="max-w-5xl text-base leading-7 text-[#7A6A84]">
+                                    {data.dataNotes.packages}
+                                </p>
+                                <div className="mt-8 grid items-center gap-10 lg:grid-cols-[300px_minmax(0,1fr)]">
+                                    <div className="flex justify-center">
+                                        <DonutChart
+                                            items={data.packageRevenue}
+                                            totalLabel={peso(total(data.packageRevenue))}
+                                            centerLabel="Accepted package booking value"
+                                            expanded
+                                        />
+                                    </div>
+                                    <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-5 sm:p-6">
+                                        <RevenueLegend
+                                            items={data.packageRevenue}
+                                            emptyMessage="No accepted package booking value is available for this reporting period."
+                                            expanded
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {expandedPanel === "insights" && (
+                            <div className="rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-6">
                                 {data.insights.length > 0 ? (
-                                    <div className="grid gap-2 md:grid-cols-2">
-                                        {data.insights.map((insight) => (
-                                            <div key={insight} className="rounded-xl border border-[#EAE2F1] bg-[#FFFEFC] px-3 py-3 text-sm leading-6 text-[#5F4A73]">
+                                    <div className="grid gap-4 md:grid-cols-2">
+                                        {data.insights.map((insight, index) => (
+                                            <div
+                                                key={insight}
+                                                className="rounded-2xl border border-[#EAE2F1] bg-[#FFFEFC] p-5 text-sm leading-7 text-[#5F4A73] shadow-sm"
+                                            >
+                                                        <span className="mb-4 flex h-9 w-9 items-center justify-center rounded-xl bg-[#F1E9FE] text-sm font-bold text-[#6B2AC6]">
+                                                            {index + 1}
+                                                        </span>
                                                 {insight}
                                             </div>
                                         ))}
@@ -1731,409 +2066,11 @@ export function AnalyticsWorkspace({
                                         message="Record authorized POS sales or accepted bookings, then refresh analytics."
                                     />
                                 )}
-                            </Card>
-
-                            <AnalyticsExpandDialog
-                                open={expandedPanel !== null}
-                                title={
-                                    expandedPanel === "sales-growth"
-                                        ? "Sales Growth"
-                                        : expandedPanel === "sales-trend"
-                                            ? "Sales Trend"
-                                            : expandedPanel === "peak-bookings"
-                                                ? "Booking Patterns"
-                                                : expandedPanel === "product-revenue"
-                                                    ? "Product Revenue Analytics"
-                                                    : expandedPanel === "package-revenue"
-                                                        ? "Package Revenue Analytics"
-                                                        : "Analytics Insights"
-                                }
-                                subtitle={`${scopeLabel} · ${data.period.label}`}
-                                onClose={() => setExpandedPanel(null)}
-                            >
-                                {expandedPanel === "sales-growth" && (
-                                    <div className="rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-6">
-                                        <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
-                                            <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-5">
-                                                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#806D91]">
-                                                    Sales change
-                                                </p>
-                                                <p className="mt-2 text-4xl font-bold tracking-tight text-[#7B3FE4]">
-                                                    {data.salesGrowth.value > 0 ? "+" : ""}
-                                                    {data.salesGrowth.value}%
-                                                </p>
-                                                <p className="mt-2 text-sm leading-6 text-[#6F5A82]">
-                                                    {data.salesGrowth.comparisonLabel}
-                                                </p>
-
-                                                <div className="mt-6 space-y-3 border-t border-[#EEE8F3] pt-4 text-sm text-[#5F4A73]">
-                                                    <div className="flex items-center justify-between gap-3">
-                                                        <span>Current sales</span>
-                                                        <strong className="text-[#2B174C]">
-                                                            {peso(data.salesGrowth.currentSales)}
-                                                        </strong>
-                                                    </div>
-                                                    <div className="flex items-center justify-between gap-3">
-                                                        <span>Previous period</span>
-                                                        <strong className="text-[#2B174C]">
-                                                            {peso(data.salesGrowth.previousSales)}
-                                                        </strong>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-4 sm:p-5">
-                                                <p className="mb-1 text-center text-xs font-semibold text-[#4D2A74]">
-                                                    {data.salesGrowth.monthlyGrowthLabel || "Selected reporting period only"}
-                                                </p>
-                                                <p className="mb-2 text-center text-xs font-medium text-[#806D91]">
-                                                    Monthly sales change (vs prior month shown)
-                                                </p>
-                                                <GrowthBarChart
-                                                    data={data.salesGrowth.monthlyGrowth}
-                                                    expanded
-                                                />
-                                                <p className="mt-7 border-t border-[#EEE8F3] pt-3 text-xs leading-5 text-[#806D91]">
-                                                    {data.salesGrowth.monthlyGrowthDescription ||
-                                                        "Every calendar month in the selected reporting period is included. Months without completed POS sales appear as ₱0."}
-                                                </p>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {expandedPanel === "sales-trend" && (
-                                    <div className="space-y-4 rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-6">
-                                        <div className="flex flex-col gap-3 border-b border-[#EEE8F3] pb-4 lg:flex-row lg:items-end lg:justify-between">
-                                            <div>
-                                                <p className="text-sm font-bold text-[#4D2A74]">
-                                                    {salesView === "month"
-                                                        ? `Monthly POS Sales — ${data.period.label}`
-                                                        : `Daily POS Sales — ${resolvedSalesMonth || data.period.label}`}
-                                                </p>
-                                                <p className="mt-1 text-xs leading-5 text-[#806D91]">
-                                                    {salesView === "month"
-                                                        ? salesMonthGroupingNote
-                                                        : `Each point represents one calendar day in ${resolvedSalesMonth || "the selected month"}. A ₱0 point means no completed POS sale was recorded on that day.`}
-                                                </p>
-                                            </div>
-
-                                            <div className="flex flex-wrap items-end gap-2">
-                                                <div className="flex rounded-xl border border-[#E6DDF0] bg-white p-1 text-xs font-semibold shadow-sm">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setSalesView("month")}
-                                                        className={`rounded-md px-3 py-2 transition ${
-                                                            salesView === "month"
-                                                                ? "bg-[#2D1B4E] text-white"
-                                                                : "text-[#765D8B] hover:bg-[#F0E9F8]"
-                                                        }`}
-                                                    >
-                                                        Monthly Overview
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setSalesView("day")}
-                                                        className={`rounded-md px-3 py-2 transition ${
-                                                            salesView === "day"
-                                                                ? "bg-[#2D1B4E] text-white"
-                                                                : "text-[#765D8B] hover:bg-[#F0E9F8]"
-                                                        }`}
-                                                    >
-                                                        Daily Breakdown
-                                                    </button>
-                                                </div>
-
-                                                {salesView === "day" && (
-                                                    <label className="grid gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
-                                                        Month to inspect
-                                                        <select
-                                                            value={resolvedSalesMonth}
-                                                            onChange={(event) =>
-                                                                setSelectedSalesMonth(event.target.value)
-                                                            }
-                                                            className="h-[38px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm font-medium normal-case tracking-normal text-[#2B174C] outline-none shadow-sm"
-                                                        >
-                                                            {availableSalesMonths.map((month) => (
-                                                                <option key={month} value={month}>
-                                                                    {month}
-                                                                </option>
-                                                            ))}
-                                                        </select>
-                                                    </label>
-                                                )}
-                                            </div>
-                                        </div>
-
-                                        <div className="grid gap-3 md:grid-cols-3">
-                                            <div className="rounded-xl border border-[#EEE8F3] bg-[#FFFEFC] px-4 py-3">
-                                                <p className="text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
-                                                    {salesView === "month"
-                                                        ? "Period total"
-                                                        : "Selected month total"}
-                                                </p>
-                                                <p className="mt-1 text-xl font-bold text-[#2B174C]">
-                                                    {peso(activeSalesTotal)}
-                                                </p>
-                                            </div>
-                                            <div className="rounded-xl border border-[#EEE8F3] bg-[#FFFEFC] px-4 py-3">
-                                                <p className="text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
-                                                    {salesView === "month"
-                                                        ? "Highest-sales month"
-                                                        : "Highest-sales day"}
-                                                </p>
-                                                <p className="mt-1 text-sm font-bold text-[#2B174C]">
-                                                    {highestSalesPoint
-                                                        ? `${highestSalesPoint.label} · ${peso(highestSalesPoint.value)}`
-                                                        : "—"}
-                                                </p>
-                                            </div>
-                                            <div className="rounded-xl border border-[#EEE8F3] bg-[#FFFEFC] px-4 py-3">
-                                                <p className="text-[10px] font-semibold uppercase tracking-wide text-[#806D91]">
-                                                    {salesView === "month"
-                                                        ? "Lowest-sales month"
-                                                        : "No-sales days"}
-                                                </p>
-                                                <p className="mt-1 text-sm font-bold text-[#2B174C]">
-                                                    {salesView === "month"
-                                                        ? lowestSalesPoint
-                                                            ? `${lowestSalesPoint.label} · ${peso(lowestSalesPoint.value)}`
-                                                            : "—"
-                                                        : `${formatNumber(noSalesDays)} day(s)`}
-                                                </p>
-                                            </div>
-                                        </div>
-
-                                        <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-3 sm:p-5">
-                                            <SalesLineChart
-                                                data={activeSalesData}
-                                                granularity={salesView}
-                                                expanded
-                                                ariaLabel={
-                                                    salesView === "month"
-                                                        ? "Monthly completed POS sales trend"
-                                                        : `Daily completed POS sales trend for ${resolvedSalesMonth}`
-                                                }
-                                            />
-                                        </div>
-                                    </div>
-                                )}
-
-                                {expandedPanel === "peak-bookings" && (
-                                    <div className="space-y-6 rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-7 xl:min-h-[calc(100vh-190px)]">
-                                        <div className="flex flex-col gap-3 border-b border-[#EEE8F3] pb-5 lg:flex-row lg:items-end lg:justify-between">
-                                            <div>
-                                                <p className="text-base font-bold text-[#4D2A74]">Accepted booking patterns</p>
-                                                <p className="mt-1 max-w-3xl text-xs leading-6 text-[#806D91]">
-                                                    Monthly Overview shows when accepted bookings occurred by event month. Weekday Pattern combines the full selected period by weekday to reveal the most commonly scheduled day.
-                                                </p>
-                                            </div>
-                                            <div
-                                                className="flex rounded-xl border border-[#E6DDF0] bg-white p-1 text-sm font-semibold shadow-sm"
-                                                aria-label="Expanded booking pattern view"
-                                            >
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setBookingView("month")}
-                                                    className={`rounded-md px-3 py-2 transition ${
-                                                        bookingView === "month"
-                                                            ? "bg-[#2D1B4E] text-white"
-                                                            : "text-[#765D8B] hover:bg-[#F0E9F8]"
-                                                    }`}
-                                                >
-                                                    Monthly Overview
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setBookingView("weekday")}
-                                                    className={`rounded-md px-3 py-2 transition ${
-                                                        bookingView === "weekday"
-                                                            ? "bg-[#2D1B4E] text-white"
-                                                            : "text-[#765D8B] hover:bg-[#F0E9F8]"
-                                                    }`}
-                                                >
-                                                    Weekday Pattern
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        <div className="grid divide-y divide-[#EEE8F3] rounded-2xl border border-[#E8DDF4] md:grid-cols-4 md:divide-x md:divide-y-0">
-                                            <div className="flex items-center gap-3 p-4">
-                                                <span className="rounded-full bg-[#F1E9FE] p-3 text-[#7B3FE4]"><CalendarDays size={22} /></span>
-                                                <div>
-                                                    <p className="text-[11px] text-[#806D91]">Peak booking month</p>
-                                                    <p className="text-lg font-bold text-[#6B2AC6]">{data.peakBookings.peakMonth}</p>
-                                                </div>
-                                            </div>
-                                            <div className="flex items-center gap-3 p-4">
-                                                <span className="rounded-full bg-[#F1E9FE] p-3 text-[#7B3FE4]"><CalendarDays size={22} /></span>
-                                                <div>
-                                                    <p className="text-[11px] text-[#806D91]">Peak booking weekday</p>
-                                                    <p className="text-lg font-bold text-[#6B2AC6]">{data.peakBookings.peakDay}</p>
-                                                </div>
-                                            </div>
-                                            <div className="flex items-center gap-3 p-4">
-                                                <span className="rounded-full bg-[#F1E9FE] p-3 text-[#7B3FE4]"><Clock3 size={22} /></span>
-                                                <div>
-                                                    <p className="text-[11px] text-[#806D91]">Peak booking time</p>
-                                                    <p className="text-lg font-bold text-[#6B2AC6]">{data.peakBookings.peakTime}</p>
-                                                </div>
-                                            </div>
-                                            <div className="flex items-center gap-3 p-4">
-                                                <span className="rounded-full bg-[#F1E9FE] p-3 text-[#7B3FE4]"><BarChart3 size={22} /></span>
-                                                <div>
-                                                    <p className="text-[11px] text-[#806D91]">Accepted bookings</p>
-                                                    <p className="text-lg font-bold text-[#6B2AC6]">{data.peakBookings.totalBookings}</p>
-                                                    <p className="text-[10px] text-[#806D91]">Confirmed, Preparing, Completed</p>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <div className="grid gap-6 pt-2 xl:grid-cols-[minmax(0,1fr)_340px]">
-                                            <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-5 sm:p-7">
-                                                <p className="text-base font-bold text-[#4D2A74]">
-                                                    {bookingView === "month"
-                                                        ? `Accepted bookings by event month · ${selectedPeriodDateRange}`
-                                                        : `Accepted bookings by event weekday · ${data.period.label}`}
-                                                </p>
-                                                <p className="mt-1 text-xs leading-6 text-[#806D91]">
-                                                    {bookingView === "month"
-                                                        ? "Every calendar month in the selected period is included. A 0 means no accepted booking was scheduled in that month."
-                                                        : `This view combines all accepted bookings from ${selectedPeriodDateRange} by event weekday. It identifies scheduling preference, not monthly booking volume.`}
-                                                </p>
-                                                <BookingBars
-                                                    data={activeBookingData}
-                                                    granularity={bookingView}
-                                                    expanded
-                                                />
-                                            </div>
-
-                                            <div className="space-y-4">
-                                                <div className="flex gap-3 rounded-2xl border border-[#F0DFC1] bg-[#FFFDF8] p-4">
-                                                    <span className="h-fit rounded-full bg-[#FFF0CB] p-2.5 text-[#C88812]"><Lightbulb size={18} /></span>
-                                                    <div>
-                                                        <p className="text-sm font-semibold text-[#7A4B09]">Booking insight</p>
-                                                        <p className="mt-1 text-xs leading-6 text-[#806D91]">
-                                                            {data.peakBookings.totalBookings > 0
-                                                                ? bookingView === "month"
-                                                                    ? `${data.peakBookings.peakMonth} recorded the most accepted bookings. Use this monthly view to plan capacity across the calendar.`
-                                                                    : `${data.peakBookings.peakDay} is the most frequently scheduled weekday across all accepted bookings in this period. Weekend bookings make up ${data.peakBookings.weekendPercentage}% of the total.`
-                                                                : "No accepted bookings are available for this reporting period."}
-                                                        </p>
-                                                    </div>
-                                                </div>
-
-                                                <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-4">
-                                                    <p className="text-sm font-bold text-[#4D2A74]">Top booked packages</p>
-                                                    {data.peakBookings.topPackages.length > 0 ? (
-                                                        <div className="mt-3 space-y-2">
-                                                            {data.peakBookings.topPackages.map((item, index) => (
-                                                                <div
-                                                                    key={item.name}
-                                                                    className="flex items-center justify-between gap-3 rounded-xl border border-[#EEE8F3] bg-white px-3 py-2.5 text-sm"
-                                                                >
-                                                                    <span className="flex min-w-0 items-center gap-2 font-medium text-[#5F4A73]">
-                                                                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#F1E9FE] text-[11px] font-bold text-[#6B2AC6]">
-                                                                            {index + 1}
-                                                                        </span>
-                                                                        <span className="truncate">{item.name}</span>
-                                                                    </span>
-                                                                    <strong className="shrink-0 text-[#2B174C]">
-                                                                        {formatNumber(item.value)}
-                                                                    </strong>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    ) : (
-                                                        <p className="mt-2 text-xs leading-5 text-[#806D91]">
-                                                            No package bookings were recorded for this period.
-                                                        </p>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {expandedPanel === "product-revenue" && (
-                                    <div className="rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-8 xl:min-h-[calc(100vh-190px)]">
-                                        <p className="max-w-5xl text-base leading-7 text-[#7A6A84]">
-                                            {data.dataNotes.products}
-                                        </p>
-                                        <div className="mt-8 grid items-center gap-10 lg:grid-cols-[300px_minmax(0,1fr)]">
-                                            <div className="flex justify-center">
-                                                <DonutChart
-                                                    items={data.productRevenue}
-                                                    totalLabel={peso(total(data.productRevenue))}
-                                                    centerLabel="POS product revenue"
-                                                    expanded
-                                                />
-                                            </div>
-                                            <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-5 sm:p-6">
-                                                <RevenueLegend
-                                                    items={data.productRevenue}
-                                                    emptyMessage="No product revenue is available. POS orders must include order-item details with product prices."
-                                                    expanded
-                                                />
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {expandedPanel === "package-revenue" && (
-                                    <div className="rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-8 xl:min-h-[calc(100vh-190px)]">
-                                        <p className="max-w-5xl text-base leading-7 text-[#7A6A84]">
-                                            {data.dataNotes.packages}
-                                        </p>
-                                        <div className="mt-8 grid items-center gap-10 lg:grid-cols-[300px_minmax(0,1fr)]">
-                                            <div className="flex justify-center">
-                                                <DonutChart
-                                                    items={data.packageRevenue}
-                                                    totalLabel={peso(total(data.packageRevenue))}
-                                                    centerLabel="Accepted package booking value"
-                                                    expanded
-                                                />
-                                            </div>
-                                            <div className="rounded-2xl border border-[#ECE3F5] bg-[#FFFEFC] p-5 sm:p-6">
-                                                <RevenueLegend
-                                                    items={data.packageRevenue}
-                                                    emptyMessage="No accepted package booking value is available for this reporting period."
-                                                    expanded
-                                                />
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {expandedPanel === "insights" && (
-                                    <div className="rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm sm:p-6">
-                                        {data.insights.length > 0 ? (
-                                            <div className="grid gap-4 md:grid-cols-2">
-                                                {data.insights.map((insight, index) => (
-                                                    <div
-                                                        key={insight}
-                                                        className="rounded-2xl border border-[#EAE2F1] bg-[#FFFEFC] p-5 text-sm leading-7 text-[#5F4A73] shadow-sm"
-                                                    >
-                                                        <span className="mb-4 flex h-9 w-9 items-center justify-center rounded-xl bg-[#F1E9FE] text-sm font-bold text-[#6B2AC6]">
-                                                            {index + 1}
-                                                        </span>
-                                                        {insight}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        ) : (
-                                            <EmptyPanel
-                                                title="No generated insight is available."
-                                                message="Record authorized POS sales or accepted bookings, then refresh analytics."
-                                            />
-                                        )}
-                                    </div>
-                                )}
-                            </AnalyticsExpandDialog>
-                        </>
-                    ) : null}
-                </div>
-            </main>
-        </AnalyticsShell>
+                            </div>
+                        )}
+                    </AnalyticsExpandDialog>
+                </>
+            ) : null}
+        </div>
     );
 }

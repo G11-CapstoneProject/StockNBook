@@ -66,9 +66,16 @@ export default function ForecastingPage() {
                     <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
                         <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 px-6 py-3">
                             <div>
-                                <h1 className="text-[25px] font-bold text-[#1A1220]">
-                                    Demand Forecasting
-                                </h1>
+                                <div className="flex flex-wrap items-center gap-2.5">
+                                    <h1 className="text-[25px] font-bold text-[#1A1220]">
+                                        Demand Forecasting
+                                    </h1>
+
+                                    <span className="inline-flex h-[34px] items-center rounded-xl border border-[#E7D9FF] bg-[#FAF6FF] px-3 text-xs font-semibold text-[#5E32A7]">
+                                        Premium Feature
+                                    </span>
+                                </div>
+
                                 <p className="mt-0.5 text-xs text-[#7A6A84]">
                                     {subtitle}
                                 </p>

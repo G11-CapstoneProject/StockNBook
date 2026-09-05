@@ -388,7 +388,7 @@ export default function AuthModal({
 
                 setPendingSignup(signupBody);
                 setOtp("");
-                setOtpTimer(Number(data.expires_in || 300));
+                setOtpTimer(90);
                 setOtpDialogOpen(true);
             } catch {
                 alert("Something went wrong while sending OTP.");
@@ -514,7 +514,7 @@ export default function AuthModal({
             }
 
             setOtp("");
-            setOtpTimer(Number(data.expires_in || 300));
+            setOtpTimer(90);
         } catch {
             alert("Something went wrong while resending OTP.");
         } finally {

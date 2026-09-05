@@ -3471,14 +3471,7 @@ module.exports.handler = async (event) => {
                     };
                 }
 
-                // Record the owner's successful login so Platform Admin can show
-                // a real last-active timestamp for this store.
-                await connection.execute(
-                    `UPDATE stores
-                     SET last_active_at = NOW()
-                     WHERE id = ?`,
-                    [store.id]
-                );
+
 
                 const token = jwt.sign(
                     {
@@ -5655,14 +5648,7 @@ module.exports.handler = async (event) => {
 
                 const store = storeRows[0];
 
-                // The client may verify the existing owner token when the app
-                // loads. Treat that successful authenticated check as activity.
-                await connection.execute(
-                    `UPDATE stores
-                     SET last_active_at = NOW()
-                     WHERE id = ?`,
-                    [store.id]
-                );
+
 
                 return {
                     statusCode: 200,

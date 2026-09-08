@@ -1,156 +1,119 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+/**
+ * Owner Dashboard — strategic, store-wide view.
+ *
+ * Redesign notes (per adviser feedback):
+ * - This dashboard is now DIFFERENT from Manager/Staff. It intentionally drops
+ *   the operational widgets (upcoming bookings table, inventory/expiration
+ *   alerts) that used to be duplicated across all three role dashboards.
+ *   Those belong on the Manager dashboard (day-to-day reports: inventory,
+ *   bookings, restock, staff activity) and the Staff dashboard (today's
+ *   queue). The Owner only sees sales, profit, and trend-level insight.
+ * - 4 KPI cards: Total Sales, POS Gross Profit, POS Profit Margin, and
+ *   Forecasted Sales (next month).
+ * - The lower summary area intentionally focuses on Top Products / Packages
+ *   and Demand Forecast. Revenue by Channel was removed to keep the layout
+ *   compact, focused, and visually balanced.
+ * - POS profit is read from the POS backend, which calculates totalCost and
+ *   profit from order_items joined to products/product_variants. No artificial
+ *   40% fallback is used anymore. Booking revenue remains separate because the
+ *   lightweight bookings endpoint does not expose booking cost/profit yet.
+ * - IMPORTANT: "POS Gross Profit" / "POS Profit Margin" keep their "POS"
+ *   qualifier on purpose. Bookings are 70%+ of revenue but have no recorded
+ *   cost, so a store-wide "Gross Profit" figure would be fabricated. Do not
+ *   rename these to drop "POS" unless a real booking-cost field is added
+ *   upstream (see aggregateBranchPerformance/buildOwnerAnalytics — booking
+ *   profit is intentionally never computed there).
+ * - The "Forecasted Sales" KPI badge and the "Demand Forecast" panel below
+ *   both read from the SAME predictedNextMonthSales/forecastGrowthPct values,
+ *   so they can never drift out of sync with each other.
+ * - "Demand Forecast" is a lightweight linear-trend projection over the
+ *   trailing months of real sales data (not a hosted ML model). It's honest
+ *   about being a trend projection in the UI copy ("Trend-based projection")
+ *   and keeps the Forecast Basis / Method disclosure — that transparency is
+ *   what the adviser's "should have science" requirement is asking for.
+ */
+
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
-    AlertTriangle,
-    CalendarClock,
-    CalendarDays,
-    PackageX,
+    BarChart3,
+    Building2,
+    Info,
+    Lightbulb,
+    Percent,
     RefreshCw,
-    ShoppingCart,
-    Store,
-    TriangleAlert,
+    Sparkles,
+    TrendingDown,
+    TrendingUp,
+    Trophy,
+    Wallet,
 } from "lucide-react";
-import {
-    DashboardExportMenu,
-    exportTableAsDoc,
-    exportTableAsExcel,
-    exportTableAsPdf,
-    type ExportContext,
-    type ExportTable,
-} from "./_shared";
+
+/* ----------------------------------------------------------------------- */
+/* Types                                                                    */
+/* ----------------------------------------------------------------------- */
 
 type Branch = {
     id: number;
     branchName: string;
-    managerName?: string;
 };
 
 type Booking = {
     id: number;
     branchId?: number | null;
-    branch_id?: number | null;
-    branchName?: string | null;
-    branch_name?: string | null;
-    name: string;
     date?: string;
-    time?: string;
     status?: string;
     packageName?: string;
-    eventName?: string;
-    bookingNumber?: string;
-
     bookingType?: string;
     booking_type?: string;
     customOrder?: string;
     custom_order?: string;
-
     agreed_price?: number | string | null;
     agreedPrice?: number | string | null;
     package_price?: number | string | null;
     packagePrice?: number | string | null;
-
-    amount_paid?: number | string | null;
-    amountPaid?: number | string | null;
     total?: number;
 };
 
 type OrderItem = {
     name?: string;
     quantity?: number;
-    salesPrice?: number;
-    sales_price?: number;
+    price?: number;
+    unitPrice?: number;
+    unit_price?: number;
+    lineTotal?: number;
+    line_total?: number;
     sellingPrice?: number;
     selling_price?: number;
-    price?: number;
-    originalPrice?: number;
-    original_price?: number;
+    salesPrice?: number;
+    sales_price?: number;
     costPrice?: number;
     cost_price?: number;
+    originalPrice?: number;
+    original_price?: number;
 };
 
 type Order = {
-    id?: string;
-    orderId?: string;
     branchId?: number | null;
-    branch_id?: number | null;
-    branchName?: string | null;
-    branch_name?: string | null;
     total?: number;
+    totalCost?: number | null;
+    profit?: number | null;
     date?: string;
-    orderDate?: string;
     createdAt?: string;
-    time?: string;
-    item?: string;
     items?: OrderItem[];
     status?: string;
-    orderNumber?: string;
     orderType?: string;
 };
 
-type ProductVariant = {
-    id?: number;
-    variantValues?: Record<string, string>;
-    variant_values?: Record<string, string>;
-    stock?: number;
-    alertLevel?: number;
-    alert_level?: number;
-    expirationDate?: string | null;
-    expiration_date?: string | null;
-};
+type PeriodOption = "month" | "quarter" | "year";
+type TrendRange = 6 | 12;
 
-type Product = {
-    id: number;
-    branchId?: number | null;
-    branch_id?: number | null;
-    branchName?: string | null;
-    branch_name?: string | null;
-    name: string;
-    category?: string;
-    stock?: number;
-    alertLevel?: number;
-    salesPrice?: number;
-    sales_price?: number;
-    sellingPrice?: number;
-    selling_price?: number;
-    price?: number;
-    originalPrice?: number;
-    original_price?: number;
-    costPrice?: number;
-    cost_price?: number;
-    expirationDate?: string | null;
-    expiration_date?: string | null;
-    variants?: ProductVariant[];
-};
-
-type ExpirationAlertStatus = "Expired" | "Expiring";
-
-type ExpirationAlertItem = {
-    id: string;
-    productName: string;
-    branchName: string;
-    variantName: string;
-    stock: number;
-    expirationDate: string;
-    daysRemaining: number;
-    status: ExpirationAlertStatus;
-};
-
-type StockAlertStatus = "Low Stock" | "Out of Stock";
-
-type StockAlertItem = {
-    id: string;
-    productName: string;
-    branchName: string;
-    variantName: string;
-    currentStock: number;
-    alertLevel: number;
-    status: StockAlertStatus;
-};
-
-
+/* ----------------------------------------------------------------------- */
+/* Generic parsing helpers (kept consistent with the rest of the app)      */
+/* ----------------------------------------------------------------------- */
 
 function getSavedItem(key: string) {
     if (typeof window === "undefined") return "";
@@ -167,6 +130,17 @@ function peso(value: number) {
         minimumFractionDigits: 0,
         maximumFractionDigits: 0,
     })}`;
+}
+
+function pesoCompact(value: number) {
+    const abs = Math.abs(value);
+    if (abs >= 1_000_000) {
+        return `₱${(value / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`;
+    }
+    if (abs >= 1_000) {
+        return `₱${(value / 1_000).toFixed(0)}K`;
+    }
+    return `₱${Math.round(value)}`;
 }
 
 function formatCurrentDashboardDateTime(value: Date) {
@@ -198,46 +172,37 @@ function toRecord(value: unknown): ApiRecord {
 function firstDefined(record: ApiRecord, keys: string[]) {
     for (const key of keys) {
         const value = record[key];
-
-        if (value !== null && value !== undefined) {
-            return value;
-        }
+        if (value !== null && value !== undefined) return value;
     }
-
     return undefined;
 }
 
 function readText(record: ApiRecord, keys: string[], fallback = "") {
     const value = firstDefined(record, keys);
-
     if (typeof value === "string") return value;
     if (typeof value === "number") return String(value);
-
     return fallback;
 }
 
 function readNumber(record: ApiRecord, keys: string[], fallback = 0) {
     const value = firstDefined(record, keys);
     const parsed = Number(value);
-
     return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function readNullableNumber(record: ApiRecord, keys: string[]) {
     const value = firstDefined(record, keys);
-
-    if (value === null || value === undefined || value === "") {
-        return null;
-    }
-
+    if (value === null || value === undefined || value === "") return null;
     const parsed = Number(value);
-
     return Number.isFinite(parsed) ? parsed : null;
 }
 
+/* ----------------------------------------------------------------------- */
+/* Normalizers (trimmed to sales/profit-relevant fields only)              */
+/* ----------------------------------------------------------------------- */
+
 function normalizeBranch(value: unknown): Branch {
     const raw = toRecord(value);
-
     return {
         id: readNumber(raw, ["id", "branch_id", "branchId"]),
         branchName: readText(
@@ -245,50 +210,44 @@ function normalizeBranch(value: unknown): Branch {
             ["branchName", "branch_name", "name", "branch"],
             "Unnamed Branch",
         ),
-        managerName: readText(raw, ["managerName", "manager_name", "manager"]),
     };
+}
+
+function normalizeDashboardBookingStatus(value?: string | null) {
+    const raw = String(value || "").trim().toLowerCase();
+    if (!raw || raw === "pending") return "Pending";
+    if (
+        raw === "awaiting down payment" ||
+        raw === "waiting down payment" ||
+        raw === "awaiting payment" ||
+        raw === "down payment required"
+    ) {
+        return "Awaiting Down Payment";
+    }
+    if (raw === "confirmed") return "Confirmed";
+    if (raw === "preparing") return "Preparing";
+    if (raw === "completed") return "Completed";
+    if (raw === "cancelled" || raw === "canceled") return "Cancelled";
+    return value || "Pending";
 }
 
 function normalizeBooking(value: unknown): Booking {
     const raw = toRecord(value);
-    const rawBranchId = readNullableNumber(raw, ["branchId", "branch_id"]);
-
     return {
         id: readNumber(raw, ["id", "booking_id"]),
-        branchId: rawBranchId,
-        branch_id: rawBranchId,
-        branchName: readText(raw, ["branchName", "branch_name"]) || null,
-        branch_name: readText(raw, ["branch_name", "branchName"]) || null,
-        name: readText(raw, ["name", "customer_name"], "Unnamed Client"),
+        branchId: readNullableNumber(raw, ["branchId", "branch_id"]),
         date: readText(raw, [
             "date",
             "event_date",
             "eventDate",
             "booking_date",
             "bookingDate",
-            "event_datetime",
-            "eventDateTime",
-            "booking_datetime",
-            "bookingDateTime",
             "scheduled_at",
             "scheduledAt",
             "start_at",
             "startAt",
             "created_at",
             "createdAt",
-        ]),
-        time: readText(raw, [
-            "time",
-            "event_time",
-            "eventTime",
-            "booking_time",
-            "bookingTime",
-            "start_time",
-            "startTime",
-            "scheduled_time",
-            "scheduledTime",
-            "time_slot",
-            "timeSlot",
         ]),
         status: normalizeDashboardBookingStatus(readText(raw, ["status"])),
         packageName: readText(raw, [
@@ -298,61 +257,30 @@ function normalizeBooking(value: unknown): Booking {
             "package_title",
             "service_name",
         ]),
-        eventName: readText(raw, [
-            "eventName",
-            "event_name",
-            "event",
-            "event_type",
-        ]),
-        bookingNumber: readText(raw, [
-            "bookingNumber",
-            "booking_number",
-            "booking_no",
-            "reference_number",
-            "reference",
-            "bookingReference",
-            "booking_reference",
-        ]),
         bookingType: readText(raw, ["bookingType", "booking_type"]),
         booking_type: readText(raw, ["booking_type", "bookingType"]),
         customOrder: readText(raw, ["customOrder", "custom_order"]),
         custom_order: readText(raw, ["custom_order", "customOrder"]),
-        agreed_price:
-            firstDefined(raw, ["agreed_price", "agreedPrice"]) as
-                | number
-                | string
-                | null
-                | undefined,
-        agreedPrice:
-            firstDefined(raw, ["agreedPrice", "agreed_price"]) as
-                | number
-                | string
-                | null
-                | undefined,
-        package_price:
-            firstDefined(raw, ["package_price", "packagePrice"]) as
-                | number
-                | string
-                | null
-                | undefined,
-        packagePrice:
-            firstDefined(raw, ["packagePrice", "package_price"]) as
-                | number
-                | string
-                | null
-                | undefined,
-        amount_paid:
-            firstDefined(raw, ["amount_paid", "amountPaid"]) as
-                | number
-                | string
-                | null
-                | undefined,
-        amountPaid:
-            firstDefined(raw, ["amountPaid", "amount_paid"]) as
-                | number
-                | string
-                | null
-                | undefined,
+        agreed_price: firstDefined(raw, ["agreed_price", "agreedPrice"]) as
+            | number
+            | string
+            | null
+            | undefined,
+        agreedPrice: firstDefined(raw, ["agreedPrice", "agreed_price"]) as
+            | number
+            | string
+            | null
+            | undefined,
+        package_price: firstDefined(raw, ["package_price", "packagePrice"]) as
+            | number
+            | string
+            | null
+            | undefined,
+        packagePrice: firstDefined(raw, ["packagePrice", "package_price"]) as
+            | number
+            | string
+            | null
+            | undefined,
         total: readNumber(raw, [
             "total",
             "total_amount",
@@ -363,47 +291,13 @@ function normalizeBooking(value: unknown): Booking {
     };
 }
 
-function normalizeDashboardBookingStatus(value?: string | null) {
-    const raw = String(value || "").trim().toLowerCase();
-
-    if (!raw || raw === "pending" || raw === "pending") {
-        return "Pending";
-    }
-
-    if (
-        raw === "awaiting down payment" ||
-        raw === "waiting down payment" ||
-        raw === "awaiting payment" ||
-        raw === "down payment required"
-    ) {
-        return "Awaiting Down Payment";
-    }
-
-    if (raw === "confirmed") return "Confirmed";
-    if (raw === "preparing") return "Preparing";
-    if (raw === "completed") return "Completed";
-    if (raw === "cancelled" || raw === "canceled") return "Cancelled";
-
-    return value || "Pending";
-}
-
 function isCustomDashboardBooking(booking: Booking) {
     const type = String(booking.bookingType || booking.booking_type || "")
         .trim()
         .toLowerCase();
-
-    const packageLabel = String(booking.packageName || "")
-        .trim()
-        .toLowerCase();
-
-    const customText = String(booking.customOrder || booking.custom_order || "")
-        .trim();
-
-    return (
-        type.includes("custom") ||
-        packageLabel.includes("custom") ||
-        Boolean(customText)
-    );
+    const packageLabel = String(booking.packageName || "").trim().toLowerCase();
+    const customText = String(booking.customOrder || booking.custom_order || "").trim();
+    return type.includes("custom") || packageLabel.includes("custom") || Boolean(customText);
 }
 
 function getDashboardBookingTotalPrice(booking: Booking) {
@@ -419,589 +313,364 @@ function getDashboardBookingTotalPrice(booking: Booking) {
     return Number.isFinite(value) ? value : 0;
 }
 
+function normalizeOrderItem(value: unknown): OrderItem {
+    const raw = toRecord(value);
+    return {
+        name: readText(raw, ["name", "productName", "product_name"]),
+        quantity: readNumber(raw, ["quantity", "qty"]),
+        price: readNumber(raw, ["price", "unitPrice", "unit_price"]),
+        unitPrice: readNumber(raw, ["unitPrice", "unit_price", "price"]),
+        unit_price: readNumber(raw, ["unit_price", "unitPrice", "price"]),
+        lineTotal: readNumber(raw, ["lineTotal", "line_total"]),
+        line_total: readNumber(raw, ["line_total", "lineTotal"]),
+        sellingPrice: readNumber(raw, ["sellingPrice", "selling_price"]),
+        selling_price: readNumber(raw, ["selling_price", "sellingPrice"]),
+        salesPrice: readNumber(raw, ["salesPrice", "sales_price"]),
+        sales_price: readNumber(raw, ["sales_price", "salesPrice"]),
+        costPrice: readNumber(raw, ["costPrice", "cost_price"]),
+        cost_price: readNumber(raw, ["cost_price", "costPrice"]),
+        originalPrice: readNumber(raw, ["originalPrice", "original_price"]),
+        original_price: readNumber(raw, ["original_price", "originalPrice"]),
+    };
+}
+
 function parseOrderItems(itemText?: string): OrderItem[] {
     if (!itemText) return [];
-
     return itemText
         .split(",")
         .map((item) => {
             const [name, qty] = item.split(" x");
-
-            return {
-                name: name?.trim() || "",
-                quantity: Number(qty || 0),
-            };
+            return { name: name?.trim() || "", quantity: Number(qty || 0) };
         })
         .filter((item) => item.name);
 }
 
-function normalizeOrderItem(value: unknown): OrderItem {
-    const raw = toRecord(value);
-
-    return {
-        name: readText(raw, ["name", "productName", "product_name"]),
-        quantity: readNumber(raw, ["quantity", "qty"]),
-        salesPrice: readNumber(raw, ["salesPrice", "sales_price"]),
-        sales_price: readNumber(raw, ["sales_price", "salesPrice"]),
-        sellingPrice: readNumber(raw, ["sellingPrice", "selling_price"]),
-        selling_price: readNumber(raw, ["selling_price", "sellingPrice"]),
-        price: readNumber(raw, ["price"]),
-        originalPrice: readNumber(raw, ["originalPrice", "original_price"]),
-        original_price: readNumber(raw, ["original_price", "originalPrice"]),
-        costPrice: readNumber(raw, ["costPrice", "cost_price"]),
-        cost_price: readNumber(raw, ["cost_price", "costPrice"]),
-    };
-}
-
 function normalizeOrder(value: unknown): Order {
     const raw = toRecord(value);
-    const rawBranchId = readNullableNumber(raw, ["branchId", "branch_id"]);
     const itemText = readText(raw, ["item"]);
-    const rawItems = firstDefined(raw, ["items"]);
+    const rawItems = firstDefined(raw, ["items", "orderItems", "order_items"]);
     const items = Array.isArray(rawItems)
         ? rawItems.map(normalizeOrderItem).filter((item) => item.name)
         : parseOrderItems(itemText);
 
     return {
-        id: readText(raw, ["id", "orderId", "order_id"]) || undefined,
-        orderId: readText(raw, ["orderId", "order_id", "id"]) || undefined,
-        branchId: rawBranchId,
-        branch_id: rawBranchId,
-        branchName: readText(raw, ["branchName", "branch_name"]) || null,
-        branch_name: readText(raw, ["branch_name", "branchName"]) || null,
+        branchId: readNullableNumber(raw, ["branchId", "branch_id"]),
         total: readNumber(raw, ["total"]),
+        totalCost: readNullableNumber(raw, ["totalCost", "total_cost"]),
+        profit: readNullableNumber(raw, ["profit"]),
         date: readText(raw, [
             "date",
             "orderDate",
             "order_date",
-            "scheduled_date",
-            "scheduledDate",
-            "pickup_date",
-            "pickupDate",
-            "delivery_date",
-            "deliveryDate",
-            "scheduled_at",
-            "scheduledAt",
-            "pickup_at",
-            "pickupAt",
-            "delivery_at",
-            "deliveryAt",
             "createdAt",
             "created_at",
         ]),
-        orderDate: readText(raw, [
-            "orderDate",
-            "order_date",
-            "scheduled_date",
-            "scheduledDate",
-            "pickup_date",
-            "pickupDate",
-            "delivery_date",
-            "deliveryDate",
-            "date",
-        ]),
         createdAt: readText(raw, ["createdAt", "created_at"]),
-        time: readText(raw, [
-            "time",
-            "order_time",
-            "orderTime",
-            "scheduled_time",
-            "scheduledTime",
-            "pickup_time",
-            "pickupTime",
-            "delivery_time",
-            "deliveryTime",
-            "time_slot",
-            "timeSlot",
-        ]),
-        item: itemText,
         items,
         status: readText(raw, ["status", "order_status"]),
-        orderNumber: readText(raw, [
-            "orderNumber",
-            "order_number",
-            "order_no",
-            "reference_number",
-            "reference",
-            "orderId",
-            "order_id",
-            "id",
-        ]),
         orderType: readText(raw, ["orderType", "order_type", "type", "source"]),
     };
 }
 
-function normalizeProduct(value: unknown): Product {
-    const raw = toRecord(value);
-    const rawBranchId = readNullableNumber(raw, ["branchId", "branch_id"]);
 
-    const sellingPrice = readNumber(raw, [
-        "salesPrice",
-        "sales_price",
-        "sellingPrice",
-        "selling_price",
-        "price",
-    ]);
+/* ----------------------------------------------------------------------- */
+/* Date / period helpers                                                   */
+/* ----------------------------------------------------------------------- */
 
-    const originalPrice = readNumber(raw, [
-        "originalPrice",
-        "original_price",
-        "costPrice",
-        "cost_price",
-        "origPrice",
-        "orig_price",
-    ]);
-
-    const rawVariants = firstDefined(raw, [
-        "variants",
-        "productVariants",
-        "product_variants",
-    ]);
-
-    const variants: ProductVariant[] = Array.isArray(rawVariants)
-        ? rawVariants.map((value) => {
-            const variant = toRecord(value);
-            const rawVariantValues = firstDefined(variant, [
-                "variantValues",
-                "variant_values",
-                "values",
-            ]);
-
-            let parsedVariantValues: Record<string, string> = {};
-
-            if (
-                rawVariantValues &&
-                typeof rawVariantValues === "object" &&
-                !Array.isArray(rawVariantValues)
-            ) {
-                parsedVariantValues =
-                    rawVariantValues as Record<string, string>;
-            } else if (typeof rawVariantValues === "string") {
-                try {
-                    const parsed = JSON.parse(rawVariantValues);
-
-                    if (
-                        parsed &&
-                        typeof parsed === "object" &&
-                        !Array.isArray(parsed)
-                    ) {
-                        parsedVariantValues =
-                            parsed as Record<string, string>;
-                    }
-                } catch {
-                    parsedVariantValues = {};
-                }
-            }
-
-            const variantAlertLevel = readNumber(variant, [
-                "alertLevel",
-                "alert_level",
-                "alert",
-            ]);
-
-            return {
-                id: readNumber(variant, ["id"]),
-                variantValues: parsedVariantValues,
-                variant_values: parsedVariantValues,
-                stock: readNumber(variant, [
-                    "stock",
-                    "quantity",
-                    "qty",
-                ]),
-                alertLevel: variantAlertLevel,
-                alert_level: variantAlertLevel,
-                expirationDate:
-                    readText(variant, [
-                        "expirationDate",
-                        "expiration_date",
-                        "expiryDate",
-                        "expiry_date",
-                    ]) || null,
-                expiration_date:
-                    readText(variant, [
-                        "expiration_date",
-                        "expirationDate",
-                        "expiry_date",
-                        "expiryDate",
-                    ]) || null,
-            };
-        })
-        : [];
-
-    const expirationDate =
-        readText(raw, [
-            "expirationDate",
-            "expiration_date",
-            "expiryDate",
-            "expiry_date",
-        ]) || null;
-
-    return {
-        id: readNumber(raw, ["id"]),
-        branchId: rawBranchId,
-        branch_id: rawBranchId,
-        branchName: readText(raw, ["branchName", "branch_name"]) || null,
-        branch_name: readText(raw, ["branch_name", "branchName"]) || null,
-        name: readText(raw, ["name"]),
-        category: readText(raw, ["category"]),
-        stock: readNumber(raw, ["stock"]),
-        alertLevel: readNumber(raw, ["alertLevel", "alert_level"]),
-        salesPrice: sellingPrice,
-        sales_price: sellingPrice,
-        sellingPrice: sellingPrice,
-        selling_price: sellingPrice,
-        price: sellingPrice,
-        originalPrice,
-        original_price: originalPrice,
-        costPrice: originalPrice,
-        cost_price: originalPrice,
-        expirationDate,
-        expiration_date: expirationDate,
-        variants,
-    };
+function parseFlexibleDate(value?: string | null): Date | null {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-const EXPIRING_SOON_DAYS = 30;
-const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
+function getOrderDate(order: Order) {
+    return parseFlexibleDate(order.date) || parseFlexibleDate(order.createdAt);
+}
 
-function parseDashboardExpirationDate(value?: string | null) {
-    const rawValue = String(value || "").trim();
+function monthKey(date: Date) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
 
-    if (!rawValue) return null;
+function monthLabelWithYear(date: Date) {
+    return date.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+}
 
-    if (/^\d{4}-\d{2}-\d{2}$/.test(rawValue)) {
-        const [year, month, day] = rawValue.split("-").map(Number);
-        const date = new Date(year, month - 1, day);
-        date.setHours(0, 0, 0, 0);
-        return Number.isNaN(date.getTime()) ? null : date;
+function getLastNMonthBuckets(reference: Date, n: number) {
+    const buckets: { key: string; date: Date; label: string }[] = [];
+    for (let i = n - 1; i >= 0; i--) {
+        const d = new Date(reference.getFullYear(), reference.getMonth() - i, 1);
+        buckets.push({ key: monthKey(d), date: d, label: monthLabelWithYear(d) });
     }
-
-    const parsedDate = new Date(rawValue);
-
-    if (Number.isNaN(parsedDate.getTime())) return null;
-
-    parsedDate.setHours(0, 0, 0, 0);
-    return parsedDate;
+    return buckets;
 }
 
-function getDashboardDaysUntilExpiration(value?: string | null) {
-    const expirationDate = parseDashboardExpirationDate(value);
-
-    if (!expirationDate) return null;
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    return Math.round(
-        (expirationDate.getTime() - today.getTime()) /
-        DAY_IN_MILLISECONDS,
-    );
-}
-
-function formatDashboardExpirationDate(value: string) {
-    const expirationDate = parseDashboardExpirationDate(value);
-
-    if (!expirationDate) return value || "";
-
-    return expirationDate.toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-    });
-}
-
-function formatDashboardBookingDate(value?: string | null) {
-    const bookingDate = parseDashboardExpirationDate(value);
-
-    if (!bookingDate) return value || "";
-
-    return bookingDate.toLocaleDateString("en-US", {
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-    });
-}
-
-function formatExpirationDistance(daysRemaining: number) {
-    if (daysRemaining < -1) {
-        return `${Math.abs(daysRemaining)} days ago`;
+function getPeriodStart(period: PeriodOption, reference: Date) {
+    if (period === "month") {
+        return new Date(reference.getFullYear(), reference.getMonth(), 1);
     }
-
-    if (daysRemaining === -1) {
-        return "1 day ago";
+    if (period === "quarter") {
+        const quarterStartMonth = Math.floor(reference.getMonth() / 3) * 3;
+        return new Date(reference.getFullYear(), quarterStartMonth, 1);
     }
+    return new Date(reference.getFullYear(), 0, 1);
+}
 
-    if (daysRemaining === 0) {
-        return "Expires today";
+function formatPeriodLabel(period: PeriodOption, reference: Date) {
+    if (period === "month") {
+        return reference.toLocaleDateString("en-US", { month: "long", year: "numeric" });
     }
-
-    if (daysRemaining === 1) {
-        return "1 day left";
+    if (period === "quarter") {
+        const quarter = Math.floor(reference.getMonth() / 3) + 1;
+        return `Q${quarter} ${reference.getFullYear()}`;
     }
-
-    return `${daysRemaining} days left`;
+    return String(reference.getFullYear());
 }
 
-function getDashboardVariantName(variant: ProductVariant) {
-    const values =
-        variant.variantValues ||
-        variant.variant_values ||
-        {};
+/* ----------------------------------------------------------------------- */
+/* Core business logic                                                     */
+/* ----------------------------------------------------------------------- */
 
-    return (
-        Object.values(values)
-            .map((value) => String(value || "").trim())
-            .filter(Boolean)
-            .join(" / ") || "Variant"
-    );
+const SCHEDULED_ORDER_TYPES = [
+    "scheduled",
+    "schedule",
+    "scheduled-order",
+    "future",
+    "future-order",
+    "advance-order",
+    "pre-order",
+    "preorder",
+];
+
+const EXCLUDED_ORDER_STATUSES = [
+    "pending",
+    "pending payment",
+    "unpaid",
+    "cancelled",
+    "canceled",
+    "refunded",
+    "void",
+    "draft",
+    "failed",
+];
+
+function isPosSaleOrder(order: Order) {
+    const type = String(order.orderType || "").trim().toLowerCase().replace(/_/g, "-");
+    const status = String(order.status || "").trim().toLowerCase();
+    return !SCHEDULED_ORDER_TYPES.includes(type) && !EXCLUDED_ORDER_STATUSES.includes(status);
 }
 
-function getDashboardStockAlertItems(
-    products: Product[],
-): StockAlertItem[] {
-    return products
-        .flatMap((product) => {
-            const variants = Array.isArray(product.variants)
-                ? product.variants
-                : [];
-
-            if (variants.length > 0) {
-                return variants.flatMap((variant, index) => {
-                    const currentStock = Number(variant.stock || 0);
-                    const alertLevel = Number(
-                        variant.alertLevel ??
-                        variant.alert_level ??
-                        0,
-                    );
-
-                    const status: StockAlertStatus | null =
-                        currentStock <= 0
-                            ? "Out of Stock"
-                            : currentStock <= alertLevel
-                                ? "Low Stock"
-                                : null;
-
-                    if (!status) return [];
-
-                    return [
-                        {
-                            id: `${product.id}-variant-${variant.id || index}`,
-                            productName: product.name,
-                            branchName:
-                                product.branchName ||
-                                product.branch_name ||
-                                "Branch",
-                            variantName:
-                                getDashboardVariantName(variant),
-                            currentStock,
-                            alertLevel,
-                            status,
-                        },
-                    ];
-                });
-            }
-
-            const currentStock = Number(product.stock || 0);
-            const alertLevel = Number(product.alertLevel || 0);
-
-            const status: StockAlertStatus | null =
-                currentStock <= 0
-                    ? "Out of Stock"
-                    : currentStock <= alertLevel
-                        ? "Low Stock"
-                        : null;
-
-            if (!status) return [];
-
-            return [
-                {
-                    id: `${product.id}-regular`,
-                    productName: product.name,
-                    branchName:
-                        product.branchName ||
-                        product.branch_name ||
-                        "Branch",
-                    variantName: "",
-                    currentStock,
-                    alertLevel,
-                    status,
-                },
-            ];
-        })
-        .sort(
-            (first, second) =>
-                first.currentStock - second.currentStock,
-        );
+function isRealizedBooking(booking: Booking) {
+    const status = normalizeDashboardBookingStatus(booking.status);
+    return status === "Confirmed" || status === "Completed";
 }
 
+type MonthlyPoint = {
+    key: string;
+    label: string;
+    posSales: number;
+    bookingSales: number;
+    sales: number;
+    profit: number;
+};
 
-function getExpirationAlertItems(
-    products: Product[],
-): ExpirationAlertItem[] {
-    return products
-        .flatMap((product) => {
-            const variants = Array.isArray(product.variants)
-                ? product.variants
-                : [];
-
-            const variantItems = variants.flatMap((variant, index) => {
-                const expirationDate =
-                    variant.expirationDate ||
-                    variant.expiration_date ||
-                    "";
-
-                const daysRemaining =
-                    getDashboardDaysUntilExpiration(expirationDate);
-
-                if (
-                    daysRemaining === null ||
-                    daysRemaining > EXPIRING_SOON_DAYS
-                ) {
-                    return [];
-                }
-
-                return [
-                    {
-                        id: `${product.id}-variant-${variant.id || index}`,
-                        productName: product.name,
-                        branchName:
-                            product.branchName ||
-                            product.branch_name ||
-                            "Branch",
-                        variantName: getDashboardVariantName(variant),
-                        stock: Number(variant.stock || 0),
-                        expirationDate,
-                        daysRemaining,
-                        status:
-                            daysRemaining < 0
-                                ? "Expired"
-                                : "Expiring",
-                    } satisfies ExpirationAlertItem,
-                ];
-            });
-
-            if (variantItems.length > 0) {
-                return variantItems;
-            }
-
-            const expirationDate =
-                product.expirationDate ||
-                product.expiration_date ||
-                "";
-
-            const daysRemaining =
-                getDashboardDaysUntilExpiration(expirationDate);
-
-            if (
-                daysRemaining === null ||
-                daysRemaining > EXPIRING_SOON_DAYS
-            ) {
-                return [];
-            }
-
-            return [
-                {
-                    id: `${product.id}-regular`,
-                    productName: product.name,
-                    branchName:
-                        product.branchName ||
-                        product.branch_name ||
-                        "Branch",
-                    variantName: "",
-                    stock: Number(product.stock || 0),
-                    expirationDate,
-                    daysRemaining,
-                    status:
-                        daysRemaining < 0
-                            ? "Expired"
-                            : "Expiring",
-                } satisfies ExpirationAlertItem,
-            ];
-        })
-        .sort((first, second) => {
-            if (first.status !== second.status) {
-                return first.status === "Expired" ? -1 : 1;
-            }
-
-            if (first.status === "Expired") {
-                // Recently expired items appear first.
-                return second.daysRemaining - first.daysRemaining;
-            }
-
-            // Items expiring soonest appear first.
-            return first.daysRemaining - second.daysRemaining;
-        });
-}
-
-function compactDashboardReference(
-    prefix: "BK" | "SO",
-    explicitReference: string | undefined,
-    fallbackValue: string | number,
+/**
+ * Owner analytics use only authoritative values returned by the APIs.
+ *
+ * - Total Sales = POS Sales + realized Booking Sales.
+ * - Profit = POS backend profit (orders.total - SQL-computed totalCost).
+ * - Booking profit is intentionally NOT estimated. The current lightweight
+ *   booking endpoint exposes booking revenue but not booking cost/profit.
+ *
+ * This removes the old hard-coded 40% margin fallback and prevents fabricated
+ * gross-profit values from appearing on the Owner dashboard.
+ */
+function buildOwnerAnalytics(
+    orders: Order[],
+    bookings: Booking[],
+    monthsBack: number,
+    reference: Date,
 ) {
-    const explicit = String(explicitReference || "").trim();
+    const buckets = getLastNMonthBuckets(reference, monthsBack).map((bucket) => ({
+        ...bucket,
+        posSales: 0,
+        posProfit: 0,
+        bookingSales: 0,
+    }));
+    const bucketByKey = new Map(buckets.map((bucket) => [bucket.key, bucket]));
 
-    // Keep already-short references such as BK-162665 or SO-102341.
-    if (explicit && explicit.length <= 12) {
-        return explicit;
-    }
+    orders.filter(isPosSaleOrder).forEach((order) => {
+        const date = getOrderDate(order);
+        if (!date) return;
+        const bucket = bucketByKey.get(monthKey(date));
+        if (!bucket) return;
 
-    // Prefer the last numeric group from an existing long reference.
-    const numericGroups = explicit.match(/\d+/g);
-    const lastNumericGroup = numericGroups?.[numericGroups.length - 1];
+        const revenue = Number(order.total || 0);
+        const backendProfit = order.profit;
+        const backendCost = order.totalCost;
 
-    if (lastNumericGroup) {
-        return `${prefix}-${lastNumericGroup.slice(-6).padStart(6, "0")}`;
-    }
+        bucket.posSales += Number.isFinite(revenue) ? revenue : 0;
 
-    const fallback = String(fallbackValue || "").replace(/\D/g, "");
-    const numberPart = fallback.slice(-6).padStart(6, "0");
+        if (backendProfit !== null && backendProfit !== undefined && Number.isFinite(backendProfit)) {
+            bucket.posProfit += backendProfit;
+        } else if (backendCost !== null && backendCost !== undefined && Number.isFinite(backendCost)) {
+            bucket.posProfit += revenue - backendCost;
+        }
+    });
 
-    return `${prefix}-${numberPart}`;
+    bookings.filter(isRealizedBooking).forEach((booking) => {
+        const date = parseFlexibleDate(booking.date);
+        if (!date) return;
+        const bucket = bucketByKey.get(monthKey(date));
+        if (!bucket) return;
+        bucket.bookingSales += getDashboardBookingTotalPrice(booking);
+    });
+
+    const monthly: MonthlyPoint[] = buckets.map((bucket) => ({
+        key: bucket.key,
+        label: bucket.label,
+        posSales: bucket.posSales,
+        bookingSales: bucket.bookingSales,
+        sales: bucket.posSales + bucket.bookingSales,
+        profit: bucket.posProfit,
+    }));
+
+    return { monthly };
 }
 
+function aggregateBranchPerformance(
+    orders: Order[],
+    bookings: Booking[],
+    branches: Branch[],
+    period: PeriodOption,
+    reference: Date,
+) {
+    const start = getPeriodStart(period, reference);
+    const end = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate() + 1);
+    const nameById = new Map(branches.map((branch) => [String(branch.id), branch.branchName]));
+    const totals = new Map<string, number>();
 
-function formatDashboardTime(dateValue?: string, explicitTime?: string) {
-    const format = (value: Date) =>
-        value.toLocaleTimeString("en-US", {
-            hour: "numeric",
-            minute: "2-digit",
-            hour12: true,
+    orders.filter(isPosSaleOrder).forEach((order) => {
+        const date = getOrderDate(order);
+        if (!date || date < start || date >= end) return;
+        const key = order.branchId !== null && order.branchId !== undefined ? String(order.branchId) : "unassigned";
+        totals.set(key, (totals.get(key) || 0) + Number(order.total || 0));
+    });
+
+    bookings.filter(isRealizedBooking).forEach((booking) => {
+        const date = parseFlexibleDate(booking.date);
+        if (!date || date < start || date >= end) return;
+        const key = booking.branchId !== null && booking.branchId !== undefined ? String(booking.branchId) : "unassigned";
+        totals.set(key, (totals.get(key) || 0) + getDashboardBookingTotalPrice(booking));
+    });
+
+    return Array.from(totals.entries())
+        .map(([key, amount]) => ({
+            key,
+            name: key === "unassigned" ? "Unassigned" : nameById.get(key) || `Branch #${key}`,
+            amount,
+        }))
+        .sort((a, b) => b.amount - a.amount);
+}
+
+type TopItemRow = { key: string; name: string; sales: number; units: number };
+
+function aggregateTopItems(
+    orders: Order[],
+    bookings: Booking[],
+    period: PeriodOption,
+    reference: Date,
+): TopItemRow[] {
+    const start = getPeriodStart(period, reference);
+    const end = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate() + 1);
+    const map = new Map<string, TopItemRow>();
+
+    orders.filter(isPosSaleOrder).forEach((order) => {
+        const date = getOrderDate(order);
+        if (!date || date < start || date >= end) return;
+
+        (order.items || []).forEach((item) => {
+            const name = (item.name || "").trim();
+            if (!name) return;
+
+            const qty = Number(item.quantity || 0);
+            const unitPrice = Number(
+                item.unitPrice ??
+                item.unit_price ??
+                item.price ??
+                item.sellingPrice ??
+                item.selling_price ??
+                item.salesPrice ??
+                item.sales_price ??
+                0,
+            );
+            const lineTotal = Number(item.lineTotal ?? item.line_total ?? qty * unitPrice);
+
+            const key = `product:${name.toLowerCase()}`;
+            const existing = map.get(key) || { key, name, sales: 0, units: 0 };
+            existing.sales += Number.isFinite(lineTotal) ? lineTotal : qty * unitPrice;
+            existing.units += qty;
+            map.set(key, existing);
         });
+    });
 
-    const rawTime = String(explicitTime || "").trim();
+    bookings.filter(isRealizedBooking).forEach((booking) => {
+        const date = parseFlexibleDate(booking.date);
+        if (!date || date < start || date >= end) return;
 
-    if (rawTime) {
-        const timeOnlyMatch = rawTime.match(
-            /^(\d{1,2}):(\d{2})(?::\d{2})?(?:\.\d+)?\s*(AM|PM)?(?:Z|[+-]\d{2}:?\d{2})?$/i,
-        );
+        const name = (booking.packageName || (isCustomDashboardBooking(booking) ? "Custom Order" : "")).trim();
+        if (!name) return;
 
-        if (timeOnlyMatch) {
-            let hour = Number(timeOnlyMatch[1]);
-            const minute = Number(timeOnlyMatch[2]);
-            const period = timeOnlyMatch[3]?.toUpperCase();
+        const key = `package:${name.toLowerCase()}`;
+        const existing = map.get(key) || { key, name, sales: 0, units: 0 };
+        existing.sales += getDashboardBookingTotalPrice(booking);
+        existing.units += 1;
+        map.set(key, existing);
+    });
 
-            if (period === "PM" && hour < 12) hour += 12;
-            if (period === "AM" && hour === 12) hour = 0;
-
-            if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
-                return format(new Date(2000, 0, 1, hour, minute));
-            }
-        }
-
-        const parsedExplicit = new Date(rawTime);
-        if (!Number.isNaN(parsedExplicit.getTime())) {
-            return format(parsedExplicit);
-        }
-    }
-
-    const rawDate = String(dateValue || "").trim();
-    const containsTime = /(?:T|\s)\d{1,2}:\d{2}/.test(rawDate);
-
-    if (!containsTime) return "";
-
-    const parsedDate = new Date(rawDate);
-    return Number.isNaN(parsedDate.getTime()) ? "" : format(parsedDate);
+    return Array.from(map.values()).sort((a, b) => b.sales - a.sales);
 }
+
+function pctDelta(current: number, previous: number): number | null {
+    if (!Number.isFinite(previous) || previous === 0) return null;
+    return ((current - previous) / Math.abs(previous)) * 100;
+}
+
+function linearForecastNext(values: number[]) {
+    const n = values.length;
+    if (n === 0) return 0;
+    if (n === 1) return values[0];
+
+    const meanX = (n - 1) / 2;
+    const meanY = values.reduce((sum, v) => sum + v, 0) / n;
+
+    let numerator = 0;
+    let denominator = 0;
+    values.forEach((value, index) => {
+        numerator += (index - meanX) * (value - meanY);
+        denominator += (index - meanX) ** 2;
+    });
+
+    const slope = denominator !== 0 ? numerator / denominator : 0;
+    const intercept = meanY - slope * meanX;
+    return Math.max(0, slope * n + intercept);
+}
+
+function niceStep(value: number) {
+    if (value <= 0) return 1;
+    const exponent = Math.floor(Math.log10(value));
+    const base = Math.pow(10, exponent);
+    const fraction = value / base;
+    let niceFraction = 10;
+    if (fraction <= 1) niceFraction = 1;
+    else if (fraction <= 2) niceFraction = 2;
+    else if (fraction <= 5) niceFraction = 5;
+    return niceFraction * base;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Main component                                                          */
+/* ----------------------------------------------------------------------- */
 
 export default function OwnerDashboard() {
     const router = useRouter();
@@ -1009,387 +678,229 @@ export default function OwnerDashboard() {
 
     const [branches, setBranches] = useState<Branch[]>([]);
     const [bookings, setBookings] = useState<Booking[]>([]);
-    const [bookingsError, setBookingsError] = useState("");
     const [orders, setOrders] = useState<Order[]>([]);
-    const [products, setProducts] = useState<Product[]>([]);
+    const [loadError, setLoadError] = useState("");
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
-    const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
-    const [showExpirationAlertsModal, setShowExpirationAlertsModal] = useState(false);
-    const [stockAlertFilter, setStockAlertFilter] = useState<
-        "all" | "low" | "out"
-    >("all");
+
+    const [trendRange, setTrendRange] = useState<TrendRange>(12);
+    const [branchPeriod, setBranchPeriod] = useState<PeriodOption>("month");
+    const [topPeriod, setTopPeriod] = useState<PeriodOption>("month");
+
 
     useEffect(() => {
         const timer = window.setInterval(() => {
             setCurrentDateTime(new Date());
         }, 30_000);
 
-        return () => {
-            window.clearInterval(timer);
-        };
+        return () => window.clearInterval(timer);
     }, []);
 
-    const loadOwnerDashboard = useCallback(async () => {
+    async function loadOwnerDashboard() {
         const token = getSavedItem("token");
         const storeId =
             getUserValue(user, "store_id") ||
             getUserValue(user, "storeId") ||
             getSavedItem("store_id") ||
             getSavedItem("stocknbook_store_id");
+
         if (!token) {
-            setBranches([]);
-            setBookings([]);
-            setOrders([]);
-            setProducts([]);
-            setBookingsError("Unable to load the owner dashboard because no login token was found.");
+            setLoadError("Unable to load the owner dashboard because no login token was found.");
             return;
         }
 
         setIsRefreshing(true);
+        setLoadError("");
 
         try {
-            try {
-                const branchesRes = await fetch("/api/branches", {
-                    method: "GET",
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                    cache: "no-store",
-                });
+            /*
+             * Load all dashboard sources at the same time, then commit the
+             * resulting state together. The previous version loaded bookings,
+             * and POS orders one after another and updated React state
+             * after each request. That caused a temporary "booking-only" render
+             * (POS = ₱0), followed by a second render when POS data arrived.
+             * It is why the KPI values and chart changed while Refreshing...
+             */
+            const ordersDateFrom = new Date(
+                currentDateTime.getFullYear(),
+                currentDateTime.getMonth() - 12,
+                1,
+            ).toISOString().slice(0, 10);
+            const ordersDateTo = currentDateTime.toISOString().slice(0, 10);
 
-                const branchesData = await branchesRes.json().catch(() => ({}));
-
-                if (branchesRes.ok && Array.isArray(branchesData.branches)) {
-                    const normalizedBranches: Branch[] = (branchesData.branches as unknown[]).map(normalizeBranch);
-                    setBranches(normalizedBranches);
-                }
-            } catch (error) {
-                console.warn("Owner dashboard branches fetch failed:", error);
-            }
-
-            try {
-                setBookingsError("");
-
-                const bookingsRes = await fetch("/api/bookings", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_booking_page_bookings",
-                        role: "owner",
-                        store_id: storeId ? Number(storeId) : undefined,
+            const [branchesResult, bookingsResult, ordersResult] =
+                await Promise.allSettled([
+                    fetch("/api/branches", {
+                        method: "GET",
+                        headers: { Authorization: `Bearer ${token}` },
+                        cache: "no-store",
                     }),
-                    cache: "no-store",
-                });
-
-                const bookingsText = await bookingsRes.text();
-                const bookingsData: {
-                    bookings?: unknown[];
-                    error?: unknown;
-                    message?: unknown;
-                    details?: unknown;
-                } = bookingsText ? JSON.parse(bookingsText) : {};
-
-                if (!bookingsRes.ok) {
-                    const message = String(
-                        bookingsData.error ||
-                        bookingsData.message ||
-                        "Unable to load booking data.",
-                    );
-
-                    console.error("Owner dashboard bookings request failed:", {
-                        status: bookingsRes.status,
-                        response: bookingsData,
-                    });
-                    setBookings([]);
-                    setBookingsError(message);
-                } else if (Array.isArray(bookingsData.bookings)) {
-                    const normalizedBookings = bookingsData.bookings.map(normalizeBooking);
-                    setBookings(normalizedBookings);
-                } else {
-                    setBookings([]);
-                    setBookingsError("Bookings API returned an invalid response.");
-                }
-            } catch (error) {
-                console.error("Owner dashboard bookings fetch failed:", error);
-                setBookings([]);
-                setBookingsError(
-                    error instanceof Error
-                        ? error.message
-                        : "Unable to load booking data.",
-                );
-            }
-
-            try {
-                const productsRes = await fetch("/api/products", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_products",
+                    fetch("/api/bookings", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_booking_page_bookings",
+                            role: "owner",
+                            store_id: storeId ? Number(storeId) : undefined,
+                        }),
+                        cache: "no-store",
                     }),
-                    cache: "no-store",
-                });
-
-                const productsData = await productsRes.json().catch(() => ({}));
-
-                if (productsRes.ok && Array.isArray(productsData.products)) {
-                    const normalizedProducts: Product[] = (productsData.products as unknown[]).map(normalizeProduct);
-                    setProducts(normalizedProducts);
-                }
-            } catch (error) {
-                console.warn("Owner dashboard products fetch failed:", error);
-            }
-
-            try {
-                const ordersRes = await fetch("/api/pos", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_orders",
+                    fetch("/api/pos", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_orders",
+                            include_order_items: true,
+                            date_from: ordersDateFrom,
+                            date_to: ordersDateTo,
+                        }),
+                        cache: "no-store",
                     }),
-                    cache: "no-store",
-                });
+                ]);
 
-                const ordersData = await ordersRes.json().catch(() => ({}));
+            // Start from the currently displayed data. If one endpoint fails,
+            // keep its previous value instead of clearing the dashboard and
+            // producing another misleading intermediate state.
+            let nextBranches = branches;
+            let nextBookings = bookings;
+            let nextOrders = orders;
+            const errors: string[] = [];
 
-                if (ordersRes.ok && Array.isArray(ordersData.orders)) {
-                    const normalizedOrders: Order[] = (ordersData.orders as unknown[]).map(normalizeOrder);
-                    setOrders(normalizedOrders);
+            if (branchesResult.status === "fulfilled") {
+                try {
+                    const response = branchesResult.value;
+                    const data = await response.json().catch(() => ({}));
+                    if (response.ok && Array.isArray(data.branches)) {
+                        nextBranches = (data.branches as unknown[]).map(normalizeBranch);
+                    } else if (!response.ok) {
+                        errors.push("Unable to load branch data.");
+                    }
+                } catch {
+                    errors.push("Unable to parse branch data.");
                 }
-            } catch (error) {
-                console.warn("Owner dashboard orders fetch failed:", error);
+            } else {
+                console.warn("Owner dashboard branches fetch failed:", branchesResult.reason);
+                errors.push("Unable to load branch data.");
             }
+
+            if (bookingsResult.status === "fulfilled") {
+                try {
+                    const response = bookingsResult.value;
+                    const text = await response.text();
+                    const data: { bookings?: unknown[]; error?: unknown; message?: unknown } =
+                        text ? JSON.parse(text) : {};
+
+                    if (response.ok && Array.isArray(data.bookings)) {
+                        nextBookings = data.bookings.map(normalizeBooking);
+                    } else if (!response.ok) {
+                        errors.push(
+                            String(data.error || data.message || "Unable to load booking data."),
+                        );
+                    }
+                } catch (error) {
+                    console.error("Owner dashboard bookings parse failed:", error);
+                    errors.push("Unable to parse booking data.");
+                }
+            } else {
+                console.error("Owner dashboard bookings fetch failed:", bookingsResult.reason);
+                errors.push("Unable to load booking data.");
+            }
+
+            if (ordersResult.status === "fulfilled") {
+                try {
+                    const response = ordersResult.value;
+                    const data = await response.json().catch(() => ({}));
+                    if (response.ok && Array.isArray(data.orders)) {
+                        nextOrders = (data.orders as unknown[]).map(normalizeOrder);
+                    } else if (!response.ok) {
+                        errors.push("Unable to load POS sales data.");
+                    }
+                } catch {
+                    errors.push("Unable to parse POS sales data.");
+                }
+            } else {
+                console.warn("Owner dashboard orders fetch failed:", ordersResult.reason);
+                errors.push("Unable to load POS sales data.");
+            }
+
+            // React 18 batches these updates, so the UI changes from the old
+            // complete snapshot to the new complete snapshot in one render.
+            setBranches(nextBranches);
+            setBookings(nextBookings);
+            setOrders(nextOrders);
+            setLoadError(errors.join(" "));
         } finally {
             setIsRefreshing(false);
         }
-    }, [user]);
+    }
 
     useEffect(() => {
-        // Load the dashboard once when the page opens.
-        // After that, data refreshes only when the user presses Refresh.
+        // Loads once on mount; the Refresh button re-triggers it manually.
         void loadOwnerDashboard();
-    }, [loadOwnerDashboard]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
-    const scheduledOrders = useMemo(
-        () =>
-            orders.filter((order) => {
-                const type = String(order.orderType || "")
-                    .trim()
-                    .toLowerCase()
-                    .replace(/_/g, "-");
+    const referenceDateKey = currentDateTime.toDateString();
 
-                return [
-                    "scheduled",
-                    "schedule",
-                    "scheduled-order",
-                    "future",
-                    "future-order",
-                    "advance-order",
-                    "pre-order",
-                    "preorder",
-                ].includes(type);
-            }),
-        [orders],
+    const analytics = useMemo(
+        () => buildOwnerAnalytics(orders, bookings, 13, currentDateTime),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [orders, bookings, referenceDateKey],
     );
 
-    const posSales = useMemo(() => {
-        return orders
-            .filter((order) => {
-                const type = String(order.orderType || "")
-                    .trim()
-                    .toLowerCase()
-                    .replace(/_/g, "-");
-
-                const status = String(order.status || "").trim().toLowerCase();
-
-                const isScheduledOrder = [
-                    "scheduled",
-                    "schedule",
-                    "scheduled-order",
-                    "future",
-                    "future-order",
-                    "advance-order",
-                    "pre-order",
-                    "preorder",
-                ].includes(type);
-
-                const isExcludedStatus = [
-                    "pending",
-                    "pending payment",
-                    "unpaid",
-                    "cancelled",
-                    "canceled",
-                    "refunded",
-                    "void",
-                    "draft",
-                    "failed",
-                ].includes(status);
-
-                // Records returned by /api/pos without an order type are treated
-                // as normal POS transactions. Scheduled orders and transactions
-                // that are not yet successfully completed are excluded.
-                return !isScheduledOrder && !isExcludedStatus;
-            })
-            .reduce((sum, order) => sum + Number(order.total || 0), 0);
-    }, [orders]);
-
-    const bookingSales = useMemo(
-        () =>
-            bookings
-                .filter((booking) => {
-                    const status = normalizeDashboardBookingStatus(booking.status);
-
-                    return status === "Confirmed" || status === "Completed";
-                })
-                .reduce(
-                    (sum, booking) =>
-                        sum + getDashboardBookingTotalPrice(booking),
-                    0,
-                ),
-        [bookings],
-    );
-    const scheduledOrderSales = scheduledOrders.reduce(
-        (sum, order) => sum + Number(order.total || 0),
-        0,
-    );
-    const totalBusinessSales = posSales + bookingSales + scheduledOrderSales;
-
-    const allUpcomingBookings = useMemo(() => {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        return [...bookings]
-            .filter((booking) => {
-                const status = String(booking.status || "").toLowerCase();
-                const schedule = new Date(booking.date || "");
-
-                return (
-                    !["completed", "cancelled", "canceled"].includes(status) &&
-                    !Number.isNaN(schedule.getTime()) &&
-                    schedule.getTime() >= today.getTime()
-                );
-            })
-            .sort(
-                (first, second) =>
-                    new Date(first.date || 0).getTime() -
-                    new Date(second.date || 0).getTime(),
-            );
-    }, [bookings]);
-
-    const upcomingBookings = allUpcomingBookings.slice(0, 3);
-
-    const pendingBookingCount = bookings.filter((booking) => {
-        const status = String(booking.status || "").toLowerCase();
-        return status.includes("pending") || status === "new";
-    }).length;
-
-
-    const allInventoryAlerts = useMemo(
-        () => getDashboardStockAlertItems(products),
-        [products],
+    const branchRows = useMemo(
+        () => aggregateBranchPerformance(orders, bookings, branches, branchPeriod, currentDateTime),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [orders, bookings, branches, branchPeriod, referenceDateKey],
     );
 
-    const inventoryAlerts = allInventoryAlerts.slice(0, 3);
-    const lowStockAlertCount = allInventoryAlerts.filter(
-        (item) => item.status === "Low Stock",
-    ).length;
-    const outOfStockAlertCount = allInventoryAlerts.filter(
-        (item) => item.status === "Out of Stock",
-    ).length;
-    const visibleStockAlerts = allInventoryAlerts.filter((item) => {
-        if (stockAlertFilter === "low") {
-            return item.status === "Low Stock";
-        }
-
-        if (stockAlertFilter === "out") {
-            return item.status === "Out of Stock";
-        }
-
-        return true;
-    });
-
-    const allExpirationAlertItems = useMemo(
-        () => getExpirationAlertItems(products),
-        [products],
+    const topItems = useMemo(
+        () => aggregateTopItems(orders, bookings, topPeriod, currentDateTime),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [orders, bookings, topPeriod, referenceDateKey],
     );
-    const expirationAlertItems = allExpirationAlertItems.slice(0, 3);
-    const expiringSoonCount = allExpirationAlertItems.filter(
-        (item) => item.status === "Expiring",
-    ).length;
 
-    const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", {
+    const monthly = analytics.monthly;
+    const current = monthly[monthly.length - 1] || { sales: 0, profit: 0, posSales: 0, bookingSales: 0 };
+    const previous = monthly[monthly.length - 2] || { sales: 0, profit: 0, posSales: 0, bookingSales: 0 };
+
+    const marginNow = current.posSales > 0 ? (current.profit / current.posSales) * 100 : 0;
+    const marginPrev = previous.posSales > 0 ? (previous.profit / previous.posSales) * 100 : 0;
+
+    const deltaSales = pctDelta(current.sales, previous.sales);
+    const deltaProfit = pctDelta(current.profit, previous.profit);
+    const deltaMarginPP = monthly.length > 1 ? marginNow - marginPrev : null;
+    const trendChartData = monthly.slice(-trendRange).map((point) => ({
+        label: point.label,
+        sales: point.sales,
+        profit: point.profit,
+    }));
+
+    const recentSalesForForecast = monthly.slice(-6).map((point) => point.sales);
+    const predictedNextMonthSales = linearForecastNext(recentSalesForForecast);
+    const forecastGrowthPct = pctDelta(predictedNextMonthSales, current.sales);
+    const nextMonthDate = new Date(currentDateTime.getFullYear(), currentDateTime.getMonth() + 1, 1);
+    const nextMonthFullLabel = nextMonthDate.toLocaleDateString("en-US", {
         month: "long",
         year: "numeric",
     });
 
-    const dashboardStoreName =
-        getUserValue(user, "storeName") ||
-        getUserValue(user, "store_name") ||
-        getUserValue(user, "businessName") ||
-        getUserValue(user, "business_name") ||
-        "Store";
+    const forecastInsight =
+        forecastGrowthPct === null
+            ? "Add a few more months of sales history to unlock next-month projections."
+            : `Based on the trailing ${recentSalesForForecast.length}-month trend, sales are projected to ${
+                forecastGrowthPct >= 0 ? "grow" : "decline"
+            } by ${Math.abs(forecastGrowthPct).toFixed(1)}% next month, reaching approximately ${peso(
+                Math.round(predictedNextMonthSales),
+            )}.`;
 
-    const dashboardBranchLabel = "All Branches";
-
-    const dashboardExportContext: ExportContext = {
-        storeName: dashboardStoreName,
-        branch: dashboardBranchLabel,
-        dateRange: `As of ${formatCurrentDashboardDateTime(currentDateTime)}`,
-    };
-
-    const dashboardFileDate = currentDateTime.toISOString().slice(0, 10);
-
-    const upcomingBookingsExportTable: ExportTable = {
-        title: "Upcoming Bookings",
-        headers: ["Date", "Booking Number", "Time", "Status"],
-        rows: allUpcomingBookings.map((booking) => [
-            formatDashboardBookingDate(booking.date),
-            booking.bookingNumber ||
-            `BK-${String(booking.id).padStart(6, "0")}`,
-            formatDashboardTime(booking.date, booking.time),
-            booking.status || "Pending",
-        ]),
-    };
-
-    const inventoryAlertsExportTable: ExportTable = {
-        title: "Inventory Alerts",
-        headers: [
-            "Product",
-            "Variant",
-            "Stock Level",
-            "Alert Level",
-            "Status",
-        ],
-        rows: allInventoryAlerts.map((item) => [
-            item.productName,
-            item.variantName,
-            String(item.currentStock),
-            String(item.alertLevel),
-            item.status,
-        ]),
-    };
-
-    const expirationAlertsExportTable: ExportTable = {
-        title: "Expiration Alerts",
-        headers: ["Product", "Stock Level", "Expiration Date", "Status"],
-        rows: allExpirationAlertItems.map((item) => [
-            item.variantName
-                ? `${item.productName} - ${item.variantName}`
-                : item.productName,
-            String(item.stock),
-            formatDashboardExpirationDate(item.expirationDate),
-            item.status,
-        ]),
-    };
+    const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 
     return (
         <>
@@ -1397,17 +908,17 @@ export default function OwnerDashboard() {
                 <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
                     <div className="min-w-0">
                         <h1 className="truncate text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                            Dashboard
+                            Owner Dashboard
                         </h1>
                         <p className="mt-1 truncate text-[12px] text-[#7A6A84]">
-                            Here&apos;s an overview of your store performance across all branches for {currentMonthLabel}.
+                            Strategic business overview across all branches for {currentMonthLabel}.
                         </p>
                     </div>
 
                     <div className="flex shrink-0 items-center gap-2.5">
-            <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-              {formatCurrentDashboardDateTime(currentDateTime)}
-            </span>
+                        <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
+                            {formatCurrentDashboardDateTime(currentDateTime)}
+                        </span>
 
                         <button
                             type="button"
@@ -1417,10 +928,7 @@ export default function OwnerDashboard() {
                             title="Refresh dashboard details"
                             className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                            <RefreshCw
-                                size={16}
-                                className={isRefreshing ? "animate-spin" : ""}
-                            />
+                            <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
                             {isRefreshing ? "Refreshing..." : "Refresh"}
                         </button>
                     </div>
@@ -1428,1215 +936,700 @@ export default function OwnerDashboard() {
             </header>
 
             <section className="px-6 py-5 font-sans">
-                <div className="mx-auto max-w-none space-y-3.5">
-                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                        <SalesSummaryCard
-                            title="Total Branch Sales"
-                            value={peso(totalBusinessSales)}
-                            subtitle="All sales channels"
-                            icon={<Store size={25} />}
-                            tone="violet"
+                <div className="mx-auto max-w-none space-y-4">
+                    {loadError && (
+                        <div className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs font-medium text-[#C32F2F]">
+                            {loadError}
+                        </div>
+                    )}
+
+                    {/* Owner KPI cards — same visual system as the existing dashboard reference */}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        <KpiCard
+                            title="Total Sales"
+                            value={peso(current.sales)}
+                            delta={deltaSales}
+                            icon={<BarChart3 size={25} />}
+                            iconBg="bg-[#F1EBFF]"
+                            iconColor="text-[#6D35D4]"
                         />
-                        <SalesSummaryCard
-                            title="Total POS Sales"
-                            value={peso(posSales)}
-                            subtitle="Point-of-sale transactions"
-                            icon={<ShoppingCart size={25} />}
-                            tone="green"
+                        <KpiCard
+                            title="POS Gross Profit"
+                            value={peso(current.profit)}
+                            delta={deltaProfit}
+                            info="Calculated from POS sales minus recorded product costs. Booking profit is excluded."
+                            icon={<Wallet size={25} />}
+                            iconBg="bg-[#E6F7EE]"
+                            iconColor="text-[#159455]"
                         />
-                        <SalesSummaryCard
-                            title="Total Booking Sales"
-                            value={peso(bookingSales)}
-                            subtitle="Sales from bookings"
-                            icon={<CalendarDays size={25} />}
-                            tone="blue"
+                        <KpiCard
+                            title="POS Profit Margin"
+                            value={`${marginNow.toFixed(1)}%`}
+                            delta={deltaMarginPP}
+                            deltaSuffix=" pp"
+                            info="POS Gross Profit divided by POS Sales, multiplied by 100. Booking profit is excluded."
+                            icon={<Percent size={25} />}
+                            iconBg="bg-[#FFF0E5]"
+                            iconColor="text-[#E66B20]"
+                        />
+                        <KpiCard
+                            title="Forecasted Sales"
+                            value={peso(Math.round(predictedNextMonthSales))}
+                            delta={forecastGrowthPct}
+                            comparisonText="next month"
+                            icon={<BarChart3 size={25} />}
+                            iconBg="bg-[#E6F7EE]"
+                            iconColor="text-[#159455]"
                         />
                     </div>
 
-                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-5">
-                        <GlanceCard
-                            title="Out of Stock"
-                            value={outOfStockAlertCount}
-                            label="Products"
-                            icon={<PackageX size={22} />}
-                            tone="red"
-                        />
-                        <GlanceCard
-                            title="Low Stock"
-                            value={lowStockAlertCount}
-                            label="Products"
-                            icon={<AlertTriangle size={22} />}
-                            tone="orange"
-                        />
-                        <GlanceCard
-                            title="Expiring Soon"
-                            value={expiringSoonCount}
-                            label="Items"
-                            icon={<CalendarClock size={22} />}
-                            tone="violet"
-                        />
-                        <GlanceCard
-                            title="Pending Bookings"
-                            value={pendingBookingCount}
-                            label="Bookings"
-                            icon={<CalendarClock size={22} />}
-                            tone="blue"
-                        />
-                        <GlanceCard
-                            title="Upcoming Bookings"
-                            value={upcomingBookings.length}
-                            label="Bookings"
-                            icon={<CalendarDays size={22} />}
-                            tone="green"
+                    {/* Trend chart + branch performance */}
+                    <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+                        <div className="rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm xl:col-span-2">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div className="flex items-center gap-2.5">
+                                    <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                                        <BarChart3 size={18} />
+                                    </span>
+                                    <div>
+                                        <h3 className="text-[15px] font-bold text-[#1A1220]">Sales &amp; POS Profit Trend</h3>
+                                        <p className="text-[11px] text-[#9A8DA8]">
+                                            Monthly total sales and POS gross profit across all branches
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <select
+                                    value={trendRange}
+                                    onChange={(event) => setTrendRange(Number(event.target.value) as TrendRange)}
+                                    className="h-8 rounded-lg border border-[#E6DDF0] bg-white px-2.5 text-xs font-semibold text-[#5F4E75] shadow-sm focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]"
+                                >
+                                    <option value={6}>Last 6 Months</option>
+                                    <option value={12}>Last 12 Months</option>
+                                </select>
+                            </div>
+
+                            <div className="mt-2">
+                                <SalesTrendChart data={trendChartData} />
+                            </div>
+
+                            <div className="mt-1 flex flex-wrap items-center justify-center gap-6 text-[10px] font-semibold text-[#5F4E75]">
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span className="h-2.5 w-2.5 rounded-full bg-[#6D35D4]" />
+                                    Total Sales
+                                </span>
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span className="h-2.5 w-2.5 rounded-full bg-[#159455]" />
+                                    POS Gross Profit
+                                </span>
+                            </div>
+                        </div>
+
+                        <BranchPerformancePanel
+                            rows={branchRows}
+                            period={branchPeriod}
+                            onPeriodChange={setBranchPeriod}
+                            periodLabel={formatPeriodLabel(branchPeriod, currentDateTime)}
                         />
                     </div>
 
-                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
-                        <CompactDashboardTable
-                            title="Upcoming Bookings"
-                            subtitle="Next 3 upcoming bookings"
-                            icon={<CalendarDays size={18} />}
-                            action={() => router.push("/bookings")}
-                            onExportPdf={() =>
-                                exportTableAsPdf(
-                                    upcomingBookingsExportTable,
-                                    dashboardExportContext,
-                                    `upcoming-bookings-${dashboardFileDate}`,
-                                )
-                            }
-                            onExportXlsx={() =>
-                                exportTableAsExcel(
-                                    upcomingBookingsExportTable,
-                                    dashboardExportContext,
-                                    `upcoming-bookings-${dashboardFileDate}`,
-                                    "Upcoming Bookings",
-                                )
-                            }
-                            onExportDoc={() =>
-                                exportTableAsDoc(
-                                    upcomingBookingsExportTable,
-                                    dashboardExportContext,
-                                    `upcoming-bookings-${dashboardFileDate}`,
-                                )
-                            }
-                            totalRecords={allUpcomingBookings.length}
-                            headers={["Date", "Booking #", "Time", "Status"]}
-                            emptyText={bookingsError || "No upcoming bookings yet."}
-                            rows={upcomingBookings.map((booking) => ({
-                                date: booking.date,
-                                reference: compactDashboardReference(
-                                    "BK",
-                                    booking.bookingNumber,
-                                    booking.id,
-                                ),
-                                time: formatDashboardTime(booking.date, booking.time),
-                                status: booking.status || "Pending",
-                            }))}
+                    {/* Clean summary area — top products + forecast */}
+                    <div className="grid grid-cols-[1.45fr_1fr] items-stretch gap-4">
+                        <TopProductsPanel
+                            rows={topItems}
+                            period={topPeriod}
+                            onPeriodChange={setTopPeriod}
+                            onViewAll={() => router.push("/reports")}
                         />
 
-                        <InventoryAlertPanel
-                            items={inventoryAlerts}
-                            totalAlerts={allInventoryAlerts.length}
-                            onExportPdf={() =>
-                                exportTableAsPdf(
-                                    inventoryAlertsExportTable,
-                                    dashboardExportContext,
-                                    `inventory-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onExportXlsx={() =>
-                                exportTableAsExcel(
-                                    inventoryAlertsExportTable,
-                                    dashboardExportContext,
-                                    `inventory-alerts-${dashboardFileDate}`,
-                                    "Inventory Alerts",
-                                )
-                            }
-                            onExportDoc={() =>
-                                exportTableAsDoc(
-                                    inventoryAlertsExportTable,
-                                    dashboardExportContext,
-                                    `inventory-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onViewAll={() => {
-                                setStockAlertFilter("all");
-                                setShowStockAlertsModal(true);
-                            }}
-                        />
-
-                        <ExpirationAlertsPanel
-                            items={expirationAlertItems}
-                            totalItems={allExpirationAlertItems.length}
-                            onExportPdf={() =>
-                                exportTableAsPdf(
-                                    expirationAlertsExportTable,
-                                    dashboardExportContext,
-                                    `expiration-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onExportXlsx={() =>
-                                exportTableAsExcel(
-                                    expirationAlertsExportTable,
-                                    dashboardExportContext,
-                                    `expiration-alerts-${dashboardFileDate}`,
-                                    "Expiration Alerts",
-                                )
-                            }
-                            onExportDoc={() =>
-                                exportTableAsDoc(
-                                    expirationAlertsExportTable,
-                                    dashboardExportContext,
-                                    `expiration-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onViewAll={() =>
-                                setShowExpirationAlertsModal(true)
-                            }
+                        <DemandForecastPanel
+                            nextMonthLabel={nextMonthFullLabel}
+                            currentMonthLabel={currentMonthLabel}
+                            predicted={predictedNextMonthSales}
+                            growthPct={forecastGrowthPct}
+                            insight={forecastInsight}
                         />
                     </div>
                 </div>
             </section>
-
-            {showStockAlertsModal && (
-                <OwnerStockAlertsModal
-                    items={visibleStockAlerts}
-                    activeFilter={stockAlertFilter}
-                    totalCount={allInventoryAlerts.length}
-                    lowStockCount={lowStockAlertCount}
-                    outOfStockCount={outOfStockAlertCount}
-                    onChangeFilter={setStockAlertFilter}
-                    onClose={() => setShowStockAlertsModal(false)}
-                />
-            )}
-            {showExpirationAlertsModal && (
-                <ExpirationAlertsModal
-                    items={allExpirationAlertItems}
-                    onClose={() => setShowExpirationAlertsModal(false)}
-                />
-            )}
-
         </>
     );
 }
 
-type DashboardTone = "violet" | "green" | "blue" | "orange" | "red" | "cyan";
 
-const toneStyles: Record<DashboardTone, { icon: string; background: string }> =
-    {
-        violet: { icon: "text-[#6D35D4]", background: "bg-[#F1EBFF]" },
-        green: { icon: "text-[#159455]", background: "bg-[#E6F7EE]" },
-        blue: { icon: "text-[#2563EB]", background: "bg-[#EAF1FF]" },
-        orange: { icon: "text-[#E66B20]", background: "bg-[#FFF0E5]" },
-        red: { icon: "text-[#DC2626]", background: "bg-[#FDECEC]" },
-        cyan: { icon: "text-[#138A96]", background: "bg-[#E8F8FA]" },
-    };
+/* ----------------------------------------------------------------------- */
+/* Presentational components                                               */
+/* ----------------------------------------------------------------------- */
 
-function SalesSummaryCard({
-                              title,
-                              value,
-                              subtitle,
-                              icon,
-                              tone,
-                          }: {
+function KpiCard({
+                     title,
+                     value,
+                     delta,
+                     deltaSuffix = "%",
+                     comparisonText = "vs last month",
+                     info,
+                     icon,
+                     iconBg,
+                     iconColor,
+                 }: {
     title: string;
     value: string;
-    subtitle: string;
+    delta: number | null;
+    deltaSuffix?: string;
+    comparisonText?: string;
+    info?: string;
     icon: React.ReactNode;
-    tone: DashboardTone;
+    iconBg: string;
+    iconColor: string;
 }) {
-    const style = toneStyles[tone];
+    const isUp = delta !== null && delta >= 0;
 
     return (
-        <div className="flex min-h-[128px] items-center gap-5 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-5 shadow-sm">
-      <span
-          className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
-      >
-        {icon}
-      </span>
-            <div className="min-w-0">
-                <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">
-                    {title}
-                </p>
-                <p className="mt-2 truncate text-[26px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
+        <div className="flex min-h-[116px] items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
+            <span
+                className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconBg} ${iconColor}`}
+            >
+                {icon}
+            </span>
+
+            <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                    <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">
+                        {title}
+                    </p>
+
+                    {info && (
+                        <span className="group relative inline-flex shrink-0">
+                            <button
+                                type="button"
+                                aria-label={`${title} information`}
+                                className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-full border border-[#D9CDE7] bg-[#FAF7FF] text-[#6D35D4] transition hover:border-[#BCA7DB] hover:bg-[#F1EBFF] focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]"
+                            >
+                                <Info size={11} strokeWidth={2.2} />
+                            </button>
+
+                            <span
+                                role="tooltip"
+                                className="pointer-events-none absolute left-1/2 top-full z-40 mt-2 hidden w-[245px] -translate-x-1/2 rounded-lg border border-[#E5DAEE] bg-[#2B174C] px-3 py-2 text-[11px] font-medium leading-4 text-white shadow-lg group-hover:block group-focus-within:block"
+                            >
+                                {info}
+                                <span className="absolute bottom-full left-1/2 h-0 w-0 -translate-x-1/2 border-x-[5px] border-b-[5px] border-x-transparent border-b-[#2B174C]" />
+                            </span>
+                        </span>
+                    )}
+                </div>
+
+                <p className="mt-2 truncate text-[25px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
                     {value}
                 </p>
-                <p className="mt-2 text-[12px] leading-4 text-[#8A7D92]">{subtitle}</p>
+
+                {delta === null ? (
+                    <p className="mt-2 text-[12px] font-medium leading-4 text-[#8A7D92]">
+                        No prior month to compare
+                    </p>
+                ) : (
+                    <p
+                        className={`mt-2 flex items-center gap-1 text-[12px] font-semibold leading-4 ${
+                            isUp ? "text-[#159455]" : "text-[#D92D20]"
+                        }`}
+                    >
+                        {isUp ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
+                        {isUp ? "+" : ""}
+                        {delta.toFixed(1)}
+                        {deltaSuffix} {comparisonText}
+                    </p>
+                )}
             </div>
         </div>
     );
 }
 
-function GlanceCard({
-                        title,
-                        value,
-                        label,
-                        icon,
-                        tone,
-                    }: {
-    title: string;
-    value: number;
-    label: string;
-    icon: React.ReactNode;
-    tone: DashboardTone;
-}) {
-    const style = toneStyles[tone];
+function SalesTrendChart({ data }: { data: { label: string; sales: number; profit: number }[] }) {
+    const width = 960;
+    const height = 245;
+    const margin = { top: 14, right: 16, bottom: 32, left: 58 };
+    const innerW = width - margin.left - margin.right;
+    const innerH = height - margin.top - margin.bottom;
+
+    if (data.length === 0) {
+        return (
+            <div className="flex h-[205px] items-center justify-center text-sm text-[#9A8DA8]">
+                No sales history yet. Once orders and bookings come in, this trend will populate automatically.
+            </div>
+        );
+    }
+
+    const maxRaw = Math.max(1, ...data.map((d) => d.sales), ...data.map((d) => d.profit));
+    const step = niceStep(maxRaw / 5);
+    const axisMax = step * 5;
+    const ticks = [0, 1, 2, 3, 4, 5].map((i) => step * i);
+
+    const xFor = (index: number) =>
+        margin.left + (data.length > 1 ? (index / (data.length - 1)) * innerW : innerW / 2);
+    const yFor = (value: number) => margin.top + innerH - (axisMax > 0 ? (value / axisMax) * innerH : 0);
+
+    const salesPoints = data.map((d, index) => ({ x: xFor(index), y: yFor(d.sales) }));
+    const profitPoints = data.map((d, index) => ({ x: xFor(index), y: yFor(d.profit) }));
+
+    const linePath = (points: { x: number; y: number }[]) =>
+        points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+
+    const areaPath = (points: { x: number; y: number }[]) => {
+        const baseline = margin.top + innerH;
+        return `${linePath(points)} L${points[points.length - 1].x.toFixed(1)},${baseline.toFixed(
+            1,
+        )} L${points[0].x.toFixed(1)},${baseline.toFixed(1)} Z`;
+    };
 
     return (
-        <div className="flex min-h-[124px] items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-4 py-5 shadow-sm">
-      <span
-          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
-      >
-        {icon}
-      </span>
-            <div className="min-w-0 flex-1">
-                <p className="whitespace-nowrap text-[12px] font-semibold leading-4 text-[#4B3E55]">
-                    {title}
-                </p>
-                <p className={`mt-1 text-[25px] font-bold leading-none ${style.icon}`}>{value}</p>
-                <p className="mt-1 text-[12px] text-[#8A7D92]">{label}</p>
-            </div>
-        </div>
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full" role="img" aria-label="Total sales and POS gross profit trend chart">
+            <defs>
+                <linearGradient id="ownerSalesFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#6D35D4" stopOpacity="0.16" />
+                    <stop offset="100%" stopColor="#6D35D4" stopOpacity="0" />
+                </linearGradient>
+            </defs>
+
+            {ticks.map((tick) => (
+                <g key={tick}>
+                    <line
+                        x1={margin.left}
+                        x2={width - margin.right}
+                        y1={yFor(tick)}
+                        y2={yFor(tick)}
+                        stroke="#EEE7F5"
+                        strokeWidth={1}
+                    />
+                    <text x={margin.left - 10} y={yFor(tick) + 4} textAnchor="end" fontSize="10" fill="#9A8DA8">
+                        {pesoCompact(tick)}
+                    </text>
+                </g>
+            ))}
+
+            <path d={areaPath(salesPoints)} fill="url(#ownerSalesFill)" stroke="none" />
+            <path
+                d={linePath(salesPoints)}
+                fill="none"
+                stroke="#6D35D4"
+                strokeWidth={2.5}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+            <path
+                d={linePath(profitPoints)}
+                fill="none"
+                stroke="#159455"
+                strokeWidth={2.5}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+
+            {salesPoints.map((p, i) => (
+                <circle key={`sales-${i}`} cx={p.x} cy={p.y} r={3} fill="#6D35D4" />
+            ))}
+            {profitPoints.map((p, i) => (
+                <circle key={`profit-${i}`} cx={p.x} cy={p.y} r={3} fill="#159455" />
+            ))}
+
+            {data.map((point, index) => (
+                <text
+                    key={point.label + index}
+                    x={xFor(index)}
+                    y={height - 12}
+                    textAnchor="middle"
+                    fontSize="9.5"
+                    fill="#9A8DA8"
+                >
+                    {point.label}
+                </text>
+            ))}
+        </svg>
     );
 }
 
-type CompactTableRow = {
-    date?: string;
-    reference: string;
-    time: string;
-    status: string;
-};
-
-function CompactDashboardTable({
-                                   title,
-                                   subtitle,
-                                   icon,
-                                   action,
-                                   onExportPdf,
-                                   onExportXlsx,
-                                   onExportDoc,
-                                   totalRecords,
-                                   headers,
-                                   rows,
-                                   emptyText,
-                               }: {
-    title: string;
-    subtitle: string;
-    icon: React.ReactNode;
-    action: () => void;
-    onExportPdf: () => void;
-    onExportXlsx: () => void;
-    onExportDoc: () => void;
-    totalRecords: number;
-    headers: [string, string, string, string];
-    rows: CompactTableRow[];
-    emptyText: string;
+function BranchPerformancePanel({
+                                    rows,
+                                    period,
+                                    onPeriodChange,
+                                    periodLabel,
+                                }: {
+    rows: { key: string; name: string; amount: number }[];
+    period: PeriodOption;
+    onPeriodChange: (period: PeriodOption) => void;
+    periodLabel: string;
 }) {
+    const visible = rows.slice(0, 6);
+    const width = 440;
+    const height = 250;
+    const margin = { top: 30, right: 16, bottom: 52, left: 54 };
+    const innerW = width - margin.left - margin.right;
+    const innerH = height - margin.top - margin.bottom;
+    const maxRaw = Math.max(1, ...visible.map((row) => row.amount));
+    const step = niceStep(maxRaw / 4);
+    const axisMax = step * 4;
+    const ticks = [0, 1, 2, 3, 4].map((index) => step * index);
+    const slotWidth = visible.length > 0 ? innerW / visible.length : innerW;
+    const barWidth = Math.min(56, Math.max(28, slotWidth * 0.52));
+    const yFor = (value: number) =>
+        margin.top + innerH - (axisMax > 0 ? (Math.max(0, value) / axisMax) * innerH : 0);
+
     return (
-        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
-            <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
-                <div className="flex min-w-0 items-start gap-2 text-[#6D35D4]">
-                    <span className="mt-0.5 flex h-6 w-6 items-center justify-center">
-                        {icon}
+        <div className="h-full rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#EAF1FF] text-[#2563EB]">
+                        <Building2 size={18} />
                     </span>
                     <div className="min-w-0">
-                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
-                            {title}
-                        </h2>
-                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
-                            {subtitle}
-                        </p>
+                        <h3 className="truncate text-[15px] font-bold text-[#1A1220]">Branch Performance</h3>
+                        <p className="truncate text-[11px] text-[#9A8DA8]">Total sales per branch for {periodLabel}</p>
                     </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
-                    <DashboardExportMenu
-                        label={title}
-                        onExportPdf={onExportPdf}
-                        onExportXlsx={onExportXlsx}
-                        onExportDoc={onExportDoc}
-                    />
 
-                    <button
-                        type="button"
-                        onClick={action}
-                        className="rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4]"
-                    >
-                        View all
-                    </button>
-                </div>
+                <select
+                    value={period}
+                    onChange={(event) => onPeriodChange(event.target.value as PeriodOption)}
+                    className="h-8 shrink-0 rounded-lg border border-[#E6DDF0] bg-white px-2.5 text-xs font-semibold text-[#5F4E75] shadow-sm focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]"
+                >
+                    <option value="month">This Month</option>
+                    <option value="quarter">This Quarter</option>
+                    <option value="year">This Year</option>
+                </select>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-hidden">
-                <table className="w-full table-fixed border-collapse">
-                    <colgroup>
-                        <col className="w-[22%]" />
-                        <col className="w-[31%]" />
-                        <col className="w-[22%]" />
-                        <col className="w-[25%]" />
-                    </colgroup>
-                    <thead className="bg-[#FBFAFD]">
-                    <tr className="h-[46px] border-b border-[#EEE8F2]">
-                        {headers.map((header) => (
-                            <th
-                                key={header}
-                                className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]"
-                            >
-                                {header}
-                            </th>
+            {visible.length === 0 ? (
+                <div className="flex min-h-[245px] items-center justify-center text-sm text-[#9A8DA8]">
+                    No branch sales recorded for this period yet.
+                </div>
+            ) : (
+                <div className="mt-3">
+                    <svg
+                        viewBox={`0 0 ${width} ${height}`}
+                        className="w-full"
+                        role="img"
+                        aria-label={`Branch sales bar chart for ${periodLabel}`}
+                    >
+                        <defs>
+                            <linearGradient id="branchBarFill" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor="#7C45E8" />
+                                <stop offset="100%" stopColor="#5C2BC5" />
+                            </linearGradient>
+                            <filter id="branchBarShadow" x="-20%" y="-20%" width="140%" height="160%">
+                                <feDropShadow dx="0" dy="3" stdDeviation="3" floodColor="#6D35D4" floodOpacity="0.16" />
+                            </filter>
+                        </defs>
+
+                        {ticks.map((tick) => (
+                            <g key={tick}>
+                                <line
+                                    x1={margin.left}
+                                    x2={width - margin.right}
+                                    y1={yFor(tick)}
+                                    y2={yFor(tick)}
+                                    stroke="#EEE7F5"
+                                    strokeWidth={1}
+                                />
+                                <text
+                                    x={margin.left - 9}
+                                    y={yFor(tick) + 4}
+                                    textAnchor="end"
+                                    fontSize="9.5"
+                                    fill="#9A8DA8"
+                                >
+                                    {pesoCompact(tick)}
+                                </text>
+                            </g>
                         ))}
-                    </tr>
-                    </thead>
-                    <tbody>
-                    {rows.length === 0 ? (
-                        <tr>
-                            <td
-                                colSpan={4}
-                                className="px-4 pt-6 text-center align-top text-[13px] text-[#8A7D92]"
-                            >
-                                {emptyText}
-                            </td>
-                        </tr>
-                    ) : (
-                        rows.map((row, index) => (
-                            <CompactDashboardRow
-                                key={`${row.reference}-${index}`}
-                                row={row}
-                            />
-                        ))
-                    )}
-                    </tbody>
-                </table>
-            </div>
-            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
-                Showing {rows.length} of {totalRecords} record
-                {totalRecords === 1 ? "" : "s"}
-            </div>
-        </section>
-    );
-}
 
-function CompactDashboardRow({ row }: { row: CompactTableRow }) {
-    const parsed = new Date(row.date || "");
-    const validDate = !Number.isNaN(parsed.getTime());
-    const month = validDate
-        ? parsed.toLocaleDateString("en-US", { month: "short" }).toUpperCase()
-        : "";
-    const day = validDate ? parsed.getDate() : "";
-    const normalized = row.status.toLowerCase();
-    const statusClass =
-        normalized.includes("confirm") || normalized.includes("complete")
-            ? "text-[#16834A]"
-            : normalized.includes("cancel")
-                ? "text-[#C53030]"
-                : "text-[#B66B00]";
-
-    return (
-        <tr className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FCFAFF]">
-            <td className="px-3 py-2">
-                <div className="flex h-10 w-10 flex-col items-center justify-center rounded-lg border border-[#E8E0F0] bg-[#FBF9FE] leading-none">
-                    <span className="text-[7px] font-bold text-[#7C3AED]">{month}</span>
-                    <span className="mt-1 text-[14px] font-bold text-[#342047]">
-                        {day}
-                    </span>
-                </div>
-            </td>
-            <td className="px-3 py-2">
-                <p
-                    title={row.reference}
-                    className="whitespace-nowrap text-[13px] font-semibold text-[#30243A]"
-                >
-                    {row.reference}
-                </p>
-            </td>
-            <td className="px-3 py-2">
-                <p className="whitespace-nowrap text-[13px] font-semibold text-[#5F4E75]">
-                    {row.time}
-                </p>
-            </td>
-            <td className="px-3 py-2">
-                <span
-                    className={`whitespace-nowrap text-[13px] font-semibold capitalize ${statusClass}`}
-                >
-                    {row.status}
-                </span>
-            </td>
-        </tr>
-    );
-}
-
-function InventoryAlertPanel({
-                                 items,
-                                 totalAlerts,
-                                 onExportPdf,
-                                 onExportXlsx,
-                                 onExportDoc,
-                                 onViewAll,
-                             }: {
-    items: StockAlertItem[];
-    totalAlerts: number;
-    onExportPdf: () => void;
-    onExportXlsx: () => void;
-    onExportDoc: () => void;
-    onViewAll: () => void;
-}) {
-    return (
-        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
-            <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
-                <div className="flex min-w-0 items-start gap-2">
-                    <TriangleAlert
-                        size={18}
-                        className="mt-0.5 shrink-0 text-[#EF4444]"
-                    />
-                    <div className="min-w-0">
-                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
-                            Inventory Alerts
-                        </h2>
-                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
-                            Items that need attention
-                        </p>
-                    </div>
-                </div>
-
-                <div className="flex shrink-0 items-center gap-2">
-                    <DashboardExportMenu
-                        label="Inventory Alerts"
-                        onExportPdf={onExportPdf}
-                        onExportXlsx={onExportXlsx}
-                        onExportDoc={onExportDoc}
-                    />
-
-                    <button
-                        type="button"
-                        onClick={onViewAll}
-                        className="rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4]"
-                    >
-                        View all
-                    </button>
-                </div>
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-hidden">
-                <table className="w-full table-fixed border-collapse">
-                    <colgroup>
-                        <col className="w-[58%]" />
-                        <col className="w-[18%]" />
-                        <col className="w-[24%]" />
-                    </colgroup>
-
-                    <thead className="bg-[#FBFAFD]">
-                    <tr className="h-[46px] border-b border-[#EEE8F2]">
-                        <th className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
-                            Product
-                        </th>
-                        <th className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
-                            Stock Level
-                        </th>
-                        <th className="whitespace-nowrap px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
-                            Stock Alert
-                        </th>
-                    </tr>
-                    </thead>
-
-                    <tbody>
-                    {items.length === 0 ? (
-                        <tr>
-                            <td
-                                colSpan={3}
-                                className="px-4 pt-6 text-center align-top text-[13px] text-[#8A7D92]"
-                            >
-                                All products and variants are well stocked.
-                            </td>
-                        </tr>
-                    ) : (
-                        items.map((item) => {
-                            const isOutOfStock =
-                                item.status === "Out of Stock";
+                        {visible.map((row, index) => {
+                            const x = margin.left + index * slotWidth + (slotWidth - barWidth) / 2;
+                            const y = yFor(row.amount);
+                            const barHeight = margin.top + innerH - y;
+                            const label = row.name.length > 16 ? `${row.name.slice(0, 14)}…` : row.name;
 
                             return (
-                                <tr
-                                    key={item.id}
-                                    className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FFFCFC]"
-                                >
-                                    <td className="px-3 py-2">
-                                        <p
-                                            title={item.productName}
-                                            className="line-clamp-1 text-[13px] font-semibold leading-5 text-[#30243A]"
-                                        >
-                                            {item.productName}
-                                        </p>
-                                        <p
-                                            title={item.variantName}
-                                            className="truncate text-[10px] font-medium text-[#806A8C]"
-                                        >
-                                            {item.variantName}
-                                        </p>
-                                    </td>
-
-                                    <td className="px-3 py-2">
-                                    <span
-                                        className={`whitespace-nowrap text-[13px] font-semibold ${
-                                            isOutOfStock
-                                                ? "text-[#DC2626]"
-                                                : "text-[#B7791F]"
-                                        }`}
+                                <g key={row.key}>
+                                    <title>{`${row.name}: ${peso(row.amount)}`}</title>
+                                    <rect
+                                        x={x}
+                                        y={y}
+                                        width={barWidth}
+                                        height={Math.max(2, barHeight)}
+                                        rx={7}
+                                        fill="url(#branchBarFill)"
+                                        filter="url(#branchBarShadow)"
+                                    />
+                                    <text
+                                        x={x + barWidth / 2}
+                                        y={Math.max(14, y - 7)}
+                                        textAnchor="middle"
+                                        fontSize="9.5"
+                                        fontWeight="700"
+                                        fill="#1A1220"
                                     >
-                                        {item.currentStock} left
-                                    </span>
-                                    </td>
-
-                                    <td className="px-3 py-2">
-                                    <span
-                                        className={`whitespace-nowrap text-[13px] font-semibold ${
-                                            isOutOfStock
-                                                ? "text-[#DC2626]"
-                                                : "text-[#B7791F]"
-                                        }`}
+                                        {pesoCompact(row.amount)}
+                                    </text>
+                                    <text
+                                        x={x + barWidth / 2}
+                                        y={height - 19}
+                                        textAnchor="middle"
+                                        fontSize="9"
+                                        fill="#7A6A84"
                                     >
-                                        {item.status}
-                                    </span>
-                                    </td>
-                                </tr>
+                                        {label}
+                                    </text>
+                                </g>
                             );
-                        })
-                    )}
-                    </tbody>
-                </table>
-            </div>
-
-            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
-                Showing {items.length} of {totalAlerts} alert
-                {totalAlerts === 1 ? "" : "s"}
-            </div>
-        </section>
-    );
-}
-function ExpirationAlertsPanel({
-                                   items,
-                                   totalItems,
-                                   showBranch = false,
-                                   onExportPdf,
-                                   onExportXlsx,
-                                   onExportDoc,
-                                   onViewAll,
-                               }: {
-    items: ExpirationAlertItem[];
-    totalItems: number;
-    showBranch?: boolean;
-    onExportPdf: () => void;
-    onExportXlsx: () => void;
-    onExportDoc: () => void;
-    onViewAll: () => void;
-}) {
-    const columnCount = showBranch ? 4 : 3;
-
-    return (
-        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
-            <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
-                <div className="flex min-w-0 items-start gap-2">
-                    <CalendarClock
-                        size={18}
-                        className="mt-0.5 shrink-0 text-[#7C3AED]"
-                    />
-                    <div className="min-w-0">
-                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
-                            Expiration Alerts
-                        </h2>
-                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
-                            Expired and expiring items
-                        </p>
-                    </div>
+                        })}
+                    </svg>
                 </div>
-
-                <div className="flex shrink-0 items-center gap-2">
-                    <DashboardExportMenu
-                        label="Expiration Alerts"
-                        onExportPdf={onExportPdf}
-                        onExportXlsx={onExportXlsx}
-                        onExportDoc={onExportDoc}
-                    />
-
-                    <button
-                        type="button"
-                        onClick={onViewAll}
-                        className="rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4]"
-                    >
-                        View all
-                    </button>
-                </div>
-            </div>
-
-            <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
-                <table className="w-full table-fixed border-collapse">
-                    <colgroup>
-                        <col className={showBranch ? "w-[23%]" : "w-[48%]"} />
-                        {showBranch ? <col className="w-[33%]" /> : null}
-                        <col className={showBranch ? "w-[18%]" : "w-[20%]"} />
-                        <col className={showBranch ? "w-[26%]" : "w-[32%]"} />
-                    </colgroup>
-
-                    <thead className="bg-[#FBFAFD]">
-                    <tr className="h-[46px] border-b border-[#EEE8F2]">
-                        <th className="whitespace-nowrap px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
-                            Product
-                        </th>
-                        {showBranch ? (
-                            <th className="whitespace-nowrap px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
-                                Branch
-                            </th>
-                        ) : null}
-                        <th className="whitespace-nowrap px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
-                            Stock Level
-                        </th>
-                        <th className="whitespace-nowrap px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase leading-3 tracking-[0.04em] text-[#806A8C]">
-                            Expiration Date
-                        </th>
-                    </tr>
-                    </thead>
-
-                    <tbody>
-                    {items.length === 0 ? (
-                        <tr>
-                            <td
-                                colSpan={columnCount}
-                                className="px-4 pt-6 text-center align-top text-[13px] text-[#8A7D92]"
-                            >
-                                No expiration alerts found.
-                            </td>
-                        </tr>
-                    ) : (
-                        items.map((item) => {
-                            const isExpired = item.status === "Expired";
-
-                            return (
-                                <tr
-                                    key={item.id}
-                                    className="h-[58px] border-b border-[#F1EDF5] last:border-b-0 hover:bg-[#FCFAFF]"
-                                >
-                                    <td className="px-2 py-2 align-middle">
-                                        <p
-                                            title={item.productName}
-                                            className="line-clamp-2 text-[13px] font-semibold leading-5 text-[#30243A]"
-                                        >
-                                            {item.productName}
-                                        </p>
-                                        {item.variantName ? (
-                                            <p
-                                                title={item.variantName}
-                                                className="truncate text-[10px] font-medium text-[#806A8C]"
-                                            >
-                                                {item.variantName}
-                                            </p>
-                                        ) : null}
-                                    </td>
-
-                                    {showBranch ? (
-                                        <td className="px-2 py-2 align-middle">
-                                            <p
-                                                title={item.branchName}
-                                                className="whitespace-nowrap text-[12px] font-semibold tracking-[-0.04em] text-[#6D35D4]"
-                                            >
-                                                {item.branchName}
-                                            </p>
-                                        </td>
-                                    ) : null}
-
-                                    <td className="px-2 py-2 align-middle">
-                                        <span className="whitespace-nowrap text-[12px] font-semibold text-[#30243A]">
-                                            {item.stock} left
-                                        </span>
-                                    </td>
-
-                                    <td className="px-2 py-2 align-middle">
-                                        <p
-                                            className={`whitespace-nowrap text-[12px] font-semibold tracking-[-0.01em] ${
-                                                isExpired
-                                                    ? "text-[#DC2626]"
-                                                    : "text-[#6D35D4]"
-                                            }`}
-                                        >
-                                            {formatDashboardExpirationDate(
-                                                item.expirationDate,
-                                            )}
-                                        </p>
-                                        <p
-                                            className={`whitespace-nowrap text-[10px] font-semibold ${
-                                                isExpired ||
-                                                item.daysRemaining <= 7
-                                                    ? "text-[#DC2626]"
-                                                    : "text-[#806A8C]"
-                                            }`}
-                                        >
-                                            {formatExpirationDistance(
-                                                item.daysRemaining,
-                                            )}
-                                        </p>
-                                    </td>
-                                </tr>
-                            );
-                        })
-                    )}
-                    </tbody>
-                </table>
-            </div>
-
-            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
-                Showing {items.length} of {totalItems} alert
-                {totalItems === 1 ? "" : "s"}
-            </div>
-        </section>
-    );
-}
-
-function ExpirationAlertsModal({
-                                   items,
-                                   showBranch = false,
-                                   onClose,
-                               }: {
-    items: ExpirationAlertItem[];
-    showBranch?: boolean;
-    onClose: () => void;
-}) {
-    const [activeFilter, setActiveFilter] = useState<
-        "all" | "expiring" | "expired"
-    >("all");
-
-    const columnCount = showBranch ? 4 : 3;
-    const expiredCount = items.filter(
-        (item) => item.status === "Expired",
-    ).length;
-    const expiringCount = items.filter(
-        (item) => item.status === "Expiring",
-    ).length;
-
-    const visibleItems = items.filter((item) => {
-        if (activeFilter === "expired") {
-            return item.status === "Expired";
-        }
-
-        if (activeFilter === "expiring") {
-            return item.status === "Expiring";
-        }
-
-        return true;
-    });
-
-    const filterClass = (
-        filter: "all" | "expiring" | "expired",
-    ) => {
-        const isActive = activeFilter === filter;
-
-        if (filter === "all") {
-            return isActive
-                ? "border-[#2B174C] bg-[#2B174C] text-white"
-                : "border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#FAF8FF]";
-        }
-
-        if (filter === "expiring") {
-            return isActive
-                ? "border-[#D8C5F3] bg-[#F1EBFF] text-[#6D35D4]"
-                : "border-[#D8C5F3] bg-white text-[#6D35D4] hover:bg-[#F7F1FF]";
-        }
-
-        return isActive
-            ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
-            : "border-[#F2C4C4] bg-white text-[#C32F2F] hover:bg-[#FFF5F5]";
-    };
-
-    return (
-        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/45 px-4 py-6 font-sans text-[#1A1220] backdrop-blur-[2px]">
-            <div
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="dashboard-expiration-alerts-title"
-                className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
-            >
-                <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
-                    <div className="flex min-w-0 items-start gap-3">
-                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
-                            <CalendarClock size={21} strokeWidth={2} />
-                        </span>
-
-                        <div>
-                            <h2
-                                id="dashboard-expiration-alerts-title"
-                                className="text-[20px] font-bold leading-6 text-[#1A1220]"
-                            >
-                                Expiration Alerts
-                            </h2>
-                            <p className="mt-1 text-sm leading-5 text-[#7A6A84]">
-                                Expired items appear first, followed by items expiring within 30 days.
-                            </p>
-                        </div>
-                    </div>
-
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        aria-label="Close expiration alerts"
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[22px] leading-none text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C]"
-                    >
-                        ×
-                    </button>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 border-b border-[#E9E0EF] px-6 py-3">
-                    <button
-                        type="button"
-                        onClick={() => setActiveFilter("all")}
-                        aria-pressed={activeFilter === "all"}
-                        className={`rounded-xl border px-4 py-2 text-xs font-semibold transition ${filterClass(
-                            "all",
-                        )}`}
-                    >
-                        All ({items.length})
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={() => setActiveFilter("expiring")}
-                        aria-pressed={activeFilter === "expiring"}
-                        className={`rounded-xl border px-4 py-2 text-xs font-semibold transition ${filterClass(
-                            "expiring",
-                        )}`}
-                    >
-                        Expiring ({expiringCount})
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={() => setActiveFilter("expired")}
-                        aria-pressed={activeFilter === "expired"}
-                        className={`rounded-xl border px-4 py-2 text-xs font-semibold transition ${filterClass(
-                            "expired",
-                        )}`}
-                    >
-                        Expired ({expiredCount})
-                    </button>
-                </div>
-
-                <div className="min-h-0 flex-1 overflow-auto">
-                    <table className="w-full min-w-[720px] border-collapse">
-                        <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
-                        <tr className="border-b border-[#E9E0EF]">
-                            <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Product
-                            </th>
-                            {showBranch ? (
-                                <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                    Branch
-                                </th>
-                            ) : null}
-                            <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Stock Level
-                            </th>
-                            <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Expiration Date
-                            </th>
-                        </tr>
-                        </thead>
-
-                        <tbody>
-                        {visibleItems.length === 0 ? (
-                            <tr>
-                                <td
-                                    colSpan={columnCount}
-                                    className="px-5 py-14 text-center text-sm text-[#7A6A84]"
-                                >
-                                    {activeFilter === "expired"
-                                        ? "No expired items found."
-                                        : activeFilter === "expiring"
-                                            ? "No expiring items found."
-                                            : "No expiration alerts found."}
-                                </td>
-                            </tr>
-                        ) : (
-                            visibleItems.map((item) => {
-                                const isExpired =
-                                    item.status === "Expired";
-
-                                return (
-                                    <tr
-                                        key={item.id}
-                                        className="border-b border-[#EEE7F2] transition hover:bg-[#FFFCF7] last:border-b-0"
-                                    >
-                                        <td className="px-5 py-3.5">
-                                            <p className="text-sm font-semibold leading-5 text-[#1A1220]">
-                                                {item.productName}
-                                            </p>
-                                            {item.variantName ? (
-                                                <p className="mt-0.5 text-xs font-medium text-[#806A8C]">
-                                                    {item.variantName}
-                                                </p>
-                                            ) : null}
-                                        </td>
-
-                                        {showBranch ? (
-                                            <td className="px-5 py-3.5 text-sm font-medium text-[#6D35D4]">
-                                                {item.branchName}
-                                            </td>
-                                        ) : null}
-
-                                        <td className="px-5 py-3.5 text-sm font-semibold text-[#30243A]">
-                                            {item.stock} left
-                                        </td>
-
-                                        <td className="px-5 py-3.5">
-                                            <p
-                                                className={`text-sm font-semibold ${
-                                                    isExpired
-                                                        ? "text-[#DC2626]"
-                                                        : "text-[#2B174C]"
-                                                }`}
-                                            >
-                                                {formatDashboardExpirationDate(
-                                                    item.expirationDate,
-                                                )}
-                                            </p>
-                                            <p
-                                                className={`mt-0.5 text-xs font-semibold ${
-                                                    isExpired ||
-                                                    item.daysRemaining <= 7
-                                                        ? "text-[#DC2626]"
-                                                        : "text-[#806A8C]"
-                                                }`}
-                                            >
-                                                {formatExpirationDistance(
-                                                    item.daysRemaining,
-                                                )}
-                                            </p>
-                                        </td>
-                                    </tr>
-                                );
-                            })
-                        )}
-                        </tbody>
-                    </table>
-                </div>
-
-                <div className="border-t border-[#E9E0EF] bg-[#FFFCF7] px-6 py-3 text-xs leading-5 text-[#7A6A84]">
-                    Expired items have dates before today. Expiring items have dates from today through the next 30 days.
-                </div>
-            </div>
+            )}
         </div>
     );
 }
 
-function OwnerStockAlertsModal({
-                                   items,
-                                   activeFilter,
-                                   totalCount,
-                                   lowStockCount,
-                                   outOfStockCount,
-                                   onChangeFilter,
-                                   onClose,
-                               }: {
-    items: StockAlertItem[];
-    activeFilter: "all" | "low" | "out";
-    totalCount: number;
-    lowStockCount: number;
-    outOfStockCount: number;
-    onChangeFilter: (filter: "all" | "low" | "out") => void;
-    onClose: () => void;
+function TopProductsPanel({
+                              rows,
+                              period,
+                              onPeriodChange,
+                              onViewAll,
+                          }: {
+    rows: TopItemRow[];
+    period: PeriodOption;
+    onPeriodChange: (period: PeriodOption) => void;
+    onViewAll: () => void;
 }) {
-    const filterClass = (active: boolean, tone: "all" | "low" | "out") => {
-        if (active && tone === "all") {
-            return "border-[#2B174C] bg-[#2B174C] text-white";
-        }
+    const top = rows.slice(0, 5);
+    const hasMore = rows.length > 5;
+    const chartColors = ["#6D35D4", "#2563EB", "#159455", "#F59E0B", "#EC4899"];
+    const total = top.reduce((sum, row) => sum + Math.max(0, row.sales), 0);
 
-        if (active && tone === "low") {
-            return "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]";
-        }
+    const radius = 48;
+    const center = 60;
+    let accumulated = 0;
 
-        if (active && tone === "out") {
-            return "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]";
-        }
+    const polar = (angle: number) => {
+        const radians = ((angle - 90) * Math.PI) / 180;
+        return {
+            x: center + radius * Math.cos(radians),
+            y: center + radius * Math.sin(radians),
+        };
+    };
 
-        return "border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#FAF8FF]";
+    const piePath = (value: number, offset: number) => {
+        if (total <= 0 || value <= 0) return "";
+        const startAngle = (offset / total) * 360;
+        const endAngle = ((offset + value) / total) * 360;
+        const startPoint = polar(startAngle);
+        const endPoint = polar(endAngle);
+        const largeArc = endAngle - startAngle > 180 ? 1 : 0;
+
+        return [
+            `M ${center} ${center}`,
+            `L ${startPoint.x} ${startPoint.y}`,
+            `A ${radius} ${radius} 0 ${largeArc} 1 ${endPoint.x} ${endPoint.y}`,
+            "Z",
+        ].join(" ");
     };
 
     return (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 px-4 py-6 font-sans text-[#1A1220] backdrop-blur-[2px] [&_*]:font-sans">
-            <div
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="owner-stock-alerts-title"
-                className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
-            >
-                <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
-                    <div className="flex min-w-0 items-start gap-3">
-                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#FFF4D8] text-[#B7791F]">
-                            <TriangleAlert size={21} strokeWidth={2} />
-                        </span>
+        <div className="flex h-full min-w-0 flex-col rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]">
+                        <Trophy size={17} />
+                    </span>
+                    <div className="min-w-0">
+                        <h3 className="truncate text-[14px] font-bold leading-5 text-[#1A1220]">
+                            Top Products / Packages
+                        </h3>
+                        <p className="truncate text-[10px] leading-4 text-[#9A8DA8]">
+                            Best-performing items by sales amount
+                        </p>
+                    </div>
+                </div>
 
-                        <div className="min-w-0">
-                            <h2
-                                id="owner-stock-alerts-title"
-                                className="!text-[20px] !font-bold !leading-6 text-[#1A1220]"
-                            >
-                                Stock Alerts
-                            </h2>
-                            <p className="mt-1 !text-sm !font-normal !leading-5 text-[#7A6A84]">
-                                Low-stock and out-of-stock products and variants.
-                            </p>
+                <select
+                    value={period}
+                    onChange={(event) => onPeriodChange(event.target.value as PeriodOption)}
+                    className="h-8 shrink-0 rounded-lg bg-[#F8F5FC] px-2.5 text-[10px] font-semibold text-[#5F4E75] outline-none"
+                >
+                    <option value="month">This Month</option>
+                    <option value="quarter">This Quarter</option>
+                    <option value="year">This Year</option>
+                </select>
+            </div>
+
+            {top.length === 0 ? (
+                <div className="flex flex-1 min-h-[220px] items-center justify-center text-[11px] font-medium text-[#9A8DA8]">
+                    No sales recorded for this period yet.
+                </div>
+            ) : (
+                <div className="mt-4 flex flex-1 items-center gap-6">
+                    <div className="relative h-[190px] w-[190px] shrink-0">
+                        <svg viewBox="0 0 120 120" className="h-full w-full" role="img" aria-label="Top products by sales">
+                            {top.map((row, index) => {
+                                const value = Math.max(0, row.sales);
+                                const path = piePath(value, accumulated);
+                                accumulated += value;
+
+                                return (
+                                    <path
+                                        key={row.key}
+                                        d={path}
+                                        fill={chartColors[index]}
+                                        stroke="#FFFFFF"
+                                        strokeWidth="1.5"
+                                    />
+                                );
+                            })}
+                        </svg>
+
+                        <div className="absolute inset-[25%] flex flex-col items-center justify-center rounded-full bg-white text-center">
+                            <span className="text-[19px] font-bold leading-none tracking-[-0.04em] text-[#1A1220]">
+                                {pesoCompact(total)}
+                            </span>
+                            <span className="mt-1 text-[9px] font-medium text-[#8A7D92]">
+                                Top 5 sales
+                            </span>
                         </div>
                     </div>
 
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        aria-label="Close stock alerts"
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl !text-[22px] !font-normal !leading-none text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C]"
-                    >
-                        ×
-                    </button>
-                </div>
+                    <div className="min-w-0 flex-1 space-y-3">
+                        {top.map((row, index) => {
+                            const share = total > 0 ? (Math.max(0, row.sales) / total) * 100 : 0;
 
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9E0EF] px-6 py-4">
-                    <div className="flex flex-wrap items-center gap-2">
-                        <button
-                            type="button"
-                            onClick={() => onChangeFilter("all")}
-                            className={`h-9 rounded-xl border px-4 !text-xs !font-semibold transition ${filterClass(
-                                activeFilter === "all",
-                                "all",
-                            )}`}
-                        >
-                            All ({totalCount})
-                        </button>
-
-                        <button
-                            type="button"
-                            onClick={() => onChangeFilter("low")}
-                            className={`h-9 rounded-xl border px-4 !text-xs !font-semibold transition ${filterClass(
-                                activeFilter === "low",
-                                "low",
-                            )}`}
-                        >
-                            Low Stock ({lowStockCount})
-                        </button>
-
-                        <button
-                            type="button"
-                            onClick={() => onChangeFilter("out")}
-                            className={`h-9 rounded-xl border px-4 !text-xs !font-semibold transition ${filterClass(
-                                activeFilter === "out",
-                                "out",
-                            )}`}
-                        >
-                            Out of Stock ({outOfStockCount})
-                        </button>
+                            return (
+                                <div key={row.key} className="min-w-0">
+                                    <div className="flex items-center gap-2.5">
+                                        <span
+                                            className="h-2.5 w-2.5 shrink-0 rounded-full"
+                                            style={{ backgroundColor: chartColors[index] }}
+                                        />
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center justify-between gap-2">
+                                                <span
+                                                    className="truncate text-[10px] font-semibold text-[#2A1B33]"
+                                                    title={row.name}
+                                                >
+                                                    {index + 1}. {row.name}
+                                                </span>
+                                                <span className="shrink-0 text-[10px] font-bold text-[#1A1220]">
+                                                    {peso(row.sales)}
+                                                </span>
+                                            </div>
+                                            <div className="mt-1 h-1 rounded-full bg-[#F1ECF6]">
+                                                <div
+                                                    className="h-full rounded-full"
+                                                    style={{
+                                                        width: `${Math.max(2, Math.min(100, share))}%`,
+                                                        backgroundColor: chartColors[index],
+                                                    }}
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })}
                     </div>
-
-                    <span className="!text-xs !font-semibold text-[#806A8C]">
-                        View only
-                    </span>
                 </div>
+            )}
 
-                <div className="min-h-0 flex-1 overflow-auto">
-                    <table className="w-full min-w-[760px] table-fixed border-collapse">
-                        <colgroup>
-                            <col className="w-[34%]" />
-                            <col className="w-[28%]" />
-                            <col className="w-[14%]" />
-                            <col className="w-[12%]" />
-                            <col className="w-[12%]" />
-                        </colgroup>
+            {(top.length > 0 || hasMore) && (
+                <button
+                    type="button"
+                    onClick={onViewAll}
+                    className="mt-3 text-[10px] font-semibold text-[#6D35D4] transition hover:text-[#4E24A8]"
+                >
+                    View full sales report →
+                </button>
+            )}
+        </div>
+    );
+}
 
-                        <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
-                        <tr className="border-b border-[#E9E0EF]">
-                            {[
-                                "Product",
-                                "Variant",
-                                "Current Stock",
-                                "Alert Level",
-                                "Status",
-                            ].map((header) => (
-                                <th
-                                    key={header}
-                                    className={`${header === "Product" ? "text-left" : "text-center"} px-4 py-3 !text-[11px] !font-semibold uppercase tracking-[0.08em] text-[#806A8C]`}
-                                >
-                                    {header}
-                                </th>
-                            ))}
-                        </tr>
-                        </thead>
+function DemandForecastPanel({
+                                 nextMonthLabel,
+                                 currentMonthLabel,
+                                 predicted,
+                                 growthPct,
+                                 insight,
+                             }: {
+    nextMonthLabel: string;
+    currentMonthLabel: string;
+    predicted: number;
+    growthPct: number | null;
+    insight: string;
+}) {
+    const isUp = growthPct !== null && growthPct >= 0;
 
-                        <tbody>
-                        {items.length === 0 ? (
-                            <tr>
-                                <td
-                                    colSpan={5}
-                                    className="px-5 py-14 text-center text-sm text-[#7A6A84]"
-                                >
-                                    No stock alerts found for this filter.
-                                </td>
-                            </tr>
-                        ) : (
-                            items.map((item) => {
-                                const isOut =
-                                    item.status === "Out of Stock";
+    return (
+        <div className="flex h-full min-w-0 flex-col rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-center gap-2.5">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#EAF1FF] text-[#2563EB]">
+                    <Sparkles size={17} />
+                </span>
+                <div className="min-w-0">
+                    <h3 className="text-[14px] font-bold leading-5 text-[#1A1220]">Demand Forecast</h3>
+                    <p className="text-[10px] leading-4 text-[#9A8DA8]">Trend-based projection for next month</p>
+                </div>
+            </div>
 
-                                return (
-                                    <tr
-                                        key={item.id}
-                                        className="border-b border-[#EEE7F2] transition hover:bg-[#FFFCF7] last:border-b-0"
+            <div className="mt-3 flex flex-1 flex-col justify-center gap-3">
+                <div className="rounded-lg bg-[#EAF8F1] px-3 py-2.5">
+                    <div className="flex items-center gap-2.5">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#D8F2E5] text-[#159455]">
+                            <BarChart3 size={16} />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                                <p className="text-[9px] font-semibold text-[#5F4E75]">
+                                    Predicted Sales ({nextMonthLabel})
+                                </p>
+                                {growthPct !== null && (
+                                    <span
+                                        className={`inline-flex shrink-0 items-center gap-1 text-[9.5px] font-bold ${
+                                            isUp ? "text-[#159455]" : "text-[#D92D20]"
+                                        }`}
                                     >
-                                        <td className="px-4 py-3.5">
-                                            <p className="line-clamp-2 !text-sm !font-semibold !leading-5 text-[#1A1220]">
-                                                {item.productName}
-                                            </p>
-                                            <p
-                                                className={`mt-0.5 !text-xs !font-medium !leading-4 ${
-                                                    isOut
-                                                        ? "text-[#D92D20]"
-                                                        : "text-[#A56607]"
-                                                }`}
-                                            >
-                                                {item.status}
-                                            </p>
-                                        </td>
-
-                                        <td className="px-4 py-3.5 text-center !text-sm !font-normal !leading-5 text-[#806A8C]">
-                                            <span className="block truncate">
-                                                {item.variantName}
-                                            </span>
-                                        </td>
-
-                                        <td
-                                            className={`px-4 py-3.5 text-center !text-sm !font-semibold !leading-5 ${
-                                                isOut
-                                                    ? "text-[#D92D20]"
-                                                    : "text-[#A56607]"
-                                            }`}
-                                        >
-                                            {item.currentStock}
-                                        </td>
-
-                                        <td className="px-4 py-3.5 text-center !text-sm !font-normal !leading-5 text-[#665875]">
-                                            {item.alertLevel}
-                                        </td>
-
-                                        <td className="px-4 py-3.5 text-center">
-                                            <span
-                                                className={`inline-flex rounded-full border px-3 py-1 !text-xs !font-semibold !leading-4 ${
-                                                    isOut
-                                                        ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
-                                                        : "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]"
-                                                }`}
-                                            >
-                                                {item.status}
-                                            </span>
-                                        </td>
-                                    </tr>
-                                );
-                            })
-                        )}
-                        </tbody>
-                    </table>
+                                        {isUp ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
+                                        {isUp ? "+" : ""}{growthPct.toFixed(1)}%
+                                    </span>
+                                )}
+                            </div>
+                            <p className="mt-0.5 text-[20px] font-bold leading-none tracking-[-0.03em] text-[#0E7B47]">
+                                {peso(Math.round(predicted))}
+                            </p>
+                            <p className="mt-0.5 text-[8px] font-medium text-[#7F7289]">vs. {currentMonthLabel}</p>
+                        </div>
+                    </div>
                 </div>
 
-                <div className="border-t border-[#E9E0EF] bg-[#FFFCF7] px-6 py-3 text-xs leading-5 text-[#7A6A84]">
-                    Staff accounts can review stock alerts for their assigned branch here.
+                <div className="rounded-xl bg-[#F4F8FE] px-3.5 py-3">
+                    <div className="flex items-start gap-2.5">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-[#2563EB] shadow-sm">
+                            <Lightbulb size={14} />
+                        </span>
+                        <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                <p className="text-[9px] font-bold text-[#2563EB]">Key Insight</p>
+                                <span className="text-[8px] font-medium text-[#7A86A0]">
+                                    Trailing 6 months • Linear trend
+                                </span>
+                            </div>
+                            <p
+                                className="mt-1 overflow-hidden text-[9px] font-medium leading-3.5 text-[#50617C]"
+                                style={{
+                                    display: "-webkit-box",
+                                    WebkitLineClamp: 3,
+                                    WebkitBoxOrient: "vertical",
+                                }}
+                            >
+                                {insight}
+                            </p>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

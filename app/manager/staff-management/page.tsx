@@ -8,6 +8,7 @@ import {
     Copy,
     Filter,
     Mail,
+    LockKeyhole,
     Pencil,
     Plus,
     RefreshCw,
@@ -61,6 +62,22 @@ type StaffMember = {
     permissions: StaffPermissions;
 };
 
+type SubscriptionPlanAccess = {
+    name: string;
+    hasAnalytics: boolean;
+    hasForecasting: boolean;
+};
+
+type SubscriptionClientResponse = {
+    subscription?: {
+        plan?: {
+            name?: string | null;
+            has_analytics?: boolean;
+            has_forecasting?: boolean;
+        };
+    };
+};
+
 const defaultPermissions: StaffPermissions = {
     dashboard: true,
     pos: false,
@@ -103,6 +120,13 @@ export default function ManagerStaffManagementPage() {
     const [branchName, setBranchName] = useState("Assigned branch");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
 
+    const [planAccess, setPlanAccess] = useState<SubscriptionPlanAccess>({
+        name: "Current",
+        hasAnalytics: false,
+        hasForecasting: false,
+    });
+    const [planAccessLoading, setPlanAccessLoading] = useState(true);
+
     const [staffName, setStaffName] = useState("");
     const [staffEmail, setStaffEmail] = useState("");
     const [permissions, setPermissions] = useState<StaffPermissions>(defaultPermissions);
@@ -121,11 +145,57 @@ export default function ManagerStaffManagementPage() {
     const [editingStaff, setEditingStaff] = useState<StaffMember | null>(null);
     const [editPermissions, setEditPermissions] = useState<StaffPermissions>(defaultPermissions);
     const [savingEdit, setSavingEdit] = useState(false);
-    const [updatingStaffStatusId, setUpdatingStaffStatusId] = useState<
+    const [deletingStaffId, setDeletingStaffId] = useState<
         number | string | null
     >(null);
 
     const getToken = () => sessionStorage.getItem("token") || "";
+
+    const loadPlanAccess = useCallback(async () => {
+        const token = getToken();
+
+        if (!token) {
+            setPlanAccessLoading(false);
+            return;
+        }
+
+        try {
+            setPlanAccessLoading(true);
+
+            const res = await fetch("/api/subscription-client", {
+                method: "GET",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    Accept: "application/json",
+                },
+                cache: "no-store",
+            });
+
+            const data = (await res.json()) as SubscriptionClientResponse;
+
+            if (!res.ok) {
+                throw new Error("Failed to verify subscription plan.");
+            }
+
+            const plan = data.subscription?.plan;
+
+            setPlanAccess({
+                name: String(plan?.name || "Current"),
+                hasAnalytics: plan?.has_analytics === true,
+                hasForecasting: plan?.has_forecasting === true,
+            });
+        } catch {
+            // Fail closed: if the plan cannot be verified, premium permissions
+            // stay locked instead of accidentally being grantable.
+            setPlanAccess({
+                name: "Current",
+                hasAnalytics: false,
+                hasForecasting: false,
+            });
+        } finally {
+            setPlanAccessLoading(false);
+        }
+    }, []);
 
     const loadStaff = useCallback(async () => {
         const token = getToken();
@@ -191,7 +261,8 @@ export default function ManagerStaffManagementPage() {
 
         setBranchName(sessionStorage.getItem("branch_name") || "Assigned branch");
         loadStaff();
-    }, [router, loadStaff]);
+        void loadPlanAccess();
+    }, [router, loadStaff, loadPlanAccess]);
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -378,7 +449,7 @@ export default function ManagerStaffManagementPage() {
         }
     };
 
-    const handleUpdateStaffStatus = async (staff: StaffMember) => {
+    const handleDeleteStaff = async (staff: StaffMember) => {
         const token = getToken();
 
         if (!token) {
@@ -386,21 +457,13 @@ export default function ManagerStaffManagementPage() {
             return;
         }
 
-        const isInactive = staff.status === "Inactive";
-        const action = isInactive
-            ? "reactivate_staff"
-            : "deactivate_staff";
-        const actionLabel = isInactive
-            ? "reactivate"
-            : "deactivate";
-
         const confirmed = window.confirm(
-            `Are you sure you want to ${actionLabel} ${staff.name}'s account?`
+            `Delete ${staff.name}'s staff account?\n\nThis will permanently remove the account and the staff member will no longer be able to log in. This action cannot be undone.`
         );
 
         if (!confirmed) return;
 
-        setUpdatingStaffStatusId(staff.id);
+        setDeletingStaffId(staff.id);
 
         try {
             const res = await fetch("/api/staff-management", {
@@ -410,7 +473,7 @@ export default function ManagerStaffManagementPage() {
                     Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
-                    action,
+                    action: "delete_staff",
                     staff_id: staff.id,
                     staff_email: staff.email,
                 }),
@@ -422,24 +485,21 @@ export default function ManagerStaffManagementPage() {
                 alert(
                     data.error ||
                     data.message ||
-                    `Failed to ${actionLabel} staff account.`
+                    "Failed to delete staff account."
                 );
                 return;
             }
 
-            await loadStaff();
+            if (editingStaff?.id === staff.id) {
+                setEditingStaff(null);
+            }
 
-            alert(
-                isInactive
-                    ? "Staff account reactivated successfully."
-                    : "Staff account deactivated successfully."
-            );
+            await loadStaff();
+            alert("Staff account deleted successfully.");
         } catch {
-            alert(
-                `Something went wrong while trying to ${actionLabel} the staff account.`
-            );
+            alert("Something went wrong while deleting the staff account.");
         } finally {
-            setUpdatingStaffStatusId(null);
+            setDeletingStaffId(null);
         }
     };
 
@@ -780,19 +840,13 @@ export default function ManagerStaffManagementPage() {
 
                                                         <button
                                                             type="button"
-                                                            disabled={updatingStaffStatusId === staff.id}
-                                                            onClick={() => void handleUpdateStaffStatus(staff)}
-                                                            className={`inline-flex h-[34px] items-center justify-center rounded-lg px-3 text-xs font-semibold shadow-sm transition disabled:opacity-60 ${
-                                                                staff.status === "Inactive"
-                                                                    ? "border border-[#D7C7E8] bg-white text-[#2B174C]"
-                                                                    : "bg-[#A33E20] text-white hover:bg-[#883117]"
-                                                            }`}
+                                                            disabled={deletingStaffId === staff.id}
+                                                            onClick={() => void handleDeleteStaff(staff)}
+                                                            className="inline-flex h-[34px] items-center justify-center rounded-lg bg-[#A33E20] px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
                                                         >
-                                                            {updatingStaffStatusId === staff.id
-                                                                ? "Saving..."
-                                                                : staff.status === "Inactive"
-                                                                    ? "Reactivate"
-                                                                    : "Deactivate"}
+                                                            {deletingStaffId === staff.id
+                                                                ? "Deleting..."
+                                                                : "Delete"}
                                                         </button>
                                                     </div>
                                                 </td>
@@ -1029,12 +1083,24 @@ export default function ManagerStaffManagementPage() {
                                             label="Analytics"
                                             value={permissions.analytics_access}
                                             allowView={false}
+                                            locked={planAccessLoading || !planAccess.hasAnalytics}
+                                            lockText={
+                                                planAccessLoading
+                                                    ? "Checking plan..."
+                                                    : `Not included in ${planAccess.name} plan`
+                                            }
                                             onChange={(value) => updateFeatureAccess("analytics", value as AccessMode)}
                                         />
                                         <AccessModeRow
                                             label="Forecasting"
                                             value={permissions.forecasting_access}
                                             allowView={false}
+                                            locked={planAccessLoading || !planAccess.hasForecasting}
+                                            lockText={
+                                                planAccessLoading
+                                                    ? "Checking plan..."
+                                                    : `Not included in ${planAccess.name} plan`
+                                            }
                                             onChange={(value) => updateFeatureAccess("forecasting", value as AccessMode)}
                                         />
                                     </div>
@@ -1117,12 +1183,24 @@ export default function ManagerStaffManagementPage() {
                                 label="Analytics"
                                 value={editPermissions.analytics_access}
                                 allowView={false}
+                                locked={planAccessLoading || !planAccess.hasAnalytics}
+                                lockText={
+                                    planAccessLoading
+                                        ? "Checking plan..."
+                                        : `Not included in ${planAccess.name} plan`
+                                }
                                 onChange={(value) => updateEditFeatureAccess("analytics", value as AccessMode)}
                             />
                             <AccessModeRow
                                 label="Forecasting"
                                 value={editPermissions.forecasting_access}
                                 allowView={false}
+                                locked={planAccessLoading || !planAccess.hasForecasting}
+                                lockText={
+                                    planAccessLoading
+                                        ? "Checking plan..."
+                                        : `Not included in ${planAccess.name} plan`
+                                }
                                 onChange={(value) => updateEditFeatureAccess("forecasting", value as AccessMode)}
                             />
                         </div>
@@ -1214,7 +1292,8 @@ function normalizePermissions(raw: any): StaffPermissions {
 }
 
 function getAccessValue(value: any, legacyBoolean: any): AccessMode {
-    if (value === "view" || value === "full" || value === "none") return value;
+    if (value === "full" || value === "none") return value;
+    if (value === "view") return "full";
     if (legacyBoolean === true) return "full";
     return "none";
 }
@@ -1335,26 +1414,64 @@ function AccessModeRow({
                            value,
                            onChange,
                            allowFull = true,
-                           allowView = true,
+                           allowView = false,
+                           locked = false,
+                           lockText = "Not included in current plan",
                        }: {
     label: string;
     value: AccessMode | ReportsAccessMode;
     onChange: (value: AccessMode | ReportsAccessMode) => void;
     allowFull?: boolean;
     allowView?: boolean;
+    locked?: boolean;
+    lockText?: string;
 }) {
     return (
-        <div className="flex min-h-[58px] items-center justify-between rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-3">
-            <span className="text-sm font-semibold text-[#1A1220]">{label}</span>
-            <select
-                value={value}
-                onChange={(e) => onChange(e.target.value as AccessMode | ReportsAccessMode)}
-                className="h-[38px] min-w-[136px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-            >
-                <option value="none">No access</option>
-                {allowView && <option value="view">View only</option>}
-                {allowFull && <option value="full">Full access</option>}
-            </select>
+        <div
+            className={`flex min-h-[58px] items-center justify-between gap-3 rounded-xl border px-4 py-3 ${
+                locked
+                    ? "cursor-not-allowed border-[#E4DCE9] bg-[#F7F4F8]"
+                    : "border-[#E6DDF0] bg-[#FFFDF8]"
+            }`}
+        >
+            <div className="flex min-w-0 items-center gap-2">
+                <span
+                    className={`text-sm font-semibold ${
+                        locked ? "text-[#8B7F91]" : "text-[#1A1220]"
+                    }`}
+                >
+                    {label}
+                </span>
+
+                {locked && (
+                    <LockKeyhole
+                        size={15}
+                        strokeWidth={2}
+                        className="shrink-0 text-[#8B7F91]"
+                    />
+                )}
+            </div>
+
+            {locked ? (
+                <div
+                    className="inline-flex min-h-[38px] max-w-[240px] cursor-not-allowed items-center gap-2 rounded-xl border border-[#DED5E4] bg-[#EEE9F0] px-3 text-xs font-semibold text-[#76697D]"
+                    title={lockText}
+                    aria-disabled="true"
+                >
+                    <LockKeyhole size={14} className="shrink-0" />
+                    <span className="truncate">{lockText}</span>
+                </div>
+            ) : (
+                <select
+                    value={value}
+                    onChange={(e) => onChange(e.target.value as AccessMode | ReportsAccessMode)}
+                    className="h-[38px] min-w-[136px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                >
+                    <option value="none">No access</option>
+                    {allowView && <option value="view">View only</option>}
+                    {allowFull && <option value="full">Full access</option>}
+                </select>
+            )}
         </div>
     );
 }

@@ -5,12 +5,14 @@ import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
     AlertTriangle,
+    BarChart3,
+    Box,
     CalendarClock,
     CalendarDays,
+    Info,
     PackageX,
     RefreshCw,
-    ShoppingCart,
-    Store,
+    Sparkles,
     TriangleAlert,
 } from "lucide-react";
 import {
@@ -36,6 +38,7 @@ type Booking = {
     branch_name?: string | null;
     name: string;
     date?: string;
+    createdAt?: string;
     time?: string;
     status?: string;
     packageName?: string;
@@ -310,6 +313,7 @@ function normalizeBooking(value: unknown): Booking {
             "created_at",
             "createdAt",
         ]),
+        createdAt: readText(raw, ["createdAt", "created_at"]),
         time: readText(raw, [
             "time",
             "event_time",
@@ -490,7 +494,7 @@ function normalizeOrder(value: unknown): Order {
     const raw = toRecord(value);
     const rawBranchId = readNullableNumber(raw, ["branchId", "branch_id"]);
     const itemText = readText(raw, ["item"]);
-    const rawItems = firstDefined(raw, ["items"]);
+    const rawItems = firstDefined(raw, ["items", "orderItems", "order_items"]);
     const items = Array.isArray(rawItems)
         ? rawItems.map(normalizeOrderItem).filter((item) => item.name)
         : parseOrderItems(itemText);
@@ -1040,27 +1044,23 @@ export default function ManagerDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
 
-    const [branches, setBranches] = useState<Branch[]>([]);
     const [bookings, setBookings] = useState<Booking[]>([]);
     const [bookingsError, setBookingsError] = useState("");
     const [orders, setOrders] = useState<Order[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
+    const [, setRestockMovements] = useState<RestockMovementRecord[]>([]);
+    const [, setAdjustmentMovements] = useState<AdjustmentMovementRecord[]>([]);
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
-    const [showExpirationAlertsModal, setShowExpirationAlertsModal] = useState(false);
-    const [stockAlertFilter, setStockAlertFilter] = useState<
-        "all" | "low" | "out"
-    >("all");
+    const [stockAlertFilter, setStockAlertFilter] = useState<"all" | "low" | "out">("all");
 
     useEffect(() => {
         const timer = window.setInterval(() => {
             setCurrentDateTime(new Date());
         }, 30_000);
 
-        return () => {
-            window.clearInterval(timer);
-        };
+        return () => window.clearInterval(timer);
     }, []);
 
     const loadManagerDashboard = useCallback(async () => {
@@ -1074,160 +1074,184 @@ export default function ManagerDashboard() {
         const assignedBranchName = getAssignedBranchName(user);
 
         if (!token || !branchId) {
-            setBranches([]);
             setBookings([]);
             setOrders([]);
             setProducts([]);
+            setRestockMovements([]);
+            setAdjustmentMovements([]);
             setBookingsError("No assigned branch was found for this account.");
             return;
         }
 
         setIsRefreshing(true);
+        setBookingsError("");
 
         try {
-            try {
-                const branchesRes = await fetch("/api/branches", {
-                    method: "GET",
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                });
+            const now = new Date();
+            const movementStart = new Date(now);
+            movementStart.setDate(movementStart.getDate() - 56);
 
-                const branchesData = await branchesRes.json().catch(() => ({}));
+            const reportQuery = new URLSearchParams({
+                branch: assignedBranchName,
+                month: movementStart.toISOString().slice(0, 7),
+                startDate: movementStart.toISOString().slice(0, 10),
+                endDate: now.toISOString().slice(0, 10),
+                role: "manager",
+                assignedBranch: assignedBranchName,
+                branch_id: String(branchId),
+            });
 
-                if (branchesRes.ok && Array.isArray(branchesData.branches)) {
-                    const normalizedBranches: Branch[] = (branchesData.branches as unknown[]).map(normalizeBranch);
-                    const assignedBranches = normalizedBranches.filter(
-                        (branch) => String(branch.id) === String(branchId),
-                    );
-
-                    setBranches(
-                        assignedBranches.length > 0
-                            ? assignedBranches
-                            : [
-                                {
-                                    id: Number(branchId),
-                                    branchName: assignedBranchName,
-                                },
-                            ],
-                    );
-                }
-            } catch (error) {
-                console.warn("Manager dashboard branches fetch failed:", error);
-            }
-
-            try {
-                setBookingsError("");
-
-                const bookingsRes = await fetch("/api/bookings", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_booking_page_bookings",
-                        role: "manager",
-                        store_id: storeId ? Number(storeId) : undefined,
-                        branch_id: Number(branchId),
+            const [bookingsResult, productsResult, ordersResult, reportsResult] =
+                await Promise.allSettled([
+                    fetch("/api/bookings", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_booking_page_bookings",
+                            role: "manager",
+                            store_id: storeId ? Number(storeId) : undefined,
+                            branch_id: Number(branchId),
+                        }),
+                        cache: "no-store",
                     }),
-                    cache: "no-store",
-                });
+                    fetch("/api/products", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_products",
+                            branch_id: Number(branchId),
+                        }),
+                        cache: "no-store",
+                    }),
+                    fetch("/api/pos", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_orders",
+                            branch_id: Number(branchId),
+                            include_order_items: true,
+                            date_from: movementStart.toISOString().slice(0, 10),
+                            date_to: now.toISOString().slice(0, 10),
+                        }),
+                        cache: "no-store",
+                    }),
+                    fetch(`/api/reports?${reportQuery.toString()}`, {
+                        headers: { Authorization: `Bearer ${token}` },
+                        cache: "no-store",
+                    }),
+                ]);
 
-                const bookingsText = await bookingsRes.text();
-                const bookingsData: {
-                    bookings?: unknown[];
-                    error?: unknown;
-                    message?: unknown;
-                    details?: unknown;
-                } = bookingsText ? JSON.parse(bookingsText) : {};
-
-                if (!bookingsRes.ok) {
-                    const message = String(
-                        bookingsData.error ||
-                        bookingsData.message ||
-                        "Unable to load booking data.",
-                    );
-
-                    console.error("Manager dashboard bookings request failed:", {
-                        status: bookingsRes.status,
-                        response: bookingsData,
-                    });
+            if (bookingsResult.status === "fulfilled") {
+                try {
+                    const response = bookingsResult.value;
+                    const payload = await response.json().catch(() => ({}));
+                    if (response.ok && Array.isArray(payload.bookings)) {
+                        const normalized = (payload.bookings as unknown[]).map(normalizeBooking);
+                        setBookings(
+                            normalized.filter((booking) =>
+                                belongsToAssignedBranch(booking, branchId),
+                            ),
+                        );
+                    } else {
+                        setBookings([]);
+                        setBookingsError(
+                            String(payload.error || payload.message || "Unable to load booking data."),
+                        );
+                    }
+                } catch (error) {
+                    console.warn("Manager dashboard bookings parsing failed:", error);
                     setBookings([]);
-                    setBookingsError(message);
-                } else if (Array.isArray(bookingsData.bookings)) {
-                    const normalizedBookings = bookingsData.bookings.map(normalizeBooking);
-                    setBookings(
-                        normalizedBookings.filter((booking) =>
-                            belongsToAssignedBranch(booking, branchId),
-                        ),
-                    );
-                } else {
-                    setBookings([]);
-                    setBookingsError("Bookings API returned an invalid response.");
+                    setBookingsError("Unable to load booking data.");
                 }
-            } catch (error) {
-                console.error("Manager dashboard bookings fetch failed:", error);
-                setBookings([]);
-                setBookingsError(
-                    error instanceof Error
-                        ? error.message
-                        : "Unable to load booking data.",
-                );
+            } else {
+                console.warn("Manager dashboard bookings fetch failed:", bookingsResult.reason);
+                setBookingsError("Unable to load booking data.");
             }
 
-            try {
-                const productsRes = await fetch("/api/products", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_products",
-                        branch_id: Number(branchId),
-                    }),
-                });
-
-                const productsData = await productsRes.json().catch(() => ({}));
-
-                if (productsRes.ok && Array.isArray(productsData.products)) {
-                    const normalizedProducts: Product[] = (productsData.products as unknown[]).map(normalizeProduct);
-                    setProducts(
-                        normalizedProducts.filter((product) =>
-                            belongsToAssignedBranch(product, branchId),
-                        ),
-                    );
+            if (productsResult.status === "fulfilled") {
+                try {
+                    const response = productsResult.value;
+                    const payload = await response.json().catch(() => ({}));
+                    if (response.ok && Array.isArray(payload.products)) {
+                        const normalized = (payload.products as unknown[]).map(normalizeProduct);
+                        setProducts(
+                            normalized.filter((product) =>
+                                belongsToAssignedBranch(product, branchId),
+                            ),
+                        );
+                    }
+                } catch (error) {
+                    console.warn("Manager dashboard products parsing failed:", error);
                 }
-            } catch (error) {
-                console.warn("Manager dashboard products fetch failed:", error);
+            } else {
+                console.warn("Manager dashboard products fetch failed:", productsResult.reason);
             }
 
-            try {
-                const ordersRes = await fetch("/api/pos", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_orders",
-                        branch_id: Number(branchId),
-                    }),
-                });
-
-                const ordersData = await ordersRes.json().catch(() => ({}));
-
-                if (ordersRes.ok && Array.isArray(ordersData.orders)) {
-                    const normalizedOrders: Order[] = (ordersData.orders as unknown[]).map(normalizeOrder);
-                    setOrders(
-                        normalizedOrders.filter((order) =>
-                            belongsToAssignedBranch(order, branchId),
-                        ),
-                    );
+            if (ordersResult.status === "fulfilled") {
+                try {
+                    const response = ordersResult.value;
+                    const payload = await response.json().catch(() => ({}));
+                    if (response.ok && Array.isArray(payload.orders)) {
+                        const normalized = (payload.orders as unknown[]).map(normalizeOrder);
+                        setOrders(
+                            normalized.filter((order) =>
+                                belongsToAssignedBranch(order, branchId),
+                            ),
+                        );
+                    }
+                } catch (error) {
+                    console.warn("Manager dashboard orders parsing failed:", error);
                 }
-            } catch (error) {
-                console.warn("Manager dashboard orders fetch failed:", error);
+            } else {
+                console.warn("Manager dashboard orders fetch failed:", ordersResult.reason);
+            }
+
+            if (reportsResult.status === "fulfilled") {
+                try {
+                    const response = reportsResult.value;
+                    const payload = await response.json().catch(() => ({}));
+                    const reportData = payload?.data && typeof payload.data === "object" ? payload.data : {};
+
+                    if (response.ok && payload?.success) {
+                        const rawRestocks = firstDefined(toRecord(reportData), [
+                            "restockHistory",
+                            "restock_history",
+                            "restocks",
+                            "inventoryRestocks",
+                            "inventory_restocks",
+                        ]);
+                        const restocks = Array.isArray(rawRestocks)
+                            ? rawRestocks.map(normalizeRestockMovement)
+                            : [];
+                        setRestockMovements(
+                            restocks.filter((item) =>
+                                !item.branchId || String(item.branchId) === String(branchId),
+                            ),
+                        );
+
+                        setAdjustmentMovements(extractAdjustmentMovements(reportData, branchId));
+                    } else {
+                        setRestockMovements([]);
+                        setAdjustmentMovements([]);
+                    }
+                } catch (error) {
+                    console.warn("Manager dashboard reports parsing failed:", error);
+                    setRestockMovements([]);
+                    setAdjustmentMovements([]);
+                }
+            } else {
+                console.warn("Manager dashboard reports fetch failed:", reportsResult.reason);
+                setRestockMovements([]);
+                setAdjustmentMovements([]);
             }
         } finally {
             setIsRefreshing(false);
@@ -1235,222 +1259,95 @@ export default function ManagerDashboard() {
     }, [user]);
 
     useEffect(() => {
-        // Load the dashboard once when the page opens.
-        // After that, data refreshes only when the user presses Refresh.
         void loadManagerDashboard();
     }, [loadManagerDashboard]);
-
-    const scheduledOrders = useMemo(
-        () =>
-            orders.filter((order) => {
-                const type = String(order.orderType || "")
-                    .trim()
-                    .toLowerCase()
-                    .replace(/_/g, "-");
-
-                return [
-                    "scheduled",
-                    "schedule",
-                    "scheduled-order",
-                    "future",
-                    "future-order",
-                    "advance-order",
-                    "pre-order",
-                    "preorder",
-                ].includes(type);
-            }),
-        [orders],
-    );
-
-    const posSales = useMemo(() => {
-        return orders
-            .filter((order) => {
-                const type = String(order.orderType || "")
-                    .trim()
-                    .toLowerCase()
-                    .replace(/_/g, "-");
-
-                const status = String(order.status || "").trim().toLowerCase();
-
-                const isScheduledOrder = [
-                    "scheduled",
-                    "schedule",
-                    "scheduled-order",
-                    "future",
-                    "future-order",
-                    "advance-order",
-                    "pre-order",
-                    "preorder",
-                ].includes(type);
-
-                const isExcludedStatus = [
-                    "pending",
-                    "pending payment",
-                    "unpaid",
-                    "cancelled",
-                    "canceled",
-                    "refunded",
-                    "void",
-                    "draft",
-                    "failed",
-                ].includes(status);
-
-                // Records returned by /api/pos without an order type are treated
-                // as normal POS transactions. Scheduled orders and transactions
-                // that are not yet successfully completed are excluded.
-                return !isScheduledOrder && !isExcludedStatus;
-            })
-            .reduce((sum, order) => sum + Number(order.total || 0), 0);
-    }, [orders]);
-
-    const bookingSales = useMemo(
-        () =>
-            bookings
-                .filter((booking) => {
-                    const status = normalizeDashboardBookingStatus(booking.status);
-
-                    return status === "Confirmed" || status === "Completed";
-                })
-                .reduce(
-                    (sum, booking) =>
-                        sum + getDashboardBookingTotalPrice(booking),
-                    0,
-                ),
-        [bookings],
-    );
-    const scheduledOrderSales = scheduledOrders.reduce(
-        (sum, order) => sum + Number(order.total || 0),
-        0,
-    );
-    const totalBusinessSales = posSales + bookingSales + scheduledOrderSales;
-
-    const allUpcomingBookings = useMemo(() => {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        return [...bookings]
-            .filter((booking) => {
-                const status = String(booking.status || "").toLowerCase();
-                const schedule = new Date(booking.date || "");
-
-                return (
-                    !["completed", "cancelled", "canceled"].includes(status) &&
-                    !Number.isNaN(schedule.getTime()) &&
-                    schedule.getTime() >= today.getTime()
-                );
-            })
-            .sort(
-                (first, second) =>
-                    new Date(first.date || 0).getTime() -
-                    new Date(second.date || 0).getTime(),
-            );
-    }, [bookings]);
-
-    const upcomingBookings = allUpcomingBookings.slice(0, 3);
-
-    const pendingBookingCount = bookings.filter((booking) => {
-        const status = String(booking.status || "").toLowerCase();
-        return status.includes("pending") || status === "new";
-    }).length;
-
 
     const allInventoryAlerts = useMemo(
         () => getDashboardStockAlertItems(products),
         [products],
     );
 
-    const inventoryAlerts = allInventoryAlerts.slice(0, 3);
-    const lowStockAlertCount = allInventoryAlerts.filter(
-        (item) => item.status === "Low Stock",
-    ).length;
-    const outOfStockAlertCount = allInventoryAlerts.filter(
-        (item) => item.status === "Out of Stock",
-    ).length;
-    const visibleStockAlerts = allInventoryAlerts.filter((item) => {
-        if (stockAlertFilter === "low") {
-            return item.status === "Low Stock";
-        }
-
-        if (stockAlertFilter === "out") {
-            return item.status === "Out of Stock";
-        }
-
-        return true;
-    });
-
     const allExpirationAlertItems = useMemo(
         () => getExpirationAlertItems(products),
         [products],
     );
-    const expirationAlertItems = allExpirationAlertItems.slice(0, 3);
-    const expiringSoonCount = allExpirationAlertItems.filter(
-        (item) => item.status === "Expiring",
+
+    const lowStockAlertCount = allInventoryAlerts.filter(
+        (item) => item.status === "Low Stock",
     ).length;
+
+    const outOfStockAlertCount = allInventoryAlerts.filter(
+        (item) => item.status === "Out of Stock",
+    ).length;
+
+    const pendingBookingCount = bookings.filter((booking) => {
+        const status = normalizeDashboardBookingStatus(booking.status);
+        return status === "Pending" || status === "Awaiting Down Payment";
+    }).length;
+
+    const upcomingNext7Days = useMemo(() => {
+        const start = new Date(currentDateTime);
+        start.setHours(0, 0, 0, 0);
+        const end = new Date(start);
+        end.setDate(end.getDate() + 7);
+
+        return bookings.filter((booking) => {
+            const status = normalizeDashboardBookingStatus(booking.status);
+            if (["Completed", "Cancelled"].includes(status)) return false;
+
+            const date = parseManagerDate(booking.date);
+            return Boolean(date && date >= start && date < end);
+        });
+    }, [bookings, currentDateTime]);
+
+    const bookingOverview = useMemo(
+        () => buildBookingOverview(bookings, currentDateTime),
+        [bookings, currentDateTime],
+    );
+
+    const inventoryHealth = useMemo(
+        () => buildInventoryHealth(products, allInventoryAlerts, allExpirationAlertItems),
+        [products, allInventoryAlerts, allExpirationAlertItems],
+    );
+
+    const attentionItems = useMemo(
+        () => buildManagerAttentionItems(allInventoryAlerts, allExpirationAlertItems),
+        [allInventoryAlerts, allExpirationAlertItems],
+    );
+
+    const urgentAttentionCount = useMemo(() => {
+        const keys = new Set<string>();
+        allInventoryAlerts
+            .filter((item) => item.status === "Out of Stock")
+            .forEach((item) => keys.add(managerAttentionKey(item.productName, item.variantName)));
+        allExpirationAlertItems.forEach((item) =>
+            keys.add(managerAttentionKey(item.productName, item.variantName)),
+        );
+        return keys.size;
+    }, [allInventoryAlerts, allExpirationAlertItems]);
+
+    const bookingTrend = useMemo(
+        () => buildBookingStatusTrend(bookings, currentDateTime),
+        [bookings, currentDateTime],
+    );
+
+    const inventoryForecast = useMemo(
+        () => buildManagerInventoryForecast(products, orders, currentDateTime),
+        [products, orders, currentDateTime],
+    );
 
     const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", {
         month: "long",
         year: "numeric",
     });
 
-    const dashboardStoreName =
-        getUserValue(user, "storeName") ||
-        getUserValue(user, "store_name") ||
-        getUserValue(user, "businessName") ||
-        getUserValue(user, "business_name") ||
-        "Store";
+    const assignedBranchName = getAssignedBranchName(user);
 
-    const dashboardBranchLabel = getAssignedBranchName(user);
-
-    const dashboardExportContext: ExportContext = {
-        storeName: dashboardStoreName,
-        branch: dashboardBranchLabel,
-        dateRange: `As of ${formatCurrentDashboardDateTime(currentDateTime)}`,
-    };
-
-    const dashboardFileDate = currentDateTime.toISOString().slice(0, 10);
-
-    const upcomingBookingsExportTable: ExportTable = {
-        title: "Upcoming Bookings",
-        headers: ["Date", "Booking Number", "Time", "Status"],
-        rows: allUpcomingBookings.map((booking) => [
-            formatDashboardBookingDate(booking.date),
-            booking.bookingNumber ||
-            `BK-${String(booking.id).padStart(6, "0")}`,
-            formatDashboardTime(booking.date, booking.time),
-            booking.status || "Pending",
-        ]),
-    };
-
-    const inventoryAlertsExportTable: ExportTable = {
-        title: "Inventory Alerts",
-        headers: [
-            "Product",
-            "Variant",
-            "Stock Level",
-            "Alert Level",
-            "Status",
-        ],
-        rows: allInventoryAlerts.map((item) => [
-            item.productName,
-            item.variantName,
-            String(item.currentStock),
-            String(item.alertLevel),
-            item.status,
-        ]),
-    };
-
-    const expirationAlertsExportTable: ExportTable = {
-        title: "Expiration Alerts",
-        headers: ["Product", "Stock Level", "Expiration Date", "Status"],
-        rows: allExpirationAlertItems.map((item) => [
-            item.variantName
-                ? `${item.productName} - ${item.variantName}`
-                : item.productName,
-            String(item.stock),
-            formatDashboardExpirationDate(item.expirationDate),
-            item.status,
-        ]),
-    };
+    const visibleStockAlerts = allInventoryAlerts.filter((item) => {
+        if (stockAlertFilter === "low") return item.status === "Low Stock";
+        if (stockAlertFilter === "out") return item.status === "Out of Stock";
+        return true;
+    });
 
     return (
         <>
@@ -1458,30 +1355,25 @@ export default function ManagerDashboard() {
                 <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
                     <div className="min-w-0">
                         <h1 className="truncate text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                            Dashboard
+                            Manager Dashboard
                         </h1>
                         <p className="mt-1 truncate text-[12px] text-[#7A6A84]">
-                            Here&apos;s an overview of {getAssignedBranchName(user)} branch performance for {currentMonthLabel}.
+                            Operational overview for {assignedBranchName} for {currentMonthLabel}.
                         </p>
                     </div>
 
                     <div className="flex shrink-0 items-center gap-2.5">
-            <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-              {formatCurrentDashboardDateTime(currentDateTime)}
-            </span>
+                        <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
+                            {formatCurrentDashboardDateTime(currentDateTime)}
+                        </span>
 
                         <button
                             type="button"
                             onClick={() => void loadManagerDashboard()}
                             disabled={isRefreshing}
-                            aria-label="Refresh dashboard details"
-                            title="Refresh dashboard details"
                             className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                            <RefreshCw
-                                size={16}
-                                className={isRefreshing ? "animate-spin" : ""}
-                            />
+                            <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
                             {isRefreshing ? "Refreshing..." : "Refresh"}
                         </button>
                     </div>
@@ -1489,171 +1381,103 @@ export default function ManagerDashboard() {
             </header>
 
             <section className="px-6 py-5 font-sans">
-                <div className="mx-auto max-w-none space-y-3.5">
-                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                        <SalesSummaryCard
-                            title="Total Branch Sales"
-                            value={peso(totalBusinessSales)}
-                            subtitle="All sales channels"
-                            icon={<Store size={25} />}
-                            tone="violet"
-                        />
-                        <SalesSummaryCard
-                            title="Total POS Sales"
-                            value={peso(posSales)}
-                            subtitle="Point-of-sale transactions"
-                            icon={<ShoppingCart size={25} />}
-                            tone="green"
-                        />
-                        <SalesSummaryCard
-                            title="Total Booking Sales"
-                            value={peso(bookingSales)}
-                            subtitle="Sales from bookings"
-                            icon={<CalendarDays size={25} />}
-                            tone="blue"
-                        />
-                    </div>
+                <div className="mx-auto max-w-none space-y-4">
+                    {bookingsError && (
+                        <div className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs font-medium text-[#C32F2F]">
+                            {bookingsError}
+                        </div>
+                    )}
 
-                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-5">
-                        <GlanceCard
-                            title="Out of Stock"
-                            value={outOfStockAlertCount}
-                            label="Products"
-                            icon={<PackageX size={22} />}
-                            tone="red"
-                        />
-                        <GlanceCard
-                            title="Low Stock"
-                            value={lowStockAlertCount}
-                            label="Products"
-                            icon={<AlertTriangle size={22} />}
-                            tone="orange"
-                        />
-                        <GlanceCard
-                            title="Expiring Soon"
-                            value={expiringSoonCount}
-                            label="Items"
-                            icon={<CalendarClock size={22} />}
-                            tone="violet"
-                        />
-                        <GlanceCard
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        <ManagerMetricCard
                             title="Pending Bookings"
                             value={pendingBookingCount}
-                            label="Bookings"
-                            icon={<CalendarClock size={22} />}
-                            tone="blue"
+                            subtitle="Bookings waiting for confirmation"
+                            icon={<CalendarClock size={24} />}
+                            tone="violet"
+                            onClick={() => router.push("/bookings")}
                         />
-                        <GlanceCard
+                        <ManagerMetricCard
                             title="Upcoming Bookings"
-                            value={upcomingBookings.length}
-                            label="Bookings"
-                            icon={<CalendarDays size={22} />}
+                            value={upcomingNext7Days.length}
+                            subtitle="Bookings in the next 7 days"
+                            icon={<CalendarDays size={24} />}
                             tone="green"
+                            onClick={() => router.push("/bookings")}
                         />
-                    </div>
-
-                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
-                        <CompactDashboardTable
-                            title="Upcoming Bookings"
-                            subtitle="Next 3 upcoming bookings"
-                            icon={<CalendarDays size={18} />}
-                            action={() => router.push("/bookings")}
-                            onExportPdf={() =>
-                                exportTableAsPdf(
-                                    upcomingBookingsExportTable,
-                                    dashboardExportContext,
-                                    `upcoming-bookings-${dashboardFileDate}`,
-                                )
-                            }
-                            onExportXlsx={() =>
-                                exportTableAsExcel(
-                                    upcomingBookingsExportTable,
-                                    dashboardExportContext,
-                                    `upcoming-bookings-${dashboardFileDate}`,
-                                    "Upcoming Bookings",
-                                )
-                            }
-                            onExportDoc={() =>
-                                exportTableAsDoc(
-                                    upcomingBookingsExportTable,
-                                    dashboardExportContext,
-                                    `upcoming-bookings-${dashboardFileDate}`,
-                                )
-                            }
-                            totalRecords={allUpcomingBookings.length}
-                            headers={["Date", "Booking #", "Time", "Status"]}
-                            emptyText={bookingsError || "No upcoming bookings yet."}
-                            rows={upcomingBookings.map((booking) => ({
-                                date: booking.date,
-                                reference: compactDashboardReference(
-                                    "BK",
-                                    booking.bookingNumber,
-                                    booking.id,
-                                ),
-                                time: formatDashboardTime(booking.date, booking.time),
-                                status: booking.status || "Pending",
-                            }))}
-                        />
-
-                        <InventoryAlertPanel
-                            items={inventoryAlerts}
-                            totalAlerts={allInventoryAlerts.length}
-                            onExportPdf={() =>
-                                exportTableAsPdf(
-                                    inventoryAlertsExportTable,
-                                    dashboardExportContext,
-                                    `inventory-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onExportXlsx={() =>
-                                exportTableAsExcel(
-                                    inventoryAlertsExportTable,
-                                    dashboardExportContext,
-                                    `inventory-alerts-${dashboardFileDate}`,
-                                    "Inventory Alerts",
-                                )
-                            }
-                            onExportDoc={() =>
-                                exportTableAsDoc(
-                                    inventoryAlertsExportTable,
-                                    dashboardExportContext,
-                                    `inventory-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onViewAll={() => {
-                                setStockAlertFilter("all");
+                        <ManagerMetricCard
+                            title="Low Stock"
+                            value={lowStockAlertCount}
+                            subtitle="Items below reorder level"
+                            icon={<AlertTriangle size={24} />}
+                            tone="orange"
+                            onClick={() => {
+                                setStockAlertFilter("low");
                                 setShowStockAlertsModal(true);
                             }}
                         />
+                        <ManagerMetricCard
+                            title="Out of Stock / Expiring Soon"
+                            value={urgentAttentionCount}
+                            subtitle="Items needing immediate attention"
+                            icon={<PackageX size={24} />}
+                            tone="red"
+                            onClick={() => router.push("/inventory")}
+                        />
+                    </div>
 
-                        <ExpirationAlertsPanel
-                            items={expirationAlertItems}
-                            totalItems={allExpirationAlertItems.length}
-                            onExportPdf={() =>
-                                exportTableAsPdf(
-                                    expirationAlertsExportTable,
-                                    dashboardExportContext,
-                                    `expiration-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onExportXlsx={() =>
-                                exportTableAsExcel(
-                                    expirationAlertsExportTable,
-                                    dashboardExportContext,
-                                    `expiration-alerts-${dashboardFileDate}`,
-                                    "Expiration Alerts",
-                                )
-                            }
-                            onExportDoc={() =>
-                                exportTableAsDoc(
-                                    expirationAlertsExportTable,
-                                    dashboardExportContext,
-                                    `expiration-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onViewAll={() =>
-                                setShowExpirationAlertsModal(true)
-                            }
+                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-12">
+                        <div className="xl:col-span-4">
+                            <ManagerDonutPanel
+                                title="Booking Overview"
+                                subtitle="Status of bookings this month"
+                                icon={<CalendarDays size={18} />}
+                                centerValue={bookingOverview.total}
+                                centerLabel="Total Bookings"
+                                periodLabel="This Month"
+                                segments={bookingOverview.segments}
+                            />
+                        </div>
+
+                        <div className="xl:col-span-4">
+                            <ManagerDonutPanel
+                                title="Inventory Health"
+                                subtitle="Current stock status across all products"
+                                icon={<Box size={18} />}
+                                centerValue={inventoryHealth.total}
+                                centerLabel="Total Items"
+                                periodLabel="This Month"
+                                segments={inventoryHealth.segments}
+                            />
+                        </div>
+
+                        <div className="xl:col-span-4">
+                            <ItemsRequiringAttentionPanel
+                                items={attentionItems.slice(0, 5)}
+                                total={attentionItems.length}
+                                onViewAll={() => router.push("/inventory")}
+                            />
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
+                        <ManagerLineChartPanel
+                            title="Booking Status Trend"
+                            subtitle="Weekly booking status over the last 8 weeks"
+                            icon={<BarChart3 size={18} />}
+                            periodLabel="Last 8 Weeks"
+                            data={bookingTrend}
+                            series={[
+                                { key: "pending", label: "Pending", color: "#F5B51B" },
+                                { key: "confirmed", label: "Confirmed", color: "#159455" },
+                                { key: "completed", label: "Completed", color: "#2F7BEA" },
+                                { key: "cancelled", label: "Cancelled", color: "#EF4444" },
+                            ]}
+                        />
+
+                        <ManagerInventoryForecastPanel
+                            rows={inventoryForecast}
+                            onViewInventory={() => router.push("/inventory")}
                         />
                     </div>
                 </div>
@@ -1670,14 +1494,1114 @@ export default function ManagerDashboard() {
                     onClose={() => setShowStockAlertsModal(false)}
                 />
             )}
-            {showExpirationAlertsModal && (
-                <ExpirationAlertsModal
-                    items={allExpirationAlertItems}
-                    onClose={() => setShowExpirationAlertsModal(false)}
-                />
-            )}
-
         </>
+    );
+}
+
+/* ----------------------------------------------------------------------- */
+/* Manager role dashboard helpers                                           */
+/* ----------------------------------------------------------------------- */
+
+type RestockMovementRecord = {
+    date: string;
+    quantityAdded: number;
+    branchId?: string | number;
+};
+
+type AdjustmentMovementRecord = {
+    date: string;
+    quantityChanged: number;
+    branchId?: string | number;
+};
+
+type ManagerSegment = {
+    label: string;
+    value: number;
+    color: string;
+};
+
+type ManagerAttentionItem = {
+    key: string;
+    productName: string;
+    variantName: string;
+    status: "Out of Stock" | "Low Stock" | "Expiring Soon" | "Expired";
+    detail: string;
+    priority: number;
+};
+
+type ManagerTrendPoint = {
+    label: string;
+    [key: string]: string | number;
+};
+
+type ManagerLineSeries = {
+    key: string;
+    label: string;
+    color: string;
+    info?: string;
+};
+
+type InventoryForecastRisk = "High" | "Medium" | "Low";
+
+type ManagerInventoryForecastRow = {
+    key: string;
+    productName: string;
+    currentStock: number;
+    averageDailyUsage: number;
+    estimatedStockoutDays: number;
+    suggestedRestock: number;
+    risk: InventoryForecastRisk;
+};
+
+function parseManagerDate(value?: string | null) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeRestockMovement(value: unknown): RestockMovementRecord {
+    const raw = toRecord(value);
+    return {
+        date: readText(raw, ["date", "createdAt", "created_at", "restockDate", "restock_date"]),
+        quantityAdded: Math.max(
+            0,
+            readNumber(raw, ["quantityAdded", "quantity_added", "quantity", "qty"], 0),
+        ),
+        branchId:
+            firstDefined(raw, ["branchId", "branch_id"]) as string | number | undefined,
+    };
+}
+
+function normalizeAdjustmentMovement(value: unknown): AdjustmentMovementRecord {
+    const raw = toRecord(value);
+    const rawQuantity = readNullableNumber(raw, [
+        "quantityChanged",
+        "quantity_changed",
+        "quantityChange",
+        "quantity_change",
+        "adjustmentQuantity",
+        "adjustment_quantity",
+        "difference",
+        "delta",
+    ]);
+
+    return {
+        date: readText(raw, ["date", "createdAt", "created_at", "updatedAt", "updated_at"]),
+        quantityChanged: Math.abs(Number(rawQuantity || 0)),
+        branchId:
+            firstDefined(raw, ["branchId", "branch_id"]) as string | number | undefined,
+    };
+}
+
+function extractAdjustmentMovements(reportData: unknown, branchId: string) {
+    const raw = toRecord(reportData);
+    const direct = firstDefined(raw, [
+        "inventoryAdjustments",
+        "inventory_adjustments",
+        "stockAdjustments",
+        "stock_adjustments",
+        "adjustmentHistory",
+        "adjustment_history",
+        "inventoryAdjustmentHistory",
+    ]);
+
+    if (Array.isArray(direct)) {
+        return direct
+            .map(normalizeAdjustmentMovement)
+            .filter(
+                (item) =>
+                    item.quantityChanged > 0 &&
+                    (!item.branchId || String(item.branchId) === String(branchId)),
+            );
+    }
+
+    const employeeActions = firstDefined(raw, ["employeeActions", "employee_actions"]);
+    if (!Array.isArray(employeeActions)) return [];
+
+    return employeeActions
+        .filter((value) => {
+            const action = toRecord(value);
+            const moduleName = readText(action, ["module"]);
+            const text = [
+                readText(action, ["action"]),
+                readText(action, ["details"]),
+                readText(action, ["description"]),
+            ]
+                .join(" ")
+                .toLowerCase();
+            const actionBranchId = firstDefined(action, ["branchId", "branch_id"]);
+
+            return (
+                moduleName.toLowerCase().includes("inventory") &&
+                /(adjust|correction|damag|missing|return|expire)/.test(text) &&
+                (!actionBranchId || String(actionBranchId) === String(branchId))
+            );
+        })
+        .map(normalizeAdjustmentMovement)
+        .filter((item) => item.quantityChanged > 0);
+}
+
+function managerAttentionKey(productName: string, variantName: string) {
+    return `${productName.trim().toLowerCase()}::${variantName.trim().toLowerCase()}`;
+}
+
+function buildManagerAttentionItems(
+    stockAlerts: StockAlertItem[],
+    expirationAlerts: ExpirationAlertItem[],
+): ManagerAttentionItem[] {
+    const map = new Map<string, ManagerAttentionItem>();
+
+    stockAlerts.forEach((item) => {
+        const key = managerAttentionKey(item.productName, item.variantName);
+        const isOut = item.status === "Out of Stock";
+        map.set(key, {
+            key,
+            productName: item.productName,
+            variantName: item.variantName || "—",
+            status: item.status,
+            detail: isOut
+                ? "0 remaining"
+                : `${item.currentStock} remaining · reorder at ${item.alertLevel}`,
+            priority: isOut ? 4 : 2,
+        });
+    });
+
+    expirationAlerts.forEach((item) => {
+        const key = managerAttentionKey(item.productName, item.variantName);
+        const expired = item.status === "Expired";
+        const next: ManagerAttentionItem = {
+            key,
+            productName: item.productName,
+            variantName: item.variantName || "—",
+            status: expired ? "Expired" : "Expiring Soon",
+            detail: expired
+                ? formatExpirationDistance(item.daysRemaining)
+                : formatExpirationDistance(item.daysRemaining),
+            priority: expired ? 3 : 1,
+        };
+
+        const existing = map.get(key);
+        if (!existing || next.priority > existing.priority) {
+            map.set(key, next);
+        }
+    });
+
+    return Array.from(map.values()).sort((a, b) => b.priority - a.priority);
+}
+
+function buildBookingOverview(bookings: Booking[], reference: Date) {
+    const start = new Date(reference.getFullYear(), reference.getMonth(), 1);
+    const end = new Date(reference.getFullYear(), reference.getMonth() + 1, 1);
+
+    const counts = { pending: 0, confirmed: 0, completed: 0, cancelled: 0 };
+
+    bookings.forEach((booking) => {
+        const date = parseManagerDate(booking.date);
+        if (!date || date < start || date >= end) return;
+
+        const status = normalizeDashboardBookingStatus(booking.status);
+        if (status === "Completed") counts.completed += 1;
+        else if (status === "Cancelled") counts.cancelled += 1;
+        else if (status === "Confirmed" || status === "Preparing") counts.confirmed += 1;
+        else counts.pending += 1;
+    });
+
+    const total = counts.pending + counts.confirmed + counts.completed + counts.cancelled;
+
+    return {
+        total,
+        segments: [
+            { label: "Pending", value: counts.pending, color: "#F5B51B" },
+            { label: "Confirmed", value: counts.confirmed, color: "#159455" },
+            { label: "Completed", value: counts.completed, color: "#2F7BEA" },
+            { label: "Cancelled", value: counts.cancelled, color: "#EF4444" },
+        ] satisfies ManagerSegment[],
+    };
+}
+
+function getManagerInventoryUnitIds(products: Product[]) {
+    return products.flatMap((product) => {
+        const variants = Array.isArray(product.variants) ? product.variants : [];
+        if (variants.length > 0) {
+            return variants.map(
+                (variant, index) =>
+                    `${product.id}-variant-${variant.id || index}`,
+            );
+        }
+        return [`${product.id}-regular`];
+    });
+}
+
+function buildInventoryHealth(
+    products: Product[],
+    stockAlerts: StockAlertItem[],
+    expirationAlerts: ExpirationAlertItem[],
+) {
+    const allIds = getManagerInventoryUnitIds(products);
+    const outIds = new Set(
+        stockAlerts.filter((item) => item.status === "Out of Stock").map((item) => item.id),
+    );
+    const lowIds = new Set(
+        stockAlerts.filter((item) => item.status === "Low Stock").map((item) => item.id),
+    );
+    const expiryIds = new Set(expirationAlerts.map((item) => item.id));
+
+    let out = 0;
+    let low = 0;
+    let expiring = 0;
+    let healthy = 0;
+
+    allIds.forEach((id) => {
+        if (outIds.has(id)) out += 1;
+        else if (lowIds.has(id)) low += 1;
+        else if (expiryIds.has(id)) expiring += 1;
+        else healthy += 1;
+    });
+
+    const total = allIds.length;
+
+    return {
+        total,
+        segments: [
+            { label: "Healthy Stock", value: healthy, color: "#159455" },
+            { label: "Low Stock", value: low, color: "#F59E0B" },
+            { label: "Out of Stock", value: out, color: "#EF4444" },
+            { label: "Expiring Soon", value: expiring, color: "#6D35D4" },
+        ] satisfies ManagerSegment[],
+    };
+}
+
+function startOfManagerWeek(value: Date) {
+    const date = new Date(value);
+    date.setHours(0, 0, 0, 0);
+    const day = date.getDay();
+    const distanceFromMonday = (day + 6) % 7;
+    date.setDate(date.getDate() - distanceFromMonday);
+    return date;
+}
+
+function getLastEightManagerWeeks(reference: Date) {
+    const currentWeek = startOfManagerWeek(reference);
+    return Array.from({ length: 8 }, (_, index) => {
+        const start = new Date(currentWeek);
+        start.setDate(start.getDate() - (7 - index) * 7);
+        const end = new Date(start);
+        end.setDate(end.getDate() + 7);
+        return {
+            start,
+            end,
+            label: start.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        };
+    });
+}
+
+function buildBookingStatusTrend(bookings: Booking[], reference: Date): ManagerTrendPoint[] {
+    const weeks = getLastEightManagerWeeks(reference);
+
+    return weeks.map((week) => {
+        const point: ManagerTrendPoint = {
+            label: week.label,
+            pending: 0,
+            confirmed: 0,
+            completed: 0,
+            cancelled: 0,
+        };
+
+        bookings.forEach((booking) => {
+            const date = parseManagerDate(booking.createdAt || booking.date);
+            if (!date || date < week.start || date >= week.end) return;
+
+            const status = normalizeDashboardBookingStatus(booking.status);
+            if (status === "Completed") point.completed = Number(point.completed) + 1;
+            else if (status === "Cancelled") point.cancelled = Number(point.cancelled) + 1;
+            else if (status === "Confirmed" || status === "Preparing") {
+                point.confirmed = Number(point.confirmed) + 1;
+            } else {
+                point.pending = Number(point.pending) + 1;
+            }
+        });
+
+        return point;
+    });
+}
+
+function isManagerReleasedOrder(order: Order) {
+    const type = String(order.orderType || "").trim().toLowerCase().replace(/_/g, "-");
+    const status = String(order.status || "").trim().toLowerCase();
+    const scheduled = [
+        "scheduled",
+        "schedule",
+        "scheduled-order",
+        "future",
+        "future-order",
+        "advance-order",
+        "pre-order",
+        "preorder",
+    ].includes(type);
+    const excluded = [
+        "pending",
+        "pending payment",
+        "unpaid",
+        "cancelled",
+        "canceled",
+        "refunded",
+        "void",
+        "draft",
+        "failed",
+    ].includes(status);
+    return !scheduled && !excluded;
+}
+
+function managerForecastName(value?: string | null) {
+    return String(value || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim()
+        .replace(/\s+/g, " ");
+}
+
+function getManagerProductStock(product: Product) {
+    const variants = Array.isArray(product.variants) ? product.variants : [];
+    if (variants.length > 0) {
+        return variants.reduce(
+            (sum, variant) => sum + Math.max(0, Number(variant.stock || 0)),
+            0,
+        );
+    }
+    return Math.max(0, Number(product.stock || 0));
+}
+
+function buildManagerInventoryForecast(
+    products: Product[],
+    orders: Order[],
+    reference: Date,
+): ManagerInventoryForecastRow[] {
+    const HISTORY_DAYS = 30;
+    const TARGET_COVERAGE_DAYS = 30;
+    const historyStart = new Date(reference);
+    historyStart.setHours(0, 0, 0, 0);
+    historyStart.setDate(historyStart.getDate() - HISTORY_DAYS);
+
+    const productIndex = products
+        .map((product) => ({
+            product,
+            normalizedName: managerForecastName(product.name),
+        }))
+        .filter((item) => item.normalizedName);
+
+    const releasedByProductId = new Map<number, number>();
+
+    orders.filter(isManagerReleasedOrder).forEach((order) => {
+        const date = parseManagerDate(order.orderDate || order.date || order.createdAt);
+        if (!date || date < historyStart || date > reference) return;
+
+        (order.items || []).forEach((item) => {
+            const quantity = Math.max(0, Number(item.quantity || 0));
+            if (quantity <= 0) return;
+
+            const itemName = managerForecastName(item.name);
+            if (!itemName) return;
+
+            let matched = productIndex.find(
+                (entry) => entry.normalizedName === itemName,
+            );
+
+            if (!matched) {
+                matched = productIndex
+                    .filter(
+                        (entry) =>
+                            itemName.includes(entry.normalizedName) ||
+                            entry.normalizedName.includes(itemName),
+                    )
+                    .sort(
+                        (first, second) =>
+                            second.normalizedName.length - first.normalizedName.length,
+                    )[0];
+            }
+
+            if (!matched) return;
+
+            releasedByProductId.set(
+                matched.product.id,
+                (releasedByProductId.get(matched.product.id) || 0) + quantity,
+            );
+        });
+    });
+
+    return products
+        .map((product) => {
+            const releasedUnits = releasedByProductId.get(product.id) || 0;
+            const averageDailyUsage = releasedUnits / HISTORY_DAYS;
+            const currentStock = getManagerProductStock(product);
+
+            if (averageDailyUsage <= 0) return null;
+
+            const estimatedStockoutDays =
+                currentStock <= 0 ? 0 : currentStock / averageDailyUsage;
+            const suggestedRestock = Math.max(
+                0,
+                Math.ceil(averageDailyUsage * TARGET_COVERAGE_DAYS - currentStock),
+            );
+
+            const risk: InventoryForecastRisk =
+                estimatedStockoutDays <= 7
+                    ? "High"
+                    : estimatedStockoutDays <= 14
+                        ? "Medium"
+                        : "Low";
+
+            return {
+                key: `forecast-${product.id}`,
+                productName: product.name,
+                currentStock,
+                averageDailyUsage,
+                estimatedStockoutDays,
+                suggestedRestock,
+                risk,
+            } satisfies ManagerInventoryForecastRow;
+        })
+        .filter(
+            (row): row is ManagerInventoryForecastRow =>
+                Boolean(row) &&
+                (row!.estimatedStockoutDays <= TARGET_COVERAGE_DAYS ||
+                    row!.suggestedRestock > 0),
+        )
+        .sort((first, second) => {
+            if (first.risk !== second.risk) {
+                const priority: Record<InventoryForecastRisk, number> = {
+                    High: 3,
+                    Medium: 2,
+                    Low: 1,
+                };
+                return priority[second.risk] - priority[first.risk];
+            }
+            return first.estimatedStockoutDays - second.estimatedStockoutDays;
+        })
+        .slice(0, 3);
+}
+
+function ManagerMetricCard({
+                               title,
+                               value,
+                               subtitle,
+                               icon,
+                               tone,
+                               onClick,
+                           }: {
+    title: string;
+    value: number;
+    subtitle: string;
+    icon: React.ReactNode;
+    tone: DashboardTone;
+    onClick?: () => void;
+}) {
+    const style = toneStyles[tone];
+
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className="flex min-h-[116px] w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm transition hover:border-[#D7C9E3] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]"
+        >
+            <span
+                className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
+            >
+                {icon}
+            </span>
+            <span className="min-w-0 flex-1">
+                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">
+                    {title}
+                </span>
+                <span className="mt-1 block text-[28px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
+                    {value.toLocaleString("en-PH")}
+                </span>
+                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">
+                    {subtitle}
+                </span>
+            </span>
+        </button>
+    );
+}
+
+function ManagerDonutPanel({
+                               title,
+                               subtitle,
+                               icon,
+                               centerValue,
+                               centerLabel,
+                               periodLabel,
+                               segments,
+                           }: {
+    title: string;
+    subtitle: string;
+    icon: React.ReactNode;
+    centerValue: number;
+    centerLabel: string;
+    periodLabel: string;
+    segments: ManagerSegment[];
+}) {
+    const total = segments.reduce((sum, segment) => sum + segment.value, 0);
+    let cursor = 0;
+    const stops = segments.map((segment) => {
+        const start = total > 0 ? (cursor / total) * 100 : 0;
+        cursor += segment.value;
+        const end = total > 0 ? (cursor / total) * 100 : 0;
+        return `${segment.color} ${start}% ${end}%`;
+    });
+    const background = total > 0 ? `conic-gradient(${stops.join(", ")})` : "#F2EDF6";
+
+    return (
+        <div className="flex h-[318px] min-w-0 flex-col rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                        {icon}
+                    </span>
+                    <div className="min-w-0">
+                        <h3 className="truncate text-[15px] font-bold text-[#1A1220]">{title}</h3>
+                        <p className="truncate text-[11px] text-[#9A8DA8]">{subtitle}</p>
+                    </div>
+                </div>
+                <span className="shrink-0 rounded-lg border border-[#E6DDF0] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#5F4E75] shadow-sm">
+                    {periodLabel}
+                </span>
+            </div>
+
+            <div className="mt-4 grid flex-1 grid-cols-[150px_minmax(0,1fr)] items-center gap-4">
+                <div className="relative mx-auto h-[150px] w-[150px] rounded-full" style={{ background }}>
+                    <div className="absolute inset-[28px] flex flex-col items-center justify-center rounded-full bg-white text-center">
+                        <span className="text-[24px] font-bold leading-none text-[#1A1220]">
+                            {centerValue.toLocaleString("en-PH")}
+                        </span>
+                        <span className="mt-1 text-[10px] font-medium text-[#8A7D92]">{centerLabel}</span>
+                    </div>
+                </div>
+
+                <div className="min-w-0 space-y-3">
+                    {segments.map((segment) => {
+                        const pct = total > 0 ? (segment.value / total) * 100 : 0;
+                        return (
+                            <div key={segment.label} className="grid grid-cols-[minmax(0,1fr)_36px_46px] items-center gap-2 text-[11px]">
+                                <span className="flex min-w-0 items-center gap-2 font-semibold text-[#4B3E55]">
+                                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: segment.color }} />
+                                    <span className="truncate">{segment.label}</span>
+                                </span>
+                                <span className="text-right font-bold text-[#2B174C]">{segment.value}</span>
+                                <span className="text-right text-[#8A7D92]">{pct.toFixed(1)}%</span>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function attentionStatusClasses(status: ManagerAttentionItem["status"]) {
+    if (status === "Out of Stock" || status === "Expired") {
+        return "bg-[#FDECEC] text-[#D52B2B]";
+    }
+    if (status === "Low Stock") return "bg-[#FFF3D8] text-[#B66A00]";
+    return "bg-[#F1EBFF] text-[#6D35D4]";
+}
+
+function attentionStatusLabel(status: ManagerAttentionItem["status"]) {
+    if (status === "Out of Stock") return "OUT OF STOCK";
+    if (status === "Low Stock") return "LOW STOCK";
+    if (status === "Expired") return "EXPIRED";
+    return "EXPIRING SOON";
+}
+
+function ItemsRequiringAttentionPanel({
+                                          items,
+                                          total,
+                                          onViewAll,
+                                      }: {
+    items: ManagerAttentionItem[];
+    total: number;
+    onViewAll: () => void;
+}) {
+    return (
+        <div className="flex h-[318px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
+            <div className="flex items-start justify-between gap-3 px-4 pb-3 pt-4">
+                <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#FDECEC] text-[#DC2626]">
+                        <TriangleAlert size={18} />
+                    </span>
+                    <div className="min-w-0">
+                        <h3 className="text-[15px] font-bold leading-5 text-[#1A1220]">
+                            Items Requiring Attention
+                        </h3>
+                        <p className="text-[11px] leading-4 text-[#9A8DA8]">
+                            Products that need immediate action
+                        </p>
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    onClick={onViewAll}
+                    className="shrink-0 text-[11px] font-semibold text-[#6D35D4] hover:underline"
+                >
+                    View All
+                </button>
+            </div>
+
+            <div className="grid grid-cols-[minmax(0,1.45fr)_minmax(72px,.75fr)_minmax(104px,.9fr)] gap-2 border-y border-[#EEE7F5] bg-[#FCFAFE] px-4 py-2 text-[9px] font-bold uppercase tracking-[0.04em] text-[#6D5B79]">
+                <span>Product</span>
+                <span>Variant</span>
+                <span>Status</span>
+            </div>
+
+            <div className="min-h-0 flex-1 divide-y divide-[#F0EAF4] overflow-hidden">
+                {items.length === 0 ? (
+                    <div className="flex h-full items-center justify-center px-6 text-center text-[11px] text-[#9A8DA8]">
+                        No inventory items currently need immediate attention.
+                    </div>
+                ) : (
+                    items.map((item) => (
+                        <div
+                            key={item.key}
+                            className="grid min-h-[46px] grid-cols-[minmax(0,1.45fr)_minmax(72px,.75fr)_minmax(104px,.9fr)] items-center gap-2 px-4 py-2"
+                        >
+                            <div className="min-w-0">
+                                <p className="truncate text-[11px] font-semibold text-[#2B174C]" title={item.productName}>
+                                    {item.productName}
+                                </p>
+                            </div>
+
+                            <p className="truncate text-[10px] font-medium text-[#6D5B79]" title={item.variantName}>
+                                {item.variantName || "—"}
+                            </p>
+
+                            <div className="min-w-0">
+                                <span
+                                    className={`inline-flex max-w-full whitespace-nowrap rounded-full px-2 py-1 text-[8px] font-bold leading-none ${attentionStatusClasses(item.status)}`}
+                                >
+                                    {attentionStatusLabel(item.status)}
+                                </span>
+                                <p className="mt-1 truncate text-[9px] text-[#9A8DA8]" title={item.detail}>
+                                    {item.detail}
+                                </p>
+                            </div>
+                        </div>
+                    ))
+                )}
+            </div>
+
+            <div className="border-t border-[#EEE7F5] px-4 py-2 text-right text-[9px] text-[#9A8DA8]">
+                Showing {Math.min(items.length, 5)} of {total} items
+            </div>
+        </div>
+    );
+}
+
+function managerForecastRiskClasses(risk: InventoryForecastRisk) {
+    if (risk === "High") return "bg-[#FDECEC] text-[#D52B2B]";
+    if (risk === "Medium") return "bg-[#FFF3D8] text-[#B66A00]";
+    return "bg-[#E8F6EC] text-[#17733A]";
+}
+
+function formatManagerStockoutDays(value: number) {
+    if (!Number.isFinite(value)) return "—";
+    if (value <= 0) return "Now";
+    if (value < 1) return "<1 day";
+    return `${Math.ceil(value)} ${Math.ceil(value) === 1 ? "day" : "days"}`;
+}
+
+function ManagerInventoryForecastPanel({
+                                           rows,
+                                           onViewInventory,
+                                       }: {
+    rows: ManagerInventoryForecastRow[];
+    onViewInventory: () => void;
+}) {
+    return (
+        <div className="flex h-[320px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                        <Sparkles size={18} />
+                    </span>
+                    <div className="min-w-0">
+                        <h3 className="truncate text-[15px] font-bold text-[#1A1220]">
+                            Inventory Forecast
+                        </h3>
+                        <p className="truncate text-[11px] text-[#9A8DA8]">
+                            Projected stock needs based on recent POS usage
+                        </p>
+                    </div>
+                </div>
+                <span className="shrink-0 rounded-lg border border-[#E6DDF0] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#5F4E75] shadow-sm">
+                    Next 30 Days
+                </span>
+            </div>
+
+            <div className="mt-3 min-h-0 flex-1">
+                {rows.length === 0 ? (
+                    <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+                        <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[#EAF7F0] text-[#159455]">
+                            <Sparkles size={20} />
+                        </span>
+                        <p className="mt-3 text-[12px] font-semibold text-[#2B174C]">
+                            No immediate restock risk detected
+                        </p>
+                        <p className="mt-1 max-w-[360px] text-[10px] leading-4 text-[#9A8DA8]">
+                            The dashboard needs recent released POS quantities before it can project a meaningful stockout risk.
+                        </p>
+                    </div>
+                ) : (
+                    <div className="divide-y divide-[#F0EAF4]">
+                        {rows.map((row) => (
+                            <div
+                                key={row.key}
+                                className="grid grid-cols-[minmax(0,1.55fr)_70px_84px_96px] items-center gap-3 py-3"
+                            >
+                                <div className="min-w-0">
+                                    <div className="flex min-w-0 items-center gap-2">
+                                        <p
+                                            className="truncate text-[11px] font-semibold text-[#2B174C]"
+                                            title={row.productName}
+                                        >
+                                            {row.productName}
+                                        </p>
+                                        <span
+                                            className={`shrink-0 rounded-full px-2 py-0.5 text-[8px] font-bold ${managerForecastRiskClasses(row.risk)}`}
+                                        >
+                                            {row.risk.toUpperCase()} RISK
+                                        </span>
+                                    </div>
+                                    <p className="mt-1 text-[9px] text-[#9A8DA8]">
+                                        {row.currentStock.toLocaleString("en-PH")} in stock · {row.averageDailyUsage.toFixed(1)} avg. units/day
+                                    </p>
+                                </div>
+
+                                <div className="text-right">
+                                    <p className="text-[8px] font-bold uppercase tracking-[0.04em] text-[#9A8DA8]">
+                                        Stockout
+                                    </p>
+                                    <p className="mt-1 text-[11px] font-bold text-[#2B174C]">
+                                        {formatManagerStockoutDays(row.estimatedStockoutDays)}
+                                    </p>
+                                </div>
+
+                                <div className="text-right">
+                                    <p className="text-[8px] font-bold uppercase tracking-[0.04em] text-[#9A8DA8]">
+                                        Restock
+                                    </p>
+                                    <p className="mt-1 text-[11px] font-bold text-[#159455]">
+                                        +{row.suggestedRestock.toLocaleString("en-PH")} units
+                                    </p>
+                                </div>
+
+                                <div className="text-right">
+                                    <p className="text-[8px] font-bold uppercase tracking-[0.04em] text-[#9A8DA8]">
+                                        Current
+                                    </p>
+                                    <p className="mt-1 text-[11px] font-bold text-[#2B174C]">
+                                        {row.currentStock.toLocaleString("en-PH")} units
+                                    </p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            <div className="mt-2 flex items-center justify-between border-t border-[#F0EAF4] pt-2">
+                <p className="text-[9px] text-[#9A8DA8]">
+                    Based on the last 30 days of released POS quantities.
+                </p>
+                <button
+                    type="button"
+                    onClick={onViewInventory}
+                    className="shrink-0 text-[10px] font-semibold text-[#6D35D4] hover:underline"
+                >
+                    View Inventory →
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function managerNiceStep(value: number) {
+    if (value <= 0) return 1;
+    const exponent = Math.floor(Math.log10(value));
+    const base = 10 ** exponent;
+    const fraction = value / base;
+    if (fraction <= 1) return base;
+    if (fraction <= 2) return 2 * base;
+    if (fraction <= 2.5) return 2.5 * base;
+    if (fraction <= 5) return 5 * base;
+    return 10 * base;
+}
+
+function ManagerLineChartPanel({
+                                   title,
+                                   subtitle,
+                                   icon,
+                                   periodLabel,
+                                   data,
+                                   series,
+                               }: {
+    title: string;
+    subtitle: string;
+    icon: React.ReactNode;
+    periodLabel: string;
+    data: ManagerTrendPoint[];
+    series: ManagerLineSeries[];
+}) {
+    return (
+        <div className="flex h-[320px] min-w-0 flex-col rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                        {icon}
+                    </span>
+                    <div className="min-w-0">
+                        <h3 className="truncate text-[15px] font-bold text-[#1A1220]">{title}</h3>
+                        <p className="truncate text-[11px] text-[#9A8DA8]">{subtitle}</p>
+                    </div>
+                </div>
+                <span className="shrink-0 rounded-lg border border-[#E6DDF0] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#5F4E75] shadow-sm">
+                    {periodLabel}
+                </span>
+            </div>
+
+            <div className="mt-2 min-h-0 flex-1">
+                <ManagerMultiLineChart data={data} series={series} />
+            </div>
+
+            <div className="mt-1 flex flex-wrap items-center justify-center gap-x-5 gap-y-1 text-[10px] font-semibold text-[#5F4E75]">
+                {series.map((item) => {
+                    const total = data.reduce(
+                        (sum, point) => sum + Math.max(0, Number(point[item.key] || 0)),
+                        0,
+                    );
+
+                    return (
+                        <span
+                            key={item.key}
+                            className="inline-flex items-center gap-1.5"
+                            title={total === 0 ? `${item.label}: no recorded movement in this period` : `${item.label}: ${total.toLocaleString("en-PH")} units in this period`}
+                        >
+                            <span
+                                className="h-2.5 w-2.5 rounded-full"
+                                style={{ backgroundColor: item.color }}
+                            />
+                            {item.label}
+                            {total === 0 && (
+                                <span className="rounded-full bg-[#F5F1F8] px-1.5 py-0.5 text-[8px] font-bold text-[#8A7D92]">
+                                    0
+                                </span>
+                            )}
+                            {item.info && (
+                                <span title={item.info} className="inline-flex cursor-help text-[#6D35D4]">
+                                    <Info size={11} />
+                                </span>
+                            )}
+                        </span>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+function ManagerMultiLineChart({
+                                   data,
+                                   series,
+                               }: {
+    data: ManagerTrendPoint[];
+    series: ManagerLineSeries[];
+}) {
+    const width = 700;
+    const height = 220;
+    const margin = { top: 12, right: 14, bottom: 34, left: 42 };
+    const innerW = width - margin.left - margin.right;
+    const innerH = height - margin.top - margin.bottom;
+
+    const allValues = data.flatMap((point) =>
+        series.map((item) => Math.max(0, Number(point[item.key] || 0))),
+    );
+    const maxValue = Math.max(0, ...allValues);
+    const step = managerNiceStep(Math.max(1, maxValue) / 4);
+    const axisMax = Math.max(step * 4, maxValue || 1);
+    const ticks = [0, 1, 2, 3, 4].map((index) => step * index);
+
+    const xFor = (index: number) =>
+        margin.left + (data.length > 1 ? (index / (data.length - 1)) * innerW : innerW / 2);
+    const yFor = (value: number) => margin.top + innerH - (value / axisMax) * innerH;
+    const baselineY = yFor(0);
+
+    const seriesValues = new Map(
+        series.map((item) => [
+            item.key,
+            data.map((point) => Math.max(0, Number(point[item.key] || 0))),
+        ]),
+    );
+
+    const zeroSeries = series.filter((item) =>
+        (seriesValues.get(item.key) || []).every((value) => value === 0),
+    );
+    const zeroSeriesIndex = new Map(zeroSeries.map((item, index) => [item.key, index]));
+
+    const safeGradientId = (key: string) =>
+        `managerFill-${key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+
+    const areaPath = (points: { x: number; y: number }[]) => {
+        if (points.length === 0) return "";
+        const line = points
+            .map(
+                (point, index) =>
+                    `${index === 0 ? "M" : "L"}${point.x.toFixed(1)},${point.y.toFixed(1)}`,
+            )
+            .join(" ");
+        const first = points[0];
+        const last = points[points.length - 1];
+        return `${line} L${last.x.toFixed(1)},${baselineY.toFixed(1)} L${first.x.toFixed(1)},${baselineY.toFixed(1)} Z`;
+    };
+
+    return (
+        <svg
+            viewBox={`0 0 ${width} ${height}`}
+            className="h-full w-full"
+            role="img"
+            aria-label="Dashboard trend chart"
+        >
+            <defs>
+                {series.map((item) => (
+                    <linearGradient
+                        key={item.key}
+                        id={safeGradientId(item.key)}
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2="1"
+                    >
+                        <stop offset="0%" stopColor={item.color} stopOpacity="0.16" />
+                        <stop offset="72%" stopColor={item.color} stopOpacity="0.045" />
+                        <stop offset="100%" stopColor={item.color} stopOpacity="0" />
+                    </linearGradient>
+                ))}
+                <filter id="managerLineSoftShadow" x="-10%" y="-25%" width="120%" height="150%">
+                    <feDropShadow dx="0" dy="1.4" stdDeviation="1.8" floodColor="#2B174C" floodOpacity="0.10" />
+                </filter>
+            </defs>
+
+            {ticks.map((tick) => (
+                <g key={tick}>
+                    <line
+                        x1={margin.left}
+                        x2={width - margin.right}
+                        y1={yFor(tick)}
+                        y2={yFor(tick)}
+                        stroke="#EEE7F5"
+                        strokeWidth={1}
+                    />
+                    <text
+                        x={margin.left - 9}
+                        y={yFor(tick) + 4}
+                        textAnchor="end"
+                        fontSize="10"
+                        fill="#9A8DA8"
+                    >
+                        {Math.round(tick)}
+                    </text>
+                </g>
+            ))}
+
+            {/* Soft area shadows, matching the Owner dashboard chart treatment. */}
+            {series.map((item) => {
+                const values = seriesValues.get(item.key) || [];
+                const isZeroSeries = values.every((value) => value === 0);
+                if (isZeroSeries) return null;
+
+                const points = values.map((value, index) => ({
+                    x: xFor(index),
+                    y: yFor(value),
+                }));
+
+                return (
+                    <path
+                        key={`area-${item.key}`}
+                        d={areaPath(points)}
+                        fill={`url(#${safeGradientId(item.key)})`}
+                        stroke="none"
+                        pointerEvents="none"
+                    />
+                );
+            })}
+
+            {series.map((item) => {
+                const values = seriesValues.get(item.key) || [];
+                const isZeroSeries = values.every((value) => value === 0);
+                const zeroIndex = zeroSeriesIndex.get(item.key) ?? 0;
+
+                const points = values.map((value, index) => ({
+                    x: xFor(index),
+                    y: yFor(value),
+                }));
+                const path = points
+                    .map(
+                        (point, index) =>
+                            `${index === 0 ? "M" : "L"}${point.x.toFixed(1)},${point.y.toFixed(1)}`,
+                    )
+                    .join(" ");
+
+                /*
+                 * When two series are both 0, they occupy the exact same baseline.
+                 * Keep both values mathematically at 0, but use different stroke widths /
+                 * dash patterns so one line does not completely hide the other.
+                 */
+                const zeroStrokeWidth = zeroIndex === 0 ? 4.6 : 2.4;
+                const zeroDash = zeroIndex === 0 ? undefined : zeroIndex === 1 ? "6 4" : "2 4";
+
+                return (
+                    <g key={item.key}>
+                        <path
+                            d={path}
+                            fill="none"
+                            stroke={item.color}
+                            strokeWidth={isZeroSeries ? zeroStrokeWidth : 2.4}
+                            strokeDasharray={isZeroSeries ? zeroDash : undefined}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            opacity={isZeroSeries ? 0.9 : 1}
+                            filter={isZeroSeries ? undefined : "url(#managerLineSoftShadow)"}
+                        />
+                        {points.map((point, index) => (
+                            <circle
+                                key={`${item.key}-${index}`}
+                                cx={point.x}
+                                cy={point.y}
+                                r={isZeroSeries ? (zeroIndex === 0 ? 3.4 : 2.2) : 3}
+                                fill={item.color}
+                                stroke="white"
+                                strokeWidth={isZeroSeries ? 0.8 : 0.6}
+                            >
+                                <title>
+                                    {`${data[index]?.label}: ${item.label} ${Number(data[index]?.[item.key] || 0)}`}
+                                </title>
+                            </circle>
+                        ))}
+                    </g>
+                );
+            })}
+
+            {data.map((point, index) => (
+                <text
+                    key={`${point.label}-${index}`}
+                    x={xFor(index)}
+                    y={height - 9}
+                    textAnchor="middle"
+                    fontSize="9.5"
+                    fill="#9A8DA8"
+                >
+                    {point.label}
+                </text>
+            ))}
+        </svg>
     );
 }
 

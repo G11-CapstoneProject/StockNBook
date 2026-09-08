@@ -123,6 +123,10 @@ export default function SettingsPage() {
             return `${window.location.origin}/book/${storeSlug}?branchId=${branchId}`;
         }
 
+        if (role === "owner") {
+            return `${window.location.origin}/book/${storeSlug}`;
+        }
+
         return "";
     }, [branchId, mounted, role, storeSlug]);
 
@@ -183,7 +187,7 @@ export default function SettingsPage() {
 
         const link = document.createElement("a");
         link.href = canvas.toDataURL("image/png");
-        link.download = `${branchSlug || "booking"}-qr.png`;
+        link.download = `${branchSlug || storeSlug || "booking"}-qr.png`;
         link.click();
     };
 
@@ -249,6 +253,12 @@ export default function SettingsPage() {
                                 isSaving={isSaving}
                                 saved={saved}
                                 onSave={handleSave}
+                                bookingLink={bookingLink}
+                                copied={copied}
+                                qrContainerRef={qrContainerRef}
+                                onCopy={() => void handleCopy()}
+                                onPreview={handlePreview}
+                                onDownloadQR={downloadQR}
                             />
                         ) : (
                             <BranchSettings
@@ -279,6 +289,12 @@ function OwnerSettings({
                            isSaving,
                            saved,
                            onSave,
+                           bookingLink,
+                           copied,
+                           qrContainerRef,
+                           onCopy,
+                           onPreview,
+                           onDownloadQR,
                        }: {
     storeName: string;
     storeSlug: string;
@@ -287,95 +303,173 @@ function OwnerSettings({
     isSaving: boolean;
     saved: boolean;
     onSave: () => void;
+    bookingLink: string;
+    copied: boolean;
+    qrContainerRef: React.RefObject<HTMLDivElement | null>;
+    onCopy: () => void;
+    onPreview: () => void;
+    onDownloadQR: () => void;
 }) {
     return (
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
-            <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
-                <SettingsCardHeading
-                    icon={<Store size={18} />}
-                    title="Business Information"
-                    detail="Update the business details used across your booking page and operations."
-                />
+        <>
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
+                    <SettingsCardHeading
+                        icon={<Store size={18} />}
+                        title="Business Information"
+                        detail="Update the business details used across your booking page and operations."
+                    />
 
-                <div className="mt-5 space-y-4">
-                    <FieldLabel label="Business Name">
-                        <input
-                            type="text"
-                            value={storeName}
-                            onChange={(event) =>
-                                setStoreName(event.target.value)
-                            }
-                            placeholder="Enter your business name"
-                            className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                        />
-                    </FieldLabel>
+                    <div className="mt-5 space-y-4">
+                        <FieldLabel label="Business Name">
+                            <input
+                                type="text"
+                                value={storeName}
+                                onChange={(event) =>
+                                    setStoreName(event.target.value)
+                                }
+                                placeholder="Enter your business name"
+                                className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                            />
+                        </FieldLabel>
 
-                    <FieldLabel
-                        label="Store Slug"
-                        detail="Used in your public booking page URL."
-                    >
-                        <input
-                            type="text"
-                            value={storeSlug}
-                            onChange={(event) =>
-                                setStoreSlug(event.target.value)
-                            }
-                            placeholder="store-slug"
-                            className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                        />
-                    </FieldLabel>
+                        <FieldLabel
+                            label="Store Slug"
+                            detail="Used in your public booking page URL."
+                        >
+                            <input
+                                type="text"
+                                value={storeSlug}
+                                onChange={(event) =>
+                                    setStoreSlug(event.target.value)
+                                }
+                                placeholder="store-slug"
+                                className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                            />
+                        </FieldLabel>
 
-                    <button
-                        type="button"
-                        onClick={onSave}
-                        disabled={isSaving}
-                        className="inline-flex h-[42px] w-full items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                        {saved ? <Check size={16} /> : <Save size={16} />}
-                        {isSaving
-                            ? "Saving..."
-                            : saved
-                                ? "Saved"
-                                : "Save Changes"}
-                    </button>
+                        <button
+                            type="button"
+                            onClick={onSave}
+                            disabled={isSaving}
+                            className="inline-flex h-[42px] w-full items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                            {saved ? <Check size={16} /> : <Save size={16} />}
+                            {isSaving
+                                ? "Saving..."
+                                : saved
+                                    ? "Saved"
+                                    : "Save Changes"}
+                        </button>
 
-                    <p className="text-center text-xs text-[#7A6A84]">
-                        Changes are saved for your current signed-in session.
-                    </p>
-                </div>
-            </section>
-
-            <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
-                <SettingsCardHeading
-                    icon={<CreditCard size={18} />}
-                    title="Subscription & Billing"
-                    detail="Review your current plan and account billing options."
-                />
-
-                <div className="mt-5 space-y-3">
-                    <div className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] p-4">
-                        <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                            Current Plan
+                        <p className="text-center text-xs text-[#7A6A84]">
+                            Changes are saved for your current signed-in session.
                         </p>
-                        <p className="mt-2 text-[18px] font-bold text-[#1A1220]">
-                            Pro Plan
-                        </p>
-                        <p className="mt-1 text-sm font-medium text-[#5F4E75]">
-                            ₱2,999 / month
+                    </div>
+                </section>
+
+                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
+                    <SettingsCardHeading
+                        icon={<CreditCard size={18} />}
+                        title="Subscription & Billing"
+                        detail="Review your current plan and account billing options."
+                    />
+
+                    <div className="mt-5 space-y-3">
+                        <div className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] p-4">
+                            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Current Plan
+                            </p>
+                            <p className="mt-2 text-[18px] font-bold text-[#1A1220]">
+                                Pro Plan
+                            </p>
+                            <p className="mt-1 text-sm font-medium text-[#5F4E75]">
+                                ₱2,999 / month
+                            </p>
+                        </div>
+
+                        <BillingRow
+                            title="Manage Subscription"
+                            detail="Change or review your current plan."
+                        />
+                        <BillingRow
+                            title="View Invoices"
+                            detail="Review past billing records and receipts."
+                        />
+                    </div>
+                </section>
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(360px,0.95fr)]">
+                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
+                    <SettingsCardHeading
+                        icon={<Link2 size={18} />}
+                        title="Store Booking Link"
+                        detail="Share this link so customers can book with any of your branches."
+                    />
+
+                    <div className="mt-5 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3">
+                        <p className="break-all font-mono text-xs leading-5 text-[#4E2C66]">
+                            {bookingLink ||
+                                "No store booking link available yet."}
                         </p>
                     </div>
 
-                    <BillingRow
-                        title="Manage Subscription"
-                        detail="Change or review your current plan."
+                    <div className="mt-4 grid grid-cols-2 gap-3">
+                        <button
+                            type="button"
+                            onClick={onCopy}
+                            disabled={!bookingLink}
+                            className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            {copied ? <Check size={16} /> : <Copy size={16} />}
+                            {copied ? "Copied" : "Copy Link"}
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={onPreview}
+                            disabled={!bookingLink}
+                            className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            <ExternalLink size={16} />
+                            Preview
+                        </button>
+                    </div>
+                </section>
+
+                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
+                    <SettingsCardHeading
+                        icon={<QrCode size={18} />}
+                        title="Store QR Code"
+                        detail="Customers can scan this code to open your store's booking page."
                     />
-                    <BillingRow
-                        title="View Invoices"
-                        detail="Review past billing records and receipts."
-                    />
-                </div>
-            </section>
-        </div>
+
+                    <div
+                        ref={qrContainerRef}
+                        className="mt-5 flex min-h-[228px] items-center justify-center rounded-xl border border-dashed border-[#D8CBE7] bg-[#FFFDF8] p-5"
+                    >
+                        {bookingLink ? (
+                            <QRCodeCanvas value={bookingLink} size={148} />
+                        ) : (
+                            <p className="text-sm text-[#9B8AAA]">
+                                No booking link available.
+                            </p>
+                        )}
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={onDownloadQR}
+                        disabled={!bookingLink}
+                        className="mt-4 inline-flex h-[42px] w-full items-center justify-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                        <Download size={16} />
+                        Download QR
+                    </button>
+                </section>
+            </div>
+        </>
     );
 }
 

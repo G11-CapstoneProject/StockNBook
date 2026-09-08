@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { Lora } from "next/font/google";
 import type { ReactNode } from "react";
 import {
+    useEffect,
     useMemo,
     useState,
     useSyncExternalStore,
@@ -20,6 +21,7 @@ import {
     GitBranch,
     LayoutDashboard,
     LineChart,
+    LockKeyhole,
     LogOut,
     Package,
     Settings,
@@ -52,6 +54,18 @@ type SidebarItem = {
     href: string;
     icon: LucideIcon;
     exact?: boolean;
+    locked?: boolean;
+    lockTitle?: string;
+};
+
+type SubscriptionResponse = {
+    subscription?: {
+        plan?: {
+            name?: string | null;
+            has_analytics?: boolean;
+            has_forecasting?: boolean;
+        };
+    };
 };
 
 type StoredSidebarData = {
@@ -300,6 +314,7 @@ function NavItem({
             aria-current={
                 active ? "page" : undefined
             }
+            title={item.locked ? item.lockTitle : undefined}
             className={`group flex items-center gap-2.5 rounded-md px-2.5 py-2 text-[11px] font-medium leading-none transition-colors duration-150 ${
                 active
                     ? "bg-[#5634BF] text-white shadow-[0_5px_12px_rgba(41,15,104,0.30)] hover:bg-[#633BCE]"
@@ -318,9 +333,18 @@ function NavItem({
                 }`}
             />
 
-            <span className="truncate">
+            <span className="min-w-0 flex-1 truncate">
                 {item.label}
             </span>
+
+            {item.locked && (
+                <LockKeyhole
+                    size={12}
+                    strokeWidth={2.2}
+                    aria-label={item.lockTitle || `${item.label} is locked by your current plan`}
+                    className="ml-auto shrink-0 text-[#E8C15B]"
+                />
+            )}
         </Link>
     );
 }
@@ -362,6 +386,21 @@ export default function RoleSidebar() {
 
     const [logoFailed, setLogoFailed] =
         useState(false);
+
+    /*
+     * null means the subscription is still being checked (or could not
+     * be verified). We only display a lock when the API explicitly says
+     * the current plan does not include that feature.
+     */
+    const [planFeatures, setPlanFeatures] = useState<{
+        planName: string;
+        analytics: boolean | null;
+        forecasting: boolean | null;
+    }>({
+        planName: "Current",
+        analytics: null,
+        forecasting: null,
+    });
 
     /*
      * This reads the saved sidebar information without
@@ -433,6 +472,91 @@ export default function RoleSidebar() {
             hydratedUser?.permissions ||
             storedData.permissions,
         );
+
+    useEffect(() => {
+        if (!isHydrated) {
+            return;
+        }
+
+        let cancelled = false;
+
+        const loadPlanFeatures = async () => {
+            const token =
+                sessionStorage.getItem("token") ||
+                localStorage.getItem("token") ||
+                "";
+
+            if (!token) {
+                return;
+            }
+
+            try {
+                const response = await fetch(
+                    "/api/subscription-client",
+                    {
+                        method: "GET",
+                        headers: {
+                            Authorization: `Bearer ${token}`,
+                            Accept: "application/json",
+                        },
+                        cache: "no-store",
+                    },
+                );
+
+                const data =
+                    (await response.json()) as SubscriptionResponse;
+
+                if (!response.ok || cancelled) {
+                    return;
+                }
+
+                const plan = data.subscription?.plan;
+
+                if (!plan) {
+                    return;
+                }
+
+                setPlanFeatures({
+                    planName: String(
+                        plan.name || "Current",
+                    ),
+                    analytics:
+                        plan.has_analytics === true,
+                    forecasting:
+                        plan.has_forecasting === true,
+                });
+            } catch {
+                // The feature pages still enforce access with PlanFeatureGate.
+                // Avoid showing a possibly incorrect sidebar lock if this
+                // lightweight check fails.
+            }
+        };
+
+        void loadPlanFeatures();
+
+        const refreshPlanFeatures = () => {
+            void loadPlanFeatures();
+        };
+
+        window.addEventListener(
+            "stocknbook-subscription-updated",
+            refreshPlanFeatures,
+        );
+
+        return () => {
+            cancelled = true;
+            window.removeEventListener(
+                "stocknbook-subscription-updated",
+                refreshPlanFeatures,
+            );
+        };
+    }, [isHydrated]);
+
+    const analyticsLocked =
+        planFeatures.analytics === false;
+
+    const forecastingLocked =
+        planFeatures.forecasting === false;
 
     const storeName =
         hydratedUser?.store_name ||
@@ -704,6 +828,12 @@ export default function RoleSidebar() {
                                         "/analytics",
                                     icon:
                                     BarChart3,
+                                    locked:
+                                    analyticsLocked,
+                                    lockTitle:
+                                        analyticsLocked
+                                            ? `${planFeatures.planName} plan does not include Analytics`
+                                            : undefined,
                                 }}
                             />
                         )}
@@ -720,6 +850,12 @@ export default function RoleSidebar() {
                                         "/dashboard/forecasting",
                                     icon:
                                     LineChart,
+                                    locked:
+                                    forecastingLocked,
+                                    lockTitle:
+                                        forecastingLocked
+                                            ? `${planFeatures.planName} plan does not include Forecasting`
+                                            : undefined,
                                 }}
                             />
                         )}

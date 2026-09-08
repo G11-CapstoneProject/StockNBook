@@ -38,10 +38,10 @@ const defaultPermissions: {
     bookings: "full",
     inventory: "full",
     packages: "full",
-    staff_management: "none",
-    reports: "none",
-    analytics: "none",
-    forecasting: "none",
+    staff_management: "full",
+    reports: "full",
+    analytics: "full",
+    forecasting: "full",
 };
 
 type BranchField =
@@ -117,26 +117,6 @@ export default function SetupScreen() {
                 ...copy[index],
                 [field]: value,
             };
-            return copy;
-        });
-    };
-
-    const updatePermission = (
-        index: number,
-        permission: keyof typeof defaultPermissions,
-        value: AccessLevel
-    ) => {
-        setBranches((prev) => {
-            const copy = [...prev];
-
-            copy[index] = {
-                ...copy[index],
-                permissions: {
-                    ...copy[index].permissions,
-                    [permission]: value,
-                },
-            };
-
             return copy;
         });
     };
@@ -552,161 +532,11 @@ export default function SetupScreen() {
                                                             />
                                                         </div>
 
-                                                        <div className="mt-5">
-                                                            <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#7A6E88]">
-                                                                Feature access
-                                                            </p>
-
-                                                            <div className="grid max-h-[280px] gap-2 overflow-y-auto pr-1">
-                                                                <AccessToggle
-                                                                    label="Sales / POS"
-                                                                    value={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .pos ||
-                                                                        "none"
-                                                                    }
-                                                                    onChange={(
-                                                                        value
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "pos",
-                                                                            value
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Bookings"
-                                                                    value={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .bookings ||
-                                                                        "none"
-                                                                    }
-                                                                    onChange={(
-                                                                        value
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "bookings",
-                                                                            value
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Inventory"
-                                                                    value={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .inventory ||
-                                                                        "none"
-                                                                    }
-                                                                    onChange={(
-                                                                        value
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "inventory",
-                                                                            value
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Packages"
-                                                                    value={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .packages ||
-                                                                        "none"
-                                                                    }
-                                                                    onChange={(
-                                                                        value
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "packages",
-                                                                            value
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Staff Management"
-                                                                    allowView={false}
-                                                                    value={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .staff_management ||
-                                                                        "none"
-                                                                    }
-                                                                    onChange={(
-                                                                        value
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "staff_management",
-                                                                            value
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Reports"
-                                                                    allowView={false}
-                                                                    value={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .reports ||
-                                                                        "none"
-                                                                    }
-                                                                    onChange={(
-                                                                        value
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "reports",
-                                                                            value
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Analytics"
-                                                                    allowView={false}
-                                                                    value={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .analytics ||
-                                                                        "none"
-                                                                    }
-                                                                    onChange={(
-                                                                        value
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "analytics",
-                                                                            value
-                                                                        )
-                                                                    }
-                                                                />
-                                                                <AccessToggle
-                                                                    label="Forecasting"
-                                                                    allowView={false}
-                                                                    value={
-                                                                        branches[index]
-                                                                            ?.permissions
-                                                                            .forecasting ||
-                                                                        "none"
-                                                                    }
-                                                                    onChange={(
-                                                                        value
-                                                                    ) =>
-                                                                        updatePermission(
-                                                                            index,
-                                                                            "forecasting",
-                                                                            value
-                                                                        )
-                                                                    }
-                                                                />
-                                                            </div>
+                                                        <div className="mt-5 flex items-start gap-2 rounded-xl border border-[#E7DFE9] bg-[#F8F5FF] px-4 py-3 text-xs leading-5 text-[#5B4A73]">
+                                                            <Check className="mt-0.5 h-4 w-4 shrink-0 text-[#6A469C]" />
+                                                            <span>
+                                                                Managers get full access to every module for this branch — Sales/POS, Bookings, Inventory, Packages, Staff Management, Reports, Analytics, and Forecasting.
+                                                            </span>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -929,36 +759,6 @@ function SetupProgress({ currentStep }: { currentStep: number }) {
                     </div>
                 );
             })}
-        </div>
-    );
-}
-
-function AccessToggle({
-                          label,
-                          value,
-                          onChange,
-                          allowView = true,
-                      }: {
-    label: string;
-    value: AccessLevel;
-    onChange: (value: AccessLevel) => void;
-    allowView?: boolean;
-}) {
-    return (
-        <div className="flex items-center justify-between rounded-xl border border-[#E7DFE9] bg-white px-4 py-3 text-sm text-[#1A1220]">
-            <span>{label}</span>
-
-            <select
-                value={value}
-                onChange={(event) =>
-                    onChange(event.target.value as AccessLevel)
-                }
-                className="h-[38px] min-w-[136px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-            >
-                <option value="none">No access</option>
-                {allowView && <option value="view">View only</option>}
-                <option value="full">Full access</option>
-            </select>
         </div>
     );
 }

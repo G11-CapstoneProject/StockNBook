@@ -4,14 +4,24 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
+    Activity,
     AlertTriangle,
+    BarChart3,
     CalendarClock,
     CalendarDays,
+    CheckCircle2,
+    ChevronRight,
+    CreditCard,
+    ClipboardList,
+    Clock3,
+    ListChecks,
+    PackageCheck,
     PackageX,
     RefreshCw,
     ShoppingCart,
     Store,
     TriangleAlert,
+    Zap,
 } from "lucide-react";
 import {
     DashboardExportMenu,
@@ -1183,14 +1193,181 @@ function formatDashboardTime(dateValue?: string, explicitTime?: string) {
     return Number.isNaN(parsedDate.getTime()) ? "" : format(parsedDate);
 }
 
+
+
+type StaffTaskPriority = "High" | "Medium" | "Low";
+
+type StaffTaskRow = {
+    id: string;
+    task: string;
+    relatedTo: string;
+    priority: StaffTaskPriority;
+    status: "Pending" | "Completed";
+};
+
+type StaffOperationRow = {
+    id: string;
+    at: Date;
+    time: string;
+    title: string;
+    detail: string;
+    status: string;
+    source: "booking" | "pos";
+};
+
+function parseOperationalDateTime(
+    dateValue?: string | null,
+    explicitTime?: string | null,
+) {
+    const rawDate = String(dateValue || "").trim();
+    if (!rawDate) return null;
+
+    let parsedDate: Date;
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+        const [year, month, day] = rawDate.split("-").map(Number);
+        parsedDate = new Date(year, month - 1, day);
+    } else {
+        parsedDate = new Date(rawDate);
+    }
+
+    if (Number.isNaN(parsedDate.getTime())) return null;
+
+    const rawTime = String(explicitTime || "").trim();
+    if (rawTime) {
+        const match = rawTime.match(
+            /^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?$/i,
+        );
+
+        if (match) {
+            let hour = Number(match[1]);
+            const minute = Number(match[2]);
+            const period = match[3]?.toUpperCase();
+
+            if (period === "PM" && hour < 12) hour += 12;
+            if (period === "AM" && hour === 12) hour = 0;
+
+            if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+                parsedDate.setHours(hour, minute, 0, 0);
+            }
+        }
+    }
+
+    return parsedDate;
+}
+
+function isSameOperationalDay(value: Date | null, reference: Date) {
+    if (!value) return false;
+
+    return (
+        value.getFullYear() === reference.getFullYear() &&
+        value.getMonth() === reference.getMonth() &&
+        value.getDate() === reference.getDate()
+    );
+}
+
+function isSuccessfulPosTransaction(order: Order) {
+    const type = String(order.orderType || "")
+        .trim()
+        .toLowerCase()
+        .replace(/_/g, "-");
+    const status = String(order.status || "").trim().toLowerCase();
+
+    const scheduledTypes = [
+        "scheduled",
+        "schedule",
+        "scheduled-order",
+        "future",
+        "future-order",
+        "advance-order",
+        "pre-order",
+        "preorder",
+    ];
+
+    const excludedStatuses = [
+        "pending",
+        "pending payment",
+        "unpaid",
+        "cancelled",
+        "canceled",
+        "refunded",
+        "void",
+        "draft",
+        "failed",
+    ];
+
+    return !scheduledTypes.includes(type) && !excludedStatuses.includes(status);
+}
+
+function bookingNeedsPreparation(booking: Booking) {
+    const status = normalizeDashboardBookingStatus(booking.status).toLowerCase();
+
+    return (
+        status === "confirmed" ||
+        status === "preparing" ||
+        status.includes("for preparation")
+    );
+}
+
+function bookingPreparationIsDone(booking: Booking) {
+    const status = normalizeDashboardBookingStatus(booking.status).toLowerCase();
+
+    return (
+        status === "completed" ||
+        status.includes("ready") ||
+        status.includes("prepared")
+    );
+}
+
+function getStaffBookingAction(booking: Booking) {
+    const status = normalizeDashboardBookingStatus(booking.status).toLowerCase();
+
+    if (status === "pending" || status.includes("awaiting")) return "Confirm";
+    if (
+        status === "confirmed" ||
+        status === "preparing" ||
+        status.includes("for preparation")
+    ) {
+        return "Prepare";
+    }
+    if (status.includes("ready") || status.includes("prepared")) return "Release";
+    return "View";
+}
+
+function getStaffTaskPriority(at: Date | null, reference: Date): StaffTaskPriority {
+    if (!at) return "Medium";
+    const hours = (at.getTime() - reference.getTime()) / (60 * 60 * 1000);
+    if (hours <= 2) return "High";
+    if (hours <= 4) return "Medium";
+    return "Low";
+}
+
+function clampPercentage(value: number) {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(100, value));
+}
+
+function formatNextBookingCountdown(target: Date | null, reference: Date) {
+    if (!target) return "No more bookings today";
+
+    const minutes = Math.max(
+        0,
+        Math.ceil((target.getTime() - reference.getTime()) / (60 * 1000)),
+    );
+
+    if (minutes < 60) return `in ${minutes} minute${minutes === 1 ? "" : "s"}`;
+
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+
+    return remainingMinutes > 0
+        ? `in ${hours}h ${remainingMinutes}m`
+        : `in ${hours} hour${hours === 1 ? "" : "s"}`;
+}
+
 export default function StaffDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
-
-    const canRestockInventory = useMemo(
-        () => hasDashboardInventoryRestockPermission(user),
-        [user],
-    );
 
     const [branches, setBranches] = useState<Branch[]>([]);
     const [bookings, setBookings] = useState<Booking[]>([]);
@@ -1198,12 +1375,8 @@ export default function StaffDashboard() {
     const [orders, setOrders] = useState<Order[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
-    const [isRefreshing, setIsRefreshing] = useState(false);
-    const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
-    const [showExpirationAlertsModal, setShowExpirationAlertsModal] = useState(false);
-    const [stockAlertFilter, setStockAlertFilter] = useState<
-        "all" | "low" | "out"
-    >("all");
+    const [isRefreshing, setIsRefreshing] = useState(true);
+    const [hasLoadedDashboard, setHasLoadedDashboard] = useState(false);
 
     useEffect(() => {
         const timer = window.setInterval(() => {
@@ -1231,6 +1404,8 @@ export default function StaffDashboard() {
             setOrders([]);
             setProducts([]);
             setBookingsError("No assigned branch was found for this account.");
+            setIsRefreshing(false);
+            setHasLoadedDashboard(true);
             return;
         }
 
@@ -1383,6 +1558,7 @@ export default function StaffDashboard() {
             }
         } finally {
             setIsRefreshing(false);
+            setHasLoadedDashboard(true);
         }
     }, [user]);
 
@@ -1392,235 +1568,321 @@ export default function StaffDashboard() {
         void loadStaffDashboard();
     }, [loadStaffDashboard]);
 
-    const scheduledOrders = useMemo(
-        () =>
-            orders.filter((order) => {
-                const type = String(order.orderType || "")
-                    .trim()
-                    .toLowerCase()
-                    .replace(/_/g, "-");
-
-                return [
-                    "scheduled",
-                    "schedule",
-                    "scheduled-order",
-                    "future",
-                    "future-order",
-                    "advance-order",
-                    "pre-order",
-                    "preorder",
-                ].includes(type);
-            }),
-        [orders],
-    );
-
-    const posSales = useMemo(() => {
-        return orders
-            .filter((order) => {
-                const type = String(order.orderType || "")
-                    .trim()
-                    .toLowerCase()
-                    .replace(/_/g, "-");
-
-                const status = String(order.status || "").trim().toLowerCase();
-
-                const isScheduledOrder = [
-                    "scheduled",
-                    "schedule",
-                    "scheduled-order",
-                    "future",
-                    "future-order",
-                    "advance-order",
-                    "pre-order",
-                    "preorder",
-                ].includes(type);
-
-                const isExcludedStatus = [
-                    "pending",
-                    "pending payment",
-                    "unpaid",
-                    "cancelled",
-                    "canceled",
-                    "refunded",
-                    "void",
-                    "draft",
-                    "failed",
-                ].includes(status);
-
-                // Records returned by /api/pos without an order type are treated
-                // as normal POS transactions. Scheduled orders and transactions
-                // that are not yet successfully completed are excluded.
-                return !isScheduledOrder && !isExcludedStatus;
-            })
-            .reduce((sum, order) => sum + Number(order.total || 0), 0);
-    }, [orders]);
-
-    const bookingSales = useMemo(
-        () =>
-            bookings
-                .filter((booking) => {
-                    const status = normalizeDashboardBookingStatus(booking.status);
-
-                    return status === "Confirmed" || status === "Completed";
-                })
-                .reduce(
-                    (sum, booking) =>
-                        sum + getDashboardBookingTotalPrice(booking),
-                    0,
-                ),
-        [bookings],
-    );
-    const scheduledOrderSales = scheduledOrders.reduce(
-        (sum, order) => sum + Number(order.total || 0),
-        0,
-    );
-    const totalBusinessSales = posSales + bookingSales + scheduledOrderSales;
-
-    const allUpcomingBookings = useMemo(() => {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        return [...bookings]
-            .filter((booking) => {
-                const status = String(booking.status || "").toLowerCase();
-                const schedule = new Date(booking.date || "");
-
-                return (
-                    !["completed", "cancelled", "canceled"].includes(status) &&
-                    !Number.isNaN(schedule.getTime()) &&
-                    schedule.getTime() >= today.getTime()
-                );
-            })
-            .sort(
-                (first, second) =>
-                    new Date(first.date || 0).getTime() -
-                    new Date(second.date || 0).getTime(),
-            );
-    }, [bookings]);
-
-    const upcomingBookings = allUpcomingBookings.slice(0, 3);
-
-    const pendingBookingCount = bookings.filter((booking) => {
-        const status = String(booking.status || "").toLowerCase();
-        return status.includes("pending") || status === "new";
-    }).length;
-
-
     const allInventoryAlerts = useMemo(
         () => getDashboardStockAlertItems(products),
         [products],
     );
 
-    const inventoryAlerts = allInventoryAlerts.slice(0, 3);
-    const lowStockAlertCount = allInventoryAlerts.filter(
-        (item) => item.status === "Low Stock",
-    ).length;
-    const outOfStockAlertCount = allInventoryAlerts.filter(
-        (item) => item.status === "Out of Stock",
-    ).length;
-    const visibleStockAlerts = allInventoryAlerts.filter((item) => {
-        if (stockAlertFilter === "low") {
-            return item.status === "Low Stock";
-        }
-
-        if (stockAlertFilter === "out") {
-            return item.status === "Out of Stock";
-        }
-
-        return true;
-    });
-
     const allExpirationAlertItems = useMemo(
         () => getExpirationAlertItems(products),
         [products],
     );
-    const expirationAlertItems = allExpirationAlertItems.slice(0, 3);
-    const expiringSoonCount = allExpirationAlertItems.filter(
-        (item) => item.status === "Expiring",
-    ).length;
 
-    const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", {
+    const dashboardBranchLabel =
+        branches[0]?.branchName || getAssignedBranchName(user);
+
+    const todayLabel = currentDateTime.toLocaleDateString("en-US", {
         month: "long",
+        day: "numeric",
         year: "numeric",
     });
 
-    const dashboardStoreName =
-        getUserValue(user, "storeName") ||
-        getUserValue(user, "store_name") ||
-        getUserValue(user, "businessName") ||
-        getUserValue(user, "business_name") ||
-        "Store";
+    const todayBookings = useMemo(() => {
+        return bookings
+            .filter((booking) => {
+                const status = normalizeDashboardBookingStatus(booking.status).toLowerCase();
+                if (status === "cancelled" || status === "canceled") return false;
 
-    const dashboardBranchLabel = getAssignedBranchName(user);
+                const at = parseOperationalDateTime(booking.date, booking.time);
+                return isSameOperationalDay(at, currentDateTime);
+            })
+            .sort((first, second) => {
+                const firstAt = parseOperationalDateTime(first.date, first.time)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+                const secondAt = parseOperationalDateTime(second.date, second.time)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+                return firstAt - secondAt;
+            });
+    }, [bookings, currentDateTime]);
 
-    const dashboardExportContext: ExportContext = {
-        storeName: dashboardStoreName,
-        branch: dashboardBranchLabel,
-        dateRange: `As of ${formatCurrentDashboardDateTime(currentDateTime)}`,
-    };
+    const bookingsToPrepare = useMemo(
+        () => todayBookings.filter(bookingNeedsPreparation),
+        [todayBookings],
+    );
 
-    const dashboardFileDate = currentDateTime.toISOString().slice(0, 10);
+    const todayPosTransactions = useMemo(() => {
+        return orders
+            .filter(isSuccessfulPosTransaction)
+            .filter((order) => {
+                const at = parseOperationalDateTime(
+                    order.date || order.orderDate || order.createdAt,
+                    order.time,
+                );
+                return isSameOperationalDay(at, currentDateTime);
+            })
+            .sort((first, second) => {
+                const firstAt = parseOperationalDateTime(
+                    first.date || first.orderDate || first.createdAt,
+                    first.time,
+                )?.getTime() ?? 0;
+                const secondAt = parseOperationalDateTime(
+                    second.date || second.orderDate || second.createdAt,
+                    second.time,
+                )?.getTime() ?? 0;
+                return firstAt - secondAt;
+            });
+    }, [orders, currentDateTime]);
 
-    const upcomingBookingsExportTable: ExportTable = {
-        title: "Upcoming Bookings",
-        headers: ["Date", "Booking Number", "Time", "Status"],
-        rows: allUpcomingBookings.map((booking) => [
-            formatDashboardBookingDate(booking.date),
-            booking.bookingNumber ||
-            `BK-${String(booking.id).padStart(6, "0")}`,
-            formatDashboardTime(booking.date, booking.time),
-            booking.status || "Pending",
-        ]),
-    };
+    const bookingTaskRows = useMemo<StaffTaskRow[]>(() => {
+        return todayBookings.map((booking) => {
+            const status = normalizeDashboardBookingStatus(booking.status);
+            const normalized = status.toLowerCase();
+            const reference = compactDashboardReference(
+                "BK",
+                booking.bookingNumber,
+                booking.id,
+            );
+            const at = parseOperationalDateTime(booking.date, booking.time);
 
-    const inventoryAlertsExportTable: ExportTable = {
-        title: "Inventory Alerts",
-        headers: [
-            "Product",
-            "Variant",
-            "Stock Level",
-            "Alert Level",
-            "Status",
-        ],
-        rows: allInventoryAlerts.map((item) => [
-            item.productName,
-            item.variantName,
-            String(item.currentStock),
-            String(item.alertLevel),
-            item.status,
-        ]),
-    };
+            if (normalized === "completed") {
+                return {
+                    id: `booking-completed-${booking.id}`,
+                    task: `Complete ${reference}`,
+                    relatedTo: reference,
+                    priority: getStaffTaskPriority(at, currentDateTime),
+                    status: "Completed",
+                };
+            }
 
-    const expirationAlertsExportTable: ExportTable = {
-        title: "Expiration Alerts",
-        headers: ["Product", "Stock Level", "Expiration Date", "Status"],
-        rows: allExpirationAlertItems.map((item) => [
-            item.variantName
-                ? `${item.productName} - ${item.variantName}`
-                : item.productName,
-            String(item.stock),
-            formatDashboardExpirationDate(item.expirationDate),
-            item.status,
-        ]),
-    };
+            let task = `Review ${reference}`;
+            if (normalized === "pending" || normalized.includes("awaiting")) {
+                task = `Confirm ${reference}`;
+            } else if (bookingNeedsPreparation(booking)) {
+                task = `Prepare ${reference}`;
+            } else if (normalized.includes("ready") || normalized.includes("prepared")) {
+                task = `Release ${reference}`;
+            }
 
+            return {
+                id: `booking-${booking.id}`,
+                task,
+                relatedTo: reference,
+                priority: getStaffTaskPriority(at, currentDateTime),
+                status: "Pending",
+            };
+        });
+    }, [todayBookings, currentDateTime]);
+
+    const inventoryTaskRows = useMemo<StaffTaskRow[]>(() => {
+        const stockTasks = allInventoryAlerts.slice(0, 3).map((item) => ({
+            id: `stock-${item.id}`,
+            task: `Verify stock: ${item.productName}`,
+            relatedTo: "Inventory",
+            priority: (item.status === "Out of Stock" ? "High" : "Medium") as StaffTaskPriority,
+            status: "Pending" as const,
+        }));
+
+        const expiryTasks = allExpirationAlertItems
+            .filter((item) => item.status === "Expired" || item.daysRemaining <= 7)
+            .slice(0, 2)
+            .map((item) => ({
+                id: `expiry-${item.id}`,
+                task: `Check expiry: ${item.productName}`,
+                relatedTo: "Inventory",
+                priority: (item.status === "Expired" || item.daysRemaining <= 2 ? "High" : "Medium") as StaffTaskPriority,
+                status: "Pending" as const,
+            }));
+
+        return [...stockTasks, ...expiryTasks];
+    }, [allInventoryAlerts, allExpirationAlertItems]);
+
+    const allStaffTasks = useMemo(
+        () => [...bookingTaskRows, ...inventoryTaskRows],
+        [bookingTaskRows, inventoryTaskRows],
+    );
+
+    const pendingStaffTasks = useMemo(
+        () => allStaffTasks.filter((task) => task.status === "Pending"),
+        [allStaffTasks],
+    );
+
+    const visiblePendingTasks = pendingStaffTasks.slice(0, 5);
+
+    const todayOperations = useMemo<StaffOperationRow[]>(() => {
+        const bookingOperations: StaffOperationRow[] = todayBookings.map((booking) => {
+            const at =
+                parseOperationalDateTime(booking.date, booking.time) ||
+                new Date(
+                    currentDateTime.getFullYear(),
+                    currentDateTime.getMonth(),
+                    currentDateTime.getDate(),
+                    23,
+                    59,
+                );
+            const status = normalizeDashboardBookingStatus(booking.status);
+            const reference = compactDashboardReference(
+                "BK",
+                booking.bookingNumber,
+                booking.id,
+            );
+            const action = getStaffBookingAction(booking);
+
+            return {
+                id: `booking-operation-${booking.id}`,
+                at,
+                time: formatDashboardTime(booking.date, booking.time) || "Today",
+                title:
+                    action === "Prepare"
+                        ? "Booking Preparation"
+                        : action === "Release"
+                            ? "Booking Release"
+                            : action === "Confirm"
+                                ? "Booking Confirmation"
+                                : "Booking",
+                detail: `${reference}${booking.eventName || booking.packageName ? ` • ${booking.eventName || booking.packageName}` : ""}`,
+                status,
+                source: "booking",
+            };
+        });
+
+        const posOperations: StaffOperationRow[] = todayPosTransactions.map((order, index) => {
+            const at =
+                parseOperationalDateTime(
+                    order.date || order.orderDate || order.createdAt,
+                    order.time,
+                ) || currentDateTime;
+            const reference = compactDashboardReference(
+                "SO",
+                order.orderNumber,
+                order.orderId || order.id || index + 1,
+            );
+
+            return {
+                id: `pos-operation-${order.orderId || order.id || index}`,
+                at,
+                time:
+                    formatDashboardTime(
+                        order.date || order.orderDate || order.createdAt,
+                        order.time,
+                    ) || "Today",
+                title: "POS Transaction",
+                detail: `${reference}${Number(order.total || 0) > 0 ? ` • ${peso(order.total || 0)}` : ""}`,
+                status: "Completed",
+                source: "pos",
+            };
+        });
+
+        const sorted = [...bookingOperations, ...posOperations].sort(
+            (first, second) => first.at.getTime() - second.at.getTime(),
+        );
+
+        if (sorted.length <= 5) return sorted;
+
+        const firstUpcomingIndex = sorted.findIndex(
+            (operation) => operation.at.getTime() >= currentDateTime.getTime(),
+        );
+
+        const startIndex =
+            firstUpcomingIndex < 0
+                ? Math.max(0, sorted.length - 5)
+                : Math.max(0, Math.min(firstUpcomingIndex - 2, sorted.length - 5));
+
+        return sorted.slice(startIndex, startIndex + 5);
+    }, [todayBookings, todayPosTransactions, currentDateTime]);
+
+    const completedTaskCount = allStaffTasks.filter(
+        (task) => task.status === "Completed",
+    ).length;
+    const taskCompletionPct = clampPercentage(
+        allStaffTasks.length > 0
+            ? (completedTaskCount / allStaffTasks.length) * 100
+            : 0,
+    );
+
+    const preparationRelevantBookings = todayBookings.filter(
+        (booking) =>
+            bookingNeedsPreparation(booking) || bookingPreparationIsDone(booking),
+    );
+    const preparedBookingCount = preparationRelevantBookings.filter(
+        bookingPreparationIsDone,
+    ).length;
+    const preparationProgressPct = clampPercentage(
+        preparationRelevantBookings.length > 0
+            ? (preparedBookingCount / preparationRelevantBookings.length) * 100
+            : 0,
+    );
+
+    const completedBookingCount = todayBookings.filter(
+        (booking) =>
+            normalizeDashboardBookingStatus(booking.status).toLowerCase() ===
+            "completed",
+    ).length;
+    const bookingCompletionPct = clampPercentage(
+        todayBookings.length > 0
+            ? (completedBookingCount / todayBookings.length) * 100
+            : 0,
+    );
+
+    const nextBooking = todayBookings
+        .map((booking) => ({
+            booking,
+            at: parseOperationalDateTime(booking.date, booking.time),
+        }))
+        .filter(
+            (entry) =>
+                entry.at &&
+                entry.at.getTime() >= currentDateTime.getTime() &&
+                normalizeDashboardBookingStatus(entry.booking.status).toLowerCase() !==
+                "completed",
+        )
+        .sort(
+            (first, second) =>
+                (first.at?.getTime() || 0) - (second.at?.getTime() || 0),
+        )[0];
+
+    const nextBookingReference = nextBooking
+        ? compactDashboardReference(
+            "BK",
+            nextBooking.booking.bookingNumber,
+            nextBooking.booking.id,
+        )
+        : "";
+
+    const staffDisplayName =
+        getUserValue(user, "name") ||
+        getUserValue(user, "full_name") ||
+        getUserValue(user, "fullName") ||
+        getUserValue(user, "first_name") ||
+        getUserValue(user, "firstName");
+    const staffFirstName = staffDisplayName.trim().split(/\s+/)[0] || "there";
+    const greeting =
+        currentDateTime.getHours() < 12
+            ? "Good morning"
+            : currentDateTime.getHours() < 18
+                ? "Good afternoon"
+                : "Good evening";
+
+    const recentActivityOperations = [...todayOperations]
+        .filter((operation) => operation.at.getTime() <= currentDateTime.getTime())
+        .sort((first, second) => second.at.getTime() - first.at.getTime())
+        .slice(0, 4);
+
+    // Visual-only redesign: Staff data, actions, RBAC checks, routes, and calculations remain unchanged.
     return (
         <>
             <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
                 <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
                     <div className="min-w-0">
                         <h1 className="truncate text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                            Dashboard
+                            Staff Dashboard
                         </h1>
                         <p className="mt-1 truncate text-[12px] text-[#7A6A84]">
-                            Here&apos;s an overview of {getAssignedBranchName(user)} branch performance for {currentMonthLabel}.
+                            {greeting}, {staffFirstName}! Here&apos;s what you need to do today.
                         </p>
                     </div>
 
                     <div className="flex shrink-0 items-center gap-2.5">
-            <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-              {formatCurrentDashboardDateTime(currentDateTime)}
-            </span>
+                        <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
+                            {formatCurrentDashboardDateTime(currentDateTime)}
+                        </span>
 
                         <button
                             type="button"
@@ -1640,200 +1902,93 @@ export default function StaffDashboard() {
                 </div>
             </header>
 
-            <section className="px-6 py-5 font-sans">
-                <div className="mx-auto max-w-none space-y-3.5">
-                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                        <SalesSummaryCard
-                            title="Total Branch Sales"
-                            value={peso(totalBusinessSales)}
-                            subtitle="All sales channels"
-                            icon={<Store size={25} />}
-                            tone="violet"
-                        />
-                        <SalesSummaryCard
-                            title="Total POS Sales"
-                            value={peso(posSales)}
-                            subtitle="Point-of-sale transactions"
-                            icon={<ShoppingCart size={25} />}
-                            tone="green"
-                        />
-                        <SalesSummaryCard
-                            title="Total Booking Sales"
-                            value={peso(bookingSales)}
-                            subtitle="Sales from bookings"
-                            icon={<CalendarDays size={25} />}
-                            tone="blue"
-                        />
-                    </div>
+            <section
+                aria-busy={isRefreshing}
+                className="min-h-[calc(100vh-88px)] bg-[#FFFDF8] px-6 py-5 font-sans"
+            >
+                <div className={`mx-auto max-w-none space-y-4 ${!hasLoadedDashboard ? "hidden" : ""}`}>
+                    {bookingsError && (
+                        <div className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs font-medium text-[#C32F2F]">
+                            {bookingsError}
+                        </div>
+                    )}
 
-                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-5">
-                        <GlanceCard
-                            title="Out of Stock"
-                            value={outOfStockAlertCount}
-                            label="Products"
-                            icon={<PackageX size={22} />}
-                            tone="red"
-                        />
-                        <GlanceCard
-                            title="Low Stock"
-                            value={lowStockAlertCount}
-                            label="Products"
-                            icon={<AlertTriangle size={22} />}
-                            tone="orange"
-                        />
-                        <GlanceCard
-                            title="Expiring Soon"
-                            value={expiringSoonCount}
-                            label="Items"
-                            icon={<CalendarClock size={22} />}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        <SalesSummaryCard
+                            title="Today&apos;s Bookings"
+                            value={String(todayBookings.length)}
+                            subtitle="Bookings scheduled today"
+                            icon={<CalendarDays size={25} />}
                             tone="violet"
                         />
-                        <GlanceCard
-                            title="Pending Bookings"
-                            value={pendingBookingCount}
-                            label="Bookings"
-                            icon={<CalendarClock size={22} />}
+                        <SalesSummaryCard
+                            title="Bookings to Prepare"
+                            value={String(bookingsToPrepare.length)}
+                            subtitle="Still require preparation"
+                            icon={<ClipboardList size={25} />}
+                            tone="green"
+                        />
+                        <SalesSummaryCard
+                            title="Today&apos;s Transactions"
+                            value={String(todayPosTransactions.length)}
+                            subtitle="POS transactions processed today"
+                            icon={<CreditCard size={25} />}
                             tone="blue"
                         />
-                        <GlanceCard
-                            title="Upcoming Bookings"
-                            value={upcomingBookings.length}
-                            label="Bookings"
-                            icon={<CalendarDays size={22} />}
-                            tone="green"
+                        <SalesSummaryCard
+                            title="Pending Tasks"
+                            value={String(pendingStaffTasks.length)}
+                            subtitle="Tasks requiring action"
+                            icon={<ListChecks size={25} />}
+                            tone="red"
                         />
                     </div>
 
                     <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
-                        <CompactDashboardTable
-                            title="Upcoming Bookings"
-                            subtitle="Next 3 upcoming bookings"
-                            icon={<CalendarDays size={18} />}
-                            action={() => router.push("/bookings")}
-                            onExportPdf={() =>
-                                exportTableAsPdf(
-                                    upcomingBookingsExportTable,
-                                    dashboardExportContext,
-                                    `upcoming-bookings-${dashboardFileDate}`,
-                                )
-                            }
-                            onExportXlsx={() =>
-                                exportTableAsExcel(
-                                    upcomingBookingsExportTable,
-                                    dashboardExportContext,
-                                    `upcoming-bookings-${dashboardFileDate}`,
-                                    "Upcoming Bookings",
-                                )
-                            }
-                            onExportDoc={() =>
-                                exportTableAsDoc(
-                                    upcomingBookingsExportTable,
-                                    dashboardExportContext,
-                                    `upcoming-bookings-${dashboardFileDate}`,
-                                )
-                            }
-                            totalRecords={allUpcomingBookings.length}
-                            headers={["Date", "Booking #", "Time", "Status"]}
-                            emptyText={bookingsError || "No upcoming bookings yet."}
-                            rows={upcomingBookings.map((booking) => ({
-                                date: booking.date,
-                                reference: compactDashboardReference(
-                                    "BK",
-                                    booking.bookingNumber,
-                                    booking.id,
-                                ),
-                                time: formatDashboardTime(booking.date, booking.time),
-                                status: booking.status || "Pending",
-                            }))}
-                        />
+                        <div className="min-w-0 xl:col-span-2">
+                            <StaffTodayWorkPanel
+                                operations={todayOperations}
+                                attentionCount={pendingStaffTasks.length}
+                                onOpenBooking={() => router.push("/bookings")}
+                                onOpenPos={() => router.push("/pos")}
+                            />
+                        </div>
 
-                        <InventoryAlertPanel
-                            items={inventoryAlerts}
-                            totalAlerts={allInventoryAlerts.length}
-                            onExportPdf={() =>
-                                exportTableAsPdf(
-                                    inventoryAlertsExportTable,
-                                    dashboardExportContext,
-                                    `inventory-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onExportXlsx={() =>
-                                exportTableAsExcel(
-                                    inventoryAlertsExportTable,
-                                    dashboardExportContext,
-                                    `inventory-alerts-${dashboardFileDate}`,
-                                    "Inventory Alerts",
-                                )
-                            }
-                            onExportDoc={() =>
-                                exportTableAsDoc(
-                                    inventoryAlertsExportTable,
-                                    dashboardExportContext,
-                                    `inventory-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onViewAll={() => {
-                                setStockAlertFilter("all");
-                                setShowStockAlertsModal(true);
-                            }}
-                        />
+                        <div className="min-w-0">
+                            <StaffReferenceQuickActionsPanel
+                                onNewPos={() => router.push("/pos")}
+                                onCreateBooking={() => router.push("/bookings")}
+                                onConfirmBooking={() => router.push("/bookings")}
+                                onPrepareBooking={() => router.push("/bookings")}
+                                onFindBooking={() => router.push("/bookings")}
+                            />
+                        </div>
+                    </div>
 
-                        <ExpirationAlertsPanel
-                            items={expirationAlertItems}
-                            totalItems={allExpirationAlertItems.length}
-                            onExportPdf={() =>
-                                exportTableAsPdf(
-                                    expirationAlertsExportTable,
-                                    dashboardExportContext,
-                                    `expiration-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onExportXlsx={() =>
-                                exportTableAsExcel(
-                                    expirationAlertsExportTable,
-                                    dashboardExportContext,
-                                    `expiration-alerts-${dashboardFileDate}`,
-                                    "Expiration Alerts",
-                                )
-                            }
-                            onExportDoc={() =>
-                                exportTableAsDoc(
-                                    expirationAlertsExportTable,
-                                    dashboardExportContext,
-                                    `expiration-alerts-${dashboardFileDate}`,
-                                )
-                            }
-                            onViewAll={() =>
-                                setShowExpirationAlertsModal(true)
-                            }
-                        />
+                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
+                        <div className="min-w-0">
+                            <StaffPendingTasksCompactPanel
+                                tasks={pendingStaffTasks.slice(0, 4)}
+                                total={pendingStaffTasks.length}
+                                bookings={todayBookings}
+                                onOpenBooking={() => router.push("/bookings")}
+                                onOpenInventory={() => router.push("/inventory")}
+                            />
+                        </div>
+
+                        <div className="min-w-0">
+                            <StaffBookingScheduleCompactPanel
+                                bookings={todayBookings}
+                                onOpenBooking={() => router.push("/bookings")}
+                            />
+                        </div>
+
+                        <div className="min-w-0">
+                            <StaffRecentActivityPanel operations={recentActivityOperations} />
+                        </div>
                     </div>
                 </div>
             </section>
-
-            {showStockAlertsModal && (
-                <StaffStockAlertsModal
-                    items={visibleStockAlerts}
-                    activeFilter={stockAlertFilter}
-                    totalCount={allInventoryAlerts.length}
-                    lowStockCount={lowStockAlertCount}
-                    outOfStockCount={outOfStockAlertCount}
-                    canRestock={canRestockInventory}
-                    onChangeFilter={setStockAlertFilter}
-                    onRestock={() => {
-                        setShowStockAlertsModal(false);
-                        router.push("/inventory");
-                    }}
-                    onClose={() => setShowStockAlertsModal(false)}
-                />
-            )}
-            {showExpirationAlertsModal && (
-                <ExpirationAlertsModal
-                    items={allExpirationAlertItems}
-                    onClose={() => setShowExpirationAlertsModal(false)}
-                />
-            )}
-
         </>
     );
 }
@@ -1866,7 +2021,7 @@ function SalesSummaryCard({
     const style = toneStyles[tone];
 
     return (
-        <div className="flex min-h-[128px] items-center gap-5 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-5 shadow-sm">
+        <div className="flex min-h-[116px] items-center gap-4 rounded-[16px] bg-white px-5 py-4 shadow-sm">
       <span
           className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
       >
@@ -1876,10 +2031,10 @@ function SalesSummaryCard({
                 <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">
                     {title}
                 </p>
-                <p className="mt-2 truncate text-[26px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
+                <p className="mt-1 truncate text-[28px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
                     {value}
                 </p>
-                <p className="mt-2 text-[12px] leading-4 text-[#8A7D92]">{subtitle}</p>
+                <p className="mt-2 text-[11px] leading-4 text-[#8A7D92]">{subtitle}</p>
             </div>
         </div>
     );
@@ -1901,7 +2056,7 @@ function GlanceCard({
     const style = toneStyles[tone];
 
     return (
-        <div className="flex min-h-[124px] items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-4 py-5 shadow-sm">
+        <div className="flex min-h-[124px] items-center gap-3 rounded-[16px] bg-white px-4 py-5 shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
       <span
           className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
       >
@@ -1915,6 +2070,1087 @@ function GlanceCard({
                 <p className="mt-1 text-[12px] text-[#8A7D92]">{label}</p>
             </div>
         </div>
+    );
+}
+
+
+
+type StaffBookingSchedulePanelProps = {
+    bookings: Booking[];
+    onViewAll: () => void;
+};
+
+function StaffBookingSchedulePanel({
+                                       bookings,
+                                       onViewAll,
+                                   }: StaffBookingSchedulePanelProps) {
+    const visible = bookings.slice(0, 5);
+
+    return (
+        <section className="flex h-full min-h-[344px] flex-col overflow-hidden rounded-[14px] bg-white shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
+            <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
+                <div className="flex min-w-0 items-start gap-2 text-[#6D35D4]">
+                    <span className="mt-0.5 flex h-6 w-6 items-center justify-center">
+                        <CalendarDays size={18} />
+                    </span>
+                    <div className="min-w-0">
+                        <h2 className="truncate text-[15px] font-bold leading-5 text-[#1A1220]">
+                            Today&apos;s Booking Schedule
+                        </h2>
+                        <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
+                            Bookings scheduled for today
+                        </p>
+                    </div>
+                </div>
+
+                <button
+                    type="button"
+                    onClick={onViewAll}
+                    className="shrink-0 rounded-lg border border-[#E6DDF0] bg-[#FAF8FF] px-4 py-2 text-[10px] font-semibold text-[#6D35D4]"
+                >
+                    View all
+                </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-x-auto">
+                <table className="w-full min-w-[690px] table-fixed border-collapse">
+                    <colgroup>
+                        <col className="w-[14%]" />
+                        <col className="w-[19%]" />
+                        <col className="w-[29%]" />
+                        <col className="w-[20%]" />
+                        <col className="w-[18%]" />
+                    </colgroup>
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[42px] border-b border-[#EEE8F2]">
+                        {["Time", "Booking #", "Customer / Event", "Status", "Next Action"].map((header) => (
+                            <th
+                                key={header}
+                                className="px-3 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.04em] text-[#806A8C]"
+                            >
+                                {header}
+                            </th>
+                        ))}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {visible.length === 0 ? (
+                        <tr>
+                            <td colSpan={5} className="px-4 py-12 text-center text-[12px] text-[#8A7D92]">
+                                No bookings scheduled for today.
+                            </td>
+                        </tr>
+                    ) : (
+                        visible.map((booking) => {
+                            const reference = compactDashboardReference(
+                                "BK",
+                                booking.bookingNumber,
+                                booking.id,
+                            );
+                            const status = normalizeDashboardBookingStatus(booking.status);
+                            const action = getStaffBookingAction(booking);
+
+                            return (
+                                <tr key={booking.id} className="border-b border-[#F1ECF4] last:border-b-0">
+                                    <td className="px-3 py-3 text-[11px] font-semibold text-[#2B174C]">
+                                        {formatDashboardTime(booking.date, booking.time) || "—"}
+                                    </td>
+                                    <td className="px-3 py-3 text-[11px] font-bold text-[#24152F]">
+                                        {reference}
+                                    </td>
+                                    <td className="px-3 py-3">
+                                        <p className="truncate text-[11px] font-semibold text-[#24152F]" title={booking.name}>
+                                            {booking.name}
+                                        </p>
+                                        <p className="truncate text-[9px] text-[#8A7D92]" title={booking.eventName || booking.packageName || ""}>
+                                            {booking.eventName || booking.packageName || "Booking"}
+                                        </p>
+                                    </td>
+                                    <td className="px-3 py-3">
+                                        <StaffStatusBadge status={status} />
+                                    </td>
+                                    <td className="px-3 py-3">
+                                        <span className="inline-flex min-w-[68px] justify-center rounded-lg bg-[#F1EBFF] px-2.5 py-1.5 text-[10px] font-semibold text-[#6D35D4]">
+                                            {action}
+                                        </span>
+                                    </td>
+                                </tr>
+                            );
+                        })
+                    )}
+                    </tbody>
+                </table>
+            </div>
+
+            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
+                Showing {visible.length} of {bookings.length} booking{bookings.length === 1 ? "" : "s"}
+            </div>
+        </section>
+    );
+}
+
+function StaffStatusBadge({ status }: { status: string }) {
+    const normalized = status.toLowerCase();
+
+    let className = "bg-[#FFF4D9] text-[#A96700]";
+    if (normalized.includes("complete") || normalized.includes("ready")) {
+        className = "bg-[#E6F7EE] text-[#159455]";
+    } else if (normalized.includes("confirm") || normalized.includes("prepar")) {
+        className = "bg-[#EAF1FF] text-[#2563EB]";
+    } else if (normalized.includes("cancel")) {
+        className = "bg-[#FDECEC] text-[#DC2626]";
+    }
+
+    return (
+        <span className={`inline-flex max-w-full rounded-full px-2.5 py-1 text-[9px] font-semibold ${className}`}>
+            <span className="truncate">{status}</span>
+        </span>
+    );
+}
+
+function StaffOperationsPanel({ operations }: { operations: StaffOperationRow[] }) {
+    return (
+        <section className="flex h-full min-h-[344px] flex-col rounded-[14px] bg-white shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
+            <div className="flex min-h-[62px] items-center gap-2 border-b border-[#EEE8F2] px-4 py-2.5 text-[#6D35D4]">
+                <span className="flex h-6 w-6 items-center justify-center">
+                    <Activity size={18} />
+                </span>
+                <div className="min-w-0">
+                    <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                        Today&apos;s Operations
+                    </h2>
+                    <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
+                        Recent activity and upcoming schedule
+                    </p>
+                </div>
+            </div>
+
+            <div className="min-h-0 flex-1 px-4 py-3">
+                {operations.length === 0 ? (
+                    <div className="flex h-full min-h-[220px] items-center justify-center text-center text-[12px] text-[#8A7D92]">
+                        No operational activity recorded for today yet.
+                    </div>
+                ) : (
+                    <div className="relative h-full">
+                        <span className="absolute bottom-3 left-[7px] top-3 w-px bg-[#E9E0EF]" aria-hidden />
+                        <div className="space-y-3">
+                            {operations.map((operation) => {
+                                const completed = operation.status.toLowerCase().includes("complete");
+                                const pending =
+                                    operation.status.toLowerCase().includes("pending") ||
+                                    operation.status.toLowerCase().includes("awaiting");
+                                const dotClass = completed
+                                    ? "border-[#159455] bg-[#E6F7EE]"
+                                    : pending
+                                        ? "border-[#E66B20] bg-[#FFF0E5]"
+                                        : "border-[#6D35D4] bg-[#F1EBFF]";
+
+                                return (
+                                    <div key={operation.id} className="relative grid grid-cols-[20px_58px_minmax(0,1fr)_auto] items-start gap-2">
+                                        <span className={`relative z-10 mt-1 h-3.5 w-3.5 rounded-full border-[3px] ${dotClass}`} />
+                                        <span className="pt-0.5 text-[10px] font-semibold text-[#5F4E75]">
+                                            {operation.time}
+                                        </span>
+                                        <div className="min-w-0">
+                                            <p className="truncate text-[11px] font-semibold text-[#1A1220]">
+                                                {operation.title}
+                                            </p>
+                                            <p className="truncate text-[9px] text-[#8A7D92]" title={operation.detail}>
+                                                {operation.detail}
+                                            </p>
+                                        </div>
+                                        <StaffStatusBadge status={operation.status} />
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
+                Showing activity closest to the current time
+            </div>
+        </section>
+    );
+}
+
+function StaffEfficiencyPanel({
+                                  taskCompleted,
+                                  taskTotal,
+                                  taskPercent,
+                                  preparationCompleted,
+                                  preparationTotal,
+                                  preparationPercent,
+                                  bookingCompleted,
+                                  bookingTotal,
+                                  bookingPercent,
+                                  transactionsProcessed,
+                                  nextBookingTime,
+                                  nextBookingReference,
+                                  nextBookingCountdown,
+                              }: {
+    taskCompleted: number;
+    taskTotal: number;
+    taskPercent: number;
+    preparationCompleted: number;
+    preparationTotal: number;
+    preparationPercent: number;
+    bookingCompleted: number;
+    bookingTotal: number;
+    bookingPercent: number;
+    transactionsProcessed: number;
+    nextBookingTime: string;
+    nextBookingReference: string;
+    nextBookingCountdown: string;
+}) {
+    return (
+        <section className="flex h-full min-h-[344px] flex-col rounded-[14px] bg-white shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
+            <div className="flex min-h-[62px] items-center gap-2 border-b border-[#EEE8F2] px-4 py-2.5 text-[#6D35D4]">
+                <span className="flex h-6 w-6 items-center justify-center">
+                    <BarChart3 size={18} />
+                </span>
+                <div className="min-w-0">
+                    <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                        Today&apos;s Efficiency
+                    </h2>
+                    <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
+                        Data-driven progress for today&apos;s operations
+                    </p>
+                </div>
+            </div>
+
+            <div className="flex flex-1 flex-col gap-3 px-4 py-3">
+                <StaffProgressMetric
+                    label="Task Completion"
+                    valueLabel={`${taskCompleted} of ${taskTotal}`}
+                    percent={taskPercent}
+                    tone="green"
+                />
+                <StaffProgressMetric
+                    label="Booking Preparation"
+                    valueLabel={`${preparationCompleted} of ${preparationTotal}`}
+                    percent={preparationPercent}
+                    tone="blue"
+                />
+                <StaffProgressMetric
+                    label="Booking Completion"
+                    valueLabel={`${bookingCompleted} of ${bookingTotal}`}
+                    percent={bookingPercent}
+                    tone="violet"
+                />
+
+                <div className="flex items-center justify-between border-t border-[#F1ECF4] pt-2.5">
+                    <div className="flex items-center gap-2">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
+                            <ShoppingCart size={14} />
+                        </span>
+                        <span className="text-[10px] font-semibold text-[#4B3E55]">Transactions Processed</span>
+                    </div>
+                    <span className="text-[12px] font-bold text-[#24152F]">{transactionsProcessed}</span>
+                </div>
+
+                <div className="mt-auto rounded-xl bg-[#F8F5FC] px-3 py-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-[#6D35D4] shadow-sm">
+                                <Clock3 size={14} />
+                            </span>
+                            <div>
+                                <p className="text-[9px] font-semibold uppercase tracking-[0.04em] text-[#8A7D92]">
+                                    Next Booking
+                                </p>
+                                <p className="text-[12px] font-bold text-[#6D35D4]">{nextBookingCountdown}</p>
+                            </div>
+                        </div>
+                        {(nextBookingTime || nextBookingReference) && (
+                            <div className="text-right">
+                                <p className="text-[10px] font-semibold text-[#24152F]">{nextBookingTime}</p>
+                                <p className="text-[9px] text-[#8A7D92]">{nextBookingReference}</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </section>
+    );
+}
+
+function StaffProgressMetric({
+                                 label,
+                                 valueLabel,
+                                 percent,
+                                 tone,
+                             }: {
+    label: string;
+    valueLabel: string;
+    percent: number;
+    tone: "green" | "blue" | "violet";
+}) {
+    const fillClass =
+        tone === "green"
+            ? "bg-[#159455]"
+            : tone === "blue"
+                ? "bg-[#2563EB]"
+                : "bg-[#6D35D4]";
+
+    return (
+        <div>
+            <div className="flex items-center justify-between gap-3">
+                <span className="text-[10px] font-semibold text-[#4B3E55]">{label}</span>
+                <span className="text-[10px] font-bold text-[#24152F]">{valueLabel}</span>
+            </div>
+            <div className="mt-1.5 flex items-center gap-2">
+                <div className="h-2 flex-1 overflow-hidden rounded-full bg-[#F1ECF6]">
+                    <div
+                        className={`h-full rounded-full ${fillClass}`}
+                        style={{ width: `${percent}%` }}
+                    />
+                </div>
+                <span className="w-8 text-right text-[9px] font-semibold text-[#5F4E75]">
+                    {Math.round(percent)}%
+                </span>
+            </div>
+        </div>
+    );
+}
+
+function StaffPendingTasksPanel({
+                                    tasks,
+                                    total,
+                                }: {
+    tasks: StaffTaskRow[];
+    total: number;
+}) {
+    return (
+        <section className="flex min-h-[290px] flex-col overflow-hidden rounded-[14px] bg-white shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
+            <div className="flex min-h-[62px] items-center gap-2 border-b border-[#EEE8F2] px-4 py-2.5 text-[#6D35D4]">
+                <span className="flex h-6 w-6 items-center justify-center">
+                    <ListChecks size={18} />
+                </span>
+                <div className="min-w-0">
+                    <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                        Pending Task List
+                    </h2>
+                    <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
+                        Actions generated from today&apos;s bookings and stock checks
+                    </p>
+                </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-x-auto">
+                <table className="w-full min-w-[650px] table-fixed border-collapse">
+                    <colgroup>
+                        <col className="w-[48%]" />
+                        <col className="w-[20%]" />
+                        <col className="w-[16%]" />
+                        <col className="w-[16%]" />
+                    </colgroup>
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[40px] border-b border-[#EEE8F2]">
+                        {["Task", "Related To", "Priority", "Status"].map((header) => (
+                            <th key={header} className="px-3 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.04em] text-[#806A8C]">
+                                {header}
+                            </th>
+                        ))}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {tasks.length === 0 ? (
+                        <tr>
+                            <td colSpan={4} className="px-4 py-10 text-center text-[12px] text-[#8A7D92]">
+                                No pending operational tasks right now.
+                            </td>
+                        </tr>
+                    ) : (
+                        tasks.map((task) => (
+                            <tr key={task.id} className="border-b border-[#F1ECF4] last:border-b-0">
+                                <td className="px-3 py-2.5">
+                                    <div className="flex items-center gap-2">
+                                        <span className="h-3.5 w-3.5 shrink-0 rounded-[3px] border border-[#D9CDE7] bg-white" aria-hidden />
+                                        <span className="truncate text-[11px] font-medium text-[#24152F]" title={task.task}>
+                                            {task.task}
+                                        </span>
+                                    </div>
+                                </td>
+                                <td className="px-3 py-2.5 text-[10px] font-medium text-[#5F4E75]">{task.relatedTo}</td>
+                                <td className="px-3 py-2.5">
+                                    <StaffPriorityBadge priority={task.priority} />
+                                </td>
+                                <td className="px-3 py-2.5">
+                                    <span className="inline-flex rounded-full bg-[#FFF4D9] px-2.5 py-1 text-[9px] font-semibold text-[#A96700]">
+                                        Pending
+                                    </span>
+                                </td>
+                            </tr>
+                        ))
+                    )}
+                    </tbody>
+                </table>
+            </div>
+
+            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
+                Showing {tasks.length} of {total} pending task{total === 1 ? "" : "s"}
+            </div>
+        </section>
+    );
+}
+
+function StaffPriorityBadge({ priority }: { priority: StaffTaskPriority }) {
+    const className =
+        priority === "High"
+            ? "bg-[#FDECEC] text-[#DC2626]"
+            : priority === "Medium"
+                ? "bg-[#EAF1FF] text-[#2563EB]"
+                : "bg-[#E6F7EE] text-[#159455]";
+
+    return (
+        <span className={`inline-flex rounded-full px-2.5 py-1 text-[9px] font-semibold ${className}`}>
+            {priority}
+        </span>
+    );
+}
+
+function StaffQuickActionsPanel({
+                                    onNewBooking,
+                                    onPos,
+                                    onInventory,
+                                    onTodayBookings,
+                                }: {
+    onNewBooking: () => void;
+    onPos: () => void;
+    onInventory: () => void;
+    onTodayBookings: () => void;
+}) {
+    return (
+        <section className="flex min-h-[290px] flex-col rounded-[14px] bg-white p-4 shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
+            <div className="flex items-center gap-2 text-[#6D35D4]">
+                <span className="flex h-6 w-6 items-center justify-center">
+                    <CheckCircle2 size={18} />
+                </span>
+                <div>
+                    <h2 className="text-[18px] font-bold leading-6 text-[#24152F]">Quick Actions</h2>
+                    <p className="text-[9px] leading-5 text-[#8A7D92]">Common tasks for daily operations</p>
+                </div>
+            </div>
+
+            <div className="mt-4 grid flex-1 grid-cols-1 gap-3 sm:grid-cols-2">
+                <StaffQuickActionButton
+                    title="New Booking"
+                    subtitle="Create or manage a booking"
+                    icon={<CalendarDays size={20} />}
+                    tone="violet"
+                    onClick={onNewBooking}
+                />
+                <StaffQuickActionButton
+                    title="POS Transaction"
+                    subtitle="Process a customer sale"
+                    icon={<ShoppingCart size={20} />}
+                    tone="blue"
+                    onClick={onPos}
+                />
+                <StaffQuickActionButton
+                    title="Check Inventory"
+                    subtitle="Verify stock items"
+                    icon={<PackageCheck size={20} />}
+                    tone="green"
+                    onClick={onInventory}
+                />
+                <StaffQuickActionButton
+                    title="Today&apos;s Bookings"
+                    subtitle="Open today&apos;s booking list"
+                    icon={<CalendarClock size={20} />}
+                    tone="violetSoft"
+                    onClick={onTodayBookings}
+                />
+            </div>
+        </section>
+    );
+}
+
+function StaffQuickActionButton({
+                                    title,
+                                    subtitle,
+                                    icon,
+                                    tone,
+                                    onClick,
+                                }: {
+    title: string;
+    subtitle: string;
+    icon: React.ReactNode;
+    tone: "violet" | "blue" | "green" | "violetSoft";
+    onClick: () => void;
+}) {
+    const styles = {
+        violet: "bg-[#6D35D4] text-white hover:bg-[#5D2BBE]",
+        blue: "bg-[#EAF1FF] text-[#2563EB] hover:bg-[#DFEAFF]",
+        green: "bg-[#E6F7EE] text-[#159455] hover:bg-[#DCF2E6]",
+        violetSoft: "bg-[#F1EBFF] text-[#6D35D4] hover:bg-[#E8DEFA]",
+    }[tone];
+
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className={`flex min-h-[88px] items-center gap-3 rounded-xl px-4 py-3 text-left transition ${styles}`}
+        >
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/70 shadow-sm">
+                {icon}
+            </span>
+            <span className="min-w-0">
+                <span className="block truncate text-[12px] font-bold">{title}</span>
+                <span className={`mt-1 block truncate text-[9px] ${tone === "violet" ? "text-white/75" : "text-[#7A6A84]"}`}>
+                    {subtitle}
+                </span>
+            </span>
+        </button>
+    );
+}
+
+
+function getStaffOperationActionLabel(operation: StaffOperationRow) {
+    if (operation.source === "pos") return "View";
+
+    const status = operation.status.toLowerCase();
+    if (status.includes("pending") || status.includes("awaiting")) return "Confirm";
+    if (status.includes("confirm") || status.includes("prepar")) return "Prepare";
+    if (status.includes("ready") || status.includes("prepared")) return "Release";
+    return "View";
+}
+
+function StaffTodayWorkPanel({
+                                 operations,
+                                 attentionCount,
+                                 onOpenBooking,
+                                 onOpenPos,
+                             }: {
+    operations: StaffOperationRow[];
+    attentionCount: number;
+    onOpenBooking: () => void;
+    onOpenPos: () => void;
+}) {
+    const visible = operations.slice(0, 3);
+
+    return (
+        <section className="flex h-full min-h-[318px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
+            <div className="flex items-center justify-between gap-4 border-b border-[#EEE8F2] px-5 py-4">
+                <div className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                        <ClipboardList size={18} />
+                    </span>
+                    <div className="min-w-0">
+                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                            Today&apos;s Work
+                        </h2>
+                        <p className="mt-1 truncate text-[11px] text-[#9A8DA8]">
+                            Here are the things you need to do today.
+                        </p>
+                    </div>
+                </div>
+
+                {attentionCount > 0 && (
+                    <span className="shrink-0 rounded-full bg-[#FFF0F0] px-3 py-1.5 text-[10px] font-semibold text-[#D92D20]">
+                        {attentionCount} item{attentionCount === 1 ? "" : "s"} require attention
+                    </span>
+                )}
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-x-auto">
+                <table className="w-full min-w-[760px] table-fixed border-collapse">
+                    <colgroup>
+                        <col className="w-[9%]" />
+                        <col className="w-[13%]" />
+                        <col className="w-[43%]" />
+                        <col className="w-[16%]" />
+                        <col className="w-[19%]" />
+                    </colgroup>
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[35px] border-b border-[#EEE8F2]">
+                        {["Type", "Time", "Work Item", "Status", "Action"].map((header) => (
+                            <th
+                                key={header}
+                                className="px-4 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]"
+                            >
+                                {header}
+                            </th>
+                        ))}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {visible.length === 0 ? (
+                        <tr className="!border-0">
+                            <td colSpan={5} className="!border-0 px-5 py-16 text-center text-[12px] text-[#8A7D92]">
+                                No work items are scheduled for today yet.
+                            </td>
+                        </tr>
+                    ) : (
+                        visible.map((operation) => {
+                            const actionLabel = getStaffOperationActionLabel(operation);
+                            const isPos = operation.source === "pos";
+                            const completed = operation.status.toLowerCase().includes("complete");
+                            const iconTone = isPos
+                                ? "bg-[#E6F7EE] text-[#159455]"
+                                : completed
+                                    ? "bg-[#EAF1FF] text-[#2563EB]"
+                                    : "bg-[#F1EBFF] text-[#6D35D4]";
+                            const isPrimary = actionLabel === "Confirm";
+
+                            return (
+                                <tr
+                                    key={operation.id}
+                                    className="!border-0 transition hover:bg-[#FCFAFE]"
+                                >
+                                    <td className="!border-0 px-4 py-3.5">
+                                        <span className={`flex h-8 w-8 items-center justify-center rounded-full ${iconTone}`}>
+                                            {isPos ? (
+                                                <ShoppingCart size={15} />
+                                            ) : actionLabel === "Prepare" ? (
+                                                <PackageCheck size={15} />
+                                            ) : (
+                                                <CalendarDays size={15} />
+                                            )}
+                                        </span>
+                                    </td>
+                                    <td className="!border-0 px-4 py-3.5 text-[10px] font-semibold text-[#5F4E75]">
+                                        {operation.time}
+                                    </td>
+                                    <td className="!border-0 px-4 py-3.5">
+                                        <p className="truncate text-[11px] font-semibold leading-4 text-[#24152F]">
+                                            {operation.title}
+                                        </p>
+                                        <p
+                                            className="mt-1.5 truncate text-[9px] leading-4 text-[#8A7D92]"
+                                            title={operation.detail}
+                                        >
+                                            {operation.detail}
+                                        </p>
+                                    </td>
+                                    <td className="!border-0 px-4 py-3.5">
+                                        <StaffStatusBadge status={operation.status} />
+                                    </td>
+                                    <td className="!border-0 px-4 py-3.5">
+                                        <button
+                                            type="button"
+                                            onClick={isPos ? onOpenPos : onOpenBooking}
+                                            className={
+                                                isPrimary
+                                                    ? "inline-flex h-8 min-w-[86px] items-center justify-center rounded-lg bg-[#6D35D4] px-3 text-[9px] font-semibold text-white transition hover:bg-[#5D2BBE]"
+                                                    : "inline-flex h-8 min-w-[86px] items-center justify-center rounded-lg bg-[#F1EBFF] px-3 text-[9px] font-semibold text-[#6D35D4] transition hover:bg-[#E8DEFA]"
+                                            }
+                                        >
+                                            <span>{actionLabel}</span>
+                                            <ChevronRight size={12} className="ml-1" />
+                                        </button>
+                                    </td>
+                                </tr>
+                            );
+                        })
+                    )}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    );
+}
+
+function StaffReferenceQuickActionsPanel({
+                                             onNewPos,
+                                             onCreateBooking,
+                                             onConfirmBooking,
+                                             onPrepareBooking,
+                                             onFindBooking,
+                                         }: {
+    onNewPos: () => void;
+    onCreateBooking: () => void;
+    onConfirmBooking: () => void;
+    onPrepareBooking: () => void;
+    onFindBooking: () => void;
+}) {
+    const actions = [
+        {
+            title: "New POS Transaction",
+            icon: <ShoppingCart size={17} />,
+            className: "bg-[#F1EBFF] text-[#6D35D4]",
+            iconClassName: "bg-[#F1EBFF] text-[#6D35D4]",
+            onClick: onNewPos,
+        },
+        {
+            title: "Create Booking",
+            icon: <CalendarDays size={17} />,
+            className: "bg-[#EAF1FF] text-[#2563EB]",
+            iconClassName: "bg-[#EAF1FF] text-[#2563EB]",
+            onClick: onCreateBooking,
+        },
+        {
+            title: "Confirm Booking",
+            icon: <CheckCircle2 size={17} />,
+            className: "bg-[#E6F7EE] text-[#159455]",
+            iconClassName: "bg-[#E6F7EE] text-[#159455]",
+            onClick: onConfirmBooking,
+        },
+        {
+            title: "Prepare Booking",
+            icon: <PackageCheck size={17} />,
+            className: "bg-[#FFF0E5] text-[#E66B20]",
+            iconClassName: "bg-[#FFF0E5] text-[#E66B20]",
+            onClick: onPrepareBooking,
+        },
+        {
+            title: "Find Booking",
+            icon: <CalendarClock size={17} />,
+            className: "bg-[#F1EBFF] text-[#6D35D4]",
+            iconClassName: "bg-[#F1EBFF] text-[#6D35D4]",
+            onClick: onFindBooking,
+        },
+    ];
+
+    return (
+        <section className="flex h-full min-h-[318px] flex-col rounded-2xl bg-white p-4 shadow-sm">
+            <div className="flex items-center gap-3">
+                <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                    <Zap size={18} />
+                </span>
+                <div>
+                    <h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">Quick Actions</h2>
+                    <p className="mt-0.5 text-[11px] text-[#9A8DA8]">Get things done faster.</p>
+                </div>
+            </div>
+
+            <div className="mt-3 flex flex-1 flex-col justify-between gap-2">
+                {actions.map((action) => (
+                    <button
+                        key={action.title}
+                        type="button"
+                        onClick={action.onClick}
+                        className={`flex min-h-[44px] items-center justify-between rounded-lg px-3 py-2 text-left transition hover:brightness-[0.98] ${action.className}`}
+                    >
+                        <span className="flex min-w-0 items-center gap-3">
+                            <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${action.iconClassName}`}>
+                                {action.icon}
+                            </span>
+                            <span className="truncate text-[10px] font-semibold">{action.title}</span>
+                        </span>
+                        <ChevronRight size={15} className="shrink-0" />
+                    </button>
+                ))}
+            </div>
+        </section>
+    );
+}
+
+function getCompactTaskAction(task: StaffTaskRow) {
+    const normalized = task.task.toLowerCase();
+    if (normalized.startsWith("confirm")) return "Confirm";
+    if (normalized.startsWith("prepare")) return "Prepare";
+    if (normalized.startsWith("release")) return "Release";
+    if (task.relatedTo.toLowerCase() === "inventory") return "Review";
+    return "Open";
+}
+
+function StaffPendingTasksCompactPanel({
+                                           tasks,
+                                           total,
+                                           bookings,
+                                           onOpenBooking,
+                                           onOpenInventory,
+                                       }: {
+    tasks: StaffTaskRow[];
+    total: number;
+    bookings: Booking[];
+    onOpenBooking: () => void;
+    onOpenInventory: () => void;
+}) {
+    const getDue = (task: StaffTaskRow) => {
+        const booking = bookings.find(
+            (item) =>
+                compactDashboardReference("BK", item.bookingNumber, item.id) === task.relatedTo,
+        );
+        return booking
+            ? formatDashboardTime(booking.date, booking.time) || "Today"
+            : "Today";
+    };
+
+    return (
+        <section
+            id="staff-pending-tasks"
+            className="flex h-full min-h-[292px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm"
+        >
+            <div className="flex items-center justify-between gap-4 border-b border-[#EEE8F2] px-5 py-4">
+                <div className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                        <ListChecks size={17} />
+                    </span>
+                    <div className="min-w-0">
+                        <h2 className="truncate text-[15px] font-bold text-[#1A1220]">
+                            Pending Tasks
+                        </h2>
+                        <p className="mt-1 truncate text-[11px] text-[#9A8DA8]">
+                            {total} task{total === 1 ? "" : "s"} require your attention.
+                        </p>
+                    </div>
+                </div>
+
+                <button
+                    type="button"
+                    onClick={
+                        tasks.some((task) => task.relatedTo.toLowerCase() === "inventory")
+                            ? onOpenInventory
+                            : onOpenBooking
+                    }
+                    className="shrink-0 rounded-lg bg-[#F7F2FC] px-3 py-2 text-[10px] font-semibold text-[#6D35D4] transition hover:bg-[#F1EBFF]"
+                >
+                    View All →
+                </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-x-auto">
+                <table className="w-full min-w-[560px] table-fixed border-collapse">
+                    <colgroup>
+                        <col className="w-[17%]" />
+                        <col className="w-[31%]" />
+                        <col className="w-[20%]" />
+                        <col className="w-[15%]" />
+                        <col className="w-[17%]" />
+                    </colgroup>
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[35px] border-b border-[#EEE8F2]">
+                        {["Priority", "Task", "Related To", "Due", "Action"].map((header) => (
+                            <th
+                                key={header}
+                                className="px-3 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]"
+                            >
+                                {header}
+                            </th>
+                        ))}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {tasks.length === 0 ? (
+                        <tr className="!border-0">
+                            <td colSpan={5} className="!border-0 px-4 py-14 text-center text-[11px] text-[#8A7D92]">
+                                No pending tasks right now.
+                            </td>
+                        </tr>
+                    ) : (
+                        tasks.map((task) => {
+                            const action = getCompactTaskAction(task);
+                            const inventoryTask = task.relatedTo.toLowerCase() === "inventory";
+
+                            return (
+                                <tr
+                                    key={task.id}
+                                    className="!border-0 transition hover:bg-[#FCFAFE]"
+                                >
+                                    <td className="!border-0 px-3 py-3.5">
+                                        <StaffPriorityBadge priority={task.priority} />
+                                    </td>
+                                    <td className="!border-0 px-3 py-3.5">
+                                        <p
+                                            className="truncate text-[10px] font-semibold leading-4 text-[#24152F]"
+                                            title={task.task}
+                                        >
+                                            {task.task}
+                                        </p>
+                                    </td>
+                                    <td className="!border-0 px-3 py-3.5 text-[9px] font-medium text-[#6F617A]">
+                                        <span className="block truncate" title={task.relatedTo}>
+                                            {task.relatedTo}
+                                        </span>
+                                    </td>
+                                    <td className="!border-0 px-3 py-3.5 text-[9px] font-semibold text-[#5F4E75]">
+                                        {getDue(task)}
+                                    </td>
+                                    <td className="!border-0 px-3 py-3.5">
+                                        <button
+                                            type="button"
+                                            onClick={inventoryTask ? onOpenInventory : onOpenBooking}
+                                            className="inline-flex min-w-[62px] justify-center rounded-lg bg-[#F1EBFF] px-2.5 py-2 text-[9px] font-semibold text-[#6D35D4] transition hover:bg-[#E8DEFA]"
+                                        >
+                                            {action}
+                                        </button>
+                                    </td>
+                                </tr>
+                            );
+                        })
+                    )}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    );
+}
+
+function StaffBookingScheduleCompactPanel({
+                                              bookings,
+                                              onOpenBooking,
+                                          }: {
+    bookings: Booking[];
+    onOpenBooking: () => void;
+}) {
+    const visible = bookings.slice(0, 3);
+
+    return (
+        <section className="flex h-full min-h-[292px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
+            <div className="flex min-h-[62px] items-center gap-2.5 border-b border-[#EEE8F2] px-4 py-2.5">
+                <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                    <CalendarDays size={17} />
+                </span>
+                <div className="min-w-0">
+                    <h2 className="truncate text-[15px] font-bold text-[#1A1220]">Today&apos;s Booking Schedule</h2>
+                    <p className="mt-0.5 truncate text-[11px] text-[#9A8DA8]">Your schedule for today.</p>
+                </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-x-auto">
+                <table className="w-full table-fixed border-collapse">
+                    <colgroup>
+                        <col className="w-[16%]" />
+                        <col className="w-[39%]" />
+                        <col className="w-[22%]" />
+                        <col className="w-[23%]" />
+                    </colgroup>
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[35px] border-b border-[#EEE8F2]">
+                        {['Time', 'Customer / Event', 'Status', 'Next Action'].map((header) => (
+                            <th key={header} className="px-2 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.04em] text-[#806A8C]">
+                                {header}
+                            </th>
+                        ))}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {visible.length === 0 ? (
+                        <tr>
+                            <td colSpan={4} className="px-4 py-12 text-center text-[11px] text-[#8A7D92]">
+                                No bookings scheduled for today.
+                            </td>
+                        </tr>
+                    ) : (
+                        visible.map((booking) => {
+                            const status = normalizeDashboardBookingStatus(booking.status);
+                            const action = getStaffBookingAction(booking);
+                            return (
+                                <tr key={booking.id} className="border-b border-[#F1ECF4] last:border-b-0">
+                                    <td className="px-2 py-2.5 text-[10px] font-semibold text-[#2B174C]">{formatDashboardTime(booking.date, booking.time) || '—'}</td>
+                                    <td className="px-2 py-2.5">
+                                        <p className="truncate text-[10px] font-semibold text-[#24152F]" title={booking.name}>{booking.name}</p>
+                                        <p className="truncate text-[9px] text-[#8A7D92]" title={booking.eventName || booking.packageName || ''}>{booking.eventName || booking.packageName || 'Booking'}</p>
+                                    </td>
+                                    <td className="px-2 py-2.5"><StaffStatusBadge status={status} /></td>
+                                    <td className="px-2 py-2.5">
+                                        <button
+                                            type="button"
+                                            onClick={onOpenBooking}
+                                            className="inline-flex min-w-[60px] justify-center rounded-lg bg-[#FAF8FF] px-2 py-1.5 text-[8px] font-semibold text-[#6D35D4] transition hover:bg-[#F1EBFF]"
+                                        >
+                                            {action}
+                                        </button>
+                                    </td>
+                                </tr>
+                            );
+                        })
+                    )}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    );
+}
+
+function StaffRecentActivityPanel({ operations }: { operations: StaffOperationRow[] }) {
+    return (
+        <section className="flex h-full min-h-[292px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
+            <div className="flex items-center gap-3 border-b border-[#EEE8F2] px-5 py-4">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                    <Clock3 size={17} />
+                </span>
+                <div className="min-w-0">
+                    <h2 className="truncate text-[15px] font-bold text-[#1A1220]">
+                        Recent Activity
+                    </h2>
+                    <p className="mt-1 truncate text-[11px] text-[#9A8DA8]">
+                        Latest transactions and updates.
+                    </p>
+                </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-x-auto">
+                <table className="w-full min-w-[430px] table-fixed border-collapse">
+                    <colgroup>
+                        <col className="w-[21%]" />
+                        <col className="w-[39%]" />
+                        <col className="w-[18%]" />
+                        <col className="w-[22%]" />
+                    </colgroup>
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[35px] border-b border-[#EEE8F2]">
+                        {["Type", "Activity", "Time", "Status"].map((header) => (
+                            <th
+                                key={header}
+                                className="px-3 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]"
+                            >
+                                {header}
+                            </th>
+                        ))}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {operations.length === 0 ? (
+                        <tr className="!border-0">
+                            <td colSpan={4} className="!border-0 px-4 py-14 text-center text-[11px] text-[#8A7D92]">
+                                No completed activity recorded yet today.
+                            </td>
+                        </tr>
+                    ) : (
+                        operations.map((operation) => {
+                            const isPos = operation.source === "pos";
+
+                            return (
+                                <tr
+                                    key={operation.id}
+                                    className="!border-0 transition hover:bg-[#FCFAFE]"
+                                >
+                                    <td className="!border-0 px-3 py-3.5">
+                                        <div className="flex items-center gap-2">
+                                            <span
+                                                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
+                                                    isPos
+                                                        ? "bg-[#E6F7EE] text-[#159455]"
+                                                        : "bg-[#F1EBFF] text-[#6D35D4]"
+                                                }`}
+                                            >
+                                                {isPos ? <ShoppingCart size={13} /> : <CalendarDays size={13} />}
+                                            </span>
+                                            <span className="truncate text-[9px] font-semibold text-[#5F4E75]">
+                                                {isPos ? "POS" : "Booking"}
+                                            </span>
+                                        </div>
+                                    </td>
+                                    <td className="!border-0 px-3 py-3.5">
+                                        <p className="truncate text-[10px] font-semibold leading-4 text-[#24152F]">
+                                            {operation.title}
+                                        </p>
+                                        <p
+                                            className="mt-1.5 truncate text-[9px] leading-4 text-[#8A7D92]"
+                                            title={operation.detail}
+                                        >
+                                            {operation.detail}
+                                        </p>
+                                    </td>
+                                    <td className="!border-0 px-3 py-3.5 text-[9px] font-semibold text-[#5F4E75]">
+                                        {operation.time}
+                                    </td>
+                                    <td className="!border-0 px-3 py-3.5">
+                                        <StaffStatusBadge status={operation.status} />
+                                    </td>
+                                </tr>
+                            );
+                        })
+                    )}
+                    </tbody>
+                </table>
+            </div>
+        </section>
     );
 }
 
@@ -1951,7 +3187,7 @@ function CompactDashboardTable({
     emptyText: string;
 }) {
     return (
-        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] bg-white shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
             <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
                 <div className="flex min-w-0 items-start gap-2 text-[#6D35D4]">
                     <span className="mt-0.5 flex h-6 w-6 items-center justify-center">
@@ -2098,7 +3334,7 @@ function InventoryAlertPanel({
     onViewAll: () => void;
 }) {
     return (
-        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] bg-white shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
             <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
                 <div className="flex min-w-0 items-start gap-2">
                     <TriangleAlert
@@ -2248,7 +3484,7 @@ function ExpirationAlertsPanel({
     const columnCount = showBranch ? 4 : 3;
 
     return (
-        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+        <section className="flex min-h-[310px] flex-col overflow-hidden rounded-[14px] bg-white shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
             <div className="flex min-h-[62px] items-center justify-between gap-3 border-b border-[#EEE8F2] px-4 py-2.5">
                 <div className="flex min-w-0 items-start gap-2">
                     <CalendarClock
@@ -2466,7 +3702,7 @@ function ExpirationAlertsModal({
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="dashboard-expiration-alerts-title"
-                className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
+                className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[18px] bg-white shadow-2xl"
             >
                 <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
                     <div className="flex min-w-0 items-start gap-3">
@@ -2682,7 +3918,7 @@ function StaffStockAlertsModal({
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="staff-stock-alerts-title"
-                className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl"
+                className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-[18px] bg-white shadow-2xl"
             >
                 <div className="flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
                     <div className="flex min-w-0 items-start gap-3">

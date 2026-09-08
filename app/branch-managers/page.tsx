@@ -60,27 +60,13 @@ const defaultManagerPermissions: ManagerPermissions = {
     dashboard: true,
     bookings: true,
     packages: true,
-    packages_manage: false,
+    packages_manage: true,
     inventory: true,
     pos: true,
-    reports: false,
-    staff_management: false,
-    branch_settings: false,
+    reports: true,
+    staff_management: true,
+    branch_settings: true,
 };
-
-const managerPermissionOptions: Array<
-    [keyof ManagerPermissions, string]
-> = [
-    ["dashboard", "Dashboard"],
-    ["bookings", "Bookings"],
-    ["packages", "Packages"],
-    ["packages_manage", "Manage Packages"],
-    ["inventory", "Inventory"],
-    ["pos", "Sales / POS"],
-    ["reports", "Reports"],
-    ["staff_management", "Staff Management"],
-    ["branch_settings", "Branch Settings"],
-];
 
 type RawManager = Record<string, unknown>;
 
@@ -282,7 +268,7 @@ export default function BranchManagersPage() {
 
     const [managers, setManagers] = useState<BranchManager[]>([]);
     const [loading, setLoading] = useState(true);
-    const [updatingId, setUpdatingId] = useState<number | null>(null);
+    const [deletingId, setDeletingId] = useState<number | null>(null);
     const [search, setSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState<
         "all" | ManagerStatus
@@ -742,7 +728,7 @@ export default function BranchManagersPage() {
         }
     };
 
-    const updateManagerStatus = async (manager: BranchManager) => {
+    const deleteManager = async (manager: BranchManager) => {
         const token =
             sessionStorage.getItem("token") || localStorage.getItem("token");
 
@@ -751,17 +737,13 @@ export default function BranchManagersPage() {
             return;
         }
 
-        const willDeactivate = manager.status !== "inactive";
-
         const confirmed = window.confirm(
-            willDeactivate
-                ? `Deactivate ${manager.name}? They will no longer be able to access their branch account.`
-                : `Reactivate ${manager.name}? They will regain access to their branch account.`
+            `Delete ${manager.name}'s manager account?\n\nThis permanently removes the manager account and all staff accounts assigned to this manager. The branch itself will not be deleted. This action cannot be undone.`
         );
 
         if (!confirmed) return;
 
-        setUpdatingId(manager.id);
+        setDeletingId(manager.id);
         setError("");
 
         try {
@@ -772,9 +754,7 @@ export default function BranchManagersPage() {
                     Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
-                    action: willDeactivate
-                        ? "deactivate_manager"
-                        : "reactivate_manager",
+                    action: "delete_manager",
                     manager_id: manager.id,
                 }),
             });
@@ -797,29 +777,26 @@ export default function BranchManagersPage() {
                 setError(
                     data.error ||
                     data.message ||
-                    `Unable to update manager (HTTP ${response.status}).`
+                    `Unable to delete manager (HTTP ${response.status}).`
                 );
                 return;
             }
 
             setManagers((currentManagers) =>
-                currentManagers.map((item) =>
-                    item.id === manager.id
-                        ? {
-                            ...item,
-                            status: willDeactivate ? "inactive" : "active",
-                        }
-                        : item
+                currentManagers.filter(
+                    (item) => item.id !== manager.id
                 )
             );
+
+            window.alert("Manager account deleted successfully.");
         } catch (requestError: unknown) {
             setError(
                 requestError instanceof Error
                     ? requestError.message
-                    : "Unable to update this manager."
+                    : "Unable to delete this manager."
             );
         } finally {
-            setUpdatingId(null);
+            setDeletingId(null);
         }
     };
 
@@ -1063,12 +1040,9 @@ export default function BranchManagersPage() {
                                         <tbody>
                                         {filteredManagers.map(
                                             (manager) => {
-                                                const isUpdating =
-                                                    updatingId ===
+                                                const isDeleting =
+                                                    deletingId ===
                                                     manager.id;
-                                                const isInactive =
-                                                    manager.status ===
-                                                    "inactive";
 
                                                 return (
                                                     <tr
@@ -1154,24 +1128,18 @@ export default function BranchManagersPage() {
                                                             <button
                                                                 type="button"
                                                                 disabled={
-                                                                    isUpdating
+                                                                    isDeleting
                                                                 }
                                                                 onClick={() =>
-                                                                    void updateManagerStatus(
+                                                                    void deleteManager(
                                                                         manager
                                                                     )
                                                                 }
-                                                                className={`inline-flex h-[38px] items-center justify-center rounded-xl px-4 text-xs font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                                                                    isInactive
-                                                                        ? "border border-[#D7C7E8] bg-white text-[#2B174C] hover:bg-[#F7F1FF]"
-                                                                        : "bg-[#A33E20] text-white hover:bg-[#883117]"
-                                                                }`}
+                                                                className="inline-flex h-[38px] items-center justify-center rounded-xl bg-[#A33E20] px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
                                                             >
-                                                                {isUpdating
-                                                                    ? "Saving..."
-                                                                    : isInactive
-                                                                        ? "Reactivate"
-                                                                        : "Deactivate"}
+                                                                {isDeleting
+                                                                    ? "Deleting..."
+                                                                    : "Delete"}
                                                             </button>
                                                         </td>
                                                     </tr>
@@ -1382,35 +1350,22 @@ export default function BranchManagersPage() {
                                                 Manager permissions
                                             </h3>
                                             <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                Choose which modules the
-                                                manager can access.
+                                                Managers automatically get
+                                                full access to all modules.
                                             </p>
                                         </div>
                                     </div>
 
-                                    <div className="grid gap-2 sm:grid-cols-2">
-                                        {managerPermissionOptions.map(
-                                            ([key, label]) => (
-                                                <ManagerPermissionToggle
-                                                    key={key}
-                                                    label={label}
-                                                    checked={
-                                                        newManagerPermissions[
-                                                            key
-                                                            ]
-                                                    }
-                                                    disabled={addingManager}
-                                                    onChange={(checked) =>
-                                                        setNewManagerPermissions(
-                                                            (current) => ({
-                                                                ...current,
-                                                                [key]: checked,
-                                                            })
-                                                        )
-                                                    }
-                                                />
-                                            )
-                                        )}
+                                    <div className="flex items-start gap-2 rounded-xl border border-[#E8DFF0] bg-[#FBF8FF] px-4 py-3 text-xs leading-5 text-[#5B4A73]">
+                                        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#188348]" />
+                                        <span>
+                                            Managers get full access to every
+                                            module for this branch —
+                                            Dashboard, Bookings, Packages,
+                                            Manage Packages, Inventory,
+                                            Sales/POS, Reports, Staff
+                                            Management, and Branch Settings.
+                                        </span>
                                     </div>
                                 </div>
 
@@ -1494,36 +1449,6 @@ function ManagerDialogInput({
                     onChange(event.target.value)
                 }
                 className="h-[46px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3 text-sm text-[#1A1220] outline-none placeholder:text-[#A796B1] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8]"
-            />
-        </label>
-    );
-}
-
-function ManagerPermissionToggle({
-                                     label,
-                                     checked,
-                                     disabled,
-                                     onChange,
-                                 }: {
-    label: string;
-    checked: boolean;
-    disabled: boolean;
-    onChange: (checked: boolean) => void;
-}) {
-    return (
-        <label className="flex min-h-[46px] cursor-pointer items-center justify-between gap-3 rounded-xl border border-[#E8DFF0] bg-[#FFFEFC] px-3.5 py-2.5 transition hover:border-[#CDB9E0] has-[:focus-visible]:ring-4 has-[:focus-visible]:ring-[#2B174C]/10">
-            <span className="text-sm font-medium text-[#1A1220]">
-                {label}
-            </span>
-
-            <input
-                type="checkbox"
-                checked={checked}
-                disabled={disabled}
-                onChange={(event) =>
-                    onChange(event.target.checked)
-                }
-                className="h-4 w-4 accent-[#2B174C] disabled:cursor-not-allowed"
             />
         </label>
     );

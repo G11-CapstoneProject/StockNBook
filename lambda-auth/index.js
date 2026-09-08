@@ -248,21 +248,21 @@ async function ensureSignupOtpsTable(connection) {
 async function ensurePaymentOtpsTable(connection) {
     await connection.execute(`
         CREATE TABLE IF NOT EXISTS payment_otps (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            store_id BIGINT NOT NULL,
-            email VARCHAR(255) NOT NULL,
+                                                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                    store_id BIGINT NOT NULL,
+                                                    email VARCHAR(255) NOT NULL,
             otp_hash CHAR(64) NOT NULL,
             expires_at DATETIME NOT NULL,
             used TINYINT(1) NOT NULL DEFAULT 0,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_payment_otps_store (store_id),
             INDEX idx_payment_otps_lookup (
-                store_id,
-                otp_hash,
-                used,
-                expires_at
-            )
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                                              store_id,
+                                              otp_hash,
+                                              used,
+                                              expires_at
+                                          )
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 }
 
@@ -917,26 +917,6 @@ function buildManagerInvitationEmail({
     const safeInviteLink = escapeHtml(inviteLink);
     const safeRecipient = escapeHtml(toEmail);
 
-    const enabledPermissions = Object.entries(permissions || {})
-        .map(([permission, value]) => ({
-            label: permissionLabel(permission),
-            access: permissionAccessLevel(value),
-        }))
-        .filter((entry) => entry.access !== null);
-
-    const permissionItems =
-        enabledPermissions.length > 0
-            ? enabledPermissions
-                .map(({ label, access }) => {
-                    const isFullAccess = access === "Full Access";
-                    const background = isFullAccess ? "#F1E9FF" : "#FDF3E3";
-                    const color = isFullAccess ? "#4B2380" : "#946617";
-
-                    return `<span style="display:inline-block;margin:4px 6px 4px 0;padding:7px 10px;border-radius:999px;background:${background};color:${color};font-size:12px;font-weight:700;">✓ ${escapeHtml(label)} — ${escapeHtml(access)}</span>`;
-                })
-                .join("")
-            : `<span style="color:#7A6E88;font-size:13px;">Your access will be configured by the store owner.</span>`;
-
     const subject = "StockNBook Manager Invitation";
 
     const html = `
@@ -978,11 +958,6 @@ function buildManagerInvitationEmail({
                                 <td style="padding:4px 0 0;color:#2D1B4E;font-size:14px;font-weight:700;">Branch Manager</td>
                             </tr>
                         </table>
-                    </div>
-
-                    <div style="margin:0 0 22px;">
-                        <div style="margin-bottom:9px;color:#2D1B4E;font-size:13px;font-weight:800;">Access assigned to you</div>
-                        <div>${permissionItems}</div>
                     </div>
 
                     <a href="${safeInviteLink}"
@@ -2307,6 +2282,7 @@ module.exports.handler = async (event) => {
                     role: "owner",
                     store_id: result.insertId,
                     store_name: storeName,
+                    store_slug: slug,
                     owner_name: ownerName,
                     phone_number: phoneNumber,
                 }),
@@ -2325,13 +2301,41 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            const [rows] = await connection.execute(
+            let [rows] = await connection.execute(
                 `SELECT id, store_name, slug
                  FROM stores
                  WHERE slug = ?
                      LIMIT 1`,
                 [slug]
             );
+
+            /*
+             * Compatibility fallback for older/demo store records.
+             *
+             * Some existing records use seeded slugs such as
+             * "demo-v1-party-store-001", while older customer links were
+             * generated from the store name, for example:
+             * "happy-party-supplies-quezon-city".
+             *
+             * Keep the database slug as the primary lookup. Only when it does
+             * not match do we compare the requested URL slug with a slug
+             * generated from each existing store name.
+             */
+            if (!rows.length) {
+                const [storeRows] = await connection.execute(
+                    `SELECT id, store_name, slug
+                     FROM stores
+                     ORDER BY id ASC`
+                );
+
+                const fallbackStore = storeRows.find(
+                    (store) => generateSlug(store.store_name || "") === slug
+                );
+
+                if (fallbackStore) {
+                    rows = [fallbackStore];
+                }
+            }
 
             if (!rows.length) {
                 return {
@@ -3492,6 +3496,7 @@ module.exports.handler = async (event) => {
                         store_id: store.id,
                         owner_name: store.owner_name,
                         store_name: store.store_name,
+                        store_slug: store.slug,
                     }),
                 };
             }
@@ -5631,7 +5636,7 @@ module.exports.handler = async (event) => {
 
             if (decoded.role === "owner") {
                 const [storeRows] = await connection.execute(
-                    `SELECT id, store_name, owner_name, email
+                    `SELECT id, store_name, owner_name, email, slug
                      FROM stores
                      WHERE id = ?
                          LIMIT 1`,
@@ -5657,6 +5662,7 @@ module.exports.handler = async (event) => {
                         role: "owner",
                         store_id: store.id,
                         store_name: store.store_name,
+                        store_slug: store.slug,
                         owner_name: store.owner_name,
                         email: store.email,
                     }),
@@ -5791,10 +5797,12 @@ module.exports.handler = async (event) => {
                 body: JSON.stringify({ error: "Invalid role" }),
             };
         }
-        // DEACTIVATE MANAGER
-        if (action === "deactivate_manager") {
+        // DELETE MANAGER ACCOUNT
+        if (action === "delete_manager") {
             const authHeader =
-                event.headers?.Authorization || event.headers?.authorization || "";
+                event.headers?.Authorization ||
+                event.headers?.authorization ||
+                "";
 
             const token = authHeader.replace("Bearer ", "");
 
@@ -5802,7 +5810,9 @@ module.exports.handler = async (event) => {
                 return {
                     statusCode: 401,
                     headers,
-                    body: JSON.stringify({ error: "Missing token" }),
+                    body: JSON.stringify({
+                        error: "Missing token",
+                    }),
                 };
             }
 
@@ -5810,11 +5820,13 @@ module.exports.handler = async (event) => {
 
             try {
                 decoded = jwt.verify(token, JWT_SECRET);
-            } catch (err) {
+            } catch {
                 return {
                     statusCode: 401,
                     headers,
-                    body: JSON.stringify({ error: "Invalid token" }),
+                    body: JSON.stringify({
+                        error: "Invalid token",
+                    }),
                 };
             }
 
@@ -5822,116 +5834,91 @@ module.exports.handler = async (event) => {
                 return {
                     statusCode: 403,
                     headers,
-                    body: JSON.stringify({ error: "Only owners can deactivate managers" }),
+                    body: JSON.stringify({
+                        error: "Only owners can delete managers",
+                    }),
                 };
             }
 
-            const storeId = decoded.store_id;
-            const { manager_id } = body;
+            const storeId = Number(decoded.store_id);
+            const managerId = Number(body.manager_id);
 
-            if (!storeId || !manager_id) {
+            if (!storeId || !managerId) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "Missing manager id" }),
+                    body: JSON.stringify({
+                        error: "Missing manager id",
+                    }),
                 };
             }
 
-            const [result] = await connection.execute(
-                `UPDATE managers
-                 SET status = 'inactive'
+            const [managerRows] = await connection.execute(
+                `SELECT id, branch_id, manager_name, manager_email
+                 FROM managers
                  WHERE id = ?
-                   AND store_id = ?`,
-                [manager_id, storeId]
+                   AND store_id = ?
+                     LIMIT 1`,
+                [managerId, storeId]
             );
 
-            if (result.affectedRows === 0) {
+            if (managerRows.length === 0) {
                 return {
                     statusCode: 404,
                     headers,
-                    body: JSON.stringify({ error: "Manager not found" }),
+                    body: JSON.stringify({
+                        error: "Manager not found",
+                    }),
                 };
             }
 
-            return {
-                statusCode: 200,
-                headers,
-                body: JSON.stringify({
-                    message: "Manager deactivated successfully",
-                    manager_updated: result.affectedRows,
-                }),
-            };
-        }
-        // REACTIVATE MANAGER
-        if (action === "reactivate_manager") {
-            const authHeader =
-                event.headers?.Authorization || event.headers?.authorization || "";
-
-            const token = authHeader.replace("Bearer ", "");
-
-            if (!token) {
-                return {
-                    statusCode: 401,
-                    headers,
-                    body: JSON.stringify({ error: "Missing token" }),
-                };
-            }
-
-            let decoded;
+            await connection.beginTransaction();
 
             try {
-                decoded = jwt.verify(token, JWT_SECRET);
-            } catch (err) {
+                // Staff accounts belong to this manager through staff.manager_id.
+                // Remove them first so the manager can be deleted cleanly and
+                // no staff account remains attached to a deleted manager.
+                const [staffDeleteResult] = await connection.execute(
+                    `DELETE FROM staff
+                     WHERE manager_id = ?
+                       AND store_id = ?`,
+                    [managerId, storeId]
+                );
+
+                const [managerDeleteResult] = await connection.execute(
+                    `DELETE FROM managers
+                     WHERE id = ?
+                       AND store_id = ?`,
+                    [managerId, storeId]
+                );
+
+                if (managerDeleteResult.affectedRows === 0) {
+                    await connection.rollback();
+
+                    return {
+                        statusCode: 404,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Manager not found",
+                        }),
+                    };
+                }
+
+                await connection.commit();
+
                 return {
-                    statusCode: 401,
+                    statusCode: 200,
                     headers,
-                    body: JSON.stringify({ error: "Invalid token" }),
+                    body: JSON.stringify({
+                        message: "Manager account deleted successfully",
+                        manager_deleted: managerDeleteResult.affectedRows,
+                        staff_deleted: staffDeleteResult.affectedRows,
+                    }),
                 };
+            } catch (deleteError) {
+                await connection.rollback();
+                throw deleteError;
             }
-
-            if (decoded.role !== "owner") {
-                return {
-                    statusCode: 403,
-                    headers,
-                    body: JSON.stringify({ error: "Only owners can reactivate managers" }),
-                };
-            }
-
-            const storeId = decoded.store_id;
-            const { manager_id } = body;
-
-            if (!storeId || !manager_id) {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({ error: "Missing manager id" }),
-                };
-            }
-
-            const [result] = await connection.execute(
-                `UPDATE managers
-                 SET status = 'active'
-                 WHERE id = ?
-                   AND store_id = ?`,
-                [manager_id, storeId]
-            );
-
-            if (result.affectedRows === 0) {
-                return {
-                    statusCode: 404,
-                    headers,
-                    body: JSON.stringify({ error: "Manager not found" }),
-                };
-            }
-
-            return {
-                statusCode: 200,
-                headers,
-                body: JSON.stringify({
-                    message: "Manager reactivated successfully",
-                    manager_updated: result.affectedRows,
-                }),
-            };
         }
 
         return {

@@ -71,21 +71,6 @@ const steps = [
     "Success",
 ];
 
-const permissionMeta: Record<
-    string,
-    { label: string; icon: typeof LayoutDashboard }
-> = {
-    dashboard: { label: "Dashboard", icon: LayoutDashboard },
-    bookings: { label: "Bookings", icon: CalendarDays },
-    packages: { label: "Packages", icon: Package },
-    packages_manage: { label: "Manage Packages", icon: Boxes },
-    inventory: { label: "Inventory", icon: Boxes },
-    pos: { label: "Sales / POS", icon: ShoppingCart },
-    reports: { label: "Reports", icon: LayoutDashboard },
-    staff_management: { label: "Staff Management", icon: UserRound },
-    branch_settings: { label: "Branch Settings", icon: Store },
-};
-
 function maskEmail(email: string) {
     const [name, domain] = email.split("@");
 
@@ -125,42 +110,6 @@ async function postInviteAction<T>(
     }
 
     return data;
-}
-
-function PermissionChips({ permissions }: { permissions: Record<string, boolean> }) {
-    const enabledPermissions = Object.entries(permissions || {}).filter(
-        ([, enabled]) => Boolean(enabled)
-    );
-
-    if (enabledPermissions.length === 0) {
-        return (
-            <p className="text-sm text-[#7A6E88]">
-                Your access will be configured by the store owner.
-            </p>
-        );
-    }
-
-    return (
-        <div className="flex flex-wrap gap-2.5">
-            {enabledPermissions.map(([permission]) => {
-                const meta = permissionMeta[permission] || {
-                    label: permission,
-                    icon: CheckCircle2,
-                };
-                const Icon = meta.icon;
-
-                return (
-                    <div
-                        key={permission}
-                        className="inline-flex items-center gap-2 rounded-xl bg-[#F0E8FA] px-3.5 py-2 text-sm font-semibold text-[#2D1B4E]"
-                    >
-                        <Icon className="h-4 w-4" />
-                        {meta.label}
-                    </div>
-                );
-            })}
-        </div>
-    );
 }
 
 function ProgressSteps({ currentStep }: { currentStep: number }) {
@@ -637,12 +586,6 @@ function AcceptInviteContent() {
                             </p>
                         </div>
 
-                        <div className="mt-6">
-                            <h3 className="text-lg font-bold text-[#291548]">Access you’ll receive</h3>
-                            <div className="mt-3">
-                                <PermissionChips permissions={details.permissions} />
-                            </div>
-                        </div>
                     </div>
                 )}
 
@@ -725,10 +668,6 @@ function AcceptInviteContent() {
                             </label>
                         </div>
 
-                        <div className="mt-6">
-                            <h3 className="text-lg font-bold text-[#291548]">Access you’ll receive</h3>
-                            <div className="mt-3"><PermissionChips permissions={details.permissions} /></div>
-                        </div>
                     </div>
                 )}
 

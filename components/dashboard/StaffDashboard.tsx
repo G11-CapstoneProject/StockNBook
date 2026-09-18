@@ -14,6 +14,7 @@ import {
     CreditCard,
     ClipboardList,
     Clock3,
+    Eye,
     ListChecks,
     PackageCheck,
     PackageX,
@@ -21,6 +22,7 @@ import {
     ShoppingCart,
     Store,
     TriangleAlert,
+    X,
     Zap,
 } from "lucide-react";
 import {
@@ -303,6 +305,10 @@ function dashboardPermissionAllowsWrite(value: unknown): boolean {
             permission.edit ??
             permission.update ??
             permission.restock ??
+            permission.create ??
+            permission.confirm ??
+            permission.prepare ??
+            permission.transact ??
             permission.fullAccess ??
             permission.full_access
         );
@@ -350,6 +356,122 @@ function hasDashboardInventoryRestockPermission(user: unknown) {
         userRecord.inventory;
 
     return dashboardPermissionAllowsWrite(directPermission);
+}
+
+function dashboardPermissionAllowsRead(value: unknown): boolean {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value > 0;
+
+    if (typeof value === "string") {
+        const normalized = value
+            .trim()
+            .toLowerCase()
+            .replace(/[_-]+/g, " ")
+            .replace(/\s+/g, " ");
+
+        if (
+            [
+                "false",
+                "none",
+                "no access",
+                "disabled",
+                "denied",
+            ].includes(normalized)
+        ) {
+            return false;
+        }
+
+        if (
+            [
+                "true",
+                "view",
+                "view only",
+                "read",
+                "read only",
+                "full",
+                "full access",
+                "manage",
+                "manage access",
+                "write",
+                "edit",
+                "update",
+                "allowed",
+            ].includes(normalized)
+        ) {
+            return true;
+        }
+    }
+
+    if (
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+    ) {
+        const permission = value as DashboardPermissionRecord;
+        const level =
+            permission.level ??
+            permission.access ??
+            permission.permission ??
+            permission.mode;
+
+        if (level !== undefined) {
+            return dashboardPermissionAllowsRead(level);
+        }
+
+        return Boolean(
+            permission.enabled ??
+            permission.allowed ??
+            permission.view ??
+            permission.read ??
+            permission.manage ??
+            permission.write ??
+            permission.edit ??
+            permission.update ??
+            permission.create ??
+            permission.fullAccess ??
+            permission.full_access
+        );
+    }
+
+    return false;
+}
+
+function getDashboardPermissionValue(
+    user: unknown,
+    keys: string[],
+): unknown | undefined {
+    const userRecord =
+        user &&
+        typeof user === "object" &&
+        !Array.isArray(user)
+            ? (user as DashboardPermissionRecord)
+            : {};
+
+    const permissionSources: unknown[] = [
+        userRecord.permissions,
+        userRecord.permission,
+        getSavedItem("permissions"),
+        getSavedItem("user_permissions"),
+        getSavedItem("stocknbook_permissions"),
+    ];
+
+    for (const source of permissionSources) {
+        const permissions = parseDashboardPermissions(source);
+
+        for (const key of keys) {
+            if (permissions[key] !== undefined) {
+                return permissions[key];
+            }
+        }
+    }
+
+    for (const key of keys) {
+        if (userRecord[key] !== undefined) {
+            return userRecord[key];
+        }
+    }
+
+    return undefined;
 }
 
 function peso(value: number) {
@@ -1203,6 +1325,9 @@ type StaffTaskRow = {
     relatedTo: string;
     priority: StaffTaskPriority;
     status: "Pending" | "Completed";
+    dueAt?: Date | null;
+    displayStatus?: string;
+    bookingId?: number;
 };
 
 type StaffOperationRow = {
@@ -1211,9 +1336,128 @@ type StaffOperationRow = {
     time: string;
     title: string;
     detail: string;
+    reference?: string;
     status: string;
-    source: "booking" | "pos";
+    source: "booking" | "pos" | "inventory" | "package";
+    bookingId?: number;
 };
+
+type StaffEmployeeAction = {
+    id: string;
+    employeeName: string;
+    employeeRole: string;
+    action: string;
+    module: string;
+    referenceNumber?: string;
+    referenceId?: string;
+    details?: string;
+    branch?: string;
+    branchId?: string | number;
+    date: string;
+    time?: string;
+};
+
+function formatLocalIsoDate(value: Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+}
+
+function normalizeStaffEmployeeAction(value: unknown): StaffEmployeeAction {
+    const raw = toRecord(value);
+
+    return {
+        id:
+            readText(raw, ["id", "actionId", "action_id"]) ||
+            `action-${Math.random().toString(36).slice(2)}`,
+        employeeName: readText(raw, [
+            "employeeName",
+            "employee_name",
+            "staffName",
+            "staff_name",
+            "userName",
+            "user_name",
+            "performedBy",
+            "performed_by",
+        ]),
+        employeeRole: readText(raw, [
+            "employeeRole",
+            "employee_role",
+            "role",
+        ]),
+        action: readText(raw, [
+            "action",
+            "actionName",
+            "action_name",
+            "description",
+        ], "Recorded action"),
+        module: readText(raw, ["module", "moduleName", "module_name"], "Inventory"),
+        referenceNumber:
+            readText(raw, [
+                "referenceNumber",
+                "reference_number",
+                "reference",
+            ]) || undefined,
+        referenceId:
+            readText(raw, [
+                "referenceId",
+                "reference_id",
+                "entityId",
+                "entity_id",
+            ]) || undefined,
+        details:
+            readText(raw, [
+                "details",
+                "detail",
+                "description",
+                "notes",
+            ]) || undefined,
+        branch:
+            readText(raw, [
+                "branch",
+                "branchName",
+                "branch_name",
+            ]) || undefined,
+        branchId:
+            firstDefined(raw, ["branchId", "branch_id"]) as
+                | string
+                | number
+                | undefined,
+        date: readText(raw, [
+            "date",
+            "createdAt",
+            "created_at",
+            "updatedAt",
+            "updated_at",
+            "timestamp",
+        ]),
+        time:
+            readText(raw, [
+                "time",
+                "createdTime",
+                "created_time",
+            ]) || undefined,
+    };
+}
+
+function normalizeActivityIdentity(value: string) {
+    return String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, " ");
+}
+
+function getEmployeeActionSource(
+    moduleName: string,
+): StaffOperationRow["source"] {
+    const normalized = String(moduleName || "").trim().toLowerCase();
+
+    if (normalized.includes("inventory")) return "inventory";
+    if (normalized.includes("sales") || normalized.includes("pos")) return "pos";
+    if (normalized.includes("package")) return "package";
+    return "booking";
+}
 
 function parseOperationalDateTime(
     dateValue?: string | null,
@@ -1374,6 +1618,9 @@ export default function StaffDashboard() {
     const [bookingsError, setBookingsError] = useState("");
     const [orders, setOrders] = useState<Order[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
+    const [employeeActions, setEmployeeActions] = useState<StaffEmployeeAction[]>([]);
+    const [employeeActionsLoaded, setEmployeeActionsLoaded] = useState(false);
+    const [selectedBookingDetails, setSelectedBookingDetails] = useState<Booking | null>(null);
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(true);
     const [hasLoadedDashboard, setHasLoadedDashboard] = useState(false);
@@ -1388,7 +1635,7 @@ export default function StaffDashboard() {
         };
     }, []);
 
-    const loadStaffDashboard = useCallback(async () => {
+    const loadStaffDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
         const token = getSavedItem("token");
         const storeId =
             getUserValue(user, "store_id") ||
@@ -1403,13 +1650,15 @@ export default function StaffDashboard() {
             setBookings([]);
             setOrders([]);
             setProducts([]);
+            setEmployeeActions([]);
+            setEmployeeActionsLoaded(false);
             setBookingsError("No assigned branch was found for this account.");
             setIsRefreshing(false);
             setHasLoadedDashboard(true);
             return;
         }
 
-        setIsRefreshing(true);
+        if (!silent) setIsRefreshing(true);
 
         try {
             try {
@@ -1418,6 +1667,7 @@ export default function StaffDashboard() {
                     headers: {
                         Authorization: `Bearer ${token}`,
                     },
+                    cache: "no-store",
                 });
 
                 const branchesData = await branchesRes.json().catch(() => ({}));
@@ -1514,16 +1764,31 @@ export default function StaffDashboard() {
                         action: "get_products",
                         branch_id: Number(branchId),
                     }),
+                    cache: "no-store",
                 });
 
                 const productsData = await productsRes.json().catch(() => ({}));
 
                 if (productsRes.ok && Array.isArray(productsData.products)) {
                     const normalizedProducts: Product[] = (productsData.products as unknown[]).map(normalizeProduct);
+
+                    /*
+                     * The products request is already scoped to the assigned branch.
+                     * Some product payloads do not repeat branch_id on every row, so
+                     * do not discard those rows. Still reject an explicitly different
+                     * branch if the API does return one.
+                     */
                     setProducts(
-                        normalizedProducts.filter((product) =>
-                            belongsToAssignedBranch(product, branchId),
-                        ),
+                        normalizedProducts.filter((product) => {
+                            const productBranchId =
+                                product.branchId ?? product.branch_id;
+
+                            return (
+                                productBranchId === null ||
+                                productBranchId === undefined ||
+                                String(productBranchId) === String(branchId)
+                            );
+                        }),
                     );
                 }
             } catch (error) {
@@ -1541,6 +1806,7 @@ export default function StaffDashboard() {
                         action: "get_orders",
                         branch_id: Number(branchId),
                     }),
+                    cache: "no-store",
                 });
 
                 const ordersData = await ordersRes.json().catch(() => ({}));
@@ -1556,16 +1822,88 @@ export default function StaffDashboard() {
             } catch (error) {
                 console.warn("Staff dashboard orders fetch failed:", error);
             }
+
+            try {
+                const now = new Date();
+                const today = formatLocalIsoDate(now);
+                const reportQuery = new URLSearchParams({
+                    branch: assignedBranchName,
+                    month: today.slice(0, 7),
+                    startDate: today,
+                    endDate: today,
+                    role: "staff",
+                    assignedBranch: assignedBranchName,
+                    branch_id: String(branchId),
+                });
+
+                const reportsRes = await fetch(
+                    `/api/reports?${reportQuery.toString()}`,
+                    {
+                        method: "GET",
+                        headers: {
+                            Authorization: `Bearer ${token}`,
+                        },
+                        cache: "no-store",
+                    },
+                );
+
+                const reportsData = await reportsRes.json().catch(() => ({}));
+                const reportPayload =
+                    reportsData?.data &&
+                    typeof reportsData.data === "object"
+                        ? reportsData.data
+                        : {};
+                const rawEmployeeActions =
+                    reportPayload.employeeActions ??
+                    reportPayload.employee_actions;
+
+                if (
+                    reportsRes.ok &&
+                    reportsData?.success !== false &&
+                    Array.isArray(rawEmployeeActions)
+                ) {
+                    setEmployeeActions(
+                        rawEmployeeActions.map(normalizeStaffEmployeeAction),
+                    );
+                    setEmployeeActionsLoaded(true);
+                } else {
+                    console.warn(
+                        "Staff dashboard employee actions were not available from Reports API.",
+                        {
+                            status: reportsRes.status,
+                            response: reportsData,
+                        },
+                    );
+                }
+            } catch (error) {
+                // Keep the last successfully loaded activity data during a
+                // temporary reports failure instead of flashing an empty panel.
+                console.warn(
+                    "Staff dashboard employee actions fetch failed:",
+                    error,
+                );
+            }
         } finally {
-            setIsRefreshing(false);
+            if (!silent) setIsRefreshing(false);
             setHasLoadedDashboard(true);
         }
     }, [user]);
 
     useEffect(() => {
-        // Load the dashboard once when the page opens.
-        // After that, data refreshes only when the user presses Refresh.
         void loadStaffDashboard();
+    }, [loadStaffDashboard]);
+
+    useEffect(() => {
+        /*
+         * Near-real-time Staff dashboard synchronization.
+         * Re-fetch current branch data every 60 seconds without showing
+         * the manual Refresh spinner.
+         */
+        const autoRefreshTimer = window.setInterval(() => {
+            void loadStaffDashboard({ silent: true });
+        }, 60_000);
+
+        return () => window.clearInterval(autoRefreshTimer);
     }, [loadStaffDashboard]);
 
     const allInventoryAlerts = useMemo(
@@ -1580,6 +1918,74 @@ export default function StaffDashboard() {
 
     const dashboardBranchLabel =
         branches[0]?.branchName || getAssignedBranchName(user);
+
+    const bookingPermissionValue = getDashboardPermissionValue(user, [
+        "booking_access",
+        "bookings_access",
+        "booking_view",
+        "bookings_view",
+        "booking_read",
+        "bookings_read",
+        "booking_manage",
+        "bookings_manage",
+        "booking_write",
+        "bookings_write",
+        "manage_bookings",
+        "booking",
+        "bookings",
+    ]);
+    const posPermissionValue = getDashboardPermissionValue(user, [
+        "pos_access",
+        "sales_pos_access",
+        "pos_view",
+        "pos_read",
+        "pos_manage",
+        "pos_write",
+        "manage_pos",
+        "sales_pos",
+        "sales",
+        "pos",
+    ]);
+    const inventoryPermissionValue = getDashboardPermissionValue(user, [
+        "inventory_access",
+        "inventory_view",
+        "inventory_read",
+        "inventory_manage",
+        "inventory_write",
+        "manage_inventory",
+        "inventory",
+    ]);
+
+    /*
+     * Bookings are part of the Staff sidebar in the current role design, so
+     * preserve booking access when no granular booking permission is stored.
+     * POS is hidden by default unless the account explicitly has POS access,
+     * matching the Staff sidebar behavior shown in the current application.
+     */
+    const canAccessBookings =
+        bookingPermissionValue === undefined
+            ? true
+            : dashboardPermissionAllowsRead(bookingPermissionValue);
+    const canManageBookings =
+        bookingPermissionValue === undefined
+            ? true
+            : dashboardPermissionAllowsWrite(bookingPermissionValue);
+    const canAccessPos =
+        posPermissionValue === undefined
+            ? false
+            : dashboardPermissionAllowsRead(posPermissionValue);
+    const canManagePos =
+        posPermissionValue === undefined
+            ? false
+            : dashboardPermissionAllowsWrite(posPermissionValue);
+    const hasInventoryRestockPermission =
+        hasDashboardInventoryRestockPermission(user);
+    const canAccessInventory =
+        inventoryPermissionValue === undefined
+            ? true
+            : dashboardPermissionAllowsRead(inventoryPermissionValue);
+    const canOpenInventory =
+        canAccessInventory || hasInventoryRestockPermission;
 
     const todayLabel = currentDateTime.toLocaleDateString("en-US", {
         month: "long",
@@ -1649,6 +2055,9 @@ export default function StaffDashboard() {
                     relatedTo: reference,
                     priority: getStaffTaskPriority(at, currentDateTime),
                     status: "Completed",
+                    dueAt: at,
+                    displayStatus: status,
+                    bookingId: booking.id,
                 };
             }
 
@@ -1667,44 +2076,211 @@ export default function StaffDashboard() {
                 relatedTo: reference,
                 priority: getStaffTaskPriority(at, currentDateTime),
                 status: "Pending",
+                dueAt: at,
+                displayStatus: status,
+                bookingId: booking.id,
             };
         });
     }, [todayBookings, currentDateTime]);
 
     const inventoryTaskRows = useMemo<StaffTaskRow[]>(() => {
-        const stockTasks = allInventoryAlerts.slice(0, 3).map((item) => ({
+        const stockTasks = allInventoryAlerts.map((item) => ({
             id: `stock-${item.id}`,
             task: `Verify stock: ${item.productName}`,
             relatedTo: "Inventory",
             priority: (item.status === "Out of Stock" ? "High" : "Medium") as StaffTaskPriority,
             status: "Pending" as const,
+            displayStatus: item.status,
         }));
 
         const expiryTasks = allExpirationAlertItems
             .filter((item) => item.status === "Expired" || item.daysRemaining <= 7)
-            .slice(0, 2)
             .map((item) => ({
                 id: `expiry-${item.id}`,
                 task: `Check expiry: ${item.productName}`,
                 relatedTo: "Inventory",
                 priority: (item.status === "Expired" || item.daysRemaining <= 2 ? "High" : "Medium") as StaffTaskPriority,
                 status: "Pending" as const,
+                displayStatus: item.status === "Expired" ? "Expired" : "Expiring Soon",
             }));
 
         return [...stockTasks, ...expiryTasks];
     }, [allInventoryAlerts, allExpirationAlertItems]);
 
-    const allStaffTasks = useMemo(
-        () => [...bookingTaskRows, ...inventoryTaskRows],
-        [bookingTaskRows, inventoryTaskRows],
-    );
+    const allStaffTasks = useMemo(() => {
+        return [...bookingTaskRows, ...inventoryTaskRows].filter((task) => {
+            const isInventoryTask =
+                task.relatedTo.trim().toLowerCase() === "inventory";
 
-    const pendingStaffTasks = useMemo(
-        () => allStaffTasks.filter((task) => task.status === "Pending"),
-        [allStaffTasks],
-    );
+            if (isInventoryTask) {
+                return canAccessInventory;
+            }
 
-    const visiblePendingTasks = pendingStaffTasks.slice(0, 5);
+            const needsBookingManagePermission =
+                /^(Confirm|Prepare|Release)\b/i.test(task.task);
+
+            if (needsBookingManagePermission) {
+                return canManageBookings;
+            }
+
+            return canAccessBookings;
+        });
+    }, [
+        bookingTaskRows,
+        inventoryTaskRows,
+        canAccessInventory,
+        canAccessBookings,
+        canManageBookings,
+    ]);
+
+    const pendingStaffTasks = useMemo(() => {
+        const priorityRank: Record<StaffTaskPriority, number> = {
+            High: 0,
+            Medium: 1,
+            Low: 2,
+        };
+
+        const severityRank = (task: StaffTaskRow) => {
+            const status = String(task.displayStatus || "")
+                .trim()
+                .toLowerCase();
+
+            if (
+                status.includes("out of stock") ||
+                status === "expired"
+            ) {
+                return 0;
+            }
+
+            if (status.includes("expiring")) {
+                return 1;
+            }
+
+            if (status.includes("low stock")) {
+                return 2;
+            }
+
+            return 3;
+        };
+
+        return allStaffTasks
+            .filter((task) => task.status === "Pending")
+            .sort((first, second) => {
+                const priorityDifference =
+                    priorityRank[first.priority] - priorityRank[second.priority];
+
+                if (priorityDifference !== 0) {
+                    return priorityDifference;
+                }
+
+                const severityDifference =
+                    severityRank(first) - severityRank(second);
+
+                if (severityDifference !== 0) {
+                    return severityDifference;
+                }
+
+                const firstDue =
+                    first.dueAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+                const secondDue =
+                    second.dueAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+
+                if (firstDue !== secondDue) {
+                    return firstDue - secondDue;
+                }
+
+                return first.task.localeCompare(second.task);
+            });
+    }, [allStaffTasks]);
+
+    const todayWorkOperations = useMemo<StaffOperationRow[]>(() => {
+        const endOfToday = new Date(
+            currentDateTime.getFullYear(),
+            currentDateTime.getMonth(),
+            currentDateTime.getDate(),
+            23,
+            59,
+            59,
+            999,
+        );
+
+        return pendingStaffTasks.map((task) => {
+            const isInventoryTask =
+                task.relatedTo.trim().toLowerCase() === "inventory";
+            const at = task.dueAt || endOfToday;
+
+            if (isInventoryTask) {
+                const [rawTitle, ...rawDetailParts] = task.task.split(":");
+                const itemDetail = rawDetailParts.join(":").trim();
+
+                return {
+                    id: `today-work-${task.id}`,
+                    at,
+                    time: task.dueAt
+                        ? task.dueAt.toLocaleTimeString("en-US", {
+                            hour: "numeric",
+                            minute: "2-digit",
+                            hour12: true,
+                        })
+                        : "Today",
+                    title: rawTitle.trim() || "Inventory Review",
+                    detail: itemDetail || "Inventory item",
+                    reference: "Inventory",
+                    status: task.displayStatus || "Pending",
+                    source: "inventory",
+                };
+            }
+
+            const booking = todayBookings.find(
+                (item) =>
+                    compactDashboardReference(
+                        "BK",
+                        item.bookingNumber,
+                        item.id,
+                    ) === task.relatedTo,
+            );
+            const action = getCompactTaskAction(task);
+
+            return {
+                id: `today-work-${task.id}`,
+                at,
+                time: booking
+                    ? formatDashboardTime(booking.date, booking.time) || "Today"
+                    : task.dueAt
+                        ? task.dueAt.toLocaleTimeString("en-US", {
+                            hour: "numeric",
+                            minute: "2-digit",
+                            hour12: true,
+                        })
+                        : "Today",
+                title:
+                    action === "Prepare"
+                        ? "Booking Preparation"
+                        : action === "Release"
+                            ? "Booking Release"
+                            : action === "Confirm"
+                                ? "Booking Confirmation"
+                                : "Booking Review",
+                detail: booking
+                    ? booking.eventName || booking.packageName || "Booking"
+                    : "Booking",
+                reference: booking
+                    ? compactDashboardReference(
+                        "BK",
+                        booking.bookingNumber,
+                        booking.id,
+                    )
+                    : task.relatedTo,
+                status:
+                    task.displayStatus ||
+                    (booking
+                        ? normalizeDashboardBookingStatus(booking.status)
+                        : "Pending"),
+                source: "booking",
+                bookingId: booking?.id ?? task.bookingId,
+            };
+        });
+    }, [pendingStaffTasks, todayBookings, currentDateTime]);
 
     const todayOperations = useMemo<StaffOperationRow[]>(() => {
         const bookingOperations: StaffOperationRow[] = todayBookings.map((booking) => {
@@ -1740,6 +2316,7 @@ export default function StaffDashboard() {
                 detail: `${reference}${booking.eventName || booking.packageName ? ` • ${booking.eventName || booking.packageName}` : ""}`,
                 status,
                 source: "booking",
+                bookingId: booking.id,
             };
         });
 
@@ -1860,10 +2437,108 @@ export default function StaffDashboard() {
                 ? "Good afternoon"
                 : "Good evening";
 
-    const recentActivityOperations = [...todayOperations]
+    const loggedRecentActivityOperations = useMemo<StaffOperationRow[]>(() => {
+        const currentStaffName = normalizeActivityIdentity(staffDisplayName);
+        const assignedBranchId = String(getAssignedBranchId(user) || "");
+        const assignedBranchName = normalizeActivityIdentity(
+            getAssignedBranchName(user),
+        );
+
+        return employeeActions
+            .filter((item) => {
+                const at = parseOperationalDateTime(item.date, item.time);
+                if (!isSameOperationalDay(at, currentDateTime)) return false;
+                if (at && at.getTime() > currentDateTime.getTime()) return false;
+
+                const itemBranchId = String(item.branchId ?? "");
+                if (
+                    assignedBranchId &&
+                    itemBranchId &&
+                    itemBranchId !== assignedBranchId
+                ) {
+                    return false;
+                }
+
+                const itemBranchName = normalizeActivityIdentity(item.branch || "");
+                if (
+                    !itemBranchId &&
+                    itemBranchName &&
+                    assignedBranchName &&
+                    itemBranchName !== assignedBranchName
+                ) {
+                    return false;
+                }
+
+                // A Staff dashboard should primarily show the activity of the
+                // logged-in Staff member, not another employee in the branch.
+                const employeeName = normalizeActivityIdentity(item.employeeName);
+                if (
+                    currentStaffName &&
+                    employeeName &&
+                    employeeName !== currentStaffName
+                ) {
+                    return false;
+                }
+
+                return true;
+            })
+            .map((item) => {
+                const at =
+                    parseOperationalDateTime(item.date, item.time) ||
+                    currentDateTime;
+                const reference =
+                    item.referenceNumber ||
+                    item.referenceId ||
+                    "";
+                const detailParts = [reference, item.details]
+                    .map((value) => String(value || "").trim())
+                    .filter(Boolean);
+
+                return {
+                    id: `employee-action-${item.id}`,
+                    at,
+                    time:
+                        formatDashboardTime(item.date, item.time) ||
+                        at.toLocaleTimeString("en-US", {
+                            hour: "numeric",
+                            minute: "2-digit",
+                            hour12: true,
+                        }),
+                    title: item.action || "Recorded action",
+                    detail:
+                        detailParts.join(" • ") ||
+                        item.module ||
+                        "Activity recorded",
+                    status: "Completed",
+                    source: getEmployeeActionSource(item.module),
+                };
+            })
+            .sort((first, second) => second.at.getTime() - first.at.getTime());
+    }, [employeeActions, currentDateTime, staffDisplayName, user]);
+
+    const inferredRecentActivityOperations = [...todayOperations]
         .filter((operation) => operation.at.getTime() <= currentDateTime.getTime())
-        .sort((first, second) => second.at.getTime() - first.at.getTime())
-        .slice(0, 4);
+        .filter((operation) => {
+            const normalizedStatus = String(operation.status || "")
+                .trim()
+                .toLowerCase();
+
+            return normalizedStatus === "completed";
+        })
+        .sort((first, second) => second.at.getTime() - first.at.getTime());
+
+    const recentActivityOperations = employeeActionsLoaded
+        ? loggedRecentActivityOperations
+        : inferredRecentActivityOperations;
+
+    const todayWorkAttentionCount = pendingStaffTasks.length;
+
+    const openBookingDetails = (bookingId: number) => {
+        const booking = bookings.find((item) => item.id === bookingId);
+        if (booking) {
+            setSelectedBookingDetails(booking);
+        }
+    };
 
     // Visual-only redesign: Staff data, actions, RBAC checks, routes, and calculations remain unchanged.
     return (
@@ -1945,17 +2620,28 @@ export default function StaffDashboard() {
                     </div>
 
                     <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
-                        <div className="min-w-0 xl:col-span-2">
+                        <div className="h-full min-h-0 min-w-0 xl:col-span-2">
                             <StaffTodayWorkPanel
-                                operations={todayOperations}
-                                attentionCount={pendingStaffTasks.length}
+                                operations={todayWorkOperations}
+                                attentionCount={todayWorkAttentionCount}
+                                canAccessBookings={canAccessBookings}
+                                canManageBookings={canManageBookings}
+                                canAccessPos={canAccessPos}
+                                canAccessInventory={canAccessInventory}
+                                onViewBooking={openBookingDetails}
                                 onOpenBooking={() => router.push("/bookings")}
                                 onOpenPos={() => router.push("/pos")}
+                                onOpenInventory={() => router.push("/inventory")}
                             />
                         </div>
 
-                        <div className="min-w-0">
+                        <div className="h-full min-h-0 min-w-0">
                             <StaffReferenceQuickActionsPanel
+                                canNewPos={canManagePos}
+                                canCreateBooking={canManageBookings}
+                                canConfirmBooking={canManageBookings}
+                                canPrepareBooking={canManageBookings}
+                                canFindBooking={canAccessBookings}
                                 onNewPos={() => router.push("/pos")}
                                 onCreateBooking={() => router.push("/bookings")}
                                 onConfirmBooking={() => router.push("/bookings")}
@@ -1966,29 +2652,61 @@ export default function StaffDashboard() {
                     </div>
 
                     <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
-                        <div className="min-w-0">
+                        <div className="h-full min-h-0 min-w-0">
                             <StaffPendingTasksCompactPanel
-                                tasks={pendingStaffTasks.slice(0, 4)}
+                                tasks={pendingStaffTasks}
                                 total={pendingStaffTasks.length}
                                 bookings={todayBookings}
+                                canAccessBookings={canAccessBookings}
+                                canManageBookings={canManageBookings}
+                                canOpenInventory={canOpenInventory}
+                                onViewBooking={openBookingDetails}
                                 onOpenBooking={() => router.push("/bookings")}
                                 onOpenInventory={() => router.push("/inventory")}
                             />
                         </div>
 
-                        <div className="min-w-0">
-                            <StaffBookingScheduleCompactPanel
-                                bookings={todayBookings}
-                                onOpenBooking={() => router.push("/bookings")}
+                        <div className="h-full min-h-0 min-w-0">
+                            <StaffEfficiencyPanel
+                                taskCompleted={completedTaskCount}
+                                taskTotal={allStaffTasks.length}
+                                taskPercent={taskCompletionPct}
+                                preparationCompleted={preparedBookingCount}
+                                preparationTotal={preparationRelevantBookings.length}
+                                preparationPercent={preparationProgressPct}
+                                bookingCompleted={completedBookingCount}
+                                bookingTotal={todayBookings.length}
+                                bookingPercent={bookingCompletionPct}
+                                transactionsProcessed={todayPosTransactions.length}
+                                nextBookingTime={
+                                    nextBooking
+                                        ? formatDashboardTime(
+                                            nextBooking.booking.date,
+                                            nextBooking.booking.time,
+                                        )
+                                        : ""
+                                }
+                                nextBookingReference={nextBookingReference}
+                                nextBookingCountdown={formatNextBookingCountdown(
+                                    nextBooking?.at || null,
+                                    currentDateTime,
+                                )}
                             />
                         </div>
 
-                        <div className="min-w-0">
+                        <div className="h-full min-h-0 min-w-0">
                             <StaffRecentActivityPanel operations={recentActivityOperations} />
                         </div>
                     </div>
                 </div>
             </section>
+
+            {selectedBookingDetails && (
+                <StaffBookingDetailsModal
+                    booking={selectedBookingDetails}
+                    onClose={() => setSelectedBookingDetails(null)}
+                />
+            )}
         </>
     );
 }
@@ -2192,17 +2910,27 @@ function StaffBookingSchedulePanel({
 function StaffStatusBadge({ status }: { status: string }) {
     const normalized = status.toLowerCase();
 
-    let className = "bg-[#FFF4D9] text-[#A96700]";
-    if (normalized.includes("complete") || normalized.includes("ready")) {
-        className = "bg-[#E6F7EE] text-[#159455]";
+    let className = "bg-[#FFF4D8] text-[#8A5A00]";
+    if (
+        normalized.includes("out of stock") ||
+        normalized === "expired"
+    ) {
+        className = "bg-[#FFE5E5] text-[#9A2424]";
+    } else if (
+        normalized.includes("low stock") ||
+        normalized.includes("expiring")
+    ) {
+        className = "bg-[#FFF4D8] text-[#8A5A00]";
+    } else if (normalized.includes("complete") || normalized.includes("ready")) {
+        className = "bg-[#E6F6EA] text-[#226B36]";
     } else if (normalized.includes("confirm") || normalized.includes("prepar")) {
         className = "bg-[#EAF1FF] text-[#2563EB]";
     } else if (normalized.includes("cancel")) {
-        className = "bg-[#FDECEC] text-[#DC2626]";
+        className = "bg-[#FFE5E5] text-[#9A2424]";
     }
 
     return (
-        <span className={`inline-flex max-w-full rounded-full px-2.5 py-1 text-[9px] font-semibold ${className}`}>
+        <span className={`inline-flex max-w-full rounded-full px-2.5 py-1 text-[10px] font-semibold ${className}`}>
             <span className="truncate">{status}</span>
         </span>
     );
@@ -2305,22 +3033,22 @@ function StaffEfficiencyPanel({
     nextBookingCountdown: string;
 }) {
     return (
-        <section className="flex h-full min-h-[344px] flex-col rounded-[14px] bg-white shadow-[0_1px_2px_rgba(23,12,48,0.04),0_10px_24px_-16px_rgba(23,12,48,0.28)]">
-            <div className="flex min-h-[62px] items-center gap-2 border-b border-[#EEE8F2] px-4 py-2.5 text-[#6D35D4]">
-                <span className="flex h-6 w-6 items-center justify-center">
-                    <BarChart3 size={18} />
+        <section className="flex h-[344px] max-h-[344px] min-h-[344px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
+            <div className="flex items-center gap-3 border-b border-[#EEE8F2] px-5 py-3.5">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                    <BarChart3 size={17} />
                 </span>
                 <div className="min-w-0">
-                    <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                    <h2 className="truncate text-[15px] font-bold text-[#1A1220]">
                         Today&apos;s Efficiency
                     </h2>
-                    <p className="truncate text-[9px] leading-5 text-[#8A7D92]">
-                        Data-driven progress for today&apos;s operations
+                    <p className="mt-1 truncate text-[11px] text-[#9A8DA8]">
+                        Progress for today&apos;s operations.
                     </p>
                 </div>
             </div>
 
-            <div className="flex flex-1 flex-col gap-3 px-4 py-3">
+            <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 py-2.5">
                 <StaffProgressMetric
                     label="Task Completion"
                     valueLabel={`${taskCompleted} of ${taskTotal}`}
@@ -2340,7 +3068,7 @@ function StaffEfficiencyPanel({
                     tone="violet"
                 />
 
-                <div className="flex items-center justify-between border-t border-[#F1ECF4] pt-2.5">
+                <div className="flex items-center justify-between border-t border-[#F1ECF4] pt-2">
                     <div className="flex items-center gap-2">
                         <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
                             <ShoppingCart size={14} />
@@ -2350,7 +3078,7 @@ function StaffEfficiencyPanel({
                     <span className="text-[12px] font-bold text-[#24152F]">{transactionsProcessed}</span>
                 </div>
 
-                <div className="mt-auto rounded-xl bg-[#F8F5FC] px-3 py-2.5">
+                <div className="mt-auto rounded-xl bg-[#F8F5FC] px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2">
                             <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-[#6D35D4] shadow-sm">
@@ -2372,6 +3100,11 @@ function StaffEfficiencyPanel({
                     </div>
                 </div>
             </div>
+
+            <div
+                className="h-6 shrink-0 border-t border-[#EEE8F2] bg-[#FCFAFE]"
+                aria-hidden="true"
+            />
         </section>
     );
 }
@@ -2610,6 +3343,7 @@ function StaffQuickActionButton({
 
 function getStaffOperationActionLabel(operation: StaffOperationRow) {
     if (operation.source === "pos") return "View";
+    if (operation.source === "inventory") return "Review";
 
     const status = operation.status.toLowerCase();
     if (status.includes("pending") || status.includes("awaiting")) return "Confirm";
@@ -2618,129 +3352,289 @@ function getStaffOperationActionLabel(operation: StaffOperationRow) {
     return "View";
 }
 
+function getStaffActionTextClass(action: string) {
+    const normalized = String(action || "").trim().toLowerCase();
+
+    if (normalized === "confirm") {
+        return "text-[#159455] hover:text-[#117A46]";
+    }
+
+    if (normalized === "prepare") {
+        return "text-[#E66B20] hover:text-[#C45716]";
+    }
+
+    if (normalized === "release") {
+        return "text-[#2563EB] hover:text-[#1D4ED8]";
+    }
+
+    return "text-[#6D35D4] hover:text-[#5D2BBE]";
+}
+
 function StaffTodayWorkPanel({
                                  operations,
                                  attentionCount,
+                                 canAccessBookings,
+                                 canManageBookings,
+                                 canAccessPos,
+                                 canAccessInventory,
+                                 onViewBooking,
                                  onOpenBooking,
                                  onOpenPos,
+                                 onOpenInventory,
                              }: {
     operations: StaffOperationRow[];
     attentionCount: number;
+    canAccessBookings: boolean;
+    canManageBookings: boolean;
+    canAccessPos: boolean;
+    canAccessInventory: boolean;
+    onViewBooking: (bookingId: number) => void;
     onOpenBooking: () => void;
     onOpenPos: () => void;
+    onOpenInventory: () => void;
 }) {
-    const visible = operations.slice(0, 3);
+    const [workFilter, setWorkFilter] = useState<"all" | "booking" | "inventory">("all");
+
+    const bookingOperationsCount = operations.filter(
+        (operation) => operation.source === "booking",
+    ).length;
+    const inventoryOperationsCount = operations.filter(
+        (operation) => operation.source === "inventory",
+    ).length;
+
+    const visibleOperations = operations.filter((operation) => {
+        if (workFilter === "booking") return operation.source === "booking";
+        if (workFilter === "inventory") return operation.source === "inventory";
+        return true;
+    });
+
+    const workFilterClass = (filter: "all" | "booking" | "inventory") => {
+        const isActive = workFilter === filter;
+
+        if (filter === "all") {
+            return isActive
+                ? "border-[#2B174C] bg-[#2B174C] text-white"
+                : "border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#FAF8FF]";
+        }
+
+        if (filter === "booking") {
+            return isActive
+                ? "border-[#D8C5F3] bg-[#F1EBFF] text-[#6D35D4]"
+                : "border-[#D8C5F3] bg-white text-[#6D35D4] hover:bg-[#F7F1FF]";
+        }
+
+        return isActive
+            ? "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]"
+            : "border-[#F4D79A] bg-white text-[#A56607] hover:bg-[#FFFBF0]";
+    };
 
     return (
-        <section className="flex h-full min-h-[318px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
-            <div className="flex items-center justify-between gap-4 border-b border-[#EEE8F2] px-5 py-4">
-                <div className="flex min-w-0 items-center gap-3">
-                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
-                        <ClipboardList size={18} />
-                    </span>
-                    <div className="min-w-0">
-                        <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
-                            Today&apos;s Work
-                        </h2>
-                        <p className="mt-1 truncate text-[11px] text-[#9A8DA8]">
-                            Here are the things you need to do today.
-                        </p>
+        <section
+            className="grid h-[318px] max-h-[318px] min-h-[318px] grid-rows-[auto_minmax(0,1fr)_24px] overflow-hidden rounded-2xl bg-white shadow-sm"
+            style={{ height: 318, minHeight: 318, maxHeight: 318 }}
+        >
+            <div className="border-b border-[#EEE8F2] px-5 py-3">
+                <div className="flex items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                            <ClipboardList size={18} />
+                        </span>
+                        <div className="min-w-0">
+                            <h2 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">
+                                Today&apos;s Work
+                            </h2>
+                            <p className="mt-1 truncate text-[11px] text-[#9A8DA8]">
+                                Here are the things you need to do today.
+                            </p>
+                        </div>
                     </div>
+
+                    {attentionCount > 0 && (
+                        <span className="shrink-0 rounded-full bg-[#FFF0F0] px-3 py-1.5 text-[10px] font-semibold text-[#D92D20]">
+                            {attentionCount} item{attentionCount === 1 ? "" : "s"} require attention
+                        </span>
+                    )}
                 </div>
 
-                {attentionCount > 0 && (
-                    <span className="shrink-0 rounded-full bg-[#FFF0F0] px-3 py-1.5 text-[10px] font-semibold text-[#D92D20]">
-                        {attentionCount} item{attentionCount === 1 ? "" : "s"} require attention
-                    </span>
-                )}
+                <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                    <button
+                        type="button"
+                        onClick={() => setWorkFilter("all")}
+                        aria-pressed={workFilter === "all"}
+                        className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${workFilterClass("all")}`}
+                    >
+                        All ({operations.length})
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setWorkFilter("booking")}
+                        aria-pressed={workFilter === "booking"}
+                        className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${workFilterClass("booking")}`}
+                    >
+                        Bookings ({bookingOperationsCount})
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setWorkFilter("inventory")}
+                        aria-pressed={workFilter === "inventory"}
+                        className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${workFilterClass("inventory")}`}
+                    >
+                        Inventory ({inventoryOperationsCount})
+                    </button>
+                </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-x-auto">
-                <table className="w-full min-w-[760px] table-fixed border-collapse">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                <table className="w-full table-fixed border-collapse">
                     <colgroup>
-                        <col className="w-[9%]" />
                         <col className="w-[13%]" />
-                        <col className="w-[43%]" />
-                        <col className="w-[16%]" />
-                        <col className="w-[19%]" />
+                        <col className="w-[25%]" />
+                        <col className="w-[20%]" />
+                        <col className="w-[18%]" />
+                        <col className="w-[24%]" />
                     </colgroup>
-                    <thead className="bg-[#FBFAFD]">
-                    <tr className="h-[35px] border-b border-[#EEE8F2]">
-                        {["Type", "Time", "Work Item", "Status", "Action"].map((header) => (
-                            <th
-                                key={header}
-                                className="px-4 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]"
-                            >
-                                {header}
-                            </th>
-                        ))}
+                    <thead className="sticky top-0 z-10 bg-[#FBFAFD]">
+                    <tr className="h-[34px] border-b border-[#EEE8F2]">
+                        <th className="px-4 py-2 text-center text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                            Time
+                        </th>
+                        <th className="px-4 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                            Work Item
+                        </th>
+                        <th className="px-3 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                            Reference
+                        </th>
+                        <th className="px-4 py-2 text-center text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                            Status
+                        </th>
+                        <th className="px-4 py-2 text-center text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                            Action
+                        </th>
                     </tr>
                     </thead>
                     <tbody>
-                    {visible.length === 0 ? (
+                    {visibleOperations.length === 0 ? (
                         <tr className="!border-0">
                             <td colSpan={5} className="!border-0 px-5 py-16 text-center text-[12px] text-[#8A7D92]">
-                                No work items are scheduled for today yet.
+                                {workFilter === "all"
+                                    ? "No pending work items require your attention right now."
+                                    : `No ${workFilter === "booking" ? "booking" : "inventory"} work items to show right now.`}
                             </td>
                         </tr>
                     ) : (
-                        visible.map((operation) => {
+                        visibleOperations.map((operation) => {
                             const actionLabel = getStaffOperationActionLabel(operation);
                             const isPos = operation.source === "pos";
-                            const completed = operation.status.toLowerCase().includes("complete");
-                            const iconTone = isPos
-                                ? "bg-[#E6F7EE] text-[#159455]"
-                                : completed
-                                    ? "bg-[#EAF1FF] text-[#2563EB]"
-                                    : "bg-[#F1EBFF] text-[#6D35D4]";
-                            const isPrimary = actionLabel === "Confirm";
+                            const isInventory = operation.source === "inventory";
+                            const normalizedStatus = operation.status.toLowerCase();
+                            const completed = normalizedStatus.includes("complete");
+                            const inventoryCritical =
+                                normalizedStatus.includes("out of stock") ||
+                                normalizedStatus.includes("expired");
+
+                            const bookingActionAllowed =
+                                actionLabel === "View"
+                                    ? canAccessBookings
+                                    : canManageBookings;
+
+                            const actionAllowed = isInventory
+                                ? canAccessInventory
+                                : isPos
+                                    ? canAccessPos
+                                    : bookingActionAllowed;
 
                             return (
                                 <tr
                                     key={operation.id}
-                                    className="!border-0 transition hover:bg-[#FCFAFE]"
+                                    className="border-b border-[#F1ECF4] transition last:border-b-0 hover:bg-[#FCFAFE]"
                                 >
-                                    <td className="!border-0 px-4 py-3.5">
-                                        <span className={`flex h-8 w-8 items-center justify-center rounded-full ${iconTone}`}>
-                                            {isPos ? (
-                                                <ShoppingCart size={15} />
-                                            ) : actionLabel === "Prepare" ? (
-                                                <PackageCheck size={15} />
-                                            ) : (
-                                                <CalendarDays size={15} />
-                                            )}
-                                        </span>
-                                    </td>
-                                    <td className="!border-0 px-4 py-3.5 text-[10px] font-semibold text-[#5F4E75]">
+                                    <td className="!border-0 px-4 py-2.5 text-center align-middle text-[10px] font-semibold text-[#5F4E75]">
                                         {operation.time}
                                     </td>
-                                    <td className="!border-0 px-4 py-3.5">
-                                        <p className="truncate text-[11px] font-semibold leading-4 text-[#24152F]">
+                                    <td className="!border-0 px-4 py-2.5 align-middle">
+                                        <p
+                                            className="truncate text-[11px] font-semibold leading-4 text-[#24152F]"
+                                            title={operation.title}
+                                        >
                                             {operation.title}
                                         </p>
+                                    </td>
+                                    <td className="!border-0 px-3 py-2.5 align-middle">
                                         <p
-                                            className="mt-1.5 truncate text-[9px] leading-4 text-[#8A7D92]"
+                                            className="truncate text-[11px] font-semibold leading-4 text-[#24152F]"
                                             title={operation.detail}
                                         >
                                             {operation.detail}
                                         </p>
                                     </td>
-                                    <td className="!border-0 px-4 py-3.5">
-                                        <StaffStatusBadge status={operation.status} />
+                                    <td className="!border-0 px-3 py-2.5 text-center align-middle">
+                                        <div className="flex justify-center">
+                                            <StaffStatusBadge status={operation.status} />
+                                        </div>
                                     </td>
-                                    <td className="!border-0 px-4 py-3.5">
-                                        <button
-                                            type="button"
-                                            onClick={isPos ? onOpenPos : onOpenBooking}
-                                            className={
-                                                isPrimary
-                                                    ? "inline-flex h-8 min-w-[86px] items-center justify-center rounded-lg bg-[#6D35D4] px-3 text-[9px] font-semibold text-white transition hover:bg-[#5D2BBE]"
-                                                    : "inline-flex h-8 min-w-[86px] items-center justify-center rounded-lg bg-[#F1EBFF] px-3 text-[9px] font-semibold text-[#6D35D4] transition hover:bg-[#E8DEFA]"
-                                            }
-                                        >
-                                            <span>{actionLabel}</span>
-                                            <ChevronRight size={12} className="ml-1" />
-                                        </button>
+                                    <td className="!border-0 px-4 py-2.5 text-center align-middle">
+                                        <div className="flex items-center justify-center gap-2 whitespace-nowrap">
+                                            {actionAllowed ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={
+                                                        isInventory
+                                                            ? onOpenInventory
+                                                            : isPos
+                                                                ? onOpenPos
+                                                                : onOpenBooking
+                                                    }
+                                                    className={`shrink-0 text-left text-[12px] font-semibold transition hover:underline ${getStaffActionTextClass(actionLabel)}`}
+                                                >
+                                                    {actionLabel}
+                                                </button>
+                                            ) : (
+                                                <span className="text-[9px] font-medium text-[#B0A4B8]">—</span>
+                                            )}
+
+                                            {((isInventory && canAccessInventory) ||
+                                                (isPos && canAccessPos) ||
+                                                (!isInventory &&
+                                                    !isPos &&
+                                                    operation.bookingId &&
+                                                    canAccessBookings)) && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        if (isInventory) {
+                                                            onOpenInventory();
+                                                            return;
+                                                        }
+
+                                                        if (isPos) {
+                                                            onOpenPos();
+                                                            return;
+                                                        }
+
+                                                        if (operation.bookingId) {
+                                                            onViewBooking(operation.bookingId);
+                                                        }
+                                                    }}
+                                                    title={
+                                                        isInventory
+                                                            ? "View inventory item"
+                                                            : isPos
+                                                                ? "View transaction details"
+                                                                : "View booking details"
+                                                    }
+                                                    aria-label={
+                                                        isInventory
+                                                            ? "View inventory item"
+                                                            : isPos
+                                                                ? "View transaction details"
+                                                                : "View booking details"
+                                                    }
+                                                    className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[#6D35D4] transition hover:text-[#5D2BBE]"
+                                                >
+                                                    <Eye size={14} />
+                                                </button>
+                                            )}
+                                        </div>
                                     </td>
                                 </tr>
                             );
@@ -2749,91 +3643,263 @@ function StaffTodayWorkPanel({
                     </tbody>
                 </table>
             </div>
+
+            <div className="flex h-6 items-center justify-center border-t border-[#EEE8F2] bg-[#FCFAFE] text-[9px] font-medium text-[#8A7D92]">
+                {visibleOperations.length > 4 ? "Scroll to view remaining work items" : ""}
+            </div>
         </section>
     );
 }
 
+function StaffBookingDetailsModal({
+                                      booking,
+                                      onClose,
+                                  }: {
+    booking: Booking;
+    onClose: () => void;
+}) {
+    const reference =
+        String(booking.bookingNumber || "").trim() ||
+        compactDashboardReference("BK", booking.bookingNumber, booking.id);
+    const eventLabel =
+        String(booking.eventName || "").trim() ||
+        String(booking.packageName || "").trim() ||
+        String(booking.customOrder || booking.custom_order || "").trim() ||
+        "Not specified";
+    const packageLabel =
+        String(booking.packageName || "").trim() ||
+        String(booking.customOrder || booking.custom_order || "").trim() ||
+        "Not specified";
+    const scheduleDate =
+        formatDashboardBookingDate(booking.date) || "Today";
+    const scheduleTime =
+        formatDashboardTime(booking.date, booking.time) || "Time not specified";
+    const status = normalizeDashboardBookingStatus(booking.status);
+    const action = getStaffBookingAction(booking);
+    const title =
+        action === "Confirm"
+            ? "Booking Confirmation Details"
+            : action === "Prepare"
+                ? "Booking Preparation Details"
+                : action === "Release"
+                    ? "Booking Release Details"
+                    : "Booking Details";
+
+    return (
+        <div
+            className="fixed inset-0 z-[80] flex items-center justify-center bg-[#160C24]/40 px-4 py-6 backdrop-blur-[1px]"
+            role="presentation"
+            onMouseDown={(event) => {
+                if (event.target === event.currentTarget) {
+                    onClose();
+                }
+            }}
+        >
+            <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="staff-booking-details-title"
+                className="w-full max-w-[520px] overflow-hidden rounded-2xl bg-white shadow-[0_24px_70px_rgba(23,12,48,0.28)]"
+            >
+                <div className="flex items-center justify-between gap-4 border-b border-[#EEE8F2] px-5 py-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                            <Eye size={18} />
+                        </span>
+                        <div className="min-w-0">
+                            <h2
+                                id="staff-booking-details-title"
+                                className="truncate text-[16px] font-bold text-[#1A1220]"
+                            >
+                                {title}
+                            </h2>
+                            <p className="mt-0.5 text-[11px] text-[#9A8DA8]">
+                                Quick booking information for today&apos;s task.
+                            </p>
+                        </div>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        aria-label="Close booking details"
+                        title="Close"
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#7A6A84] transition hover:bg-[#F5F0F8] hover:text-[#2B174C]"
+                    >
+                        <X size={17} />
+                    </button>
+                </div>
+
+                <div className="grid grid-cols-1 gap-x-5 gap-y-4 px-5 py-5 sm:grid-cols-2">
+                    <BookingDetailItem label="Client" value={booking.name || "Unnamed Client"} />
+                    <BookingDetailItem label="Reference" value={reference} />
+                    <BookingDetailItem label="Event" value={eventLabel} />
+                    <BookingDetailItem label="Package / Selection" value={packageLabel} />
+                    <BookingDetailItem
+                        label="Schedule"
+                        value={`${scheduleDate} • ${scheduleTime}`}
+                    />
+                    <div>
+                        <p className="text-[9px] font-semibold uppercase tracking-[0.05em] text-[#8A7D92]">
+                            Status
+                        </p>
+                        <div className="mt-1.5">
+                            <StaffStatusBadge status={status} />
+                        </div>
+                    </div>
+                </div>
+
+                <div className="border-t border-[#EEE8F2] bg-[#FCFAFE] px-5 py-3 text-[10px] leading-4 text-[#7A6A84]">
+                    This view uses the booking already loaded in the Staff dashboard, so you do not need to copy and search the booking number manually.
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function BookingDetailItem({
+                               label,
+                               value,
+                           }: {
+    label: string;
+    value: string;
+}) {
+    return (
+        <div className="min-w-0">
+            <p className="text-[9px] font-semibold uppercase tracking-[0.05em] text-[#8A7D92]">
+                {label}
+            </p>
+            <p
+                className="mt-1.5 break-words text-[12px] font-semibold leading-5 text-[#24152F]"
+                title={value}
+            >
+                {value}
+            </p>
+        </div>
+    );
+}
+
 function StaffReferenceQuickActionsPanel({
+                                             canNewPos,
+                                             canCreateBooking,
+                                             canConfirmBooking,
+                                             canPrepareBooking,
+                                             canFindBooking,
                                              onNewPos,
                                              onCreateBooking,
                                              onConfirmBooking,
                                              onPrepareBooking,
                                              onFindBooking,
                                          }: {
+    canNewPos: boolean;
+    canCreateBooking: boolean;
+    canConfirmBooking: boolean;
+    canPrepareBooking: boolean;
+    canFindBooking: boolean;
     onNewPos: () => void;
     onCreateBooking: () => void;
     onConfirmBooking: () => void;
     onPrepareBooking: () => void;
     onFindBooking: () => void;
 }) {
-    const actions = [
-        {
+    const actions: {
+        title: string;
+        icon: React.ReactNode;
+        className: string;
+        iconClassName: string;
+        onClick: () => void;
+    }[] = [];
+
+    if (canNewPos) {
+        actions.push({
             title: "New POS Transaction",
             icon: <ShoppingCart size={17} />,
             className: "bg-[#F1EBFF] text-[#6D35D4]",
             iconClassName: "bg-[#F1EBFF] text-[#6D35D4]",
             onClick: onNewPos,
-        },
-        {
+        });
+    }
+
+    if (canCreateBooking) {
+        actions.push({
             title: "Create Booking",
             icon: <CalendarDays size={17} />,
             className: "bg-[#EAF1FF] text-[#2563EB]",
             iconClassName: "bg-[#EAF1FF] text-[#2563EB]",
             onClick: onCreateBooking,
-        },
-        {
+        });
+    }
+
+    if (canConfirmBooking) {
+        actions.push({
             title: "Confirm Booking",
             icon: <CheckCircle2 size={17} />,
             className: "bg-[#E6F7EE] text-[#159455]",
             iconClassName: "bg-[#E6F7EE] text-[#159455]",
             onClick: onConfirmBooking,
-        },
-        {
+        });
+    }
+
+    if (canPrepareBooking) {
+        actions.push({
             title: "Prepare Booking",
             icon: <PackageCheck size={17} />,
             className: "bg-[#FFF0E5] text-[#E66B20]",
             iconClassName: "bg-[#FFF0E5] text-[#E66B20]",
             onClick: onPrepareBooking,
-        },
-        {
+        });
+    }
+
+    if (canFindBooking) {
+        actions.push({
             title: "Find Booking",
             icon: <CalendarClock size={17} />,
             className: "bg-[#F1EBFF] text-[#6D35D4]",
             iconClassName: "bg-[#F1EBFF] text-[#6D35D4]",
             onClick: onFindBooking,
-        },
-    ];
+        });
+    }
 
     return (
-        <section className="flex h-full min-h-[318px] flex-col rounded-2xl bg-white p-4 shadow-sm">
-            <div className="flex items-center gap-3">
-                <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
-                    <Zap size={18} />
-                </span>
-                <div>
-                    <h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">Quick Actions</h2>
-                    <p className="mt-0.5 text-[11px] text-[#9A8DA8]">Get things done faster.</p>
+        <section className="flex h-[318px] min-h-[318px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
+            <div className="shrink-0 px-4 pt-4">
+                <div className="flex items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                        <Zap size={18} />
+                    </span>
+                    <div>
+                        <h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">Quick Actions</h2>
+                        <p className="mt-1 text-[11px] leading-4 text-[#9A8DA8]">
+                            Only actions available to your account.
+                        </p>
+                    </div>
                 </div>
             </div>
 
-            <div className="mt-3 flex flex-1 flex-col justify-between gap-2">
-                {actions.map((action) => (
-                    <button
-                        key={action.title}
-                        type="button"
-                        onClick={action.onClick}
-                        className={`flex min-h-[44px] items-center justify-between rounded-lg px-3 py-2 text-left transition hover:brightness-[0.98] ${action.className}`}
-                    >
-                        <span className="flex min-w-0 items-center gap-3">
-                            <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${action.iconClassName}`}>
-                                {action.icon}
+            {actions.length === 0 ? (
+                <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] leading-5 text-[#8A7D92]">
+                    No quick actions are available with your current permissions.
+                </div>
+            ) : (
+                <div className="mt-3 flex min-h-0 flex-1 flex-col gap-2 px-4 pb-4 pt-1">
+                    {actions.map((action) => (
+                        <button
+                            key={action.title}
+                            type="button"
+                            onClick={action.onClick}
+                            className={`flex h-10 shrink-0 items-center justify-between rounded-lg px-3 text-left transition hover:brightness-[0.98] ${action.className}`}
+                        >
+                            <span className="flex min-w-0 items-center gap-3">
+                                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${action.iconClassName}`}>
+                                    {action.icon}
+                                </span>
+                                <span className="truncate text-[10px] font-semibold">{action.title}</span>
                             </span>
-                            <span className="truncate text-[10px] font-semibold">{action.title}</span>
-                        </span>
-                        <ChevronRight size={15} className="shrink-0" />
-                    </button>
-                ))}
-            </div>
+                            <ChevronRight size={15} className="shrink-0" />
+                        </button>
+                    ))}
+                </div>
+            )}
         </section>
     );
 }
@@ -2851,15 +3917,61 @@ function StaffPendingTasksCompactPanel({
                                            tasks,
                                            total,
                                            bookings,
+                                           canAccessBookings,
+                                           canManageBookings,
+                                           canOpenInventory,
+                                           onViewBooking,
                                            onOpenBooking,
                                            onOpenInventory,
                                        }: {
     tasks: StaffTaskRow[];
     total: number;
     bookings: Booking[];
+    canAccessBookings: boolean;
+    canManageBookings: boolean;
+    canOpenInventory: boolean;
+    onViewBooking: (bookingId: number) => void;
     onOpenBooking: () => void;
     onOpenInventory: () => void;
 }) {
+    const [taskFilter, setTaskFilter] = useState<"all" | "booking" | "inventory">("all");
+
+    const isInventoryRelatedTask = (task: StaffTaskRow) =>
+        task.relatedTo.trim().toLowerCase() === "inventory";
+
+    const bookingTaskCount = tasks.filter(
+        (task) => !isInventoryRelatedTask(task),
+    ).length;
+    const inventoryTaskCount = tasks.filter((task) =>
+        isInventoryRelatedTask(task),
+    ).length;
+
+    const visibleTasks = tasks.filter((task) => {
+        if (taskFilter === "booking") return !isInventoryRelatedTask(task);
+        if (taskFilter === "inventory") return isInventoryRelatedTask(task);
+        return true;
+    });
+
+    const taskFilterClass = (filter: "all" | "booking" | "inventory") => {
+        const isActive = taskFilter === filter;
+
+        if (filter === "all") {
+            return isActive
+                ? "border-[#2B174C] bg-[#2B174C] text-white"
+                : "border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#FAF8FF]";
+        }
+
+        if (filter === "booking") {
+            return isActive
+                ? "border-[#D8C5F3] bg-[#F1EBFF] text-[#6D35D4]"
+                : "border-[#D8C5F3] bg-white text-[#6D35D4] hover:bg-[#F7F1FF]";
+        }
+
+        return isActive
+            ? "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]"
+            : "border-[#F4D79A] bg-white text-[#A56607] hover:bg-[#FFFBF0]";
+    };
+
     const getDue = (task: StaffTaskRow) => {
         const booking = bookings.find(
             (item) =>
@@ -2870,104 +3982,223 @@ function StaffPendingTasksCompactPanel({
             : "Today";
     };
 
+    const getTaskDisplayLabel = (task: StaffTaskRow) => {
+        const inventoryTask =
+            task.relatedTo.trim().toLowerCase() === "inventory";
+
+        if (inventoryTask) {
+            const [rawAction] = task.task.split(":");
+            return rawAction.trim() || "Inventory Review";
+        }
+
+        const action = getCompactTaskAction(task);
+        if (action === "Confirm") return "Confirm Booking";
+        if (action === "Prepare") return "Prepare Booking";
+        if (action === "Release") return "Release Booking";
+        return "Review Booking";
+    };
+
+    const getTaskEventLabel = (task: StaffTaskRow) => {
+        const inventoryTask =
+            task.relatedTo.trim().toLowerCase() === "inventory";
+
+        if (inventoryTask) {
+            const [, ...detailParts] = task.task.split(":");
+            const itemName = detailParts.join(":").trim();
+            return itemName || "Inventory item";
+        }
+
+        const booking =
+            bookings.find((item) => item.id === task.bookingId) ||
+            bookings.find(
+                (item) =>
+                    compactDashboardReference(
+                        "BK",
+                        item.bookingNumber,
+                        item.id,
+                    ) === task.relatedTo,
+            );
+
+        return (
+            booking?.eventName ||
+            booking?.packageName ||
+            "Booking"
+        );
+    };
+
     return (
         <section
             id="staff-pending-tasks"
-            className="flex h-full min-h-[292px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm"
+            className="grid h-[344px] max-h-[344px] min-h-[344px] grid-rows-[auto_minmax(0,1fr)_24px] overflow-hidden rounded-2xl bg-white shadow-sm"
+            style={{ height: 344, minHeight: 344, maxHeight: 344 }}
         >
-            <div className="flex items-center justify-between gap-4 border-b border-[#EEE8F2] px-5 py-4">
-                <div className="flex min-w-0 items-center gap-3">
-                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
-                        <ListChecks size={17} />
-                    </span>
-                    <div className="min-w-0">
-                        <h2 className="truncate text-[15px] font-bold text-[#1A1220]">
-                            Pending Tasks
-                        </h2>
-                        <p className="mt-1 truncate text-[11px] text-[#9A8DA8]">
-                            {total} task{total === 1 ? "" : "s"} require your attention.
-                        </p>
+            <div className="border-b border-[#EEE8F2] px-5 py-4">
+                <div className="flex items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
+                            <ListChecks size={17} />
+                        </span>
+                        <div className="min-w-0">
+                            <h2 className="truncate text-[15px] font-bold text-[#1A1220]">
+                                Pending Tasks
+                            </h2>
+                            <p className="mt-1 truncate text-[11px] text-[#9A8DA8]">
+                                {total} task{total === 1 ? "" : "s"} require your attention.
+                            </p>
+                        </div>
                     </div>
                 </div>
 
-                <button
-                    type="button"
-                    onClick={
-                        tasks.some((task) => task.relatedTo.toLowerCase() === "inventory")
-                            ? onOpenInventory
-                            : onOpenBooking
-                    }
-                    className="shrink-0 rounded-lg bg-[#F7F2FC] px-3 py-2 text-[10px] font-semibold text-[#6D35D4] transition hover:bg-[#F1EBFF]"
-                >
-                    View All →
-                </button>
+                <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                    <button
+                        type="button"
+                        onClick={() => setTaskFilter("all")}
+                        aria-pressed={taskFilter === "all"}
+                        className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${taskFilterClass("all")}`}
+                    >
+                        All ({tasks.length})
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setTaskFilter("booking")}
+                        aria-pressed={taskFilter === "booking"}
+                        className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${taskFilterClass("booking")}`}
+                    >
+                        Bookings ({bookingTaskCount})
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setTaskFilter("inventory")}
+                        aria-pressed={taskFilter === "inventory"}
+                        className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${taskFilterClass("inventory")}`}
+                    >
+                        Inventory ({inventoryTaskCount})
+                    </button>
+                </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-x-auto">
-                <table className="w-full min-w-[560px] table-fixed border-collapse">
+            <div className="min-h-0 max-h-full overflow-y-auto overscroll-contain">
+                <table className="w-full table-fixed border-collapse">
                     <colgroup>
-                        <col className="w-[17%]" />
-                        <col className="w-[31%]" />
+                        <col className="w-[8%]" />
+                        <col className="w-[32%]" />
+                        <col className="w-[24%]" />
+                        <col className="w-[16%]" />
                         <col className="w-[20%]" />
-                        <col className="w-[15%]" />
-                        <col className="w-[17%]" />
                     </colgroup>
-                    <thead className="bg-[#FBFAFD]">
-                    <tr className="h-[35px] border-b border-[#EEE8F2]">
-                        {["Priority", "Task", "Related To", "Due", "Action"].map((header) => (
-                            <th
-                                key={header}
-                                className="px-3 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]"
-                            >
-                                {header}
-                            </th>
-                        ))}
+                    <thead className="sticky top-0 z-10 bg-[#FBFAFD]">
+                    <tr className="h-[34px] border-b border-[#EEE8F2]">
+                        <th className="px-2 py-2 text-center text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+
+                        </th>
+                        <th className="px-3 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                            Required Action
+                        </th>
+                        <th className="px-3 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                            Reference
+                        </th>
+                        <th className="px-3 py-2 text-center text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                            Due
+                        </th>
+                        <th className="px-3 py-2 text-center text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
+                            Action
+                        </th>
                     </tr>
                     </thead>
                     <tbody>
-                    {tasks.length === 0 ? (
+                    {visibleTasks.length === 0 ? (
                         <tr className="!border-0">
                             <td colSpan={5} className="!border-0 px-4 py-14 text-center text-[11px] text-[#8A7D92]">
-                                No pending tasks right now.
+                                {taskFilter === "all"
+                                    ? "No pending tasks right now."
+                                    : `No ${taskFilter === "booking" ? "booking" : "inventory"} tasks to show right now.`}
                             </td>
                         </tr>
                     ) : (
-                        tasks.map((task) => {
+                        visibleTasks.map((task) => {
                             const action = getCompactTaskAction(task);
                             const inventoryTask = task.relatedTo.toLowerCase() === "inventory";
+                            const bookingActionNeedsManage =
+                                action === "Confirm" ||
+                                action === "Prepare" ||
+                                action === "Release";
+                            const actionAllowed = inventoryTask
+                                ? canOpenInventory
+                                : bookingActionNeedsManage
+                                    ? canManageBookings
+                                    : canAccessBookings;
 
                             return (
                                 <tr
                                     key={task.id}
-                                    className="!border-0 transition hover:bg-[#FCFAFE]"
+                                    className="border-b border-[#F1ECF4] transition last:border-b-0 hover:bg-[#FCFAFE]"
                                 >
-                                    <td className="!border-0 px-3 py-3.5">
-                                        <StaffPriorityBadge priority={task.priority} />
+                                    <td className="!border-0 px-2 py-2.5 text-center align-middle">
+                                        {(inventoryTask && canOpenInventory) ||
+                                        (!inventoryTask &&
+                                            task.bookingId &&
+                                            canAccessBookings) ? (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    if (inventoryTask) {
+                                                        onOpenInventory();
+                                                        return;
+                                                    }
+
+                                                    if (task.bookingId) {
+                                                        onViewBooking(task.bookingId);
+                                                    }
+                                                }}
+                                                title={
+                                                    inventoryTask
+                                                        ? "View inventory item"
+                                                        : "View booking details"
+                                                }
+                                                aria-label={
+                                                    inventoryTask
+                                                        ? "View inventory item"
+                                                        : "View booking details"
+                                                }
+                                                className="inline-flex items-center justify-center text-[#6D35D4] transition hover:text-[#5D2BBE]"
+                                            >
+                                                <Eye size={14} />
+                                            </button>
+                                        ) : (
+                                            <span className="text-[9px] font-medium text-[#B0A4B8]">—</span>
+                                        )}
                                     </td>
-                                    <td className="!border-0 px-3 py-3.5">
+                                    <td className="!border-0 px-3 py-2.5 align-middle">
                                         <p
-                                            className="truncate text-[10px] font-semibold leading-4 text-[#24152F]"
-                                            title={task.task}
+                                            className="whitespace-normal break-words text-[10px] font-semibold leading-4 text-[#24152F]"
+                                            title={getTaskDisplayLabel(task)}
                                         >
-                                            {task.task}
+                                            {getTaskDisplayLabel(task)}
                                         </p>
                                     </td>
-                                    <td className="!border-0 px-3 py-3.5 text-[9px] font-medium text-[#6F617A]">
-                                        <span className="block truncate" title={task.relatedTo}>
-                                            {task.relatedTo}
+                                    <td className="!border-0 px-3 py-2.5 align-middle text-[10px] font-medium leading-4 text-[#6F617A]">
+                                        <span
+                                            className="block whitespace-normal break-words"
+                                            title={getTaskEventLabel(task)}
+                                        >
+                                            {getTaskEventLabel(task)}
                                         </span>
                                     </td>
-                                    <td className="!border-0 px-3 py-3.5 text-[9px] font-semibold text-[#5F4E75]">
+                                    <td className="!border-0 px-3 py-2.5 text-center align-middle text-[9px] font-semibold text-[#5F4E75]">
                                         {getDue(task)}
                                     </td>
-                                    <td className="!border-0 px-3 py-3.5">
-                                        <button
-                                            type="button"
-                                            onClick={inventoryTask ? onOpenInventory : onOpenBooking}
-                                            className="inline-flex min-w-[62px] justify-center rounded-lg bg-[#F1EBFF] px-2.5 py-2 text-[9px] font-semibold text-[#6D35D4] transition hover:bg-[#E8DEFA]"
-                                        >
-                                            {action}
-                                        </button>
+                                    <td className="!border-0 px-3 py-2.5 text-center align-middle">
+                                        {actionAllowed ? (
+                                            <button
+                                                type="button"
+                                                onClick={inventoryTask ? onOpenInventory : onOpenBooking}
+                                                className={`text-[12px] font-semibold transition hover:underline ${getStaffActionTextClass(action)}`}
+                                            >
+                                                {action}
+                                            </button>
+                                        ) : (
+                                            <span className="text-[9px] font-medium text-[#B0A4B8]">—</span>
+                                        )}
                                     </td>
                                 </tr>
                             );
@@ -2976,90 +4207,18 @@ function StaffPendingTasksCompactPanel({
                     </tbody>
                 </table>
             </div>
-        </section>
-    );
-}
 
-function StaffBookingScheduleCompactPanel({
-                                              bookings,
-                                              onOpenBooking,
-                                          }: {
-    bookings: Booking[];
-    onOpenBooking: () => void;
-}) {
-    const visible = bookings.slice(0, 3);
-
-    return (
-        <section className="flex h-full min-h-[292px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
-            <div className="flex min-h-[62px] items-center gap-2.5 border-b border-[#EEE8F2] px-4 py-2.5">
-                <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
-                    <CalendarDays size={17} />
-                </span>
-                <div className="min-w-0">
-                    <h2 className="truncate text-[15px] font-bold text-[#1A1220]">Today&apos;s Booking Schedule</h2>
-                    <p className="mt-0.5 truncate text-[11px] text-[#9A8DA8]">Your schedule for today.</p>
-                </div>
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-x-auto">
-                <table className="w-full table-fixed border-collapse">
-                    <colgroup>
-                        <col className="w-[16%]" />
-                        <col className="w-[39%]" />
-                        <col className="w-[22%]" />
-                        <col className="w-[23%]" />
-                    </colgroup>
-                    <thead className="bg-[#FBFAFD]">
-                    <tr className="h-[35px] border-b border-[#EEE8F2]">
-                        {['Time', 'Customer / Event', 'Status', 'Next Action'].map((header) => (
-                            <th key={header} className="px-2 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.04em] text-[#806A8C]">
-                                {header}
-                            </th>
-                        ))}
-                    </tr>
-                    </thead>
-                    <tbody>
-                    {visible.length === 0 ? (
-                        <tr>
-                            <td colSpan={4} className="px-4 py-12 text-center text-[11px] text-[#8A7D92]">
-                                No bookings scheduled for today.
-                            </td>
-                        </tr>
-                    ) : (
-                        visible.map((booking) => {
-                            const status = normalizeDashboardBookingStatus(booking.status);
-                            const action = getStaffBookingAction(booking);
-                            return (
-                                <tr key={booking.id} className="border-b border-[#F1ECF4] last:border-b-0">
-                                    <td className="px-2 py-2.5 text-[10px] font-semibold text-[#2B174C]">{formatDashboardTime(booking.date, booking.time) || '—'}</td>
-                                    <td className="px-2 py-2.5">
-                                        <p className="truncate text-[10px] font-semibold text-[#24152F]" title={booking.name}>{booking.name}</p>
-                                        <p className="truncate text-[9px] text-[#8A7D92]" title={booking.eventName || booking.packageName || ''}>{booking.eventName || booking.packageName || 'Booking'}</p>
-                                    </td>
-                                    <td className="px-2 py-2.5"><StaffStatusBadge status={status} /></td>
-                                    <td className="px-2 py-2.5">
-                                        <button
-                                            type="button"
-                                            onClick={onOpenBooking}
-                                            className="inline-flex min-w-[60px] justify-center rounded-lg bg-[#FAF8FF] px-2 py-1.5 text-[8px] font-semibold text-[#6D35D4] transition hover:bg-[#F1EBFF]"
-                                        >
-                                            {action}
-                                        </button>
-                                    </td>
-                                </tr>
-                            );
-                        })
-                    )}
-                    </tbody>
-                </table>
+            <div className="flex h-6 items-center justify-center border-t border-[#EEE8F2] bg-[#FCFAFE] text-[9px] font-medium text-[#8A7D92]">
+                {visibleTasks.length > 3 ? "Scroll to review remaining tasks" : ""}
             </div>
         </section>
     );
 }
+
 
 function StaffRecentActivityPanel({ operations }: { operations: StaffOperationRow[] }) {
     return (
-        <section className="flex h-full min-h-[292px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
+        <section className="grid h-[344px] max-h-[344px] min-h-[344px] grid-rows-[auto_minmax(0,1fr)_24px] overflow-hidden rounded-2xl bg-white shadow-sm">
             <div className="flex items-center gap-3 border-b border-[#EEE8F2] px-5 py-4">
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
                     <Clock3 size={17} />
@@ -3074,20 +4233,20 @@ function StaffRecentActivityPanel({ operations }: { operations: StaffOperationRo
                 </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-x-auto">
-                <table className="w-full min-w-[430px] table-fixed border-collapse">
+            <div className="min-h-0 overflow-y-auto overscroll-contain">
+                <table className="w-full table-fixed border-collapse">
                     <colgroup>
-                        <col className="w-[21%]" />
-                        <col className="w-[39%]" />
+                        <col className="w-[14%]" />
+                        <col className="w-[46%]" />
                         <col className="w-[18%]" />
                         <col className="w-[22%]" />
                     </colgroup>
-                    <thead className="bg-[#FBFAFD]">
-                    <tr className="h-[35px] border-b border-[#EEE8F2]">
+                    <thead className="sticky top-0 z-10 bg-[#FBFAFD]">
+                    <tr className="h-[30px] border-b border-[#EEE8F2]">
                         {["Type", "Activity", "Time", "Status"].map((header) => (
                             <th
                                 key={header}
-                                className="px-3 py-2 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]"
+                                className="px-2.5 py-1 text-left text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]"
                             >
                                 {header}
                             </th>
@@ -3104,43 +4263,58 @@ function StaffRecentActivityPanel({ operations }: { operations: StaffOperationRo
                     ) : (
                         operations.map((operation) => {
                             const isPos = operation.source === "pos";
+                            const isInventory = operation.source === "inventory";
+                            const isPackage = operation.source === "package";
+                            const activityType = isPos
+                                ? "POS"
+                                : isInventory
+                                    ? "Inventory"
+                                    : isPackage
+                                        ? "Package"
+                                        : "Booking";
+
+                            const activityTone = isPos
+                                ? "bg-[#E6F7EE] text-[#159455]"
+                                : isInventory
+                                    ? "bg-[#FFF0E5] text-[#E66B20]"
+                                    : isPackage
+                                        ? "bg-[#F1EBFF] text-[#6D35D4]"
+                                        : "bg-[#EAF1FF] text-[#2563EB]";
 
                             return (
                                 <tr
                                     key={operation.id}
                                     className="!border-0 transition hover:bg-[#FCFAFE]"
                                 >
-                                    <td className="!border-0 px-3 py-3.5">
-                                        <div className="flex items-center gap-2">
-                                            <span
-                                                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
-                                                    isPos
-                                                        ? "bg-[#E6F7EE] text-[#159455]"
-                                                        : "bg-[#F1EBFF] text-[#6D35D4]"
-                                                }`}
-                                            >
-                                                {isPos ? <ShoppingCart size={13} /> : <CalendarDays size={13} />}
-                                            </span>
-                                            <span className="truncate text-[9px] font-semibold text-[#5F4E75]">
-                                                {isPos ? "POS" : "Booking"}
-                                            </span>
-                                        </div>
+                                    <td className="!border-0 px-2.5 py-2.5 text-center align-middle">
+                                        <span
+                                            className={`mx-auto flex h-7 w-7 items-center justify-center rounded-full ${activityTone}`}
+                                            title={activityType}
+                                            aria-label={activityType}
+                                        >
+                                            {isPos ? (
+                                                <ShoppingCart size={13} />
+                                            ) : isInventory ? (
+                                                <PackageX size={13} />
+                                            ) : isPackage ? (
+                                                <PackageCheck size={13} />
+                                            ) : (
+                                                <CalendarDays size={13} />
+                                            )}
+                                        </span>
                                     </td>
-                                    <td className="!border-0 px-3 py-3.5">
-                                        <p className="truncate text-[10px] font-semibold leading-4 text-[#24152F]">
+                                    <td className="!border-0 px-2.5 py-2.5 align-middle">
+                                        <p
+                                            className="truncate text-[10px] font-semibold leading-4 text-[#24152F]"
+                                            title={operation.title}
+                                        >
                                             {operation.title}
                                         </p>
-                                        <p
-                                            className="mt-1.5 truncate text-[9px] leading-4 text-[#8A7D92]"
-                                            title={operation.detail}
-                                        >
-                                            {operation.detail}
-                                        </p>
                                     </td>
-                                    <td className="!border-0 px-3 py-3.5 text-[9px] font-semibold text-[#5F4E75]">
+                                    <td className="!border-0 px-2.5 py-2.5 align-middle text-[9px] font-semibold text-[#5F4E75]">
                                         {operation.time}
                                     </td>
-                                    <td className="!border-0 px-3 py-3.5">
+                                    <td className="!border-0 px-2.5 py-2.5 align-middle">
                                         <StaffStatusBadge status={operation.status} />
                                     </td>
                                 </tr>
@@ -3149,6 +4323,10 @@ function StaffRecentActivityPanel({ operations }: { operations: StaffOperationRo
                     )}
                     </tbody>
                 </table>
+            </div>
+
+            <div className="flex h-6 items-center justify-center border-t border-[#EEE8F2] bg-[#FCFAFE] text-[9px] font-medium text-[#8A7D92]">
+                {operations.length > 4 ? "Scroll to view remaining activities" : ""}
             </div>
         </section>
     );

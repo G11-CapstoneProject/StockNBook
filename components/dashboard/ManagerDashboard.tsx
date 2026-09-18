@@ -1063,7 +1063,7 @@ export default function ManagerDashboard() {
         return () => window.clearInterval(timer);
     }, []);
 
-    const loadManagerDashboard = useCallback(async () => {
+    const loadManagerDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
         const token = getSavedItem("token");
         const storeId =
             getUserValue(user, "store_id") ||
@@ -1083,7 +1083,7 @@ export default function ManagerDashboard() {
             return;
         }
 
-        setIsRefreshing(true);
+        if (!silent) setIsRefreshing(true);
         setBookingsError("");
 
         try {
@@ -1254,12 +1254,25 @@ export default function ManagerDashboard() {
                 setAdjustmentMovements([]);
             }
         } finally {
-            setIsRefreshing(false);
+            if (!silent) setIsRefreshing(false);
         }
     }, [user]);
 
     useEffect(() => {
         void loadManagerDashboard();
+    }, [loadManagerDashboard]);
+
+    useEffect(() => {
+        /*
+         * Near-real-time Manager dashboard refresh.
+         * Re-fetch the same authoritative branch-scoped APIs every 60 seconds
+         * without showing the manual Refresh spinner.
+         */
+        const autoRefreshTimer = window.setInterval(() => {
+            void loadManagerDashboard({ silent: true });
+        }, 60_000);
+
+        return () => window.clearInterval(autoRefreshTimer);
     }, [loadManagerDashboard]);
 
     const allInventoryAlerts = useMemo(
@@ -1280,25 +1293,14 @@ export default function ManagerDashboard() {
         (item) => item.status === "Out of Stock",
     ).length;
 
+    const expiringSoonAlertCount = allExpirationAlertItems.filter(
+        (item) => item.status === "Expiring",
+    ).length;
+
     const pendingBookingCount = bookings.filter((booking) => {
         const status = normalizeDashboardBookingStatus(booking.status);
         return status === "Pending" || status === "Awaiting Down Payment";
     }).length;
-
-    const upcomingNext7Days = useMemo(() => {
-        const start = new Date(currentDateTime);
-        start.setHours(0, 0, 0, 0);
-        const end = new Date(start);
-        end.setDate(end.getDate() + 7);
-
-        return bookings.filter((booking) => {
-            const status = normalizeDashboardBookingStatus(booking.status);
-            if (["Completed", "Cancelled"].includes(status)) return false;
-
-            const date = parseManagerDate(booking.date);
-            return Boolean(date && date >= start && date < end);
-        });
-    }, [bookings, currentDateTime]);
 
     const bookingOverview = useMemo(
         () => buildBookingOverview(bookings, currentDateTime),
@@ -1314,17 +1316,6 @@ export default function ManagerDashboard() {
         () => buildManagerAttentionItems(allInventoryAlerts, allExpirationAlertItems),
         [allInventoryAlerts, allExpirationAlertItems],
     );
-
-    const urgentAttentionCount = useMemo(() => {
-        const keys = new Set<string>();
-        allInventoryAlerts
-            .filter((item) => item.status === "Out of Stock")
-            .forEach((item) => keys.add(managerAttentionKey(item.productName, item.variantName)));
-        allExpirationAlertItems.forEach((item) =>
-            keys.add(managerAttentionKey(item.productName, item.variantName)),
-        );
-        return keys.size;
-    }, [allInventoryAlerts, allExpirationAlertItems]);
 
     const bookingTrend = useMemo(
         () => buildBookingStatusTrend(bookings, currentDateTime),
@@ -1395,15 +1386,7 @@ export default function ManagerDashboard() {
                             subtitle="Bookings waiting for confirmation"
                             icon={<CalendarClock size={24} />}
                             tone="violet"
-                            onClick={() => router.push("/bookings")}
-                        />
-                        <ManagerMetricCard
-                            title="Upcoming Bookings"
-                            value={upcomingNext7Days.length}
-                            subtitle="Bookings in the next 7 days"
-                            icon={<CalendarDays size={24} />}
-                            tone="green"
-                            onClick={() => router.push("/bookings")}
+                            onClick={() => router.push("/bookings?status=pending")}
                         />
                         <ManagerMetricCard
                             title="Low Stock"
@@ -1417,12 +1400,23 @@ export default function ManagerDashboard() {
                             }}
                         />
                         <ManagerMetricCard
-                            title="Out of Stock / Expiring Soon"
-                            value={urgentAttentionCount}
-                            subtitle="Items needing immediate attention"
+                            title="Out of Stock"
+                            value={outOfStockAlertCount}
+                            subtitle="Items with no stock remaining"
                             icon={<PackageX size={24} />}
                             tone="red"
-                            onClick={() => router.push("/inventory")}
+                            onClick={() => {
+                                setStockAlertFilter("out");
+                                setShowStockAlertsModal(true);
+                            }}
+                        />
+                        <ManagerMetricCard
+                            title="Expiring Soon"
+                            value={expiringSoonAlertCount}
+                            subtitle={`Items expiring within ${EXPIRING_SOON_DAYS} days`}
+                            icon={<CalendarDays size={24} />}
+                            tone="blue"
+                            onClick={() => router.push("/inventory?filter=expiring-soon")}
                         />
                     </div>
 
@@ -1524,7 +1518,7 @@ type ManagerAttentionItem = {
     key: string;
     productName: string;
     variantName: string;
-    status: "Out of Stock" | "Low Stock" | "Expiring Soon" | "Expired";
+    status: "Expired" | "Out of Stock" | "Very Low Stock" | "Expiring Soon" | "Low Stock";
     detail: string;
     priority: number;
 };
@@ -1655,15 +1649,35 @@ function buildManagerAttentionItems(
     stockAlerts.forEach((item) => {
         const key = managerAttentionKey(item.productName, item.variantName);
         const isOut = item.status === "Out of Stock";
+        const veryLowThreshold = Math.max(1, Math.ceil(item.alertLevel * 0.5));
+        const isVeryLow =
+            !isOut &&
+            item.currentStock > 0 &&
+            item.currentStock <= veryLowThreshold;
+
+        const status: ManagerAttentionItem["status"] =
+            isOut
+                ? "Out of Stock"
+                : isVeryLow
+                    ? "Very Low Stock"
+                    : "Low Stock";
+
+        const priority =
+            status === "Out of Stock"
+                ? 4
+                : status === "Very Low Stock"
+                    ? 3
+                    : 1;
+
         map.set(key, {
             key,
             productName: item.productName,
             variantName: item.variantName || "—",
-            status: item.status,
+            status,
             detail: isOut
                 ? "0 remaining"
                 : `${item.currentStock} remaining · reorder at ${item.alertLevel}`,
-            priority: isOut ? 4 : 2,
+            priority,
         });
     });
 
@@ -1675,10 +1689,8 @@ function buildManagerAttentionItems(
             productName: item.productName,
             variantName: item.variantName || "—",
             status: expired ? "Expired" : "Expiring Soon",
-            detail: expired
-                ? formatExpirationDistance(item.daysRemaining)
-                : formatExpirationDistance(item.daysRemaining),
-            priority: expired ? 3 : 1,
+            detail: formatExpirationDistance(item.daysRemaining),
+            priority: expired ? 5 : 2,
         };
 
         const existing = map.get(key);
@@ -1687,7 +1699,12 @@ function buildManagerAttentionItems(
         }
     });
 
-    return Array.from(map.values()).sort((a, b) => b.priority - a.priority);
+    return Array.from(map.values()).sort((a, b) => {
+        if (b.priority !== a.priority) return b.priority - a.priority;
+
+        // Keep ties deterministic and useful: lower remaining stock first.
+        return a.productName.localeCompare(b.productName);
+    });
 }
 
 function buildBookingOverview(bookings: Booking[], reference: Date) {
@@ -2099,18 +2116,27 @@ function ManagerDonutPanel({
 }
 
 function attentionStatusClasses(status: ManagerAttentionItem["status"]) {
-    if (status === "Out of Stock" || status === "Expired") {
-        return "bg-[#FDECEC] text-[#D52B2B]";
+    if (status === "Expired") {
+        return "bg-[#FDECEC] text-[#B42318]";
     }
-    if (status === "Low Stock") return "bg-[#FFF3D8] text-[#B66A00]";
-    return "bg-[#F1EBFF] text-[#6D35D4]";
+    if (status === "Out of Stock") {
+        return "bg-[#FFF0F0] text-[#D52B2B]";
+    }
+    if (status === "Very Low Stock") {
+        return "bg-[#FFF0E5] text-[#C45100]";
+    }
+    if (status === "Expiring Soon") {
+        return "bg-[#F1EBFF] text-[#6D35D4]";
+    }
+    return "bg-[#FFF3D8] text-[#B66A00]";
 }
 
 function attentionStatusLabel(status: ManagerAttentionItem["status"]) {
-    if (status === "Out of Stock") return "OUT OF STOCK";
-    if (status === "Low Stock") return "LOW STOCK";
     if (status === "Expired") return "EXPIRED";
-    return "EXPIRING SOON";
+    if (status === "Out of Stock") return "OUT OF STOCK";
+    if (status === "Very Low Stock") return "VERY LOW";
+    if (status === "Expiring Soon") return "EXPIRING SOON";
+    return "LOW STOCK";
 }
 
 function ItemsRequiringAttentionPanel({
@@ -2134,14 +2160,14 @@ function ItemsRequiringAttentionPanel({
                             Items Requiring Attention
                         </h3>
                         <p className="text-[11px] leading-4 text-[#9A8DA8]">
-                            Products that need immediate action
+                            Prioritized by urgency: expired items appear first
                         </p>
                     </div>
                 </div>
                 <button
                     type="button"
                     onClick={onViewAll}
-                    className="shrink-0 text-[11px] font-semibold text-[#6D35D4] hover:underline"
+                    className="shrink-0 rounded-lg border border-[#E6DDF0] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#5F4E75] shadow-sm"
                 >
                     View All
                 </button>
@@ -2209,6 +2235,57 @@ function formatManagerStockoutDays(value: number) {
     return `${Math.ceil(value)} ${Math.ceil(value) === 1 ? "day" : "days"}`;
 }
 
+function ManagerForecastInfoTooltip({
+                                        label,
+                                        formula,
+                                        note,
+                                        align = "center",
+                                    }: {
+    label: string;
+    formula: string;
+    note: string;
+    align?: "left" | "center" | "right";
+}) {
+    const tooltipPositionClass =
+        align === "left"
+            ? "left-0"
+            : align === "right"
+                ? "right-0"
+                : "left-1/2 -translate-x-1/2";
+
+    return (
+        <span className="group relative inline-flex shrink-0 align-middle">
+            <button
+                type="button"
+                aria-label={`${label} explanation`}
+                className="inline-flex h-[15px] w-[15px] items-center justify-center rounded-full border border-[#D9CDE7] bg-[#FAF7FF] text-[#6D35D4] transition hover:border-[#BCA7DB] hover:bg-[#F1EBFF] focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]"
+            >
+                <Info size={9} strokeWidth={2.2} />
+            </button>
+
+            {/*
+             * The arrow is anchored to the INFO BUTTON wrapper itself instead
+             * of to the tooltip box. This guarantees that its tip stays exactly
+             * centered under the icon even when the tooltip box is left- or
+             * right-aligned to avoid overflowing the panel.
+             */}
+            <span
+                aria-hidden="true"
+                className="pointer-events-none absolute left-1/2 top-full z-[51] hidden h-0 w-0 -translate-x-1/2 border-x-[5px] border-b-[5px] border-x-transparent border-b-[#2B174C] group-hover:block group-focus-within:block"
+            />
+
+            <span
+                role="tooltip"
+                className={`pointer-events-none absolute top-full z-50 mt-[5px] hidden w-[245px] max-w-[calc(100vw-2rem)] rounded-lg border border-[#E5DAEE] bg-[#2B174C] px-3 py-2 text-left text-[10px] font-medium leading-4 text-white shadow-lg group-hover:block group-focus-within:block ${tooltipPositionClass}`}
+            >
+                <span className="block font-bold">{label}</span>
+                <span className="mt-0.5 block">{formula}</span>
+                <span className="mt-1 block text-[#E8DFF2]">{note}</span>
+            </span>
+        </span>
+    );
+}
+
 function ManagerInventoryForecastPanel({
                                            rows,
                                            onViewInventory,
@@ -2271,24 +2348,48 @@ function ManagerInventoryForecastPanel({
                                             {row.risk.toUpperCase()} RISK
                                         </span>
                                     </div>
-                                    <p className="mt-1 text-[9px] text-[#9A8DA8]">
-                                        {row.currentStock.toLocaleString("en-PH")} in stock · {row.averageDailyUsage.toFixed(1)} avg. units/day
-                                    </p>
+                                    <div className="mt-1 flex items-center gap-1 text-[9px] text-[#9A8DA8]">
+                                        <span>
+                                            {row.currentStock.toLocaleString("en-PH")} in stock · {row.averageDailyUsage.toFixed(1)} avg. units/day
+                                        </span>
+                                        <ManagerForecastInfoTooltip
+                                            label="Average Daily Usage"
+                                            formula="Units Released ÷ 30 days"
+                                            note="Average units released per day from recent POS transactions."
+                                            align="left"
+                                        />
+                                    </div>
                                 </div>
 
                                 <div className="text-right">
-                                    <p className="text-[8px] font-bold uppercase tracking-[0.04em] text-[#9A8DA8]">
-                                        Stockout
-                                    </p>
+                                    <div className="flex items-center justify-end gap-1">
+                                        <p className="text-[8px] font-bold uppercase tracking-[0.04em] text-[#9A8DA8]">
+                                            Stockout
+                                        </p>
+                                        <ManagerForecastInfoTooltip
+                                            label="Estimated Stockout"
+                                            formula="Current Stock ÷ Avg. Daily Usage"
+                                            note="Estimated days until stock reaches zero if recent usage continues."
+                                            align="right"
+                                        />
+                                    </div>
                                     <p className="mt-1 text-[11px] font-bold text-[#2B174C]">
                                         {formatManagerStockoutDays(row.estimatedStockoutDays)}
                                     </p>
                                 </div>
 
                                 <div className="text-right">
-                                    <p className="text-[8px] font-bold uppercase tracking-[0.04em] text-[#9A8DA8]">
-                                        Restock
-                                    </p>
+                                    <div className="flex items-center justify-end gap-1">
+                                        <p className="text-[8px] font-bold uppercase tracking-[0.04em] text-[#9A8DA8]">
+                                            Restock
+                                        </p>
+                                        <ManagerForecastInfoTooltip
+                                            label="Suggested Restock"
+                                            formula="(Avg. Daily Usage × 30) − Current Stock"
+                                            note="Suggested units needed to restore approximately 30 days of stock coverage."
+                                            align="right"
+                                        />
+                                    </div>
                                     <p className="mt-1 text-[11px] font-bold text-[#159455]">
                                         +{row.suggestedRestock.toLocaleString("en-PH")} units
                                     </p>
@@ -2310,7 +2411,7 @@ function ManagerInventoryForecastPanel({
 
             <div className="mt-2 flex items-center justify-between border-t border-[#F0EAF4] pt-2">
                 <p className="text-[9px] text-[#9A8DA8]">
-                    Based on the last 30 days of released POS quantities.
+                    Based on the last 30 days of released POS quantities; target coverage is 30 days.
                 </p>
                 <button
                     type="button"

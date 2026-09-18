@@ -106,16 +106,51 @@ async function deleteChildByParent(db, relation) {
 
     if (!childColumns.has(childColumn) || !parentColumns.has(parentColumn) || !parentColumns.has("store_id")) return;
 
-    const [result] = await db.query(
-        `DELETE child
-         FROM ${quoteIdentifier(childTable)} AS child
-        INNER JOIN ${quoteIdentifier(parentTable)} AS parent
-        ON child.${quoteIdentifier(childColumn)} = parent.${quoteIdentifier(parentColumn)}
-        INNER JOIN tmp_perf_destroy_store_ids AS seeded
-        ON parent.store_id = seeded.id`
+    // Delete one seeded store at a time instead of one very large multi-store
+    // DELETE. The demo dataset can be large enough that a single statement
+    // holds row locks for a long time and collides with the running app.
+    const [seededStores] = await db.query(
+        `SELECT id FROM tmp_perf_destroy_store_ids ORDER BY id`
     );
 
-    console.log(`Deleted ${Number(result.affectedRows || 0).toLocaleString()} rows from ${childTable}.`);
+    let totalDeleted = 0;
+
+    for (const seeded of seededStores) {
+        const storeId = Number(seeded.id);
+        let attempt = 0;
+
+        while (true) {
+            try {
+                const [result] = await db.query(
+                    `DELETE child
+                     FROM ${quoteIdentifier(childTable)} AS child
+                    INNER JOIN ${quoteIdentifier(parentTable)} AS parent
+                    ON child.${quoteIdentifier(childColumn)} = parent.${quoteIdentifier(parentColumn)}
+                    WHERE parent.store_id = ?`,
+                    [storeId]
+                );
+
+                totalDeleted += Number(result.affectedRows || 0);
+                break;
+            } catch (error) {
+                const retryable =
+                    Number(error?.errno) === 1205 ||
+                    String(error?.code || "").toUpperCase() === "ER_LOCK_DEADLOCK";
+
+                if (!retryable || attempt >= 4) throw error;
+
+                attempt += 1;
+                const waitMs = attempt * 1000;
+                console.warn(
+                    `Lock encountered while deleting ${childTable} for store ${storeId}; ` +
+                    `retrying in ${waitMs}ms (attempt ${attempt}/4)...`
+                );
+                await new Promise((resolve) => setTimeout(resolve, waitMs));
+            }
+        }
+    }
+
+    console.log(`Deleted ${totalDeleted.toLocaleString()} rows from ${childTable}.`);
 }
 
 async function deleteRowsScopedByColumn(db, tableName, columnName, tempTableName) {
@@ -159,6 +194,11 @@ async function deleteStoreScopedTables(db) {
 
 async function main() {
     const db = await mysql.createConnection(dbConfig());
+
+    // Do not let a busy application connection block the destroy script for a
+    // long time. deleteChildByParent() retries transient lock conflicts.
+    await db.query("SET SESSION innodb_lock_wait_timeout = 5");
+
     console.log("Connected to database.");
 
     let foreignKeyChecksDisabled = false;

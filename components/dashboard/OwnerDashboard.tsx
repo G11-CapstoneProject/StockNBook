@@ -13,7 +13,7 @@
  * - 4 KPI cards: Total Sales, POS Gross Profit, POS Profit Margin, and
  *   Forecasted Sales (next month).
  * - The lower summary area intentionally focuses on Top Products / Packages
- *   and Demand Forecast. Revenue by Channel was removed to keep the layout
+ *   and Sales Forecast. Revenue by Channel was removed to keep the layout
  *   compact, focused, and visually balanced.
  * - POS profit is read from the POS backend, which calculates totalCost and
  *   profit from order_items joined to products/product_variants. No artificial
@@ -25,11 +25,11 @@
  *   rename these to drop "POS" unless a real booking-cost field is added
  *   upstream (see aggregateBranchPerformance/buildOwnerAnalytics — booking
  *   profit is intentionally never computed there).
- * - The "Forecasted Sales" KPI badge and the "Demand Forecast" panel below
+ * - The "Forecasted Sales" KPI badge and the "Sales Forecast" panel below
  *   both read from the SAME predictedNextMonthSales/forecastGrowthPct values,
  *   so they can never drift out of sync with each other.
- * - "Demand Forecast" is a lightweight linear-trend projection over the
- *   trailing months of real sales data (not a hosted ML model). It's honest
+ * - "Sales Forecast" is a lightweight linear-trend projection over the
+ *   last completed months of real sales data (not a hosted ML model). It's honest
  *   about being a trend projection in the UI copy ("Trend-based projection")
  *   and keeps the Forecast Basis / Method disclosure — that transparency is
  *   what the adviser's "should have science" requirement is asking for.
@@ -636,7 +636,7 @@ function pctDelta(current: number, previous: number): number | null {
     return ((current - previous) / Math.abs(previous)) * 100;
 }
 
-function linearForecastNext(values: number[]) {
+function linearForecastNext(values: number[], stepsAhead = 1) {
     const n = values.length;
     if (n === 0) return 0;
     if (n === 1) return values[0];
@@ -653,7 +653,8 @@ function linearForecastNext(values: number[]) {
 
     const slope = denominator !== 0 ? numerator / denominator : 0;
     const intercept = meanY - slope * meanX;
-    return Math.max(0, slope * n + intercept);
+    const targetIndex = n - 1 + Math.max(1, stepsAhead);
+    return Math.max(0, slope * targetIndex + intercept);
 }
 
 function niceStep(value: number) {
@@ -696,7 +697,7 @@ export default function OwnerDashboard() {
         return () => window.clearInterval(timer);
     }, []);
 
-    async function loadOwnerDashboard() {
+    async function loadOwnerDashboard({ silent = false }: { silent?: boolean } = {}) {
         const token = getSavedItem("token");
         const storeId =
             getUserValue(user, "store_id") ||
@@ -709,7 +710,7 @@ export default function OwnerDashboard() {
             return;
         }
 
-        setIsRefreshing(true);
+        if (!silent) setIsRefreshing(true);
         setLoadError("");
 
         try {
@@ -836,15 +837,33 @@ export default function OwnerDashboard() {
             setOrders(nextOrders);
             setLoadError(errors.join(" "));
         } finally {
-            setIsRefreshing(false);
+            if (!silent) setIsRefreshing(false);
         }
     }
 
     useEffect(() => {
-        // Loads once on mount; the Refresh button re-triggers it manually.
+        // Initial load. The Refresh button still works exactly as before.
         void loadOwnerDashboard();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    useEffect(() => {
+        /*
+         * Near-real-time dashboard refresh:
+         * re-check the same authoritative APIs every 60 seconds while this page
+         * remains open. This keeps KPI values, their data-aware tooltips, charts,
+         * and the forecast current without adding WebSockets or changing the
+         * existing backend/API contract.
+         */
+        const autoRefreshTimer = window.setInterval(() => {
+            void loadOwnerDashboard({ silent: true });
+        }, 60_000);
+
+        return () => window.clearInterval(autoRefreshTimer);
+        // Keep the timer closure aligned with the latest successfully displayed
+        // snapshot so a partial API failure can still preserve existing data.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [branches, bookings, orders, user]);
 
     const referenceDateKey = currentDateTime.toDateString();
 
@@ -882,25 +901,65 @@ export default function OwnerDashboard() {
         profit: point.profit,
     }));
 
-    const recentSalesForForecast = monthly.slice(-6).map((point) => point.sales);
-    const predictedNextMonthSales = linearForecastNext(recentSalesForForecast);
-    const forecastGrowthPct = pctDelta(predictedNextMonthSales, current.sales);
+    /*
+     * Forecast stability:
+     * Use only COMPLETED months so an in-progress month (for example, September 9)
+     * does not look artificially weak simply because the month is not finished yet.
+     * The 6-month history window is rolling, so when the calendar month changes,
+     * the forecast basis and displayed month range move forward automatically.
+     *
+     * Because the newest completed month is one month behind the current month,
+     * forecasting the NEXT calendar month is two monthly steps ahead of that
+     * completed-history endpoint.
+     */
+    const completedMonthly = monthly.slice(0, -1);
+    const recentCompletedMonthsForForecast = completedMonthly.slice(-6);
+    const recentSalesForForecast = recentCompletedMonthsForForecast.map((point) => point.sales);
+
+    const forecastHistoryStartLabel =
+        recentCompletedMonthsForForecast[0]?.label || "";
+    const forecastHistoryEndLabel =
+        recentCompletedMonthsForForecast[recentCompletedMonthsForForecast.length - 1]?.label || "";
+    const forecastHistoryRangeLabel =
+        forecastHistoryStartLabel && forecastHistoryEndLabel
+            ? `${forecastHistoryStartLabel} – ${forecastHistoryEndLabel}`
+            : "Completed-month history";
+
+    const predictedNextMonthSales = linearForecastNext(recentSalesForForecast, 2);
+
+    const forecastBaseline =
+        recentCompletedMonthsForForecast[recentCompletedMonthsForForecast.length - 1] ||
+        previous;
+    const forecastGrowthPct = pctDelta(predictedNextMonthSales, forecastBaseline.sales);
+
     const nextMonthDate = new Date(currentDateTime.getFullYear(), currentDateTime.getMonth() + 1, 1);
     const nextMonthFullLabel = nextMonthDate.toLocaleDateString("en-US", {
+        month: "long",
+        year: "numeric",
+    });
+    const forecastBaselineDate = new Date(
+        currentDateTime.getFullYear(),
+        currentDateTime.getMonth() - 1,
+        1,
+    );
+    const forecastBaselineLabel = forecastBaselineDate.toLocaleDateString("en-US", {
+        month: "long",
+        year: "numeric",
+    });
+
+    const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", {
         month: "long",
         year: "numeric",
     });
 
     const forecastInsight =
         forecastGrowthPct === null
-            ? "Add a few more months of sales history to unlock next-month projections."
-            : `Based on the trailing ${recentSalesForForecast.length}-month trend, sales are projected to ${
-                forecastGrowthPct >= 0 ? "grow" : "decline"
-            } by ${Math.abs(forecastGrowthPct).toFixed(1)}% next month, reaching approximately ${peso(
+            ? `Forecast basis: ${forecastHistoryRangeLabel}. Partial ${currentMonthLabel} is excluded because it is still in progress.`
+            : `Using completed months ${forecastHistoryRangeLabel} and excluding partial ${currentMonthLabel}, ${nextMonthFullLabel} sales are projected at ${peso(
                 Math.round(predictedNextMonthSales),
-            )}.`;
-
-    const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+            )}, ${Math.abs(forecastGrowthPct).toFixed(1)}% ${
+                forecastGrowthPct >= 0 ? "higher" : "lower"
+            } than ${forecastBaselineLabel}.`;
 
     return (
         <>
@@ -949,6 +1008,11 @@ export default function OwnerDashboard() {
                             title="Total Sales"
                             value={peso(current.sales)}
                             delta={deltaSales}
+                            info={`Current ${currentMonthLabel} total: ${peso(current.sales)} = ${peso(current.posSales)} POS sales + ${peso(current.bookingSales)} confirmed/completed booking revenue. ${
+                                deltaSales === null
+                                    ? "No prior-month comparison is available yet."
+                                    : `${Math.abs(deltaSales).toFixed(1)}% ${deltaSales >= 0 ? "higher" : "lower"} than last month.`
+                            } Auto-updates every 60 seconds while this dashboard is open.`}
                             icon={<BarChart3 size={25} />}
                             iconBg="bg-[#F1EBFF]"
                             iconColor="text-[#6D35D4]"
@@ -957,7 +1021,11 @@ export default function OwnerDashboard() {
                             title="POS Gross Profit"
                             value={peso(current.profit)}
                             delta={deltaProfit}
-                            info="Calculated from POS sales minus recorded product costs. Booking profit is excluded."
+                            info={`Current ${currentMonthLabel} POS Gross Profit: ${peso(current.profit)} from ${peso(current.posSales)} in POS sales. It uses recorded POS product costs only. Booking profit is excluded because booking cost data is not currently recorded. ${
+                                deltaProfit === null
+                                    ? "No prior-month comparison is available yet."
+                                    : `${Math.abs(deltaProfit).toFixed(1)}% ${deltaProfit >= 0 ? "higher" : "lower"} than last month.`
+                            }`}
                             icon={<Wallet size={25} />}
                             iconBg="bg-[#E6F7EE]"
                             iconColor="text-[#159455]"
@@ -967,7 +1035,11 @@ export default function OwnerDashboard() {
                             value={`${marginNow.toFixed(1)}%`}
                             delta={deltaMarginPP}
                             deltaSuffix=" pp"
-                            info="POS Gross Profit divided by POS Sales, multiplied by 100. Booking profit is excluded."
+                            info={`Current ${currentMonthLabel} margin: ${marginNow.toFixed(1)}% = ${peso(current.profit)} POS Gross Profit ÷ ${peso(current.posSales)} POS Sales × 100. This measures POS profitability only; bookings are excluded. ${
+                                deltaMarginPP === null
+                                    ? "No prior-month comparison is available yet."
+                                    : `${Math.abs(deltaMarginPP).toFixed(1)} percentage points ${deltaMarginPP >= 0 ? "higher" : "lower"} than last month.`
+                            }`}
                             icon={<Percent size={25} />}
                             iconBg="bg-[#FFF0E5]"
                             iconColor="text-[#E66B20]"
@@ -976,7 +1048,13 @@ export default function OwnerDashboard() {
                             title="Forecasted Sales"
                             value={peso(Math.round(predictedNextMonthSales))}
                             delta={forecastGrowthPct}
-                            comparisonText="next month"
+                            comparisonText="vs last completed month"
+                            info={`Projected ${nextMonthFullLabel} sales: ${peso(Math.round(predictedNextMonthSales))}. ${
+                                forecastGrowthPct === null
+                                    ? "No percentage comparison is available yet."
+                                    : `${Math.abs(forecastGrowthPct).toFixed(1)}% ${forecastGrowthPct >= 0 ? "above" : "below"} ${forecastBaselineLabel} sales (${peso(forecastBaseline.sales)}).`
+                            } Forecast basis: ${forecastHistoryRangeLabel}. Partial ${currentMonthLabel} is excluded to avoid incomplete-month bias. Linear-trend projection only; data updates every 60 seconds and the month range rolls forward automatically.`}
+                            infoAlign="right"
                             icon={<BarChart3 size={25} />}
                             iconBg="bg-[#E6F7EE]"
                             iconColor="text-[#159455]"
@@ -1045,8 +1123,12 @@ export default function OwnerDashboard() {
                         <DemandForecastPanel
                             nextMonthLabel={nextMonthFullLabel}
                             currentMonthLabel={currentMonthLabel}
+                            comparisonMonthLabel={forecastBaselineLabel}
                             predicted={predictedNextMonthSales}
+                            comparisonSales={forecastBaseline.sales}
                             growthPct={forecastGrowthPct}
+                            historyMonths={recentSalesForForecast.length}
+                            historyRangeLabel={forecastHistoryRangeLabel}
                             insight={forecastInsight}
                         />
                     </div>
@@ -1068,6 +1150,7 @@ function KpiCard({
                      deltaSuffix = "%",
                      comparisonText = "vs last month",
                      info,
+                     infoAlign = "center",
                      icon,
                      iconBg,
                      iconColor,
@@ -1078,11 +1161,20 @@ function KpiCard({
     deltaSuffix?: string;
     comparisonText?: string;
     info?: string;
+    infoAlign?: "center" | "right";
     icon: React.ReactNode;
     iconBg: string;
     iconColor: string;
 }) {
     const isUp = delta !== null && delta >= 0;
+    const tooltipPositionClass =
+        infoAlign === "right"
+            ? "right-0"
+            : "left-1/2 -translate-x-1/2";
+    const tooltipArrowClass =
+        infoAlign === "right"
+            ? "right-[5px]"
+            : "left-1/2 -translate-x-1/2";
 
     return (
         <div className="flex min-h-[116px] items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
@@ -1110,10 +1202,12 @@ function KpiCard({
 
                             <span
                                 role="tooltip"
-                                className="pointer-events-none absolute left-1/2 top-full z-40 mt-2 hidden w-[245px] -translate-x-1/2 rounded-lg border border-[#E5DAEE] bg-[#2B174C] px-3 py-2 text-[11px] font-medium leading-4 text-white shadow-lg group-hover:block group-focus-within:block"
+                                className={`pointer-events-none absolute top-full z-40 mt-2 hidden w-[280px] max-w-[calc(100vw-2rem)] rounded-lg border border-[#E5DAEE] bg-[#2B174C] px-3 py-2 text-[11px] font-medium leading-4 text-white shadow-lg group-hover:block group-focus-within:block ${tooltipPositionClass}`}
                             >
                                 {info}
-                                <span className="absolute bottom-full left-1/2 h-0 w-0 -translate-x-1/2 border-x-[5px] border-b-[5px] border-x-transparent border-b-[#2B174C]" />
+                                <span
+                                    className={`absolute bottom-full h-0 w-0 border-x-[5px] border-b-[5px] border-x-transparent border-b-[#2B174C] ${tooltipArrowClass}`}
+                                />
                             </span>
                         </span>
                     )}
@@ -1188,6 +1282,10 @@ function SalesTrendChart({ data }: { data: { label: string; sales: number; profi
                     <stop offset="0%" stopColor="#6D35D4" stopOpacity="0.16" />
                     <stop offset="100%" stopColor="#6D35D4" stopOpacity="0" />
                 </linearGradient>
+                <linearGradient id="ownerProfitFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#159455" stopOpacity="0.12" />
+                    <stop offset="100%" stopColor="#159455" stopOpacity="0" />
+                </linearGradient>
             </defs>
 
             {ticks.map((tick) => (
@@ -1207,6 +1305,7 @@ function SalesTrendChart({ data }: { data: { label: string; sales: number; profi
             ))}
 
             <path d={areaPath(salesPoints)} fill="url(#ownerSalesFill)" stroke="none" />
+            <path d={areaPath(profitPoints)} fill="url(#ownerProfitFill)" stroke="none" />
             <path
                 d={linePath(salesPoints)}
                 fill="none"
@@ -1260,8 +1359,18 @@ function BranchPerformancePanel({
 }) {
     const visible = rows.slice(0, 6);
     const width = 440;
-    const height = 250;
-    const margin = { top: 30, right: 16, bottom: 52, left: 54 };
+    const height = 260;
+    const margin = { top: 30, right: 20, bottom: 78, left: 54 };
+
+    const chartBranchLabel = (name: string) => {
+        const compact = String(name || "")
+            .trim()
+            .replace(/\s+Retail\s+Branch$/i, "")
+            .replace(/\s+Retail$/i, "")
+            .trim();
+
+        return compact || name;
+    };
     const innerW = width - margin.left - margin.right;
     const innerH = height - margin.top - margin.bottom;
     const maxRaw = Math.max(1, ...visible.map((row) => row.amount));
@@ -1345,7 +1454,6 @@ function BranchPerformancePanel({
                             const x = margin.left + index * slotWidth + (slotWidth - barWidth) / 2;
                             const y = yFor(row.amount);
                             const barHeight = margin.top + innerH - y;
-                            const label = row.name.length > 16 ? `${row.name.slice(0, 14)}…` : row.name;
 
                             return (
                                 <g key={row.key}>
@@ -1371,12 +1479,17 @@ function BranchPerformancePanel({
                                     </text>
                                     <text
                                         x={x + barWidth / 2}
-                                        y={height - 19}
+                                        y={height - 48}
                                         textAnchor="middle"
-                                        fontSize="9"
-                                        fill="#7A6A84"
+                                        fontSize="10"
+                                        fontWeight="700"
+                                        fill="#5F4E75"
+                                        stroke="#FFFFFF"
+                                        strokeWidth="1.6"
+                                        paintOrder="stroke"
+                                        transform={`rotate(-30 ${x + barWidth / 2} ${height - 48})`}
                                     >
-                                        {label}
+                                        {chartBranchLabel(row.name)}
                                     </text>
                                 </g>
                             );
@@ -1452,7 +1565,7 @@ function TopProductsPanel({
                 <select
                     value={period}
                     onChange={(event) => onPeriodChange(event.target.value as PeriodOption)}
-                    className="h-8 shrink-0 rounded-lg bg-[#F8F5FC] px-2.5 text-[10px] font-semibold text-[#5F4E75] outline-none"
+                    className="h-8 shrink-0 rounded-lg border border-[#E6DDF0] bg-white px-2.5 text-xs font-semibold text-[#5F4E75] shadow-sm focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]"
                 >
                     <option value="month">This Month</option>
                     <option value="quarter">This Quarter</option>
@@ -1552,56 +1665,100 @@ function TopProductsPanel({
 function DemandForecastPanel({
                                  nextMonthLabel,
                                  currentMonthLabel,
+                                 comparisonMonthLabel,
                                  predicted,
+                                 comparisonSales,
                                  growthPct,
+                                 historyMonths,
+                                 historyRangeLabel,
                                  insight,
                              }: {
     nextMonthLabel: string;
     currentMonthLabel: string;
+    comparisonMonthLabel: string;
     predicted: number;
+    comparisonSales: number;
     growthPct: number | null;
+    historyMonths: number;
+    historyRangeLabel: string;
     insight: string;
 }) {
-    const isUp = growthPct !== null && growthPct >= 0;
+    const hasComparison = growthPct !== null;
+    const isUp = hasComparison && growthPct >= 0;
+
+    const forecastTone = !hasComparison
+        ? {
+            container: "border border-[#DDE5F2] bg-[#F5F8FC]",
+            icon: "bg-white text-[#64748B]",
+            amount: "text-[#334155]",
+            direction: "text-[#64748B]",
+            label: "Trend projection",
+        }
+        : isUp
+            ? {
+                container: "border border-[#CFEBDD] bg-[#EAF8F1]",
+                icon: "bg-[#D8F2E5] text-[#159455]",
+                amount: "text-[#0E7B47]",
+                direction: "text-[#159455]",
+                label: "Higher sales projected",
+            }
+            : {
+                container: "border border-[#F4D2D2] bg-[#FFF2F2]",
+                icon: "bg-[#FDE2E2] text-[#D92D20]",
+                amount: "text-[#B42318]",
+                direction: "text-[#D92D20]",
+                label: "Lower sales projected",
+            };
 
     return (
         <div className="flex h-full min-w-0 flex-col rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
-            <div className="flex items-center gap-2.5">
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#EAF1FF] text-[#2563EB]">
-                    <Sparkles size={17} />
-                </span>
-                <div className="min-w-0">
-                    <h3 className="text-[14px] font-bold leading-5 text-[#1A1220]">Demand Forecast</h3>
-                    <p className="text-[10px] leading-4 text-[#9A8DA8]">Trend-based projection for next month</p>
+            <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#EAF1FF] text-[#2563EB]">
+                        <Sparkles size={17} />
+                    </span>
+                    <div className="min-w-0">
+                        <h3 className="text-[14px] font-bold leading-5 text-[#1A1220]">Sales Forecast</h3>
+                        <p className="text-[10px] leading-4 text-[#9A8DA8]">
+                            Next-month sales projection for {nextMonthLabel}
+                        </p>
+                    </div>
                 </div>
+
+                <span className={`shrink-0 rounded-full px-2 py-1 text-[8.5px] font-bold ${forecastTone.direction} bg-white`}>
+                    {forecastTone.label}
+                </span>
             </div>
 
             <div className="mt-3 flex flex-1 flex-col justify-center gap-3">
-                <div className="rounded-lg bg-[#EAF8F1] px-3 py-2.5">
+                <div className={`rounded-xl px-3 py-2.5 ${forecastTone.container}`}>
                     <div className="flex items-center gap-2.5">
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#D8F2E5] text-[#159455]">
+                        <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${forecastTone.icon}`}>
                             <BarChart3 size={16} />
                         </span>
+
                         <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
                                 <p className="text-[9px] font-semibold text-[#5F4E75]">
-                                    Predicted Sales ({nextMonthLabel})
+                                    Forecasted Sales ({nextMonthLabel})
                                 </p>
+
                                 {growthPct !== null && (
-                                    <span
-                                        className={`inline-flex shrink-0 items-center gap-1 text-[9.5px] font-bold ${
-                                            isUp ? "text-[#159455]" : "text-[#D92D20]"
-                                        }`}
-                                    >
+                                    <span className={`inline-flex shrink-0 items-center gap-1 text-[9.5px] font-bold ${forecastTone.direction}`}>
                                         {isUp ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
-                                        {isUp ? "+" : ""}{growthPct.toFixed(1)}%
+                                        {isUp ? "+" : ""}
+                                        {growthPct.toFixed(1)}%
                                     </span>
                                 )}
                             </div>
-                            <p className="mt-0.5 text-[20px] font-bold leading-none tracking-[-0.03em] text-[#0E7B47]">
+
+                            <p className={`mt-0.5 text-[20px] font-bold leading-none tracking-[-0.03em] ${forecastTone.amount}`}>
                                 {peso(Math.round(predicted))}
                             </p>
-                            <p className="mt-0.5 text-[8px] font-medium text-[#7F7289]">vs. {currentMonthLabel}</p>
+
+                            <p className="mt-1 text-[8px] font-medium text-[#7F7289]">
+                                Compared with last completed month ({comparisonMonthLabel}): {peso(comparisonSales)}
+                            </p>
                         </div>
                     </div>
                 </div>
@@ -1611,13 +1768,15 @@ function DemandForecastPanel({
                         <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-[#2563EB] shadow-sm">
                             <Lightbulb size={14} />
                         </span>
+
                         <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                                 <p className="text-[9px] font-bold text-[#2563EB]">Key Insight</p>
                                 <span className="text-[8px] font-medium text-[#7A86A0]">
-                                    Trailing 6 months • Linear trend
+                                    {historyRangeLabel} • {historyMonths} completed months • Linear trend • Auto-refresh 60s
                                 </span>
                             </div>
+
                             <p
                                 className="mt-1 overflow-hidden text-[9px] font-medium leading-3.5 text-[#50617C]"
                                 style={{

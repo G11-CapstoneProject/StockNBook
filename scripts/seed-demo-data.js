@@ -1,11 +1,21 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 /**
- * StockNBook demo seeder (realistic high-volume version).
+ * StockNBook demo seeder (realistic plan-based testing version).
  *
  * This variant includes:
- *  - deterministic 3x-per-plan store assignment (9 Starter, 9 Growth, 9 Scale)
- *  - defensive insertRows that sanitizes NaN/Infinity and normalizes booleans/objects
- *  - defensive math when building order line totals and order totals to avoid NaN being injected
+ *  - deterministic store assignment kept at 9 Starter, 9 Growth, 9 Scale (27 total)
+ *  - Starter: 50 inventory items, 1 branch, 1 staff, 20 straight booking days
+ *  - Growth: 800 inventory items with a larger but still moderate workload
+ *  - Scale: 5,000 inventory items, high-volume bookings, and billion-peso sales
+ *  - exact inventory-attention fixtures using FOOD products (expired / expiring soon / out of stock / low stock)
+ *  - healthy non-fixture inventory so dashboard attention counts remain predictable
+ *  - deterministic daily bookings with realistic time allowances between events
+ *  - historical sales: 12 months Starter, 24 months Growth, 36 months Scale
+ *  - historical bookings: 12 months Starter, 24 months Growth, 36 months Scale
+ *  - current-day POS + pending bookings so Staff dashboards always have today's work
+ *  - plan-scaled employee_actions history, including guaranteed same-day Staff Recent Activity rows
+ *  - daily booking status progression so Today's Efficiency has completion/preparation data
+ *  - defensive insertRows/math and Philippine-date alignment (Asia/Manila by default)
  *
  * Usage:
  *   node seed-demo-data.js
@@ -83,13 +93,60 @@ function addDays(date, days) {
     return new Date(date.getTime() + days * DAY_MS);
 }
 
+function addMonthsUtc(date, months) {
+    const copy = new Date(date.getTime());
+    copy.setUTCMonth(copy.getUTCMonth() + months);
+    return copy;
+}
+
+function startOfUtcMonth(date) {
+    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function endOfPreviousUtcMonth(date) {
+    return addDays(startOfUtcMonth(date), -1);
+}
+
+function maxDate(a, b) {
+    return a > b ? new Date(a.getTime()) : new Date(b.getTime());
+}
+
+const SEED_TIME_ZONE = process.env.SEED_TIME_ZONE || "Asia/Manila";
+
+function seedTimeParts(value = new Date()) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: SEED_TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+    }).formatToParts(value);
+
+    const byType = Object.fromEntries(
+        parts
+            .filter((part) => part.type !== "literal")
+            .map((part) => [part.type, Number(part.value)])
+    );
+
+    return {
+        year: byType.year,
+        month: byType.month,
+        day: byType.day,
+        hour: byType.hour,
+        minute: byType.minute,
+    };
+}
+
 function todayUtc() {
-    const now = new Date();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const parts = seedTimeParts();
+    return new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
 }
 
 const TODAY = todayUtc();
 const SALES_END_CAP = parseIsoDate("2026-12-31", "sales end cap");
+const DEFAULT_HISTORICAL_SALES_END = addDays(TODAY, -1);
 
 const CONFIG = Object.freeze({
     runTag: sanitizeRunTag(process.env.SEED_RUN_TAG || "demo-v1"),
@@ -114,7 +171,10 @@ const CONFIG = Object.freeze({
     dryRun: envBool("SEED_DRY_RUN", false) || process.argv.includes("--dry-run"),
 
     salesStart: parseIsoDate(process.env.SEED_SALES_START || "2016-01-01", "SEED_SALES_START"),
-    salesEnd: parseIsoDate(process.env.SEED_SALES_END || "2026-12-31", "SEED_SALES_END"),
+    salesEnd: parseIsoDate(
+        process.env.SEED_SALES_END || isoDate(DEFAULT_HISTORICAL_SALES_END),
+        "SEED_SALES_END"
+    ),
 
     nearBookingStart: addDays(TODAY, 1),
     nearBookingEnd: addDays(TODAY, 365),
@@ -141,7 +201,7 @@ const CATEGORIES = [
     "Banners and Garlands","Cake Decorations","Candles","Party Favors","Gift Packaging",
     "Confetti and Poppers","Photo Booth Supplies","Artificial Flowers","Retail Lighting",
     "Food Service Supplies","Invitations and Stationery","Wearable Party Accessories",
-    "Kids Party Supplies","Wedding Supplies","Corporate Event Supplies"
+    "Kids Party Supplies","Wedding Supplies","Corporate Event Supplies","Food and Beverages"
 ];
 
 const PRODUCT_BLUEPRINTS = [
@@ -187,6 +247,72 @@ const PRODUCT_BLUEPRINTS = [
     ["Corporate Event Supplies", "Corporate Logo Sticker Set", "count", 380], ["Corporate Event Supplies", "Name Badge and Lanyard Set", "count", 420],
     ["Corporate Event Supplies", "Event Wristband Set", "count", 350], ["Corporate Event Supplies", "Raffle Ticket Book", "piece", 180],
 ];
+
+const ATTENTION_FOOD_BLUEPRINTS = [
+    ["Fresh Milk 1L", "bottle", 115],
+    ["Strawberry Yogurt Cup", "cup", 75],
+    ["Cream Cheese Tub", "tub", 185],
+    ["Butter Cake Loaf", "loaf", 240],
+    ["Chicken Sandwich Pack", "pack", 165],
+    ["Fresh Fruit Cup", "cup", 120],
+    ["Mango Juice 1L", "bottle", 135],
+    ["Chocolate Cake Slice", "slice", 95],
+    ["Soft Bread Loaf", "loaf", 105],
+    ["Assorted Cupcake Box", "box", 360],
+    ["Baked Macaroni Tray", "tray", 520],
+    ["Garden Salad Bowl", "bowl", 210],
+    ["Leche Flan Family Tub", "tub", 280],
+    ["Ube Cake Roll", "roll", 320],
+    ["Ham and Cheese Sandwich", "pack", 145],
+    ["Cheese Roll Box", "box", 250],
+    ["Fresh Fruit Tart", "piece", 180],
+    ["Buko Pandan Dessert Cup", "cup", 95],
+    ["Mango Graham Tub", "tub", 190],
+    ["Chocolate Brownie Box", "box", 290],
+];
+
+const INVENTORY_ATTENTION_ORDER = ["expired", "expiringSoon", "outOfStock", "lowStock"];
+
+function inventoryAttentionStateForIndex(planProfile, itemIndex) {
+    const attention = planProfile?.inventoryAttention;
+    if (!attention) return null;
+
+    let cursor = 0;
+    for (const state of INVENTORY_ATTENTION_ORDER) {
+        cursor += Math.max(0, Number(attention[state] || 0));
+        if (itemIndex <= cursor) return state;
+    }
+
+    return null;
+}
+
+function totalInventoryAttention(planProfile) {
+    return INVENTORY_ATTENTION_ORDER.reduce(
+        (sum, state) => sum + Math.max(0, Number(planProfile?.inventoryAttention?.[state] || 0)),
+        0
+    );
+}
+
+function attentionFoodProduct(storeIndex, itemIndex, attentionState) {
+    const blueprint = ATTENTION_FOOD_BLUEPRINTS[(itemIndex - 1) % ATTENTION_FOOD_BLUEPRINTS.length];
+    const cycle = Math.floor((itemIndex - 1) / ATTENTION_FOOD_BLUEPRINTS.length) + 1;
+    const [baseName, format, basePrice] = blueprint;
+    const stateLabel = {
+        expired: "Expired Batch",
+        expiringSoon: "Expiry-Soon Batch",
+        outOfStock: "Out-of-Stock SKU",
+        lowStock: "Low-Stock SKU",
+    }[attentionState] || "Attention SKU";
+
+    return {
+        category: "Food and Beverages",
+        name: `${baseName} - ${stateLabel} S${String(storeIndex).padStart(3, "0")}-${String(cycle).padStart(2, "0")}`,
+        variantParentName: baseName,
+        basePrice,
+        baseName,
+        format,
+    };
+}
 
 const COLORS = ["Gold","Silver","Rose Gold","White","Black","Royal Blue","Sky Blue","Navy Blue","Blush Pink","Hot Pink","Lavender","Purple","Emerald Green","Sage Green","Red","Orange","Yellow","Champagne","Pastel Mix","Rainbow Mix"];
 const STYLES = ["Classic","Elegant","Modern","Minimalist","Premium","Festive","Tropical","Rustic","Boho","Kids","Wedding","Corporate"];
@@ -562,7 +688,7 @@ async function ensureSeederSchema(db) {
     const requiredTables = [
         "stores", "branches", "managers", "staff", "categories",
         "products", "packages", "bookings", "orders", "order_items",
-        "plans", "platform_admins",
+        "employee_actions", "plans", "platform_admins",
     ];
 
     for (const tableName of requiredTables) {
@@ -582,10 +708,10 @@ async function ensureSeederSchema(db) {
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS product_variants (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            product_id INT NOT NULL,
-            variant_values JSON NULL,
-            sku VARCHAR(120) NULL,
+                                                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                        product_id INT NOT NULL,
+                                                        variant_values JSON NULL,
+                                                        sku VARCHAR(120) NULL,
             barcode VARCHAR(32) NULL,
             stock INT NOT NULL DEFAULT 0,
             alert_level INT NOT NULL DEFAULT 0,
@@ -594,7 +720,7 @@ async function ensureSeederSchema(db) {
             status VARCHAR(30) NOT NULL DEFAULT 'active',
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     await getTableColumns(db, "product_variants", true);
 
@@ -608,16 +734,16 @@ async function ensureSeederSchema(db) {
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS booking_items (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            booking_id BIGINT NOT NULL,
-            product_id INT NOT NULL,
-            variant_id INT NULL,
-            product_name VARCHAR(255) NOT NULL,
+                                                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                     booking_id BIGINT NOT NULL,
+                                                     product_id INT NOT NULL,
+                                                     variant_id INT NULL,
+                                                     product_name VARCHAR(255) NOT NULL,
             quantity INT NOT NULL DEFAULT 1,
             unit_price DECIMAL(14,2) NOT NULL DEFAULT 0.00,
             line_total DECIMAL(14,2) NOT NULL DEFAULT 0.00,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     await getTableColumns(db, "booking_items", true);
 
@@ -628,23 +754,23 @@ async function ensureSeederSchema(db) {
     // rows come from the `plans` and `platform_admins` tables, never from here.
     await db.query(`
         CREATE TABLE IF NOT EXISTS subscriptions (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            store_id BIGINT NOT NULL,
-            plan_id INT NOT NULL,
-            status ENUM('active','expiring','expired','cancelled') NOT NULL DEFAULT 'active',
+                                                     id INT AUTO_INCREMENT PRIMARY KEY,
+                                                     store_id BIGINT NOT NULL,
+                                                     plan_id INT NOT NULL,
+                                                     status ENUM('active','expiring','expired','cancelled') NOT NULL DEFAULT 'active',
             auto_renew TINYINT(1) NOT NULL DEFAULT 0,
             started_at TIMESTAMP NULL DEFAULT NULL,
             expires_at TIMESTAMP NULL DEFAULT NULL,
             created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS payments (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            store_id BIGINT NOT NULL,
-            plan_id INT NOT NULL,
-            amount DECIMAL(10,2) NOT NULL,
+                                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                                store_id BIGINT NOT NULL,
+                                                plan_id INT NOT NULL,
+                                                amount DECIMAL(10,2) NOT NULL,
             reference_no VARCHAR(100) NOT NULL,
             receipt_url VARCHAR(500) NULL,
             status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
@@ -652,35 +778,35 @@ async function ensureSeederSchema(db) {
             reviewed_by BIGINT NULL,
             reviewed_at TIMESTAMP NULL DEFAULT NULL,
             UNIQUE KEY uniq_reference_no (reference_no)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS subscription_history (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            subscription_id INT NOT NULL,
-            store_id BIGINT NOT NULL,
-            old_plan_id INT NULL,
-            new_plan_id INT NOT NULL,
-            change_type ENUM('upgrade','downgrade','renewal','cancellation','admin_override') NOT NULL,
+                                                            id INT AUTO_INCREMENT PRIMARY KEY,
+                                                            subscription_id INT NOT NULL,
+                                                            store_id BIGINT NOT NULL,
+                                                            old_plan_id INT NULL,
+                                                            new_plan_id INT NOT NULL,
+                                                            change_type ENUM('upgrade','downgrade','renewal','cancellation','admin_override') NOT NULL,
             changed_by BIGINT NOT NULL,
             created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS subscription_audit_logs (
-            audit_log_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            business_id BIGINT NOT NULL,
-            subscription_id INT NULL,
-            payment_submission_id INT NULL,
-            action VARCHAR(100) NOT NULL,
+                                                               audit_log_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                               business_id BIGINT NOT NULL,
+                                                               subscription_id INT NULL,
+                                                               payment_submission_id INT NULL,
+                                                               action VARCHAR(100) NOT NULL,
             previous_status VARCHAR(50) NULL,
             new_status VARCHAR(50) NULL,
             performed_by_admin_id BIGINT NULL,
             reason TEXT NULL,
             created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
     tableColumnCache.clear();
@@ -693,6 +819,7 @@ async function ensureSeederLookupIndexes(db) {
         ["product_variants", "idx_perf_product_variants_product", ["product_id"]],
         ["packages", "idx_perf_packages_store_branch", ["store_id", "branch_id"]],
         ["bookings", "idx_perf_bookings_store_reference", ["store_id", "booking_reference"]],
+        ["employee_actions", "idx_perf_employee_actions_store_created", ["store_id", "created_at"]],
     ];
 
     for (const [tableName, indexName, columns] of lookupIndexes) {
@@ -719,6 +846,9 @@ async function ensurePerformanceIndexes(db) {
         ["bookings", "idx_perf_bookings_branch_event", ["branch_id", "event_date"]],
         ["booking_items", "idx_perf_booking_items_booking", ["booking_id"]],
         ["booking_items", "idx_perf_booking_items_product", ["product_id"]],
+        ["employee_actions", "idx_perf_employee_actions_store_created", ["store_id", "created_at"]],
+        ["employee_actions", "idx_perf_employee_actions_branch_created", ["branch_id", "created_at"]],
+        ["employee_actions", "idx_perf_employee_actions_employee_created", ["employee_id", "created_at"]],
         ["subscriptions", "idx_perf_subscriptions_store", ["store_id"]],
         ["payments", "idx_perf_payments_store", ["store_id"]],
         ["payments", "idx_perf_payments_status", ["status"]],
@@ -1034,7 +1164,12 @@ async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelN
         branch_settings: true,
     });
 
-    for (let managerIndex = 0; managerIndex < Math.min(CONFIG.managersPerStore, branches.length); managerIndex += 1) {
+    const managerCount = Math.min(
+        Number(planProfile.managers || CONFIG.managersPerStore),
+        branches.length
+    );
+
+    for (let managerIndex = 0; managerIndex < managerCount; managerIndex += 1) {
         const managerName = realisticName(rng, usedPersonnelNames);
         const managerEmail = `${emailSlug(managerName)}.s${identity.code}.m${managerIndex + 1}@${STORE_EMAIL_DOMAIN}`;
 
@@ -1067,18 +1202,21 @@ async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelN
     }
 
     const staffPermissionProfiles = [
+        // Operations Staff: best all-around dashboard demo account.
+        {
+            dashboard: true, bookings: true, packages: true, packages_manage: false,
+            inventory: true, pos: true, reports: false, staff_management: false,
+            staff_roles: false, branch_settings: false,
+        },
+        // Booking-focused Staff.
         {
             dashboard: true, bookings: true, packages: true, packages_manage: false,
             inventory: false, pos: false, reports: false, staff_management: false,
             staff_roles: false, branch_settings: false,
         },
+        // POS / inventory-focused Staff.
         {
             dashboard: true, bookings: false, packages: false, packages_manage: false,
-            inventory: true, pos: true, reports: false, staff_management: false,
-            staff_roles: false, branch_settings: false,
-        },
-        {
-            dashboard: true, bookings: true, packages: false, packages_manage: false,
             inventory: true, pos: true, reports: false, staff_management: false,
             staff_roles: false, branch_settings: false,
         },
@@ -1109,7 +1247,24 @@ async function createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelN
 
     if (staffRows.length) await insertRows(db, "staff", staffRows, 10);
 
-    return { storeId, identity, ownerName, branches };
+    const [storedStaff] = await db.execute(
+        `SELECT id, branch_id, manager_id, staff_name, staff_email, permissions
+         FROM staff
+         WHERE store_id = ?
+         ORDER BY id`,
+        [storeId]
+    );
+
+    const staff = storedStaff.map((row) => ({
+        id: Number(row.id),
+        branchId: Number(row.branch_id),
+        managerId: row.manager_id == null ? null : Number(row.manager_id),
+        name: String(row.staff_name),
+        email: String(row.staff_email),
+        permissions: row.permissions,
+    }));
+
+    return { storeId, identity, ownerName, branches, staff };
 }
 
 async function createCategories(db, storeId) {
@@ -1126,21 +1281,63 @@ async function createCategories(db, storeId) {
 }
 
 async function createProducts(db, storeId, storeIndex, branches, planProfile) {
-    // Plan-specific product count (Starter up to 50, Growth up to 800, Scale up to 2000)
     const desiredProducts = planProfile.productsPerStore || CONFIG.productsPerStore;
+    const attentionTotal = totalInventoryAttention(planProfile);
+
+    if (attentionTotal > desiredProducts) {
+        throw new Error(
+            `${planProfile.name} requests ${attentionTotal} inventory attention fixtures ` +
+            `but only ${desiredProducts} products are configured.`
+        );
+    }
+
     const rng = createRng(`${CONFIG.runTag}:products:${storeIndex}`);
     const rows = [];
     const pendingVariants = [];
+    const attentionStates = [];
 
     for (let itemIndex = 1; itemIndex <= desiredProducts; itemIndex += 1) {
-        const product = productName(storeIndex, itemIndex);
-        const hasVariants = itemIndex % 2 === 1 && desiredProducts > 10; // small stores can have no variants sometimes
+        const attentionState = inventoryAttentionStateForIndex(planProfile, itemIndex);
+        const product = attentionState
+            ? attentionFoodProduct(storeIndex, itemIndex, attentionState)
+            : productName(storeIndex, itemIndex);
+        const branch = branches[(itemIndex - 1) % branches.length];
+        const isAttentionFixture = Boolean(attentionState);
+
+        // Attention fixtures stay simple (no variants) so each dashboard count is
+        // exactly one product and does not get multiplied by variant-level states.
+        const hasVariants =
+            !isAttentionFixture &&
+            itemIndex % 2 === 1 &&
+            desiredProducts > 10;
+
         const priceVariance = 0.80 + rng() * 0.55;
         const baseSalesPrice = Math.max(35, Math.round((product.basePrice * priceVariance) / 5) * 5);
         const baseOriginalPrice = Math.max(20, Math.round((baseSalesPrice * (0.54 + rng() * 0.18)) / 5) * 5);
-        const alertLevel = randomInt(rng, 8, 25);
-        const branch = branches[(itemIndex - 1) % branches.length];
-        const sku = `${CONFIG.runTag.toUpperCase()}-${String(storeIndex).padStart(3, "0")}-${String(itemIndex).padStart(4, "0")}`;
+
+        let alertLevel = randomInt(rng, 8, 25);
+        let forcedStock = null;
+        let forcedExpirationDate = null;
+
+        if (attentionState === "expired") {
+            alertLevel = 12;
+            forcedStock = randomInt(rng, 24, 80);
+            forcedExpirationDate = addDays(TODAY, -randomInt(rng, 1, 18));
+        } else if (attentionState === "expiringSoon") {
+            alertLevel = 12;
+            forcedStock = randomInt(rng, 24, 80);
+            forcedExpirationDate = addDays(TODAY, randomInt(rng, 2, 7));
+        } else if (attentionState === "outOfStock") {
+            alertLevel = 12;
+            forcedStock = 0;
+        } else if (attentionState === "lowStock") {
+            // Keep this above 50% of the reorder level so it is "low stock"
+            // without unintentionally becoming a separate "very low" fixture.
+            alertLevel = 12;
+            forcedStock = randomInt(rng, 7, 11);
+        }
+
+        const sku = `${CONFIG.runTag.toUpperCase()}-${String(storeIndex).padStart(3, "0")}-${String(itemIndex).padStart(5, "0")}`;
         const variantTemplates = [];
 
         if (hasVariants) {
@@ -1149,23 +1346,31 @@ async function createProducts(db, storeId, storeIndex, branches, planProfile) {
                 const priceMultiplier = 0.92 + variantIndex * 0.12;
                 const salesPrice = Math.max(35, Math.round((baseSalesPrice * priceMultiplier) / 5) * 5);
                 const originalPrice = Math.max(20, Math.round((baseOriginalPrice * priceMultiplier) / 5) * 5);
+                const variantAlertLevel = Math.max(3, Math.round(alertLevel / 3));
 
+                // Healthy variants are intentionally kept well above their reorder
+                // levels and without near-term expiry. This prevents random products
+                // from changing the exact attention totals requested for testing.
                 variantTemplates.push({
                     variant_values: JSON.stringify(values),
                     sku: `${sku}-V${String(variantIndex + 1).padStart(2, "0")}`,
                     barcode: String(8900000000000 + storeIndex * 100000 + itemIndex * 10 + variantIndex),
-                    stock: productStock(rng, itemIndex + variantIndex),
-                    alert_level: Math.max(3, Math.round(alertLevel / 3)),
+                    stock: randomInt(rng, variantAlertLevel + 15, variantAlertLevel + 180),
+                    alert_level: variantAlertLevel,
                     original_price: originalPrice,
                     sales_price: salesPrice,
+                    expiration_date: null,
+                    expiry_date: null,
                     status: "active",
                 });
             }
         }
 
         const stock = hasVariants
-            ? variantTemplates.reduce((sum, variant) => sum + (Number.isFinite(Number(variant.stock)) ? Number(variant.stock) : 0), 0)
-            : productStock(rng, itemIndex);
+            ? variantTemplates.reduce((sum, variant) => sum + Number(variant.stock || 0), 0)
+            : forcedStock !== null
+                ? forcedStock
+                : randomInt(rng, alertLevel + 15, alertLevel + 260);
 
         const salesPrice = hasVariants
             ? Math.min(...variantTemplates.map((variant) => variant.sales_price))
@@ -1183,26 +1388,30 @@ async function createProducts(db, storeId, storeIndex, branches, planProfile) {
             package_id: null,
             package_name: null,
             sku,
-            barcode: `${String(8800000000000 + storeIndex * 10000 + itemIndex)}`,
+            barcode: `${String(8800000000000 + storeIndex * 100000 + itemIndex)}`,
             name,
-            description: hasVariants
-                ? `${name}. Direct-sale party supply item available in ${VARIANTS_PER_PRODUCT} realistic variants; not for rental.`
-                : `${name}. Direct-sale party supply item; not for rental.`,
+            description: isAttentionFixture
+                ? `${name}. Food inventory fixture for ${attentionState} dashboard testing.`
+                : hasVariants
+                    ? `${name}. Direct-sale party supply item available in ${VARIANTS_PER_PRODUCT} realistic variants; not for rental.`
+                    : `${name}. Direct-sale party supply item; not for rental.`,
             category: product.category,
             stock,
             alert_level: alertLevel,
             original_price: originalPrice,
             sales_price: salesPrice,
+            expiration_date: forcedExpirationDate ? isoDate(forcedExpirationDate) : null,
+            expiry_date: forcedExpirationDate ? isoDate(forcedExpirationDate) : null,
             has_variants: hasVariants ? 1 : 0,
             status: "active",
         });
 
         pendingVariants.push(variantTemplates);
+        attentionStates.push(attentionState);
     }
 
     await insertRows(db, "products", rows);
 
-    // Fetch inserted products for this store
     const [products] = await db.execute(
         `SELECT id, branch_id, name, category, sales_price, has_variants
          FROM products
@@ -1219,7 +1428,9 @@ async function createProducts(db, storeId, storeIndex, branches, planProfile) {
         }
     }
 
-    if (variantRows.length) await insertRows(db, "product_variants", variantRows, Math.max(CONFIG.batchSize, 800));
+    if (variantRows.length) {
+        await insertRows(db, "product_variants", variantRows, Math.max(CONFIG.batchSize, 800));
+    }
 
     const [storedVariants] = await db.execute(
         `SELECT
@@ -1257,7 +1468,7 @@ async function createProducts(db, storeId, storeIndex, branches, planProfile) {
         });
     }
 
-    return products.map((row) => {
+    return products.map((row, index) => {
         const id = Number(row.id);
         return {
             id,
@@ -1267,9 +1478,11 @@ async function createProducts(db, storeId, storeIndex, branches, planProfile) {
             salesPrice: Number(row.sales_price),
             hasVariants: dbBoolean(row.has_variants),
             variants: variantsByProduct.get(id) || [],
+            attentionState: attentionStates[index] || null,
         };
     });
 }
+
 
 function saleSelectionForProduct(rng, product) {
     if (!product.hasVariants || !product.variants.length) {
@@ -1309,6 +1522,7 @@ function selectDistinctProducts(rng, candidates, count) {
     return selected;
 }
 
+
 async function createPackages(db, storeId, storeIndex, branches, products) {
     const rng = createRng(`${CONFIG.runTag}:packages:${storeIndex}`);
     const rows = [];
@@ -1318,13 +1532,14 @@ async function createPackages(db, storeId, storeIndex, branches, products) {
         const definition = PACKAGE_DEFINITIONS[index];
         const branch = branches[index % branches.length];
         const branchProducts = products.filter((product) => product.branchId === branch.id);
-        const categoryMatches = branchProducts.filter((product) =>
+        const sellableBranchProducts = branchProducts.filter((product) => !product.attentionState);
+        const categoryMatches = sellableBranchProducts.filter((product) =>
             definition.categories.includes(product.category)
         );
 
         const chosenProducts = selectDistinctProducts(
             rng,
-            categoryMatches.length >= definition.itemCount ? categoryMatches : branchProducts,
+            categoryMatches.length >= definition.itemCount ? categoryMatches : sellableBranchProducts,
             definition.itemCount
         );
 
@@ -1469,7 +1684,7 @@ async function createSubscriptionLifecycle(db, store, plans, adminIds, counters,
         paymentSeq += 1;
         const [result] = await db.execute(
             `INSERT INTO payments
-                 (store_id, plan_id, amount, reference_no, receipt_url, status, submitted_at, reviewed_by, reviewed_at)
+             (store_id, plan_id, amount, reference_no, receipt_url, status, submitted_at, reviewed_by, reviewed_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 storeId,
@@ -1490,7 +1705,7 @@ async function createSubscriptionLifecycle(db, store, plans, adminIds, counters,
     async function insertSubscription({ planId, status, autoRenew, startedAt, expiresAt }) {
         const [result] = await db.execute(
             `INSERT INTO subscriptions
-                 (store_id, plan_id, status, auto_renew, started_at, expires_at, created_at)
+             (store_id, plan_id, status, auto_renew, started_at, expires_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [
                 storeId,
@@ -1509,7 +1724,7 @@ async function createSubscriptionLifecycle(db, store, plans, adminIds, counters,
     async function insertHistory(subscriptionId, { oldPlanId, newPlanId, changeType, changedBy, createdAt }) {
         await db.execute(
             `INSERT INTO subscription_history
-                 (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by, created_at)
+             (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [subscriptionId, storeId, oldPlanId, newPlanId, changeType, changedBy, sqlDateTime(createdAt, 9, 0, 0)]
         );
@@ -1522,7 +1737,7 @@ async function createSubscriptionLifecycle(db, store, plans, adminIds, counters,
     }) {
         await db.execute(
             `INSERT INTO subscription_audit_logs
-                 (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason, created_at)
+             (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 storeId,
@@ -1789,9 +2004,11 @@ async function createSubscriptionLifecycle(db, store, plans, adminIds, counters,
 }
 
 function buildProductCatalog(products) {
+    const sellableProducts = products.filter((product) => !product.attentionState);
+    const sourceProducts = sellableProducts.length ? sellableProducts : products;
     const byBranch = new Map();
 
-    for (const product of products) {
+    for (const product of sourceProducts) {
         if (!byBranch.has(product.branchId)) byBranch.set(product.branchId, []);
         byBranch.get(product.branchId).push(product);
     }
@@ -1801,7 +2018,7 @@ function buildProductCatalog(products) {
         popularByBranch.set(branchId, branchProducts.slice(0, Math.min(160, branchProducts.length)));
     }
 
-    return { all: products, byBranch, popularByBranch };
+    return { all: sourceProducts, byBranch, popularByBranch };
 }
 
 function chooseSaleProducts(rng, catalog, branchId, count) {
@@ -1835,10 +2052,22 @@ function orderLineCount(rng) {
 // Defensive createHistoricalOrders
 // ---------------------
 async function createHistoricalOrders(db, context, counters) {
-    const { storeId, storeIndex, branches, catalog } = context;
+    const { storeId, storeIndex, branches, catalog, planProfile } = context;
+    const salesMultiplier = Math.max(
+        0.1,
+        Number(planProfile?.salesMultiplier || 1)
+    );
+    const maxDailyOrders = Math.max(
+        1,
+        Number(planProfile?.maxDailyOrders || 30)
+    );
     const orderRows = [];
     const orderItemRows = [];
-    let cursor = new Date(CONFIG.salesStart.getTime());
+    const historicalSalesMonths = Math.max(1, Number(planProfile?.historicalSalesMonths || 24));
+    const profileSalesStart = startOfUtcMonth(addMonthsUtc(TODAY, -(historicalSalesMonths - 1)));
+    // Keep historical analytics useful without unnecessarily generating a decade
+    // of rows for every demo store. SEED_SALES_START can still push this later.
+    let cursor = maxDate(CONFIG.salesStart, profileSalesStart);
     let orderSequence = 0;
 
     const flush = async () => {
@@ -1871,15 +2100,23 @@ async function createHistoricalOrders(db, context, counters) {
             SALES_DAY_FACTORS[cursor.getUTCDay()] *
             paydayFactor(cursor) *
             specialEventFactor(cursor) *
+            salesMultiplier *
             (0.88 + rng() * 0.28);
 
-        const orderCount = Math.min(30, poisson(rng, lambda));
+        const orderCount = Math.min(maxDailyOrders, poisson(rng, lambda));
 
         for (let number = 0; number < orderCount; number += 1) {
             orderSequence += 1;
             const branch = branchWeightedChoice(rng, branches);
             const customerName = realisticName(rng);
-            const lineCount = orderLineCount(rng);
+            const baseLineCount = orderLineCount(rng);
+            const extraLines =
+                planProfile?.tier === "scale"
+                    ? randomInt(rng, 2, 5)
+                    : planProfile?.tier === "growth"
+                        ? randomInt(rng, 0, 2)
+                        : 0;
+            const lineCount = Math.min(10, baseLineCount + extraLines);
             const selectedProducts = chooseSaleProducts(rng, catalog, branch.id, lineCount);
             const eventBoost = demandMonthFactor(cursor) >= 1.3 ? 1 : 0;
 
@@ -1890,11 +2127,24 @@ async function createHistoricalOrders(db, context, counters) {
                 const rawSalesPrice = Number(selected.salesPrice || 0);
                 const safeSalesPrice = Number.isFinite(rawSalesPrice) ? rawSalesPrice : 0;
 
-                const quantity = Math.min(
-                    20,
-                    randomInt(rng, 1, 4 + eventBoost) +
-                    (lineIndex === 0 && rng() < 0.22 ? randomInt(rng, 2, 6) : 0)
-                );
+                let quantity;
+                if (planProfile?.tier === "scale") {
+                    // Scale represents wholesale / corporate-volume transactions.
+                    quantity = Math.min(120,
+                        randomInt(rng, 8, 24 + eventBoost * 6) +
+                        (lineIndex === 0 && rng() < 0.45 ? randomInt(rng, 18, 55) : 0)
+                    );
+                } else if (planProfile?.tier === "growth") {
+                    quantity = Math.min(35,
+                        randomInt(rng, 2, 8 + eventBoost * 2) +
+                        (lineIndex === 0 && rng() < 0.28 ? randomInt(rng, 3, 10) : 0)
+                    );
+                } else {
+                    quantity = Math.min(18,
+                        randomInt(rng, 1, 6 + eventBoost) +
+                        (lineIndex === 0 && rng() < 0.24 ? randomInt(rng, 2, 7) : 0)
+                    );
+                }
 
                 const unitPrice = roundMoney(safeSalesPrice * (0.96 + rng() * 0.08));
                 const lineTotal = roundMoney(quantity * unitPrice);
@@ -1952,6 +2202,214 @@ async function createHistoricalOrders(db, context, counters) {
     }
 
     await flush();
+}
+
+async function createDashboardCurrentDayOrders(db, context, counters) {
+    const { storeId, storeIndex, branches, catalog, planProfile } = context;
+    const orderRows = [];
+    const orderItemRows = [];
+    const todayKey = isoDate(TODAY);
+    const nowParts = seedTimeParts();
+    const transactionsPerBranch = Math.max(
+        1,
+        Number(planProfile?.todayPosPerBranch || 3)
+    );
+
+    const customerPool = [
+        "Walk-in Customer",
+        "Maria Santos",
+        "Corporate Walk-in",
+        "Angela Reyes",
+        "Paolo Cruz",
+        "Bianca Garcia",
+        "Miguel Mendoza",
+        "Event Organizer",
+        "School Organization",
+        "Company Purchasing",
+    ];
+
+    for (const [branchIndex, branch] of branches.entries()) {
+        const branchProducts = catalog.byBranch.get(branch.id) || [];
+        if (!branchProducts.length) continue;
+
+        const rng = createRng(`${CONFIG.runTag}:dashboard-pos:${storeIndex}:${branch.id}`);
+        const selectedProducts = branchProducts.slice(
+            0,
+            Math.min(20, branchProducts.length)
+        );
+
+        for (
+            let transactionIndex = 0;
+            transactionIndex < transactionsPerBranch;
+            transactionIndex += 1
+        ) {
+            const product =
+                selectedProducts[transactionIndex % selectedProducts.length] ||
+                randomChoice(rng, branchProducts);
+            const selected = saleSelectionForProduct(rng, product);
+
+            const quantityRange =
+                planProfile?.tier === "scale"
+                    ? [12, 60]
+                    : planProfile?.tier === "growth"
+                        ? [3, 14]
+                        : [2, 8];
+
+            const quantity = randomInt(rng, quantityRange[0], quantityRange[1]);
+            const unitPrice = roundMoney(Number(selected.salesPrice || 0));
+            const total = roundMoney(quantity * unitPrice);
+            const orderId =
+                `DASH-${CONFIG.runTag.toUpperCase()}-${String(storeIndex).padStart(3, "0")}-` +
+                `${String(branchIndex + 1).padStart(2, "0")}-${todayKey.replace(/-/g, "")}-` +
+                `${String(transactionIndex + 1).padStart(3, "0")}`;
+
+            // Keep showcase transactions at or before the local current hour.
+            const latestHour = Math.max(9, Math.min(20, nowParts.hour));
+            const earliestHour = Math.max(8, latestHour - transactionsPerBranch + 1);
+            const hour = Math.min(
+                latestHour,
+                earliestHour + transactionIndex
+            );
+            const minute = (transactionIndex * 7 + branchIndex * 11) % 60;
+
+            orderRows.push({
+                order_id: orderId,
+                store_id: storeId,
+                branch_id: branch.id,
+                customer_name:
+                    customerPool[transactionIndex % customerPool.length],
+                item: `${selected.saleName} x${quantity}`.slice(0, 250),
+                total,
+                order_date: todayKey,
+                created_at: sqlDateTime(TODAY, hour, minute, 0),
+            });
+
+            orderItemRows.push({
+                order_id: orderId,
+                store_id: storeId,
+                branch_id: branch.id,
+                product_id: selected.id,
+                variant_id: selected.variantId,
+                product_name: selected.saleName,
+                quantity,
+                unit_price: unitPrice,
+                line_total: total,
+                created_at: sqlDateTime(TODAY, hour, minute, 0),
+            });
+        }
+    }
+
+    await insertRows(db, "orders", orderRows, Math.min(CONFIG.batchSize, 300));
+    await insertRows(
+        db,
+        "order_items",
+        orderItemRows,
+        Math.max(CONFIG.batchSize, 600)
+    );
+    counters.orders += orderRows.length;
+    counters.orderItems += orderItemRows.length;
+}
+
+async function ensureMinimumScaleSales(db, context, counters) {
+    const { storeId, storeIndex, branches, catalog, planProfile } = context;
+    const target = Number(planProfile?.minimumSalesTarget || 0);
+    if (!target || planProfile?.tier !== "scale") return;
+
+    const [[summary]] = await db.execute(
+        `SELECT COALESCE(SUM(total), 0) AS total_sales
+         FROM orders
+         WHERE store_id = ?`,
+        [storeId]
+    );
+
+    let runningSales = Number(summary?.total_sales || 0);
+    if (runningSales >= target) return;
+
+    const orderRows = [];
+    const orderItemRows = [];
+    let sequence = 0;
+
+    const flush = async () => {
+        if (!orderRows.length) return;
+        await insertRows(db, "orders", orderRows, Math.min(CONFIG.batchSize, 300));
+        await insertRows(db, "order_items", orderItemRows, Math.max(CONFIG.batchSize, 900));
+        counters.orders += orderRows.length;
+        counters.orderItems += orderItemRows.length;
+        orderRows.length = 0;
+        orderItemRows.length = 0;
+    };
+
+    while (runningSales < target) {
+        sequence += 1;
+        const rng = createRng(`${CONFIG.runTag}:scale-revenue-floor:${storeIndex}:${sequence}`);
+        const branch = branches[(sequence - 1) % branches.length];
+        const lineCount = randomInt(rng, 7, 10);
+        const selectedProducts = chooseSaleProducts(rng, catalog, branch.id, lineCount);
+        const orderDate = addDays(TODAY, -randomInt(rng, 30, 1095));
+        const hour = randomInt(rng, 9, 18);
+        const minute = randomInt(rng, 0, 59);
+
+        const lines = selectedProducts.map((product, lineIndex) => {
+            const selected = saleSelectionForProduct(rng, product);
+            const quantity = randomInt(rng, lineIndex === 0 ? 180 : 60, lineIndex === 0 ? 420 : 220);
+            const unitPrice = roundMoney(Number(selected.salesPrice || 0) * (0.97 + rng() * 0.05));
+            return {
+                product: selected,
+                quantity,
+                unitPrice,
+                lineTotal: roundMoney(quantity * unitPrice),
+            };
+        });
+
+        const total = roundMoney(lines.reduce((sum, line) => sum + line.lineTotal, 0));
+        const orderId =
+            `BULK-${CONFIG.runTag.toUpperCase()}-${String(storeIndex).padStart(3, "0")}-` +
+            `${isoDate(orderDate).replace(/-/g, "")}-${String(sequence).padStart(6, "0")}`;
+
+        orderRows.push({
+            order_id: orderId,
+            store_id: storeId,
+            branch_id: branch.id,
+            customer_name: corporateName(rng),
+            item: lines.slice(0, 3).map((line) => `${line.product.saleName} x${line.quantity}`).join(", ").slice(0, 250),
+            total,
+            order_date: isoDate(orderDate),
+            created_at: sqlDateTime(orderDate, hour, minute, randomInt(rng, 0, 59)),
+        });
+
+        for (const line of lines) {
+            orderItemRows.push({
+                order_id: orderId,
+                store_id: storeId,
+                branch_id: branch.id,
+                product_id: line.product.id,
+                variant_id: line.product.variantId,
+                product_name: line.product.saleName,
+                quantity: line.quantity,
+                unit_price: line.unitPrice,
+                line_total: line.lineTotal,
+                created_at: sqlDateTime(orderDate, hour, minute, randomInt(rng, 0, 59)),
+            });
+        }
+
+        runningSales += total;
+
+        if (orderRows.length >= Math.min(CONFIG.batchSize, 300)) {
+            await flush();
+        }
+
+        if (sequence > 20000) {
+            throw new Error(
+                `Unable to reach Scale sales target of ${target.toLocaleString()} after 20,000 bulk orders.`
+            );
+        }
+    }
+
+    await flush();
+    console.log(
+        `    Scale sales floor reached: PHP ${Math.round(runningSales).toLocaleString()} ` +
+        `(target PHP ${Math.round(target).toLocaleString()})`
+    );
 }
 
 // booking helper functions unchanged:
@@ -2038,7 +2496,7 @@ function paymentForBooking(status, agreedPrice, rng) {
         };
     }
 
-    if (status === "confirmed") {
+    if (status === "confirmed" || status === "preparing") {
         const paid = rng() < 0.18;
         const amountPaid = paid
             ? agreedPrice
@@ -2122,10 +2580,30 @@ function bookingProducts(rng, packageItem, catalog, branchId) {
 }
 
 async function createBookings(db, context, datePools, counters) {
-    const { storeId, storeIndex, branches, catalog, packages } = context;
+    const { storeId, storeIndex, branches, catalog, packages, planProfile } = context;
     const bookingRows = [];
     const pendingItems = new Map();
+    const monthlyBookingCounts = new Map();
+    const monthlyBookingLimit = Number.isFinite(Number(planProfile?.bookingsPerMonth))
+    && Number(planProfile?.bookingsPerMonth) > 0
+        ? Number(planProfile.bookingsPerMonth)
+        : null;
     let bookingSequence = 0;
+
+    const historicalBookingMonths = Math.max(1, Number(planProfile?.historicalBookingMonths || 24));
+    // Starter's historical window ends last month so its current 20-day booking
+    // fixture can remain inside the published 20-bookings/month ceiling.
+    const historicalBookingEnd = monthlyBookingLimit
+        ? endOfPreviousUtcMonth(TODAY)
+        : addDays(TODAY, -1);
+    const historicalBookingStart = startOfUtcMonth(
+        addMonthsUtc(historicalBookingEnd, -(historicalBookingMonths - 1))
+    );
+    const historicalBookingPool = buildWeightedDates(
+        historicalBookingStart,
+        historicalBookingEnd,
+        "retail"
+    );
 
     const flush = async () => {
         if (!bookingRows.length) return;
@@ -2183,8 +2661,28 @@ async function createBookings(db, context, datePools, counters) {
             bookingSequence += 1;
 
             const rng = createRng(`${CONFIG.runTag}:booking:${storeIndex}:${period}:${bookingSequence}`);
-            const pool = datePools[period];
-            const eventDate = pickWeightedDate(rng, pool);
+            const pool = period === "historical" ? historicalBookingPool : datePools[period];
+            let eventDate = pickWeightedDate(rng, pool);
+
+            if (monthlyBookingLimit) {
+                // Starter has a hard 20-bookings/month test ceiling. Re-pick a
+                // date when a weighted month is already full so historical data
+                // never contradicts the plan limit.
+                for (let attempt = 0; attempt < 80; attempt += 1) {
+                    const monthKey = isoDate(eventDate).slice(0, 7);
+                    if ((monthlyBookingCounts.get(monthKey) || 0) < monthlyBookingLimit) break;
+                    eventDate = pickWeightedDate(rng, pool);
+                }
+
+                const monthKey = isoDate(eventDate).slice(0, 7);
+                if ((monthlyBookingCounts.get(monthKey) || 0) >= monthlyBookingLimit) {
+                    // The requested target count cannot fit in the available
+                    // period without breaking the monthly cap. Skip this row.
+                    continue;
+                }
+                monthlyBookingCounts.set(monthKey, (monthlyBookingCounts.get(monthKey) || 0) + 1);
+            }
+
             const packageItem = packageForPeriod(rng, packages, period);
             const branch =
                 branches.find((b) => b.id === packageItem.branchId) ||
@@ -2282,12 +2780,1009 @@ async function createBookings(db, context, datePools, counters) {
         }
     };
 
-    await createPeriod("historical", CONFIG.historicalBookingsPerStore);
-    await createPeriod("near", CONFIG.nearTermBookingsPerStore);
-    await createPeriod("long", CONFIG.longTermBookingsPerStore);
+    const bookingCounts = planProfile?.bookingCounts || {
+        historical: CONFIG.historicalBookingsPerStore,
+        near: CONFIG.nearTermBookingsPerStore,
+        long: CONFIG.longTermBookingsPerStore,
+    };
+
+    await createPeriod("historical", Number(bookingCounts.historical || 0));
+    await createPeriod("near", Number(bookingCounts.near || 0));
+    await createPeriod("long", Number(bookingCounts.long || 0));
 
     await flush();
 }
+
+function scheduledBookingStatus(eventDate, slotMinutes, rng) {
+    const eventDateKey = isoDate(eventDate);
+    const todayKey = isoDate(TODAY);
+
+    if (eventDateKey < todayKey) return "completed";
+
+    if (eventDateKey > todayKey) {
+        return rng() < 0.72 ? "confirmed" : "pending";
+    }
+
+    const now = seedTimeParts();
+    const nowMinutes = now.hour * 60 + now.minute;
+    const minutesUntilSlot = slotMinutes - nowMinutes;
+
+    // Today is intentionally a mixed operational day so the Staff dashboard
+    // can calculate booking completion and preparation progress from real rows.
+    if (minutesUntilSlot <= -30) return "completed";
+    if (minutesUntilSlot <= 150) return "preparing";
+    if (minutesUntilSlot <= 360) return "confirmed";
+    return "pending";
+}
+
+async function createScheduledDailyBookings(db, context, counters) {
+    const {
+        storeId,
+        storeIndex,
+        branches,
+        catalog,
+        packages,
+        planProfile,
+    } = context;
+
+    const schedule = planProfile?.dailyBookingSchedule;
+    if (!schedule) return;
+
+    const days = Math.max(0, Number(schedule.days || 0));
+    const bookingsPerBranchPerDay = Math.max(
+        0,
+        Number(schedule.bookingsPerBranchPerDay || 0)
+    );
+    const startOffsetDays = Number(schedule.startOffsetDays || 0);
+    const firstSlotMinutes = Math.max(
+        0,
+        Math.min(23 * 60 + 59, Number(schedule.firstHour || 9) * 60 + Number(schedule.firstMinute || 0))
+    );
+    const gapMinutes = Math.max(60, Number(schedule.gapMinutes || 150));
+
+    if (!days || !bookingsPerBranchPerDay) return;
+
+    const lastSlotMinutes = firstSlotMinutes + (bookingsPerBranchPerDay - 1) * gapMinutes;
+    if (lastSlotMinutes > 23 * 60 + 45) {
+        throw new Error(
+            `${planProfile.name} daily booking schedule exceeds the end of the day. ` +
+            `Reduce bookingsPerBranchPerDay or gapMinutes.`
+        );
+    }
+
+    const bookingRows = [];
+    const pendingItems = new Map();
+    let sequence = 0;
+
+    const flush = async () => {
+        if (!bookingRows.length) return;
+
+        const rowsToInsert = bookingRows.splice(0, bookingRows.length);
+        await insertRows(db, "bookings", rowsToInsert, Math.min(CONFIG.batchSize, 250));
+
+        const references = rowsToInsert.map((row) => row.booking_reference);
+        const placeholders = references.map(() => "?").join(", ");
+        const [insertedBookings] = await db.query(
+            `SELECT id, booking_reference
+             FROM bookings
+             WHERE store_id = ?
+               AND booking_reference IN (${placeholders})`,
+            [storeId, ...references]
+        );
+
+        const bookingIds = new Map(
+            insertedBookings.map((row) => [String(row.booking_reference), Number(row.id)])
+        );
+        const bookingItemRows = [];
+
+        for (const reference of references) {
+            const bookingId = bookingIds.get(reference);
+            if (!bookingId) {
+                throw new Error(`Unable to retrieve scheduled booking ${reference}.`);
+            }
+
+            for (const item of pendingItems.get(reference) || []) {
+                bookingItemRows.push({
+                    booking_id: bookingId,
+                    store_id: storeId,
+                    product_id: item.productId,
+                    variant_id: item.variantId,
+                    product_name: item.productName,
+                    quantity: item.quantity,
+                    unit_price: item.unitPrice,
+                    line_total: roundMoney(item.quantity * item.unitPrice),
+                });
+            }
+            pendingItems.delete(reference);
+        }
+
+        await insertRows(db, "booking_items", bookingItemRows, Math.max(CONFIG.batchSize, 800));
+        counters.bookings += rowsToInsert.length;
+        counters.bookingItems += bookingItemRows.length;
+    };
+
+    for (let dayIndex = 0; dayIndex < days; dayIndex += 1) {
+        const eventDate = addDays(TODAY, startOffsetDays + dayIndex);
+        const eventDateKey = isoDate(eventDate);
+
+        for (const [branchIndex, branch] of branches.entries()) {
+            const branchPackages = packages.filter((pkg) => pkg.branchId === branch.id);
+            const branchProducts = catalog.byBranch.get(branch.id) || [];
+            if (!branchProducts.length || !packages.length) continue;
+
+            for (let slotIndex = 0; slotIndex < bookingsPerBranchPerDay; slotIndex += 1) {
+                sequence += 1;
+                const rng = createRng(
+                    `${CONFIG.runTag}:scheduled-booking:${storeIndex}:${branch.id}:${eventDateKey}:${slotIndex}`
+                );
+                const packageItem =
+                    branchPackages[(dayIndex + slotIndex) % Math.max(1, branchPackages.length)] ||
+                    packages[(dayIndex + branchIndex + slotIndex) % packages.length];
+                const selectedProducts = bookingProducts(rng, packageItem, catalog, branch.id);
+
+                const extrasTotal = selectedProducts
+                    .filter(
+                        (item) =>
+                            !packageItem.inclusions.some(
+                                (included) => Number(included.productId || included.product_id) === item.productId
+                            )
+                    )
+                    .reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
+
+                const agreedPrice = roundMoney(packageItem.price + extrasTotal);
+                const slotMinutes = firstSlotMinutes + slotIndex * gapMinutes;
+                const status = scheduledBookingStatus(eventDate, slotMinutes, rng);
+                const payment = paymentForBooking(status, agreedPrice, rng);
+                const eventHour = Math.floor(slotMinutes / 60);
+                const eventMinute = slotMinutes % 60;
+                const customerName = realisticName(rng);
+
+                const leadDays = randomInt(
+                    rng,
+                    3,
+                    Math.min(120, Math.max(14, dayIndex + 14))
+                );
+                let createdDate = addDays(eventDate, -leadDays);
+                if (createdDate > TODAY) {
+                    createdDate = addDays(TODAY, -randomInt(rng, 0, 30));
+                }
+
+                const reference =
+                    `DAILY-BKG-${CONFIG.runTag.toUpperCase()}-` +
+                    `${String(storeIndex).padStart(3, "0")}-` +
+                    `${eventDateKey.replace(/-/g, "")}-` +
+                    `${String(branchIndex + 1).padStart(2, "0")}-` +
+                    `${String(slotIndex + 1).padStart(2, "0")}`;
+
+                const packageJson = JSON.stringify({
+                    id: packageItem.id,
+                    packageId: packageItem.id,
+                    name: packageItem.name,
+                    price: packageItem.price,
+                    purchaseType: "scheduled retail booking",
+                    inclusions: packageItem.inclusions,
+                    selectedProducts,
+                });
+
+                bookingRows.push({
+                    store_id: storeId,
+                    branch_id: branch.id,
+                    booking_type: "package",
+                    name: customerName,
+                    phone: buildPhoneNumber(storeIndex, 500 + (sequence % 7000)),
+                    event_date: eventDateKey,
+                    event_type: packageItem.eventType,
+                    package_name: packageItem.name,
+                    custom_order: selectedProducts
+                        .slice(-3)
+                        .map((item) => `${item.productName} x${item.quantity}`)
+                        .join(", ")
+                        .slice(0, 500),
+                    notes:
+                        `Daily workload fixture with ${gapMinutes}-minute booking allowance. ` +
+                        "Designed for booking overview and Staff pending-task testing.",
+                    status,
+                    booking_reference: reference,
+                    package_json: packageJson,
+                    packageJSON: packageJson,
+                    facebook_name: customerName,
+                    email: `${emailSlug(customerName)}.daily.${storeIndex}.${sequence}@customer.example`,
+                    event_time: formatSeedEventTime(eventHour, eventMinute),
+                    theme: randomChoice(rng, THEMES),
+                    venue: `${randomChoice(rng, VENUE_TYPES)}, ${storeIdentity(storeIndex).location}`,
+                    agreed_price: agreedPrice,
+                    package_price: packageItem.price,
+                    payment_status: payment.paymentStatus,
+                    required_down_payment: payment.requiredDownPayment,
+                    amount_paid: payment.amountPaid,
+                    balance: Math.max(0, roundMoney(agreedPrice - payment.amountPaid)),
+                    created_at: sqlDateTime(
+                        createdDate,
+                        randomInt(rng, 8, 18),
+                        randomInt(rng, 0, 59),
+                        0
+                    ),
+                });
+
+                pendingItems.set(reference, selectedProducts);
+
+                if (bookingRows.length >= Math.min(CONFIG.batchSize, 250)) {
+                    await flush();
+                }
+            }
+        }
+    }
+
+    await flush();
+}
+
+function formatSeedEventTime(hour, minute = 0) {
+    const normalizedHour = Math.max(0, Math.min(23, hour));
+    const normalizedMinute = Math.max(0, Math.min(59, minute));
+    const period = normalizedHour >= 12 ? "PM" : "AM";
+    const displayHour = normalizedHour % 12 || 12;
+    return `${displayHour}:${String(normalizedMinute).padStart(2, "0")} ${period}`;
+}
+
+async function createDashboardTodayBookings(db, context, counters) {
+    const {
+        storeId,
+        storeIndex,
+        branches,
+        catalog,
+        packages,
+        planProfile,
+    } = context;
+
+    const bookingRows = [];
+    const pendingItems = new Map();
+    const nowParts = seedTimeParts();
+    const todayKey = isoDate(TODAY);
+    const bookingsPerBranch = Math.max(
+        0,
+        Number(planProfile?.todayBookingsPerBranch ?? 4)
+    );
+
+    // Plan profiles with a deterministic daily booking schedule already seed
+    // today's bookings, so avoid double-counting the same day.
+    if (!bookingsPerBranch) return;
+
+    const statusCycle = [
+        "completed",
+        "confirmed",
+        "preparing",
+        "pending",
+        "confirmed",
+        "preparing",
+        "completed",
+        "pending",
+    ];
+
+    const customerPool = [
+        "Angela Reyes",
+        "Paolo Cruz",
+        "Bianca Santos",
+        "Miguel Garcia",
+        "Samantha Lopez",
+        "Andrea Mendoza",
+        "Carlo Bautista",
+        "Sophia Ramos",
+    ];
+
+    for (const [branchIndex, branch] of branches.entries()) {
+        const branchPackages = packages.filter((pkg) => pkg.branchId === branch.id);
+        const branchProducts = catalog.byBranch.get(branch.id) || [];
+        if (!branchProducts.length || !packages.length) continue;
+
+        const rng = createRng(
+            `${CONFIG.runTag}:dashboard-bookings:${storeIndex}:${branch.id}`
+        );
+
+        for (
+            let scenarioIndex = 0;
+            scenarioIndex < bookingsPerBranch;
+            scenarioIndex += 1
+        ) {
+            const status = statusCycle[scenarioIndex % statusCycle.length];
+
+            let eventHour;
+            if (status === "completed") {
+                eventHour = Math.max(
+                    8,
+                    Math.min(18, nowParts.hour - 3 + (scenarioIndex % 2))
+                );
+            } else {
+                eventHour = Math.min(
+                    23,
+                    Math.max(9, nowParts.hour + 1 + (scenarioIndex % 4))
+                );
+            }
+
+            const eventMinute = (15 + scenarioIndex * 10 + branchIndex * 5) % 60;
+
+            const packageItem =
+                branchPackages[
+                scenarioIndex % Math.max(1, branchPackages.length)
+                    ] ||
+                packages[scenarioIndex % packages.length];
+
+            const selectedProducts = bookingProducts(
+                rng,
+                packageItem,
+                catalog,
+                branch.id
+            );
+
+            const extrasTotal = selectedProducts
+                .filter(
+                    (item) =>
+                        !packageItem.inclusions.some(
+                            (included) =>
+                                Number(
+                                    included.productId ||
+                                    included.product_id
+                                ) === item.productId
+                        )
+                )
+                .reduce(
+                    (sum, item) =>
+                        sum + item.unitPrice * item.quantity,
+                    0
+                );
+
+            const agreedPrice = roundMoney(packageItem.price + extrasTotal);
+            const payment = paymentForBooking(
+                status === "preparing" ? "confirmed" : status,
+                agreedPrice,
+                rng
+            );
+
+            const sequence =
+                branchIndex * bookingsPerBranch + scenarioIndex + 1;
+
+            const reference =
+                `DASH-BKG-${CONFIG.runTag.toUpperCase()}-` +
+                `${String(storeIndex).padStart(3, "0")}-` +
+                `${String(branchIndex + 1).padStart(2, "0")}-` +
+                `${String(sequence).padStart(3, "0")}`;
+
+            const customerName =
+                customerPool[scenarioIndex % customerPool.length];
+
+            const packageJson = JSON.stringify({
+                id: packageItem.id,
+                packageId: packageItem.id,
+                name: packageItem.name,
+                price: packageItem.price,
+                purchaseType: "advance retail order",
+                inclusions: packageItem.inclusions,
+                selectedProducts,
+            });
+
+            bookingRows.push({
+                store_id: storeId,
+                branch_id: branch.id,
+                booking_type: "package",
+                name: customerName,
+                phone: buildPhoneNumber(storeIndex, 900 + sequence),
+                event_date: todayKey,
+                event_type: packageItem.eventType,
+                package_name: packageItem.name,
+                custom_order: selectedProducts
+                    .slice(-3)
+                    .map(
+                        (item) =>
+                            `${item.productName} x${item.quantity}`
+                    )
+                    .join(", ")
+                    .slice(0, 500),
+                notes:
+                    "Dashboard showcase booking generated for realistic same-day operations.",
+                status,
+                booking_reference: reference,
+                package_json: packageJson,
+                packageJSON: packageJson,
+                facebook_name: customerName,
+                email:
+                    `${emailSlug(customerName)}.dashboard.` +
+                    `${storeIndex}.${sequence}@customer.example`,
+                event_time: formatSeedEventTime(eventHour, eventMinute),
+                theme: randomChoice(rng, THEMES),
+                venue:
+                    `${randomChoice(rng, VENUE_TYPES)}, ` +
+                    `${storeIdentity(storeIndex).location}`,
+                agreed_price: agreedPrice,
+                package_price: packageItem.price,
+                payment_status: payment.paymentStatus,
+                required_down_payment: payment.requiredDownPayment,
+                amount_paid: payment.amountPaid,
+                balance: Math.max(
+                    0,
+                    roundMoney(agreedPrice - payment.amountPaid)
+                ),
+                created_at: sqlDateTime(
+                    addDays(TODAY, -randomInt(rng, 1, 12)),
+                    11,
+                    0,
+                    0
+                ),
+            });
+
+            pendingItems.set(reference, selectedProducts);
+        }
+    }
+
+    if (!bookingRows.length) return;
+
+    await insertRows(
+        db,
+        "bookings",
+        bookingRows,
+        Math.min(CONFIG.batchSize, 300)
+    );
+
+    const references = bookingRows.map((row) => row.booking_reference);
+    const placeholders = references.map(() => "?").join(", ");
+    const [insertedBookings] = await db.query(
+        `SELECT id, booking_reference
+         FROM bookings
+         WHERE store_id = ?
+           AND booking_reference IN (${placeholders})`,
+        [storeId, ...references]
+    );
+
+    const bookingIds = new Map(
+        insertedBookings.map((row) => [
+            String(row.booking_reference),
+            Number(row.id),
+        ])
+    );
+
+    const bookingItemRows = [];
+
+    for (const reference of references) {
+        const bookingId = bookingIds.get(reference);
+        if (!bookingId) continue;
+
+        for (const item of pendingItems.get(reference) || []) {
+            bookingItemRows.push({
+                booking_id: bookingId,
+                store_id: storeId,
+                product_id: item.productId,
+                variant_id: item.variantId,
+                product_name: item.productName,
+                quantity: item.quantity,
+                unit_price: item.unitPrice,
+                line_total: roundMoney(
+                    item.quantity * item.unitPrice
+                ),
+            });
+        }
+    }
+
+    await insertRows(
+        db,
+        "booking_items",
+        bookingItemRows,
+        Math.max(CONFIG.batchSize, 700)
+    );
+
+    counters.bookings += bookingRows.length;
+    counters.bookingItems += bookingItemRows.length;
+}
+
+function parsePermissions(value) {
+    if (!value) return {};
+    if (typeof value === "object" && !Buffer.isBuffer(value)) return value;
+    try { return JSON.parse(String(value)); } catch { return {}; }
+}
+
+function databaseDateKey(value) {
+    if (!value) return "";
+
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+    }
+
+    const text = String(value).trim();
+    const isoMatch = text.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (isoMatch) return isoMatch[1];
+
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) return "";
+    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+
+function groupRowsByBranchAndDate(rows, dateField) {
+    const grouped = new Map();
+    for (const row of rows) {
+        const branchId = Number(row.branch_id);
+        const dayKey = databaseDateKey(row[dateField]);
+        if (!branchId || !dayKey) continue;
+        const key = `${branchId}:${dayKey}`;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(row);
+    }
+    return grouped;
+}
+
+function actionKindsForPermissions(permissions) {
+    const kinds = [];
+    if (permissions.pos) kinds.push("pos", "pos");
+    if (permissions.bookings) kinds.push("booking", "booking");
+    if (permissions.inventory) kinds.push("inventory", "inventory");
+    if (permissions.packages) kinds.push("package");
+    return kinds.length ? kinds : ["inventory"];
+}
+
+function employeeActionTimestamp(dayOffset, actionIndex, actionsPerDay, rng) {
+    const actionDate = addDays(TODAY, -dayOffset);
+
+    if (dayOffset === 0) {
+        const now = seedTimeParts();
+        const nowMinutes = now.hour * 60 + now.minute;
+        const latestMinute = Math.max(0, nowMinutes - 1);
+        const earliestMinute = Math.max(0, latestMinute - 240);
+        const spread = Math.max(1, latestMinute - earliestMinute);
+        const minuteOfDay = Math.min(
+            latestMinute,
+            earliestMinute + Math.floor(((actionIndex + 1) / (actionsPerDay + 1)) * spread)
+        );
+        return sqlDateTime(
+            actionDate,
+            Math.floor(minuteOfDay / 60),
+            minuteOfDay % 60,
+            Math.min(59, 5 + actionIndex * 7)
+        );
+    }
+
+    const minuteOfDay = randomInt(rng, 8 * 60, 18 * 60 + 30);
+    return sqlDateTime(
+        actionDate,
+        Math.floor(minuteOfDay / 60),
+        minuteOfDay % 60,
+        randomInt(rng, 0, 59)
+    );
+}
+
+async function createStaffEmployeeActionHistory(db, context, counters) {
+    const {
+        storeId,
+        storeIndex,
+        staff,
+        catalog,
+        packages,
+        planProfile,
+    } = context;
+
+    if (!staff?.length || !(await tableExists(db, "employee_actions"))) return;
+
+    const historyDays = Math.max(
+        1,
+        Number(planProfile?.employeeActionHistoryDays || 14)
+    );
+    const actionsPerStaffPerDay = Math.max(
+        4,
+        Number(planProfile?.employeeActionsPerStaffPerDay || 4)
+    );
+    const historyStart = isoDate(addDays(TODAY, -(historyDays - 1)));
+    const todayKey = isoDate(TODAY);
+
+    const [recentOrders] = await db.execute(
+        `SELECT order_id, branch_id, order_date, created_at, total, item
+         FROM orders
+         WHERE store_id = ?
+           AND order_date BETWEEN ? AND ?
+         ORDER BY order_date, created_at, order_id`,
+        [storeId, historyStart, todayKey]
+    );
+
+    const [recentBookings] = await db.execute(
+        `SELECT id, branch_id, booking_reference, event_date, event_type,
+                package_name, name, status
+         FROM bookings
+         WHERE store_id = ?
+           AND event_date BETWEEN ? AND ?
+         ORDER BY event_date, id`,
+        [storeId, historyStart, todayKey]
+    );
+
+    const ordersByBranchDate = groupRowsByBranchAndDate(recentOrders, "order_date");
+    const bookingsByBranchDate = groupRowsByBranchAndDate(recentBookings, "event_date");
+    const packagesByBranch = new Map();
+    for (const pkg of packages || []) {
+        if (!packagesByBranch.has(pkg.branchId)) packagesByBranch.set(pkg.branchId, []);
+        packagesByBranch.get(pkg.branchId).push(pkg);
+    }
+
+    const actionRows = [];
+
+    for (const [staffIndex, employee] of staff.entries()) {
+        const permissions = parsePermissions(employee.permissions);
+        const kinds = actionKindsForPermissions(permissions);
+        const branchProducts = catalog.byBranch.get(employee.branchId) || catalog.all || [];
+        const branchPackages = packagesByBranch.get(employee.branchId) || packages || [];
+
+        for (let dayOffset = 0; dayOffset < historyDays; dayOffset += 1) {
+            const actionDate = addDays(TODAY, -dayOffset);
+            const dayKey = isoDate(actionDate);
+            const rng = createRng(
+                `${CONFIG.runTag}:employee-actions:${storeIndex}:${employee.id}:${dayKey}`
+            );
+            const dayOrders = ordersByBranchDate.get(`${employee.branchId}:${dayKey}`) || [];
+            const dayBookings = bookingsByBranchDate.get(`${employee.branchId}:${dayKey}`) || [];
+
+            for (let actionIndex = 0; actionIndex < actionsPerStaffPerDay; actionIndex += 1) {
+                let kind = kinds[(actionIndex + dayOffset + staffIndex) % kinds.length];
+
+                // If a chosen module has no matching source row for this date,
+                // stay inside the Staff member's permissions instead of inventing
+                // an action from a module they cannot access.
+                const availableKinds = kinds.filter((candidate) => {
+                    if (candidate === "pos") return dayOrders.length > 0;
+                    if (candidate === "booking") return dayBookings.length > 0;
+                    if (candidate === "package") return branchPackages.length > 0;
+                    if (candidate === "inventory") return branchProducts.length > 0;
+                    return false;
+                });
+                if (!availableKinds.includes(kind) && availableKinds.length) {
+                    kind = availableKinds[(actionIndex + dayOffset) % availableKinds.length];
+                }
+
+                let referenceNumber = null;
+                let referenceId = null;
+                let action = "Recorded operational activity";
+                let details = "Completed a routine branch operation.";
+
+                if (kind === "pos" && dayOrders.length) {
+                    const order = dayOrders[(actionIndex + staffIndex) % dayOrders.length];
+                    referenceNumber = String(order.order_id);
+                    referenceId = String(order.order_id);
+                    action = "Processed POS transaction";
+                    details = `Completed a ₱${Number(order.total || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} sale for ${String(order.item || "customer order").slice(0, 140)}.`;
+                } else if (kind === "booking" && dayBookings.length) {
+                    const booking = dayBookings[(actionIndex + staffIndex) % dayBookings.length];
+                    const normalizedStatus = String(booking.status || "").toLowerCase();
+                    referenceNumber = String(booking.booking_reference || `BK-${booking.id}`);
+                    referenceId = String(booking.id);
+                    action = normalizedStatus === "completed"
+                        ? "Completed booking"
+                        : normalizedStatus.includes("prepar")
+                            ? "Prepared booking requirements"
+                            : normalizedStatus === "pending"
+                                ? "Reviewed pending booking"
+                                : "Confirmed booking details";
+                    details = `${String(booking.name || "Customer")} • ${String(booking.event_type || booking.package_name || "Event booking")}.`;
+                } else if (kind === "package" && branchPackages.length) {
+                    const pkg = branchPackages[(actionIndex + dayOffset) % branchPackages.length];
+                    referenceNumber = `PKG-${String(pkg.id).padStart(6, "0")}`;
+                    referenceId = String(pkg.id);
+                    action = actionIndex % 2 === 0
+                        ? "Reviewed package inclusions"
+                        : "Prepared package items";
+                    details = `${pkg.name} checked for an upcoming customer booking.`;
+                } else if (kind === "inventory" && branchProducts.length) {
+                    const product = branchProducts[(actionIndex * 7 + dayOffset + staffIndex) % branchProducts.length];
+                    referenceNumber = `INV-${String(product.id).padStart(6, "0")}`;
+                    referenceId = String(product.id);
+                    const inventoryActions = [
+                        "Checked inventory stock",
+                        "Verified reorder level",
+                        "Reviewed expiry status",
+                        "Updated inventory count",
+                    ];
+                    action = inventoryActions[(actionIndex + dayOffset) % inventoryActions.length];
+                    details = `${product.name} was reviewed during the branch inventory check.`;
+                } else {
+                    kind = kinds[0] || "inventory";
+                    action = kind === "booking"
+                        ? "Reviewed booking workload"
+                        : kind === "package"
+                            ? "Reviewed package workload"
+                            : kind === "pos"
+                                ? "Reviewed POS workload"
+                                : "Reviewed inventory workload";
+                    details = "Completed the scheduled daily branch review.";
+                }
+
+                const module = kind === "pos"
+                    ? "Sales / POS"
+                    : kind === "booking"
+                        ? "Bookings"
+                        : kind === "package"
+                            ? "Packages"
+                            : "Inventory";
+
+                actionRows.push({
+                    store_id: storeId,
+                    branch_id: employee.branchId,
+                    employee_id: employee.id,
+                    employee_name: employee.name,
+                    employee_role: "Staff",
+                    module,
+                    reference_number: referenceNumber,
+                    action,
+                    reference_id: referenceId,
+                    details,
+                    created_at: employeeActionTimestamp(
+                        dayOffset,
+                        actionIndex,
+                        actionsPerStaffPerDay,
+                        rng
+                    ),
+                });
+            }
+        }
+    }
+
+    await insertRows(db, "employee_actions", actionRows, Math.max(CONFIG.batchSize, 800));
+    counters.employeeActions += actionRows.length;
+}
+
+async function createWeeklySameDayBookings(db, context, counters) {
+    const {
+        storeId,
+        storeIndex,
+        branches,
+        catalog,
+        packages,
+        planProfile,
+    } = context;
+
+    const weekCount = Math.max(
+        0,
+        Number(planProfile?.weeklySameDayWeeks || 0)
+    );
+    const bookingsPerBranchPerWeek = Math.max(
+        0,
+        Number(planProfile?.weeklySameDayBookingsPerBranch || 0)
+    );
+
+    if (!weekCount || !bookingsPerBranchPerWeek) return;
+
+    const bookingRows = [];
+    const pendingItems = new Map();
+
+    for (let weekOffset = 1; weekOffset <= weekCount; weekOffset += 1) {
+        const eventDate = addDays(TODAY, -(weekOffset * 7));
+        const eventDateKey = isoDate(eventDate);
+
+        for (const [branchIndex, branch] of branches.entries()) {
+            const branchPackages = packages.filter(
+                (pkg) => pkg.branchId === branch.id
+            );
+            const branchProducts = catalog.byBranch.get(branch.id) || [];
+            if (!branchProducts.length || !packages.length) continue;
+
+            const rng = createRng(
+                `${CONFIG.runTag}:weekly-sameday:${storeIndex}:${branch.id}:${eventDateKey}`
+            );
+
+            for (
+                let bookingIndex = 0;
+                bookingIndex < bookingsPerBranchPerWeek;
+                bookingIndex += 1
+            ) {
+                const packageItem =
+                    branchPackages[
+                    (weekOffset + bookingIndex) %
+                    Math.max(1, branchPackages.length)
+                        ] ||
+                    packages[
+                    (weekOffset + branchIndex + bookingIndex) %
+                    packages.length
+                        ];
+
+                const selectedProducts = bookingProducts(
+                    rng,
+                    packageItem,
+                    catalog,
+                    branch.id
+                );
+
+                const extrasTotal = selectedProducts
+                    .filter(
+                        (item) =>
+                            !packageItem.inclusions.some(
+                                (included) =>
+                                    Number(
+                                        included.productId ||
+                                        included.product_id
+                                    ) === item.productId
+                            )
+                    )
+                    .reduce(
+                        (sum, item) =>
+                            sum + item.unitPrice * item.quantity,
+                        0
+                    );
+
+                const agreedPrice = roundMoney(
+                    packageItem.price + extrasTotal
+                );
+                const payment = paymentForBooking(
+                    "completed",
+                    agreedPrice,
+                    rng
+                );
+
+                const sequence =
+                    (weekOffset - 1) *
+                    branches.length *
+                    bookingsPerBranchPerWeek +
+                    branchIndex * bookingsPerBranchPerWeek +
+                    bookingIndex +
+                    1;
+
+                const reference =
+                    `WKLY-BKG-${CONFIG.runTag.toUpperCase()}-` +
+                    `${String(storeIndex).padStart(3, "0")}-` +
+                    `${eventDateKey.replace(/-/g, "")}-` +
+                    `${String(branchIndex + 1).padStart(2, "0")}-` +
+                    `${String(bookingIndex + 1).padStart(2, "0")}`;
+
+                const customerName = realisticName(rng);
+                const eventHour = 10 + ((weekOffset + branchIndex) % 8);
+                const eventMinute =
+                    (15 + weekOffset * 7 + branchIndex * 11) % 60;
+
+                const packageJson = JSON.stringify({
+                    id: packageItem.id,
+                    packageId: packageItem.id,
+                    name: packageItem.name,
+                    price: packageItem.price,
+                    purchaseType: "same-day retail booking",
+                    inclusions: packageItem.inclusions,
+                    selectedProducts,
+                });
+
+                bookingRows.push({
+                    store_id: storeId,
+                    branch_id: branch.id,
+                    booking_type: "package",
+                    name: customerName,
+                    phone: buildPhoneNumber(
+                        storeIndex,
+                        3000 + (sequence % 6000)
+                    ),
+                    event_date: eventDateKey,
+                    event_type: packageItem.eventType,
+                    package_name: packageItem.name,
+                    custom_order: selectedProducts
+                        .slice(-3)
+                        .map(
+                            (item) =>
+                                `${item.productName} x${item.quantity}`
+                        )
+                        .join(", ")
+                        .slice(0, 500),
+                    notes:
+                        "Guaranteed weekly same-day demo booking. " +
+                        "The booking was created on the same calendar date as the event.",
+                    status: "completed",
+                    booking_reference: reference,
+                    package_json: packageJson,
+                    packageJSON: packageJson,
+                    facebook_name: customerName,
+                    email:
+                        `${emailSlug(customerName)}.weekly.` +
+                        `${storeIndex}.${sequence}@customer.example`,
+                    event_time: formatSeedEventTime(
+                        eventHour,
+                        eventMinute
+                    ),
+                    theme: randomChoice(rng, THEMES),
+                    venue:
+                        `${randomChoice(rng, VENUE_TYPES)}, ` +
+                        `${storeIdentity(storeIndex).location}`,
+                    agreed_price: agreedPrice,
+                    package_price: packageItem.price,
+                    payment_status: payment.paymentStatus,
+                    required_down_payment:
+                    payment.requiredDownPayment,
+                    amount_paid: payment.amountPaid,
+                    balance: Math.max(
+                        0,
+                        roundMoney(
+                            agreedPrice - payment.amountPaid
+                        )
+                    ),
+                    // This is the important same-day condition:
+                    // created_at and event_date share the same calendar date.
+                    created_at: sqlDateTime(
+                        eventDate,
+                        Math.max(8, eventHour - 2),
+                        eventMinute,
+                        0
+                    ),
+                });
+
+                pendingItems.set(reference, selectedProducts);
+            }
+        }
+    }
+
+    if (!bookingRows.length) return;
+
+    for (
+        let offset = 0;
+        offset < bookingRows.length;
+        offset += Math.min(CONFIG.batchSize, 250)
+    ) {
+        const chunk = bookingRows.slice(
+            offset,
+            offset + Math.min(CONFIG.batchSize, 250)
+        );
+
+        await insertRows(
+            db,
+            "bookings",
+            chunk,
+            Math.min(CONFIG.batchSize, 250)
+        );
+
+        const references = chunk.map(
+            (row) => row.booking_reference
+        );
+        const placeholders = references
+            .map(() => "?")
+            .join(", ");
+
+        const [insertedBookings] = await db.query(
+            `SELECT id, booking_reference
+             FROM bookings
+             WHERE store_id = ?
+               AND booking_reference IN (${placeholders})`,
+            [storeId, ...references]
+        );
+
+        const bookingIds = new Map(
+            insertedBookings.map((row) => [
+                String(row.booking_reference),
+                Number(row.id),
+            ])
+        );
+
+        const bookingItemRows = [];
+
+        for (const reference of references) {
+            const bookingId = bookingIds.get(reference);
+            if (!bookingId) {
+                throw new Error(
+                    `Unable to retrieve weekly same-day booking ${reference}.`
+                );
+            }
+
+            for (const item of pendingItems.get(reference) || []) {
+                bookingItemRows.push({
+                    booking_id: bookingId,
+                    store_id: storeId,
+                    product_id: item.productId,
+                    variant_id: item.variantId,
+                    product_name: item.productName,
+                    quantity: item.quantity,
+                    unit_price: item.unitPrice,
+                    line_total: roundMoney(
+                        item.quantity * item.unitPrice
+                    ),
+                });
+            }
+
+            pendingItems.delete(reference);
+        }
+
+        await insertRows(
+            db,
+            "booking_items",
+            bookingItemRows,
+            Math.max(CONFIG.batchSize, 800)
+        );
+
+        counters.bookings += chunk.length;
+        counters.bookingItems += bookingItemRows.length;
+    }
+}
+
 
 function buildDatePools() {
     return {
@@ -2367,6 +3862,7 @@ async function main() {
         payments: 0,
         subscriptionHistory: 0,
         subscriptionAuditLogs: 0,
+        employeeActions: 0,
     };
 
     try {
@@ -2405,27 +3901,194 @@ async function main() {
         const usedPersonnelNames = new Set();
         const datePools = buildDatePools();
 
-        // Plan profiles define how heavy the generated demo data should be per store
+        // Plan-specific TEST DATA profiles. Store count remains unchanged:
+        // 9 Starter + 9 Growth + 9 Scale = 27 demo stores.
+        //
+        // Starter follows the limits supplied for this testing scenario.
+        // Growth is moderately heavier, while Scale is intentionally stress-test sized.
         const planProfiles = {};
-        planProfiles[starter.id] = { name: starter.name, productsPerStore: 50, bookingsPerMonth: 20, staff: 1, branches: 1 };
-        planProfiles[growth.id] = { name: growth.name, productsPerStore: 800, bookingsPerMonth: 20, staff: 3, branches: 3 };
-        planProfiles[scale.id] = { name: scale.name, productsPerStore: 2000, bookingsPerMonth: 999, staff: 10, branches: 4 };
+
+        planProfiles[starter.id] = {
+            tier: "starter",
+            name: starter.name,
+            productsPerStore: 50,
+            bookingsPerMonth: 20,
+            staff: 1,
+            branches: 1,
+            managers: 1,
+            salesMultiplier: 1.25,
+            historicalSalesMonths: 12,
+            historicalBookingMonths: 12,
+            maxDailyOrders: 24,
+            todayPosPerBranch: 8,
+            todayBookingsPerBranch: 0,
+            employeeActionHistoryDays: 14,
+            employeeActionsPerStaffPerDay: 4,
+            inventoryAttention: {
+                expired: 5,
+                expiringSoon: 5,
+                outOfStock: 5,
+                lowStock: 5,
+            },
+            dailyBookingSchedule: {
+                startOffsetDays: 0,
+                days: 20,
+                bookingsPerBranchPerDay: 1,
+                firstHour: 8,
+                firstMinute: 0,
+                gapMinutes: 180,
+            },
+            weeklySameDayWeeks: 0,
+            weeklySameDayBookingsPerBranch: 0,
+            bookingCounts: {
+                // ~15 completed/cancelled/confirmed bookings per historical month,
+                // safely below Starter's 20 bookings/month ceiling.
+                historical: 180,
+                near: 0,
+                long: 24,
+            },
+        };
+
+        planProfiles[growth.id] = {
+            tier: "growth",
+            name: growth.name,
+            productsPerStore: 800,
+            // The exact Growth monthly entitlement was not supplied here, so the
+            // seeder does not enforce a guessed monthly cap.
+            bookingsPerMonth: null,
+            staff: 3,
+            branches: 3,
+            managers: 3,
+            salesMultiplier: 2.25,
+            historicalSalesMonths: 24,
+            historicalBookingMonths: 24,
+            maxDailyOrders: 60,
+            todayPosPerBranch: 15,
+            todayBookingsPerBranch: 0,
+            employeeActionHistoryDays: 21,
+            employeeActionsPerStaffPerDay: 6,
+            inventoryAttention: {
+                expired: 10,
+                expiringSoon: 10,
+                outOfStock: 10,
+                lowStock: 10,
+            },
+            // Growth has a clearly heavier booking workload than Starter:
+            // 3 bookings per branch per day x 3 branches x 90 days = 810 scheduled bookings/store.
+            dailyBookingSchedule: {
+                startOffsetDays: 0,
+                days: 90,
+                bookingsPerBranchPerDay: 3,
+                firstHour: 8,
+                firstMinute: 0,
+                gapMinutes: 240,
+            },
+            weeklySameDayWeeks: 0,
+            weeklySameDayBookingsPerBranch: 0,
+            bookingCounts: {
+                // Two years of dense historical booking history, plus 810 scheduled bookings/store.
+                historical: 1440,
+                near: 0,
+                long: 120,
+            },
+        };
+
+        planProfiles[scale.id] = {
+            tier: "scale",
+            name: scale.name,
+            productsPerStore: 5000,
+            bookingsPerMonth: null,
+            staff: 18,
+            branches: 6,
+            managers: 6,
+            salesMultiplier: 8.5,
+            historicalSalesMonths: 36,
+            historicalBookingMonths: 36,
+            maxDailyOrders: 180,
+            todayPosPerBranch: 35,
+            todayBookingsPerBranch: 0,
+            employeeActionHistoryDays: 30,
+            employeeActionsPerStaffPerDay: 8,
+            minimumSalesTarget: 2000000000,
+            inventoryAttention: {
+                expired: 50,
+                expiringSoon: 80,
+                outOfStock: 100,
+                lowStock: 200,
+            },
+            // 5 bookings per branch per day. With 6 demo branches this produces
+            // 30 bookings/day/store, with 2.5-hour allowance between branch slots.
+            dailyBookingSchedule: {
+                startOffsetDays: 0,
+                days: 365,
+                bookingsPerBranchPerDay: 5,
+                firstHour: 8,
+                firstMinute: 0,
+                gapMinutes: 150,
+            },
+            weeklySameDayWeeks: 0,
+            weeklySameDayBookingsPerBranch: 0,
+            bookingCounts: {
+                // Three years of large historical booking volume for analytics.
+                // The separate daily schedule still guarantees 5 spaced bookings
+                // per branch per day for the active 365-day test window.
+                historical: 10800,
+                near: 0,
+                long: 3600,
+            },
+        };
 
         // For distribution of subscription states and renewal-watch etc we'll seed triplet pattern per-plan group
         for (let storeIndex = 1; storeIndex <= STORE_COUNT; storeIndex += 1) {
             const startedAt = Date.now();
             const identity = storeIdentity(storeIndex);
             const planForStore = assignedPlans[storeIndex - 1];
-            const planProfile = planProfiles[planForStore.id] || { name: planForStore.name, productsPerStore: CONFIG.productsPerStore, bookingsPerMonth: CONFIG.historicalBookingsPerStore, staff: CONFIG.staffPerStore, branches: CONFIG.managersPerStore };
+            const planProfile = planProfiles[planForStore.id] || {
+                tier: "custom",
+                name: planForStore.name,
+                productsPerStore: CONFIG.productsPerStore,
+                bookingsPerMonth: CONFIG.historicalBookingsPerStore,
+                staff: CONFIG.staffPerStore,
+                branches: CONFIG.managersPerStore,
+                managers: CONFIG.managersPerStore,
+                salesMultiplier: 1,
+                historicalSalesMonths: 24,
+                historicalBookingMonths: 24,
+                maxDailyOrders: 30,
+                todayPosPerBranch: 3,
+                todayBookingsPerBranch: 4,
+                employeeActionHistoryDays: 14,
+                employeeActionsPerStaffPerDay: 4,
+                inventoryAttention: null,
+                dailyBookingSchedule: null,
+                weeklySameDayWeeks: 0,
+                weeklySameDayBookingsPerBranch: 0,
+                bookingCounts: {
+                    historical: CONFIG.historicalBookingsPerStore,
+                    near: CONFIG.nearTermBookingsPerStore,
+                    long: CONFIG.longTermBookingsPerStore,
+                },
+            };
 
             console.log(`[${storeIndex}/${STORE_COUNT}] Seeding store (plan: ${planProfile.name})...`);
+            console.log(
+                `    Profile: ${planProfile.productsPerStore} products, ` +
+                `${planProfile.branches} branches, ${planProfile.staff} staff, ` +
+                `${planProfile.todayPosPerBranch} POS/branch today, ` +
+                `${totalInventoryAttention(planProfile)} exact inventory attention items/store, ` +
+                `${planProfile.dailyBookingSchedule?.bookingsPerBranchPerDay || planProfile.todayBookingsPerBranch || 0} scheduled bookings/branch/day, ` +
+                `${planProfile.employeeActionsPerStaffPerDay || 0} employee actions/staff/day`
+            );
 
             await db.beginTransaction();
 
             try {
                 const store = await createStoreAndPeople(db, storeIndex, passwordHash, usedPersonnelNames, planProfile);
                 counters.stores += 1;
-                counters.managers += Math.min(CONFIG.managersPerStore, store.branches.length);
+                counters.managers += Math.min(
+                    Number(planProfile.managers || CONFIG.managersPerStore),
+                    store.branches.length
+                );
                 counters.staff += planProfile.staff;
 
                 // categories
@@ -2476,6 +4139,35 @@ async function main() {
                         storeIndex,
                         branches: store.branches,
                         catalog: productCatalog,
+                        planProfile,
+                    },
+                    counters
+                );
+
+                // A deterministic current-day POS layer keeps Staff/Owner
+                // dashboard visuals useful while historical POS stops yesterday.
+                await createDashboardCurrentDayOrders(
+                    db,
+                    {
+                        storeId: store.storeId,
+                        storeIndex,
+                        branches: store.branches,
+                        catalog: productCatalog,
+                        planProfile,
+                    },
+                    counters
+                );
+
+                // Guarantee Scale stores land in the billion-peso range while
+                // keeping order totals tied to real seeded product prices/quantities.
+                await ensureMinimumScaleSales(
+                    db,
+                    {
+                        storeId: store.storeId,
+                        storeIndex,
+                        branches: store.branches,
+                        catalog: productCatalog,
+                        planProfile,
                     },
                     counters
                 );
@@ -2489,8 +4181,71 @@ async function main() {
                         branches: store.branches,
                         catalog: productCatalog,
                         packages,
+                        planProfile,
                     },
                     datePools,
+                    counters
+                );
+
+                // Deterministic daily workload: Starter gets 20 straight booking
+                // days; Growth gets a moderate 30-day run; Scale gets 5 spaced
+                // bookings per branch every day for a full year.
+                await createScheduledDailyBookings(
+                    db,
+                    {
+                        storeId: store.storeId,
+                        storeIndex,
+                        branches: store.branches,
+                        catalog: productCatalog,
+                        packages,
+                        planProfile,
+                    },
+                    counters
+                );
+
+                // Scale can guarantee at least one true same-day booking
+                // per branch for every week in its configured history window.
+                await createWeeklySameDayBookings(
+                    db,
+                    {
+                        storeId: store.storeId,
+                        storeIndex,
+                        branches: store.branches,
+                        catalog: productCatalog,
+                        packages,
+                        planProfile,
+                    },
+                    counters
+                );
+
+                // Guaranteed current-day booking statuses for Staff workload,
+                // Manager booking overview, and Owner booking revenue visuals.
+                await createDashboardTodayBookings(
+                    db,
+                    {
+                        storeId: store.storeId,
+                        storeIndex,
+                        branches: store.branches,
+                        catalog: productCatalog,
+                        packages,
+                        planProfile,
+                    },
+                    counters
+                );
+
+                // Seed real employee_actions rows for every Staff account.
+                // Today's rows drive Staff Recent Activity; the short history
+                // gives Reports/Employee Actions realistic daily activity.
+                await createStaffEmployeeActionHistory(
+                    db,
+                    {
+                        storeId: store.storeId,
+                        storeIndex,
+                        staff: store.staff,
+                        catalog: productCatalog,
+                        packages,
+                        planProfile,
+                    },
                     counters
                 );
 
@@ -2526,6 +4281,7 @@ async function main() {
         console.log(`Payments:        ${counters.payments.toLocaleString()}`);
         console.log(`Sub. history:    ${counters.subscriptionHistory.toLocaleString()}`);
         console.log(`Sub. audit logs: ${counters.subscriptionAuditLogs.toLocaleString()}`);
+        console.log(`Employee actions:${String(counters.employeeActions.toLocaleString()).padStart(12, " ")}`);
         console.log("");
         console.log(`Owner 001 login: owner001@${STORE_EMAIL_DOMAIN}`);
         console.log(`Password:        ${CONFIG.defaultPassword}`);

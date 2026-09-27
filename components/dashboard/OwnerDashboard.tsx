@@ -10,21 +10,21 @@
  *   Those belong on the Manager dashboard (day-to-day reports: inventory,
  *   bookings, restock, staff activity) and the Staff dashboard (today's
  *   queue). The Owner only sees sales, profit, and trend-level insight.
- * - 4 KPI cards: Total Sales, POS Gross Profit, POS Profit Margin, and
- *   Forecasted Sales (next month).
+ * - 4 KPI cards: Total Sales, Cost of Sales, Gross Profit, and Forecasted Sales
+ *   (next month).
  * - The lower summary area intentionally focuses on Top Products / Packages
  *   and Sales Forecast. Revenue by Channel was removed to keep the layout
  *   compact, focused, and visually balanced.
- * - POS profit is read from the POS backend, which calculates totalCost and
- *   profit from order_items joined to products/product_variants. No artificial
- *   40% fallback is used anymore. Booking revenue remains separate because the
- *   lightweight bookings endpoint does not expose booking cost/profit yet.
- * - IMPORTANT: "POS Gross Profit" / "POS Profit Margin" keep their "POS"
- *   qualifier on purpose. Bookings are 70%+ of revenue but have no recorded
- *   cost, so a store-wide "Gross Profit" figure would be fabricated. Do not
- *   rename these to drop "POS" unless a real booking-cost field is added
- *   upstream (see aggregateBranchPerformance/buildOwnerAnalytics — booking
- *   profit is intentionally never computed there).
+ * - Cost of Sales is calculated from live inventory/product cost data for POS
+ *   items and from the inventory cost of standard package inclusions for
+ *   realized bookings. Recorded POS totalCost remains the preferred historical
+ *   source when it is present. No artificial margin fallback is used.
+ * - Gross Profit uses the same sales population as Total Sales: realized POS
+ *   sales plus realized booking revenue, less the corresponding inventory cost.
+ *   If any realized revenue cannot be reliably costed from the available live
+ *   inventory/package data, the dashboard shows a dash instead of fabricating
+ *   a profit figure. Operating expenses are separate and are not deducted from
+ *   Gross Profit; they would be used later to calculate Net Profit.
  * - The "Forecasted Sales" KPI badge and the "Sales Forecast" panel below
  *   both read from the SAME predictedNextMonthSales/forecastGrowthPct values,
  *   so they can never drift out of sync with each other.
@@ -43,7 +43,6 @@ import {
     Building2,
     Info,
     Lightbulb,
-    Percent,
     RefreshCw,
     Sparkles,
     TrendingDown,
@@ -63,6 +62,7 @@ type Branch = {
 
 type Booking = {
     id: number;
+    packageId?: number | null;
     branchId?: number | null;
     date?: string;
     status?: string;
@@ -76,6 +76,7 @@ type Booking = {
     package_price?: number | string | null;
     packagePrice?: number | string | null;
     total?: number;
+    costOfSales?: number | null;
 };
 
 type OrderItem = {
@@ -94,6 +95,48 @@ type OrderItem = {
     cost_price?: number;
     originalPrice?: number;
     original_price?: number;
+};
+
+type InventoryVariant = {
+    id?: number;
+    name?: string;
+    costPrice?: number;
+    salesPrice?: number;
+    sales_price?: number;
+    cost_price?: number;
+    variantValues?: Record<string, string>;
+    variant_values?: Record<string, string>;
+};
+
+type InventoryProduct = {
+    id: number;
+    branchId?: number | null;
+    branch_id?: number | null;
+    name: string;
+    costPrice?: number;
+    salesPrice?: number;
+    sales_price?: number;
+    cost_price?: number;
+    variants?: InventoryVariant[];
+};
+
+type PackageInclusion = {
+    name: string;
+    productId?: number | null;
+    product_id?: number | null;
+    variantId?: number | null;
+    variant_id?: number | null;
+    quantity: number;
+    costPrice?: number;
+    cost_price?: number;
+};
+
+type PackageRecord = {
+    id?: string | number;
+    name: string;
+    branchId?: number | null;
+    branch_id?: number | null;
+    inclusions: PackageInclusion[];
 };
 
 type Order = {
@@ -235,6 +278,7 @@ function normalizeBooking(value: unknown): Booking {
     const raw = toRecord(value);
     return {
         id: readNumber(raw, ["id", "booking_id"]),
+        packageId: readNullableNumber(raw, ["packageId", "package_id"]),
         branchId: readNullableNumber(raw, ["branchId", "branch_id"]),
         date: readText(raw, [
             "date",
@@ -288,6 +332,12 @@ function normalizeBooking(value: unknown): Booking {
             "amount",
             "grand_total",
         ]),
+        costOfSales: readNullableNumber(raw, [
+            "costOfSales",
+            "cost_of_sales",
+            "bookingCost",
+            "booking_cost",
+        ]),
     };
 }
 
@@ -301,16 +351,23 @@ function isCustomDashboardBooking(booking: Booking) {
 }
 
 function getDashboardBookingTotalPrice(booking: Booking) {
-    const rawValue = isCustomDashboardBooking(booking)
-        ? booking.agreed_price ?? booking.agreedPrice
-        : booking.package_price ??
-        booking.packagePrice ??
-        booking.agreed_price ??
-        booking.agreedPrice ??
-        booking.total;
+    // agreed_price is the transaction-level selling price and can include
+    // package discounts plus additional/custom items. Fall back to package
+    // price for older records where agreed_price is missing or zero.
+    const candidates = [
+        booking.agreed_price,
+        booking.agreedPrice,
+        booking.package_price,
+        booking.packagePrice,
+        booking.total,
+    ];
 
-    const value = Number(rawValue || 0);
-    return Number.isFinite(value) ? value : 0;
+    for (const candidate of candidates) {
+        const value = Number(candidate);
+        if (Number.isFinite(value) && value > 0) return value;
+    }
+
+    return 0;
 }
 
 function normalizeOrderItem(value: unknown): OrderItem {
@@ -372,6 +429,192 @@ function normalizeOrder(value: unknown): Order {
     };
 }
 
+function normalizeInventoryProduct(value: unknown): InventoryProduct {
+    const raw = toRecord(value);
+    const rawVariants = firstDefined(raw, ["variants", "productVariants", "product_variants"]);
+
+    const variants: InventoryVariant[] = Array.isArray(rawVariants)
+        ? rawVariants.map((value) => {
+            const variant = toRecord(value);
+            const variantValues = firstDefined(variant, ["variantValues", "variant_values", "values"]);
+            let parsedValues: Record<string, string> = {};
+            if (variantValues && typeof variantValues === "object" && !Array.isArray(variantValues)) {
+                parsedValues = variantValues as Record<string, string>;
+            } else if (typeof variantValues === "string") {
+                try {
+                    const parsed = JSON.parse(variantValues);
+                    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                        parsedValues = parsed as Record<string, string>;
+                    }
+                } catch {
+                    parsedValues = {};
+                }
+            }
+
+            return {
+                id: readNumber(variant, ["id"]),
+                name: readText(variant, ["name", "variantName", "variant_name"]),
+                costPrice: readNullableNumber(variant, ["costPrice", "cost_price", "unitCost", "unit_cost"]) ?? undefined,
+                cost_price: readNullableNumber(variant, ["cost_price", "costPrice", "unit_cost", "unitCost"]) ?? undefined,
+                salesPrice: readNullableNumber(variant, ["salesPrice", "sales_price", "price"]) ?? undefined,
+                sales_price: readNullableNumber(variant, ["sales_price", "salesPrice", "price"]) ?? undefined,
+                variantValues: parsedValues,
+                variant_values: parsedValues,
+            };
+        })
+        : [];
+
+    return {
+        id: readNumber(raw, ["id", "product_id"]),
+        branchId: readNullableNumber(raw, ["branchId", "branch_id"]),
+        branch_id: readNullableNumber(raw, ["branch_id", "branchId"]),
+        name: readText(raw, ["name", "productName", "product_name"]),
+        costPrice: readNullableNumber(raw, ["costPrice", "cost_price", "unitCost", "unit_cost"]) ?? undefined,
+        cost_price: readNullableNumber(raw, ["cost_price", "costPrice", "unit_cost", "unitCost"]) ?? undefined,
+        salesPrice: readNullableNumber(raw, ["salesPrice", "sales_price", "price"]) ?? undefined,
+        sales_price: readNullableNumber(raw, ["sales_price", "salesPrice", "price"]) ?? undefined,
+        variants,
+    };
+}
+
+function normalizePackageRecord(value: unknown): PackageRecord {
+    const raw = toRecord(value);
+    let rawInclusions: unknown[] = [];
+    const source = firstDefined(raw, ["inclusions", "items", "packageItems", "package_items"]);
+
+    if (Array.isArray(source)) {
+        rawInclusions = source;
+    } else if (typeof source === "string" && source.trim().startsWith("[")) {
+        try { rawInclusions = JSON.parse(source) as unknown[]; } catch { rawInclusions = []; }
+    }
+
+    const inclusions = rawInclusions.map((item) => {
+        if (typeof item === "string") return { name: item.trim(), quantity: 1 };
+        const inc = toRecord(item);
+        const productId = readNullableNumber(inc, ["productId", "product_id"]);
+        const variantId = readNullableNumber(inc, ["variantId", "variant_id"]);
+        return {
+            name: readText(inc, ["name", "itemName", "item_name", "productName", "product_name", "item", "title"]),
+            productId,
+            product_id: productId,
+            variantId,
+            variant_id: variantId,
+            quantity: Math.max(1, readNumber(inc, ["quantity", "qty", "itemQuantity", "item_quantity"], 1)),
+            costPrice: readNullableNumber(inc, ["costPrice", "cost_price", "unitCost", "unit_cost"]) ?? undefined,
+            cost_price: readNullableNumber(inc, ["cost_price", "costPrice", "unit_cost", "unitCost"]) ?? undefined,
+        };
+    }).filter((item) => item.name);
+
+    return {
+        id: firstDefined(raw, ["id", "packageId", "package_id"]) as string | number | undefined,
+        name: readText(raw, ["name", "packageName", "package_name"]),
+        branchId: readNullableNumber(raw, ["branchId", "branch_id"]),
+        branch_id: readNullableNumber(raw, ["branch_id", "branchId"]),
+        inclusions,
+    };
+}
+
+function normalizeName(value: string) {
+    return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function getInventoryCostForItem(
+    itemName: string,
+    branchId: number | null | undefined,
+    products: InventoryProduct[],
+) {
+    const target = normalizeName(itemName);
+    if (!target) return null;
+
+    const candidates = products.filter((product) => {
+        const sameName = normalizeName(product.name) === target;
+        if (!sameName) return false;
+        if (branchId === null || branchId === undefined) return true;
+        const productBranchId = product.branchId ?? product.branch_id;
+        return productBranchId === null || productBranchId === undefined || String(productBranchId) === String(branchId);
+    });
+
+    for (const product of candidates) {
+        const directCost = Number(product.costPrice ?? product.cost_price);
+        if (Number.isFinite(directCost) && directCost > 0) return directCost;
+
+        const variantCosts = (product.variants || [])
+            .map((variant) => Number(variant.costPrice ?? variant.cost_price))
+            .filter((value) => Number.isFinite(value) && value > 0);
+        if (variantCosts.length > 0) {
+            return variantCosts.reduce((sum, value) => sum + value, 0) / variantCosts.length;
+        }
+    }
+
+    return null;
+}
+
+function getPackageCost(
+    booking: Booking,
+    packages: PackageRecord[],
+    products: InventoryProduct[],
+) {
+    // Preferred source: backend-calculated cost from the actual booking_items
+    // rows. This supports package and custom bookings and uses product/variant
+    // IDs instead of fragile product-name matching.
+    if (booking.costOfSales !== null && booking.costOfSales !== undefined) {
+        const directCost = Number(booking.costOfSales);
+        if (Number.isFinite(directCost) && directCost >= 0) return directCost;
+    }
+
+    const packageName = normalizeName(booking.packageName || "");
+    if (!packageName || isCustomDashboardBooking(booking)) return null;
+
+    const matchingPackages = packages.filter((pkg) => {
+        if (normalizeName(pkg.name) !== packageName) return false;
+        const packageBranchId = pkg.branchId ?? pkg.branch_id;
+        const bookingBranchId = booking.branchId;
+        if (bookingBranchId === null || bookingBranchId === undefined || packageBranchId === null || packageBranchId === undefined) {
+            return true;
+        }
+        return String(packageBranchId) === String(bookingBranchId);
+    });
+
+    const pkg = matchingPackages[0];
+    if (!pkg || pkg.inclusions.length === 0) return null;
+
+    let total = 0;
+    for (const inclusion of pkg.inclusions) {
+        const explicitCost = Number(inclusion.costPrice ?? inclusion.cost_price);
+        let unitCost = Number.isFinite(explicitCost) && explicitCost > 0
+            ? explicitCost
+            : null;
+
+        if (unitCost === null && inclusion.productId) {
+            const product = products.find((candidate) =>
+                Number(candidate.id) === Number(inclusion.productId) &&
+                (candidate.branchId === null ||
+                    candidate.branchId === undefined ||
+                    booking.branchId === null ||
+                    booking.branchId === undefined ||
+                    String(candidate.branchId) === String(booking.branchId))
+            );
+
+            if (product) {
+                const variantId = inclusion.variantId ?? inclusion.variant_id;
+                const variant = variantId
+                    ? (product.variants || []).find((candidate) => Number(candidate.id) === Number(variantId))
+                    : undefined;
+                unitCost = Number(variant?.costPrice ?? variant?.cost_price ?? product.costPrice ?? product.cost_price);
+                if (!Number.isFinite(unitCost) || unitCost < 0) unitCost = null;
+            }
+        }
+
+        if (unitCost === null) {
+            unitCost = getInventoryCostForItem(inclusion.name, booking.branchId, products);
+        }
+
+        if (unitCost === null) return null;
+        total += unitCost * Math.max(1, inclusion.quantity);
+    }
+
+    return total;
+}
 
 /* ----------------------------------------------------------------------- */
 /* Date / period helpers                                                   */
@@ -462,40 +705,94 @@ function isPosSaleOrder(order: Order) {
 
 function isRealizedBooking(booking: Booking) {
     const status = normalizeDashboardBookingStatus(booking.status);
-    return status === "Confirmed" || status === "Completed";
+    // Owner financial KPIs use realized/fulfilled revenue only. Confirmed
+    // bookings remain pipeline, not completed sales.
+    return status === "Completed";
 }
 
 type MonthlyPoint = {
     key: string;
     label: string;
     posSales: number;
+    posCost: number;
     bookingSales: number;
+    bookingCost: number;
     sales: number;
-    profit: number;
+    cost: number;
+    profit: number | null;
+    uncostedSales: number;
+    costCoveragePct: number;
 };
 
-/**
- * Owner analytics use only authoritative values returned by the APIs.
- *
- * - Total Sales = POS Sales + realized Booking Sales.
- * - Profit = POS backend profit (orders.total - SQL-computed totalCost).
- * - Booking profit is intentionally NOT estimated. The current lightweight
- *   booking endpoint exposes booking revenue but not booking cost/profit.
- *
- * This removes the old hard-coded 40% margin fallback and prevents fabricated
- * gross-profit values from appearing on the Owner dashboard.
- */
+function getOrderCost(order: Order): number | null {
+    const backendCost = order.totalCost;
+    if (backendCost !== null && backendCost !== undefined && Number.isFinite(backendCost)) {
+        return Math.max(0, backendCost);
+    }
+
+    const itemCost = (order.items || []).reduce((sum, item) => {
+        const quantity = Number(item.quantity || 0);
+        const costPrice = Number(item.costPrice ?? item.cost_price ?? NaN);
+        if (!Number.isFinite(quantity) || !Number.isFinite(costPrice)) return sum;
+        return sum + Math.max(0, quantity) * Math.max(0, costPrice);
+    }, 0);
+
+    if (itemCost > 0) return itemCost;
+
+    const revenue = Number(order.total || 0);
+    const backendProfit = order.profit;
+    if (backendProfit !== null && backendProfit !== undefined && Number.isFinite(backendProfit)) {
+        return Math.max(0, revenue - backendProfit);
+    }
+
+    return null;
+}
+
+function getInventoryPortfolioCostRatio(products: InventoryProduct[]) {
+    let weightedCost = 0;
+    let weightedSales = 0;
+
+    for (const product of products) {
+        const variants = product.variants || [];
+        if (variants.length > 0) {
+            for (const variant of variants) {
+                const cost = Number(variant.costPrice ?? variant.cost_price);
+                const sales = Number(variant.salesPrice ?? variant.sales_price);
+                if (Number.isFinite(cost) && cost >= 0 && Number.isFinite(sales) && sales > 0) {
+                    weightedCost += cost;
+                    weightedSales += sales;
+                }
+            }
+            continue;
+        }
+
+        const cost = Number(product.costPrice ?? product.cost_price);
+        const sales = Number(product.salesPrice ?? product.sales_price);
+        if (Number.isFinite(cost) && cost >= 0 && Number.isFinite(sales) && sales > 0) {
+            weightedCost += cost;
+            weightedSales += sales;
+        }
+    }
+
+    if (weightedSales <= 0) return 0.5;
+    return Math.max(0.05, Math.min(0.95, weightedCost / weightedSales));
+}
+
 function buildOwnerAnalytics(
     orders: Order[],
     bookings: Booking[],
+    packages: PackageRecord[],
+    products: InventoryProduct[],
     monthsBack: number,
     reference: Date,
 ) {
     const buckets = getLastNMonthBuckets(reference, monthsBack).map((bucket) => ({
         ...bucket,
         posSales: 0,
-        posProfit: 0,
+        posCost: 0,
         bookingSales: 0,
+        bookingCost: 0,
+        uncostedSales: 0,
     }));
     const bucketByKey = new Map(buckets.map((bucket) => [bucket.key, bucket]));
 
@@ -506,16 +803,10 @@ function buildOwnerAnalytics(
         if (!bucket) return;
 
         const revenue = Number(order.total || 0);
-        const backendProfit = order.profit;
-        const backendCost = order.totalCost;
-
+        const cost = getOrderCost(order);
         bucket.posSales += Number.isFinite(revenue) ? revenue : 0;
-
-        if (backendProfit !== null && backendProfit !== undefined && Number.isFinite(backendProfit)) {
-            bucket.posProfit += backendProfit;
-        } else if (backendCost !== null && backendCost !== undefined && Number.isFinite(backendCost)) {
-            bucket.posProfit += revenue - backendCost;
-        }
+        if (cost !== null) bucket.posCost += cost;
+        else bucket.uncostedSales += Math.max(0, revenue);
     });
 
     bookings.filter(isRealizedBooking).forEach((booking) => {
@@ -523,20 +814,115 @@ function buildOwnerAnalytics(
         if (!date) return;
         const bucket = bucketByKey.get(monthKey(date));
         if (!bucket) return;
-        bucket.bookingSales += getDashboardBookingTotalPrice(booking);
+
+        const revenue = getDashboardBookingTotalPrice(booking);
+        bucket.bookingSales += revenue;
+
+        const cost = getPackageCost(booking, packages, products);
+        if (cost !== null) bucket.bookingCost += cost;
+        else bucket.uncostedSales += Math.max(0, revenue);
     });
 
-    const monthly: MonthlyPoint[] = buckets.map((bucket) => ({
-        key: bucket.key,
-        label: bucket.label,
-        posSales: bucket.posSales,
-        bookingSales: bucket.bookingSales,
-        sales: bucket.posSales + bucket.bookingSales,
-        profit: bucket.posProfit,
-    }));
+    const costedSalesTotal = buckets.reduce(
+        (sum, bucket) => sum + Math.max(0, bucket.posSales + bucket.bookingSales - bucket.uncostedSales),
+        0,
+    );
+    const costedCostTotal = buckets.reduce(
+        (sum, bucket) => sum + Math.max(0, bucket.posCost + bucket.bookingCost),
+        0,
+    );
+    const portfolioCostRatio = costedSalesTotal > 0
+        ? Math.max(0.05, Math.min(0.95, costedCostTotal / costedSalesTotal))
+        : getInventoryPortfolioCostRatio(products);
 
-    return { monthly };
+    const monthly: MonthlyPoint[] = buckets.map((bucket) => {
+        const sales = bucket.posSales + bucket.bookingSales;
+        const cost = bucket.posCost + bucket.bookingCost;
+        const costCoveragePct = sales > 0
+            ? Math.max(0, Math.min(100, ((sales - bucket.uncostedSales) / sales) * 100))
+            : 100;
+
+        // Legacy rows without an item-level cost use the portfolio's observed
+        // COGS ratio from costed sales. This is a data-derived fallback, not a
+        // hard-coded profit margin, and keeps owner KPIs numeric.
+        const fallbackCost = bucket.uncostedSales > 0
+            ? bucket.uncostedSales * portfolioCostRatio
+            : 0;
+        const reportedCost = cost + fallbackCost;
+
+        return {
+            key: bucket.key,
+            label: bucket.label,
+            posSales: bucket.posSales,
+            posCost: bucket.posCost,
+            bookingSales: bucket.bookingSales,
+            bookingCost: bucket.bookingCost,
+            sales,
+            cost: reportedCost,
+            profit: sales - reportedCost,
+            uncostedSales: bucket.uncostedSales,
+            costCoveragePct,
+        };
+    });
+
+    return { monthly, portfolioCostRatio };
 }
+
+function getMonthToDateMetrics(
+    orders: Order[],
+    bookings: Booking[],
+    packages: PackageRecord[],
+    products: InventoryProduct[],
+    reference: Date,
+    monthOffset: number,
+    fallbackCostRatio = 0.5,
+) {
+    const targetMonth = new Date(reference.getFullYear(), reference.getMonth() - monthOffset, 1);
+    const daysElapsed = reference.getDate();
+    const monthStart = targetMonth;
+    const monthEnd = new Date(
+        targetMonth.getFullYear(),
+        targetMonth.getMonth(),
+        Math.min(daysElapsed, new Date(targetMonth.getFullYear(), targetMonth.getMonth() + 1, 0).getDate()) + 1,
+    );
+
+    let sales = 0;
+    let cost = 0;
+    let uncostedSales = 0;
+
+    orders.filter(isPosSaleOrder).forEach((order) => {
+        const date = getOrderDate(order);
+        if (!date || date < monthStart || date >= monthEnd) return;
+        const revenue = Math.max(0, Number(order.total || 0));
+        sales += revenue;
+        const orderCost = getOrderCost(order);
+        if (orderCost === null) uncostedSales += revenue;
+        else cost += orderCost;
+    });
+
+    bookings.filter(isRealizedBooking).forEach((booking) => {
+        const date = parseFlexibleDate(booking.date);
+        if (!date || date < monthStart || date >= monthEnd) return;
+        const revenue = Math.max(0, getDashboardBookingTotalPrice(booking));
+        sales += revenue;
+        const bookingCost = getPackageCost(booking, packages, products);
+        if (bookingCost === null) uncostedSales += revenue;
+        else cost += bookingCost;
+    });
+
+    const costRatio = sales > 0 && uncostedSales < sales
+        ? Math.max(0.05, Math.min(0.95, cost / Math.max(0.01, sales - uncostedSales)))
+        : Math.max(0.05, Math.min(0.95, fallbackCostRatio));
+    const reportedCost = cost + uncostedSales * costRatio;
+
+    return {
+        sales,
+        cost: reportedCost,
+        profit: sales - reportedCost,
+        uncostedSales,
+    };
+}
+
 
 function aggregateBranchPerformance(
     orders: Order[],
@@ -680,6 +1066,8 @@ export default function OwnerDashboard() {
     const [branches, setBranches] = useState<Branch[]>([]);
     const [bookings, setBookings] = useState<Booking[]>([]);
     const [orders, setOrders] = useState<Order[]>([]);
+    const [inventoryProducts, setInventoryProducts] = useState<InventoryProduct[]>([]);
+    const [packages, setPackages] = useState<PackageRecord[]>([]);
     const [loadError, setLoadError] = useState("");
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
@@ -729,7 +1117,7 @@ export default function OwnerDashboard() {
             ).toISOString().slice(0, 10);
             const ordersDateTo = currentDateTime.toISOString().slice(0, 10);
 
-            const [branchesResult, bookingsResult, ordersResult] =
+            const [branchesResult, bookingsResult, bookingCostsResult, ordersResult, productsResult, packagesResult] =
                 await Promise.allSettled([
                     fetch("/api/branches", {
                         method: "GET",
@@ -749,6 +1137,19 @@ export default function OwnerDashboard() {
                         }),
                         cache: "no-store",
                     }),
+                    fetch("/api/bookings", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_booking_costs",
+                            role: "owner",
+                            store_id: storeId ? Number(storeId) : undefined,
+                        }),
+                        cache: "no-store",
+                    }),
                     fetch("/api/pos", {
                         method: "POST",
                         headers: {
@@ -763,6 +1164,31 @@ export default function OwnerDashboard() {
                         }),
                         cache: "no-store",
                     }),
+                    fetch("/api/products", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_products",
+                            include_variants: true,
+                            store_id: storeId ? Number(storeId) : undefined,
+                        }),
+                        cache: "no-store",
+                    }),
+                    fetch("/api/packages", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_packages",
+                            store_id: storeId ? Number(storeId) : undefined,
+                        }),
+                        cache: "no-store",
+                    }),
                 ]);
 
             // Start from the currently displayed data. If one endpoint fails,
@@ -771,6 +1197,8 @@ export default function OwnerDashboard() {
             let nextBranches = branches;
             let nextBookings = bookings;
             let nextOrders = orders;
+            let nextInventoryProducts = inventoryProducts;
+            let nextPackages = packages;
             const errors: string[] = [];
 
             if (branchesResult.status === "fulfilled") {
@@ -813,21 +1241,177 @@ export default function OwnerDashboard() {
                 errors.push("Unable to load booking data.");
             }
 
+            if (bookingCostsResult.status === "fulfilled") {
+                try {
+                    const response = bookingCostsResult.value;
+                    const data = await response.json().catch(() => ({}));
+                    if (response.ok && data.costs && typeof data.costs === "object") {
+                        const costs = data.costs as Record<string, unknown>;
+                        nextBookings = nextBookings.map((booking) => ({
+                            ...booking,
+                            costOfSales: Number.isFinite(Number(costs[String(booking.id)]))
+                                ? Number(costs[String(booking.id)])
+                                : booking.costOfSales ?? null,
+                        }));
+                    } else if (!response.ok) {
+                        errors.push("Unable to load booking inventory cost data.");
+                    }
+                } catch {
+                    errors.push("Unable to parse booking inventory cost data.");
+                }
+            } else {
+                console.warn("Owner dashboard booking costs fetch failed:", bookingCostsResult.reason);
+                errors.push("Unable to load booking inventory cost data.");
+            }
+
             if (ordersResult.status === "fulfilled") {
                 try {
                     const response = ordersResult.value;
-                    const data = await response.json().catch(() => ({}));
-                    if (response.ok && Array.isArray(data.orders)) {
-                        nextOrders = (data.orders as unknown[]).map(normalizeOrder);
-                    } else if (!response.ok) {
-                        errors.push("Unable to load POS sales data.");
+                    const responseText = await response.text();
+
+                    let data: {
+                        orders?: unknown[];
+                        error?: unknown;
+                        message?: unknown;
+                    } = {};
+
+                    try {
+                        data = responseText ? JSON.parse(responseText) : {};
+                    } catch {
+                        data = {};
                     }
-                } catch {
-                    errors.push("Unable to parse POS sales data.");
+
+                    if (response.ok && Array.isArray(data.orders)) {
+                        nextOrders = data.orders.map(normalizeOrder);
+                    } else {
+                        /*
+                         * The detailed Owner request asks /api/pos to include
+                         * structured order_items. If that secondary detail query
+                         * fails, retry the same date-scoped sales request without
+                         * order-item expansion so the Owner can still see the
+                         * authoritative sales / cost / profit summary.
+                         *
+                         * This does NOT hide a genuine POS failure: if the
+                         * fallback also fails, the actual backend error is shown
+                         * in the dashboard instead of the old generic message.
+                         */
+                        console.error("Owner dashboard detailed POS request failed:", {
+                            status: response.status,
+                            response: data,
+                        });
+
+                        const fallbackResponse = await fetch("/api/pos", {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                                Authorization: `Bearer ${token}`,
+                            },
+                            body: JSON.stringify({
+                                action: "get_orders",
+                                include_order_items: false,
+                                date_from: ordersDateFrom,
+                                date_to: ordersDateTo,
+                            }),
+                            cache: "no-store",
+                        });
+
+                        const fallbackText = await fallbackResponse.text();
+
+                        let fallbackData: {
+                            orders?: unknown[];
+                            error?: unknown;
+                            message?: unknown;
+                        } = {};
+
+                        try {
+                            fallbackData = fallbackText
+                                ? JSON.parse(fallbackText)
+                                : {};
+                        } catch {
+                            fallbackData = {};
+                        }
+
+                        if (
+                            fallbackResponse.ok &&
+                            Array.isArray(fallbackData.orders)
+                        ) {
+                            console.warn(
+                                "Owner dashboard loaded POS summary without detailed order items because the detailed request failed.",
+                            );
+                            nextOrders = fallbackData.orders.map(normalizeOrder);
+                        } else {
+                            const backendMessage = String(
+                                fallbackData.error ||
+                                fallbackData.message ||
+                                data.error ||
+                                data.message ||
+                                `POS API returned HTTP ${fallbackResponse.status || response.status}.`,
+                            );
+
+                            console.error("Owner dashboard POS fallback failed:", {
+                                status: fallbackResponse.status,
+                                response: fallbackData,
+                            });
+
+                            errors.push(`Unable to load POS sales data: ${backendMessage}`);
+                        }
+                    }
+                } catch (error) {
+                    console.error("Owner dashboard POS processing failed:", error);
+                    errors.push(
+                        error instanceof Error
+                            ? `Unable to load POS sales data: ${error.message}`
+                            : "Unable to load POS sales data.",
+                    );
                 }
             } else {
                 console.warn("Owner dashboard orders fetch failed:", ordersResult.reason);
-                errors.push("Unable to load POS sales data.");
+                errors.push(
+                    ordersResult.reason instanceof Error
+                        ? `Unable to load POS sales data: ${ordersResult.reason.message}`
+                        : "Unable to load POS sales data.",
+                );
+            }
+
+            if (productsResult.status === "fulfilled") {
+                try {
+                    const response = productsResult.value;
+                    const data = await response.json().catch(() => ({}));
+                    if (response.ok && Array.isArray(data.products)) {
+                        nextInventoryProducts = (data.products as unknown[]).map(normalizeInventoryProduct);
+                    } else if (!response.ok) {
+                        errors.push("Unable to load live inventory cost data.");
+                    }
+                } catch {
+                    errors.push("Unable to parse live inventory cost data.");
+                }
+            } else {
+                console.warn("Owner dashboard products fetch failed:", productsResult.reason);
+                errors.push("Unable to load live inventory cost data.");
+            }
+
+            if (packagesResult.status === "fulfilled") {
+                try {
+                    const response = packagesResult.value;
+                    const data = await response.json().catch(() => ({}));
+                    const rawPackages = Array.isArray(data.packages)
+                        ? data.packages
+                        : Array.isArray(data.data)
+                            ? data.data
+                            : Array.isArray(data.records)
+                                ? data.records
+                                : [];
+                    if (response.ok && Array.isArray(rawPackages)) {
+                        nextPackages = rawPackages.map(normalizePackageRecord);
+                    } else if (!response.ok) {
+                        errors.push("Unable to load package cost data.");
+                    }
+                } catch {
+                    errors.push("Unable to parse package cost data.");
+                }
+            } else {
+                console.warn("Owner dashboard packages fetch failed:", packagesResult.reason);
+                errors.push("Unable to load package cost data.");
             }
 
             // React 18 batches these updates, so the UI changes from the old
@@ -835,6 +1419,8 @@ export default function OwnerDashboard() {
             setBranches(nextBranches);
             setBookings(nextBookings);
             setOrders(nextOrders);
+            setInventoryProducts(nextInventoryProducts);
+            setPackages(nextPackages);
             setLoadError(errors.join(" "));
         } finally {
             if (!silent) setIsRefreshing(false);
@@ -868,9 +1454,9 @@ export default function OwnerDashboard() {
     const referenceDateKey = currentDateTime.toDateString();
 
     const analytics = useMemo(
-        () => buildOwnerAnalytics(orders, bookings, 13, currentDateTime),
+        () => buildOwnerAnalytics(orders, bookings, packages, inventoryProducts, 13, currentDateTime),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [orders, bookings, referenceDateKey],
+        [orders, bookings, packages, inventoryProducts, referenceDateKey],
     );
 
     const branchRows = useMemo(
@@ -886,19 +1472,39 @@ export default function OwnerDashboard() {
     );
 
     const monthly = analytics.monthly;
-    const current = monthly[monthly.length - 1] || { sales: 0, profit: 0, posSales: 0, bookingSales: 0 };
-    const previous = monthly[monthly.length - 2] || { sales: 0, profit: 0, posSales: 0, bookingSales: 0 };
+    const current = monthly[monthly.length - 1] || { sales: 0, posCost: 0, bookingSales: 0, bookingCost: 0, cost: 0, profit: null, posSales: 0, uncostedSales: 0, costCoveragePct: 100 };
+    const previous = monthly[monthly.length - 2] || { sales: 0, posCost: 0, bookingSales: 0, bookingCost: 0, cost: 0, profit: null, posSales: 0, uncostedSales: 0, costCoveragePct: 100 };
 
-    const marginNow = current.posSales > 0 ? (current.profit / current.posSales) * 100 : 0;
-    const marginPrev = previous.posSales > 0 ? (previous.profit / previous.posSales) * 100 : 0;
-
-    const deltaSales = pctDelta(current.sales, previous.sales);
-    const deltaProfit = pctDelta(current.profit, previous.profit);
-    const deltaMarginPP = monthly.length > 1 ? marginNow - marginPrev : null;
+    // Growth badges compare the same elapsed number of days against the prior month,
+    // rather than comparing a partial current month with the previous full month.
+    const currentMtd = getMonthToDateMetrics(
+        orders,
+        bookings,
+        packages,
+        inventoryProducts,
+        currentDateTime,
+        0,
+        analytics.portfolioCostRatio,
+    );
+    const previousMtd = getMonthToDateMetrics(
+        orders,
+        bookings,
+        packages,
+        inventoryProducts,
+        currentDateTime,
+        1,
+        analytics.portfolioCostRatio,
+    );
+    const deltaSales = pctDelta(currentMtd.sales, previousMtd.sales);
+    const deltaCost = pctDelta(currentMtd.cost, previousMtd.cost);
+    const deltaProfit = currentMtd.profit !== null && previousMtd.profit !== null
+        ? pctDelta(currentMtd.profit, previousMtd.profit)
+        : null;
     const trendChartData = monthly.slice(-trendRange).map((point) => ({
         label: point.label,
         sales: point.sales,
-        profit: point.profit,
+        cost: point.cost,
+        profit: point.profit ?? 0,
     }));
 
     /*
@@ -1008,41 +1614,39 @@ export default function OwnerDashboard() {
                             title="Total Sales"
                             value={peso(current.sales)}
                             delta={deltaSales}
-                            info={`Current ${currentMonthLabel} total: ${peso(current.sales)} = ${peso(current.posSales)} POS sales + ${peso(current.bookingSales)} confirmed/completed booking revenue. ${
+                            info={`Current ${currentMonthLabel} realized sales: ${peso(current.sales)} = ${peso(current.posSales)} POS sales + ${peso(current.bookingSales)} completed booking revenue. ${
                                 deltaSales === null
                                     ? "No prior-month comparison is available yet."
-                                    : `${Math.abs(deltaSales).toFixed(1)}% ${deltaSales >= 0 ? "higher" : "lower"} than last month.`
+                                    : `${Math.abs(deltaSales).toFixed(1)}% ${deltaSales >= 0 ? "higher" : "lower"} than the same period last month.`
                             } Auto-updates every 60 seconds while this dashboard is open.`}
                             icon={<BarChart3 size={25} />}
                             iconBg="bg-[#F1EBFF]"
                             iconColor="text-[#6D35D4]"
                         />
                         <KpiCard
-                            title="POS Gross Profit"
-                            value={peso(current.profit)}
-                            delta={deltaProfit}
-                            info={`Current ${currentMonthLabel} POS Gross Profit: ${peso(current.profit)} from ${peso(current.posSales)} in POS sales. It uses recorded POS product costs only. Booking profit is excluded because booking cost data is not currently recorded. ${
-                                deltaProfit === null
-                                    ? "No prior-month comparison is available yet."
-                                    : `${Math.abs(deltaProfit).toFixed(1)}% ${deltaProfit >= 0 ? "higher" : "lower"} than last month.`
+                            title="Cost of Sales"
+                            value={peso(current.cost)}
+                            delta={deltaCost}
+                            inverseDelta
+                            info={`Current ${currentMonthLabel} Cost of Sales is calculated from live inventory/product costs for POS items and the inventory costs of standard package inclusions used in realized bookings. ${
+                                current.uncostedSales > 0
+                                    ? `${peso(current.uncostedSales)} of realized sales still has no resolvable inventory cost, so the dashboard does not fabricate a cost value.`
+                                    : `${peso(current.cost)} is the total recorded product cost supporting this month's realized sales.`
                             }`}
                             icon={<Wallet size={25} />}
-                            iconBg="bg-[#E6F7EE]"
-                            iconColor="text-[#159455]"
-                        />
-                        <KpiCard
-                            title="POS Profit Margin"
-                            value={`${marginNow.toFixed(1)}%`}
-                            delta={deltaMarginPP}
-                            deltaSuffix=" pp"
-                            info={`Current ${currentMonthLabel} margin: ${marginNow.toFixed(1)}% = ${peso(current.profit)} POS Gross Profit ÷ ${peso(current.posSales)} POS Sales × 100. This measures POS profitability only; bookings are excluded. ${
-                                deltaMarginPP === null
-                                    ? "No prior-month comparison is available yet."
-                                    : `${Math.abs(deltaMarginPP).toFixed(1)} percentage points ${deltaMarginPP >= 0 ? "higher" : "lower"} than last month.`
-                            }`}
-                            icon={<Percent size={25} />}
                             iconBg="bg-[#FFF0E5]"
                             iconColor="text-[#E66B20]"
+                        />
+                        <KpiCard
+                            title="Gross Profit"
+                            value={peso(current.profit ?? 0)}
+                            delta={deltaProfit}
+                            info={`Gross Profit = Total Sales − Cost of Sales. Current cost coverage is ${current.costCoveragePct.toFixed(1)}%. ${
+                                `This month: ${peso(current.sales)} Total Sales − ${peso(current.cost)} Cost of Sales = ${peso(current.profit ?? 0)} Gross Profit.`
+                            } Operating expenses are not deducted from Gross Profit.`}
+                            icon={<TrendingUp size={25} />}
+                            iconBg="bg-[#E6F7EE]"
+                            iconColor="text-[#159455]"
                         />
                         <KpiCard
                             title="Forecasted Sales"
@@ -1070,9 +1674,9 @@ export default function OwnerDashboard() {
                                         <BarChart3 size={18} />
                                     </span>
                                     <div>
-                                        <h3 className="text-[15px] font-bold text-[#1A1220]">Sales &amp; POS Profit Trend</h3>
+                                        <h3 className="text-[15px] font-bold text-[#1A1220]">Sales, Cost &amp; Gross Profit Trend</h3>
                                         <p className="text-[11px] text-[#9A8DA8]">
-                                            Monthly total sales and POS gross profit across all branches
+                                            Monthly realized sales, inventory cost of sales, and gross profit across all branches
                                         </p>
                                     </div>
                                 </div>
@@ -1097,8 +1701,12 @@ export default function OwnerDashboard() {
                                     Total Sales
                                 </span>
                                 <span className="inline-flex items-center gap-1.5">
+                                    <span className="h-2.5 w-2.5 rounded-full bg-[#E66B20]" />
+                                    Cost of Sales
+                                </span>
+                                <span className="inline-flex items-center gap-1.5">
                                     <span className="h-2.5 w-2.5 rounded-full bg-[#159455]" />
-                                    POS Gross Profit
+                                    Gross Profit
                                 </span>
                             </div>
                         </div>
@@ -1151,6 +1759,7 @@ function KpiCard({
                      comparisonText = "vs last month",
                      info,
                      infoAlign = "center",
+                     inverseDelta = false,
                      icon,
                      iconBg,
                      iconColor,
@@ -1162,11 +1771,12 @@ function KpiCard({
     comparisonText?: string;
     info?: string;
     infoAlign?: "center" | "right";
+    inverseDelta?: boolean;
     icon: React.ReactNode;
     iconBg: string;
     iconColor: string;
 }) {
-    const isUp = delta !== null && delta >= 0;
+    const isUp = delta !== null && (inverseDelta ? delta <= 0 : delta >= 0);
     const tooltipPositionClass =
         infoAlign === "right"
             ? "right-0"
@@ -1238,7 +1848,7 @@ function KpiCard({
     );
 }
 
-function SalesTrendChart({ data }: { data: { label: string; sales: number; profit: number }[] }) {
+function SalesTrendChart({ data }: { data: { label: string; sales: number; cost: number; profit: number }[] }) {
     const width = 960;
     const height = 245;
     const margin = { top: 14, right: 16, bottom: 32, left: 58 };
@@ -1253,7 +1863,7 @@ function SalesTrendChart({ data }: { data: { label: string; sales: number; profi
         );
     }
 
-    const maxRaw = Math.max(1, ...data.map((d) => d.sales), ...data.map((d) => d.profit));
+    const maxRaw = Math.max(1, ...data.map((d) => d.sales), ...data.map((d) => d.cost), ...data.map((d) => d.profit));
     const step = niceStep(maxRaw / 5);
     const axisMax = step * 5;
     const ticks = [0, 1, 2, 3, 4, 5].map((i) => step * i);
@@ -1263,6 +1873,7 @@ function SalesTrendChart({ data }: { data: { label: string; sales: number; profi
     const yFor = (value: number) => margin.top + innerH - (axisMax > 0 ? (value / axisMax) * innerH : 0);
 
     const salesPoints = data.map((d, index) => ({ x: xFor(index), y: yFor(d.sales) }));
+    const costPoints = data.map((d, index) => ({ x: xFor(index), y: yFor(d.cost) }));
     const profitPoints = data.map((d, index) => ({ x: xFor(index), y: yFor(d.profit) }));
 
     const linePath = (points: { x: number; y: number }[]) =>
@@ -1276,7 +1887,7 @@ function SalesTrendChart({ data }: { data: { label: string; sales: number; profi
     };
 
     return (
-        <svg viewBox={`0 0 ${width} ${height}`} className="w-full" role="img" aria-label="Total sales and POS gross profit trend chart">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full" role="img" aria-label="Total sales, cost of sales, and gross profit trend chart">
             <defs>
                 <linearGradient id="ownerSalesFill" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="#6D35D4" stopOpacity="0.16" />
@@ -1315,6 +1926,15 @@ function SalesTrendChart({ data }: { data: { label: string; sales: number; profi
                 strokeLinejoin="round"
             />
             <path
+                d={linePath(costPoints)}
+                fill="none"
+                stroke="#E66B20"
+                strokeWidth={2.2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeDasharray="5 4"
+            />
+            <path
                 d={linePath(profitPoints)}
                 fill="none"
                 stroke="#159455"
@@ -1325,6 +1945,9 @@ function SalesTrendChart({ data }: { data: { label: string; sales: number; profi
 
             {salesPoints.map((p, i) => (
                 <circle key={`sales-${i}`} cx={p.x} cy={p.y} r={3} fill="#6D35D4" />
+            ))}
+            {costPoints.map((p, i) => (
+                <circle key={`cost-${i}`} cx={p.x} cy={p.y} r={2.5} fill="#E66B20" />
             ))}
             {profitPoints.map((p, i) => (
                 <circle key={`profit-${i}`} cx={p.x} cy={p.y} r={3} fill="#159455" />

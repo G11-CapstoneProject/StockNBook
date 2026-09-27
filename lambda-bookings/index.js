@@ -3,184 +3,6 @@
 const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
-/*
- * Shared subscription entitlement checks.
- *
- * Subscription management belongs to the store owner, but plan limits are
- * enforced at the API boundary so managers/staff (and public booking pages)
- * cannot bypass the active store plan.
- */
-
-function normalizeLimit(value) {
-    if (value === null || value === undefined || Number(value) === 0) {
-        return null;
-    }
-
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-}
-
-async function getActivePlan(connection, storeId) {
-    const [rows] = await connection.execute(
-        `SELECT
-             p.id,
-             p.name,
-             p.max_inventory,
-             p.max_bookings,
-             p.max_staff,
-             p.max_branches
-         FROM subscriptions s
-                  INNER JOIN plans p ON p.id = s.plan_id
-         WHERE s.store_id = ?
-           AND LOWER(s.status) = 'active'
-           AND (s.expires_at IS NULL OR s.expires_at >= CURDATE())
-         ORDER BY s.id DESC
-             LIMIT 1`,
-        [Number(storeId)]
-    );
-
-    if (rows.length > 0) {
-        const plan = rows[0];
-        return {
-            id: Number(plan.id),
-            name: String(plan.name || "Current plan"),
-            max_inventory: normalizeLimit(plan.max_inventory),
-            max_bookings: normalizeLimit(plan.max_bookings),
-            max_staff: normalizeLimit(plan.max_staff),
-            max_branches: normalizeLimit(plan.max_branches),
-        };
-    }
-
-    // New stores begin on Starter before a paid subscription record exists.
-    const [starterRows] = await connection.execute(
-        `SELECT
-             id,
-             name,
-             max_inventory,
-             max_bookings,
-             max_staff,
-             max_branches
-         FROM plans
-         WHERE is_archived = 0
-           AND (LOWER(name) = 'starter' OR price = 0)
-         ORDER BY price ASC, id ASC
-             LIMIT 1`
-    );
-
-    if (starterRows.length === 0) {
-        return null;
-    }
-
-    const plan = starterRows[0];
-    return {
-        id: Number(plan.id),
-        name: String(plan.name || "Starter"),
-        max_inventory: normalizeLimit(plan.max_inventory),
-        max_bookings: normalizeLimit(plan.max_bookings),
-        max_staff: normalizeLimit(plan.max_staff),
-        max_branches: normalizeLimit(plan.max_branches),
-    };
-}
-
-async function getStoreUsage(connection, storeId) {
-    const [inventoryRows] = await connection.execute(
-        `SELECT COUNT(*) AS total
-         FROM products
-         WHERE store_id = ?
-           AND deleted_at IS NULL`,
-        [Number(storeId)]
-    );
-
-    const [bookingRows] = await connection.execute(
-        "SELECT COUNT(*) AS total FROM bookings WHERE store_id = ?",
-        [Number(storeId)]
-    );
-
-    const [staffRows] = await connection.execute(
-        `SELECT COUNT(*) AS total
-         FROM staff
-         WHERE store_id = ?
-           AND status IN ('active', 'pending')`,
-        [Number(storeId)]
-    );
-
-    const [branchRows] = await connection.execute(
-        `SELECT COUNT(*) AS total
-         FROM branches
-         WHERE store_id = ?
-           AND COALESCE(status, 'active') <> 'deleted'`,
-        [Number(storeId)]
-    );
-
-    return {
-        inventory: Number(inventoryRows[0]?.total || 0),
-        bookings: Number(bookingRows[0]?.total || 0),
-        staff: Number(staffRows[0]?.total || 0),
-        branches: Number(branchRows[0]?.total || 0),
-    };
-}
-
-function makeLimitError(resource, plan, current, limit, increment = 1, role = "") {
-    const labels = {
-        inventory: "inventory items",
-        bookings: "bookings",
-        staff: "staff accounts",
-        branches: "branches",
-    };
-
-    const label = labels[resource] || resource;
-    const isOwner = role === "owner";
-    const ownerAction = isOwner
-        ? "Upgrade your plan to add more."
-        : "Contact your account owner to upgrade.";
-
-    const error = new Error(
-        `Plan limit reached: your ${plan?.name || "current"} plan allows up to ${limit} ${label}. ${ownerAction}`
-    );
-    error.statusCode = 409;
-    error.code = `${String(resource).toUpperCase()}_LIMIT_REACHED`;
-    error.plan_name = plan?.name || "Current plan";
-    error.resource = resource;
-    error.current = current;
-    error.limit = limit;
-    error.requested = current + increment;
-    return error;
-}
-
-async function assertPlanLimit(
-    connection,
-    storeId,
-    resource,
-    increment = 1,
-    role = ""
-) {
-    const plan = await getActivePlan(connection, storeId);
-
-    if (!plan) {
-        const error = new Error("No active subscription plan is configured for this store.");
-        error.statusCode = 500;
-        error.code = "PLAN_NOT_CONFIGURED";
-        throw error;
-    }
-
-    const usage = await getStoreUsage(connection, storeId);
-    const current = Number(usage[resource] || 0);
-    const limit = plan[`max_${resource}`];
-
-    if (limit !== null && current + Number(increment) > limit) {
-        throw makeLimitError(resource, plan, current, limit, Number(increment), role);
-    }
-
-    return { plan, usage, current, limit };
-}
-
-module.exports = {
-    getActivePlan,
-    getStoreUsage,
-    assertPlanLimit,
-};
-
-
 const JWT_SECRET = "stocknbook-secret-key";
 
 const dbConfig = {
@@ -1238,7 +1060,7 @@ function bookingPageSelectFields() {
     `;
 }
 
-module.exports.handler = async (event) => {
+exports.handler = async (event) => {
     const method = event.httpMethod || event.requestContext?.http?.method;
 
     if (method === "OPTIONS") {
@@ -1370,16 +1192,6 @@ module.exports.handler = async (event) => {
             const amountPaid = 0;
             const balance = isCustom ? 0 : packagePrice;
             const paymentStatus = "Unpaid";
-
-            // Booking limits apply to public booking creation too, so the
-            // customer-facing page cannot bypass the store owner's plan.
-            await assertPlanLimit(
-                connection,
-                targetStoreId,
-                "bookings",
-                1,
-                ""
-            );
 
             const [result] = await connection.execute(
                 `
@@ -1673,6 +1485,105 @@ module.exports.handler = async (event) => {
             const [rows] = await connection.execute(query, params);
 
             return response(200, { bookings: rows });
+        }
+
+        // ── PROTECTED: get_booking_costs ──────────────────────────────────────
+        // Returns item-level inventory cost for owner financial KPIs. The
+        // project has had two booking_items schemas over its development
+        // history, so the quantity/cost columns are detected at runtime.
+        // This keeps the dashboard compatible with both the seeded local
+        // database and the current booking workflow.
+        if (action === "get_booking_costs") {
+            const { branch_id, branchId } = body;
+            const requestedBranchId = branch_id || branchId;
+
+            const [columnRows] = await connection.query(`SHOW COLUMNS FROM booking_items`);
+            const availableColumns = new Set(
+                columnRows.map((row) => String(row.Field || row.field || "").toLowerCase())
+            );
+
+            const quantityColumn = [
+                "used_quantity",
+                "booked_quantity",
+                "quantity",
+                "reserved_quantity",
+            ].find((column) => availableColumns.has(column));
+
+            if (!quantityColumn) {
+                return response(200, { success: true, costs: {} });
+            }
+
+            const hasUnitCost = availableColumns.has("unit_cost");
+            const quantityExpression = `COALESCE(NULLIF(bi.${quantityColumn}, 0), 0)`;
+            const unitCostExpression = hasUnitCost
+                ? `COALESCE(NULLIF(bi.unit_cost, 0), CASE WHEN bi.variant_id IS NOT NULL THEN pv.original_price ELSE p.original_price END, 0)`
+                : `COALESCE(CASE WHEN bi.variant_id IS NOT NULL THEN pv.original_price ELSE p.original_price END, 0)`;
+
+            let query = `
+                SELECT
+                    bi.booking_id AS bookingId,
+                    bi.product_id AS productId,
+                    bi.variant_id AS variantId,
+                    ${quantityExpression} AS quantityUsed,
+                    ${unitCostExpression} AS unitCost
+                FROM booking_items bi
+                INNER JOIN bookings b
+                    ON b.id = bi.booking_id
+                LEFT JOIN products p
+                    ON p.id = bi.product_id
+                   AND p.store_id = b.store_id
+                LEFT JOIN product_variants pv
+                    ON pv.id = bi.variant_id
+                   AND pv.product_id = bi.product_id
+                WHERE b.store_id = ?
+            `;
+
+            const params = [store_id];
+
+            if (requestedBranchId) {
+                query += ` AND b.branch_id = ?`;
+                params.push(Number(requestedBranchId));
+            }
+
+            query += ` ORDER BY bi.booking_id, bi.id`;
+
+            const [rows] = await connection.execute(query, params);
+            const totals = new Map();
+            const invalidBookings = new Set();
+            const rowCounts = new Map();
+
+            for (const row of rows) {
+                const bookingId = String(row.bookingId);
+                const quantity = Number(row.quantityUsed || 0);
+                const unitCost = Number(row.unitCost || 0);
+
+                rowCounts.set(bookingId, (rowCounts.get(bookingId) || 0) + 1);
+
+                if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitCost) || unitCost < 0) {
+                    invalidBookings.add(bookingId);
+                    continue;
+                }
+
+                totals.set(
+                    bookingId,
+                    (totals.get(bookingId) || 0) + quantity * unitCost
+                );
+            }
+
+            const costs = {};
+            for (const [bookingId, total] of totals.entries()) {
+                if (!invalidBookings.has(bookingId) && rowCounts.get(bookingId) > 0) {
+                    costs[bookingId] = Number(total.toFixed(2));
+                }
+            }
+
+            return response(200, {
+                success: true,
+                costs,
+                cost_basis: hasUnitCost
+                    ? "booking_item_unit_cost_with_inventory_fallback"
+                    : "live_inventory_original_price",
+            });
         }
 
         // ── PROTECTED: get_booking_items ───────────────────────────────────────
@@ -2189,13 +2100,8 @@ module.exports.handler = async (event) => {
     } catch (err) {
         console.error("BOOKINGS LAMBDA ERROR:", err);
 
-        return response(Number(err?.statusCode) || 500, {
+        return response(500, {
             error: err.message || "Bookings Lambda failed",
-            ...(err?.code ? { code: err.code } : {}),
-            ...(err?.plan_name ? { plan_name: err.plan_name } : {}),
-            ...(err?.resource ? { resource: err.resource } : {}),
-            ...(err?.current !== undefined ? { current: err.current } : {}),
-            ...(err?.limit !== undefined ? { limit: err.limit } : {}),
         });
     } finally {
         if (connection) {

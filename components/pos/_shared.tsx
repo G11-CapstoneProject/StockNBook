@@ -137,22 +137,46 @@ export type BranchesApiResponse = {
 export type PosOrdersApiResponse = {
     success?: boolean;
     orders?: ApiOrder[];
+    taxType?: string | null;
+    taxRegistration?: string | null;
     error?: string;
 };
 
 export type OrderItem = {
     name: string;
     quantity: number;
+    unitPrice?: number;
+    lineTotal?: number;
+    costPrice?: number;
 };
 
 export type Order = {
     id: string;
+    controlNumber?: string | null;
     customer?: string;
+    customerAddress?: string | null;
+    customerContactNumber?: string | null;
     items: OrderItem[];
     total: number;
     date: string;
     branchId?: number | null;
     branchName?: string | null;
+    paymentMode?: string | null;
+    creditTerm?: string | null;
+    creditDueDate?: string | null;
+    taxType?: string | null;
+    taxRegistration?: string | null;
+    status?: string | null;
+    vatableSales?: number;
+    vatAmount?: number;
+    customerPayment?: number;
+    totalPaid?: number;
+    balance?: number;
+    collectionStatus?: string | null;
+    changeDue?: number;
+    cashierId?: number | null;
+    cashierName?: string | null;
+    cashierRole?: string | null;
 
     // Calculated by the POS backend from the exact order_items rows.
     cost?: number;
@@ -161,9 +185,29 @@ export type Order = {
 
 export type ApiOrder = {
     orderId: string;
+    controlNumber?: string | null;
     customerName?: string;
+    customerAddress?: string | null;
+    customerContactNumber?: string | null;
     item?: string;
     total?: number;
+
+    paymentMode?: string | null;
+    creditTerm?: string | null;
+    creditDueDate?: string | null;
+    taxType?: string | null;
+    taxRegistration?: string | null;
+    status?: string | null;
+    vatableSales?: number | string | null;
+    vatAmount?: number | string | null;
+    customerPayment?: number | string | null;
+    totalPaid?: number | string | null;
+    balance?: number | string | null;
+    collectionStatus?: string | null;
+    changeDue?: number | string | null;
+    cashierId?: number | string | null;
+    cashierName?: string | null;
+    cashierRole?: string | null;
 
     totalCost?: number;
     total_cost?: number;
@@ -178,6 +222,19 @@ export type ApiOrder = {
     branchName?: string | null;
     branch_name?: string | null;
     branch?: string | null;
+};
+
+
+
+export type CreditCollection = {
+    id: number;
+    orderId: string;
+    amount: number;
+    paymentMethod: string;
+    referenceNumber?: string | null;
+    paymentDate: string;
+    receivedByName?: string | null;
+    receivedByRole?: string | null;
 };
 
 export type CartItem = {
@@ -494,7 +551,7 @@ export function POSLayout({
                     <div className="flex items-center justify-between px-6 py-3">
                         <div className="flex flex-wrap items-center gap-3">
                             <h1 className="text-[25px] font-bold text-[#1A1220]">
-                                POS / Sales
+                                {role === "owner" ? "Sales History & Audit" : "POS Register"}
                             </h1>
 
                             <span className="rounded-lg bg-[#EFE8F8] px-3.5 py-1.5 text-sm font-medium text-[#4E2C66]">
@@ -537,6 +594,10 @@ export function OrdersTable({
                                 emptyText = "No orders yet.",
                                 showBranch = false,
                                 getBranchName,
+                                containerClassName = "",
+                                scrollAreaClassName = "",
+                                stickyHeader = false,
+                                allowHorizontalScroll = true,
                             }: {
     title: string;
     subtitle: string;
@@ -544,9 +605,15 @@ export function OrdersTable({
     emptyText?: string;
     showBranch?: boolean;
     getBranchName?: (order: Order) => string;
+    containerClassName?: string;
+    scrollAreaClassName?: string;
+    stickyHeader?: boolean;
+    allowHorizontalScroll?: boolean;
 }) {
     return (
-        <section className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+        <section
+            className={`overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm ${containerClassName}`}
+        >
             <div className="border-b border-[#E6DDF0] bg-white px-3 py-3">
                 <h3 className="text-[16px] font-bold text-[#1A1220]">
                     {title}
@@ -557,7 +624,11 @@ export function OrdersTable({
                 </p>
             </div>
 
-            <div className="w-full overflow-x-auto">
+            <div
+                className={`w-full ${
+                    allowHorizontalScroll ? "overflow-x-auto" : "overflow-x-hidden"
+                } ${scrollAreaClassName}`}
+            >
                 <table
                     className={`w-full table-fixed text-sm ${
                         showBranch ? "min-w-[980px]" : ""
@@ -573,7 +644,7 @@ export function OrdersTable({
                         </colgroup>
                     )}
 
-                    <thead>
+                    <thead className={stickyHeader ? "sticky top-0 z-10 bg-white" : ""}>
                     <tr className="border-b border-[#E6DDF0]">
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Order ID

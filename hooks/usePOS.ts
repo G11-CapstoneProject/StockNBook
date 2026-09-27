@@ -8,6 +8,7 @@ import {
     type CartMap,
     type Category,
     type CategoryApiResponse,
+    type CreditCollection,
     type Order,
     type OrderItem,
     type PosOrdersApiResponse,
@@ -187,6 +188,12 @@ export function usePOS() {
     const [categoryFilter, setCategoryFilter] = useState<string>("All");
     const [search, setSearch] = useState("");
     const [payment, setPayment] = useState<string>("");
+    const [customerName, setCustomerName] = useState<string>("Walk-in");
+    const [customerAddress, setCustomerAddress] = useState<string>("N/A");
+    const [customerContactNumber, setCustomerContactNumber] = useState<string>("");
+    const [paymentMode, setPaymentMode] = useState<"CASH" | "CREDIT">("CASH");
+    const [creditTerm, setCreditTerm] = useState<string>("N/A");
+    const [taxType, setTaxType] = useState<"VAT" | "NON_VAT">("VAT");
 
     const isOwner = role === "owner";
     const isBranchUser = role === "manager" || role === "staff";
@@ -281,6 +288,11 @@ export function usePOS() {
             const categoriesData = await safeJson<CategoryApiResponse>(categoriesRes);
             const ordersData = await safeJson<PosOrdersApiResponse>(ordersRes);
 
+            if (ordersRes.ok) {
+                const backendTaxType = String(ordersData.taxType || "").toUpperCase();
+                setTaxType(backendTaxType === "NON_VAT" ? "NON_VAT" : "VAT");
+            }
+
             if (productsRes.ok && Array.isArray(productsData.products)) {
                 const mapped = productsData.products.map(mapProduct);
 
@@ -315,7 +327,34 @@ export function usePOS() {
 
                     return {
                         id: o.orderId,
+                        controlNumber: o.controlNumber ?? null,
                         customer: o.customerName,
+                        customerAddress: o.customerAddress ?? null,
+                        customerContactNumber: o.customerContactNumber ?? null,
+                        paymentMode: o.paymentMode ?? null,
+                        creditTerm: o.creditTerm ?? null,
+                        creditDueDate: o.creditDueDate ?? null,
+                        taxType: o.taxType ?? null,
+                        vatableSales: Number(o.vatableSales ?? 0),
+                        vatAmount: Number(o.vatAmount ?? 0),
+                        customerPayment: Number(o.customerPayment ?? 0),
+                        totalPaid: Number(o.totalPaid ?? o.customerPayment ?? 0),
+                        balance: Number(
+                            o.balance ??
+                            Math.max(
+                                0,
+                                Number(o.total || 0) - Number(o.totalPaid ?? o.customerPayment ?? 0)
+                            )
+                        ),
+                        collectionStatus: o.collectionStatus ?? null,
+                        changeDue: Number(o.changeDue ?? 0),
+                        cashierId:
+                            o.cashierId == null || o.cashierId === ""
+                                ? null
+                                : Number(o.cashierId),
+                        cashierName: o.cashierName ?? null,
+                        cashierRole: o.cashierRole ?? null,
+                        status: o.status ?? null,
                         items: o.item
                             ? o.item.split(",").map((s: string) => {
                                 const [name, qty] = s.split(" x");
@@ -518,11 +557,16 @@ export function usePOS() {
         });
     }, [branchRawProducts, categoryFilter, search]);
 
-    function resetOrderDraft() {
+    function resetOrderDraft(_nextCustomerName = "Walk-in") {
         setCart({});
         setCategoryFilter("All");
         setSearch("");
         setPayment("");
+        setCustomerName("Walk-in");
+        setCustomerAddress("N/A");
+        setCustomerContactNumber("");
+        setPaymentMode("CASH");
+        setCreditTerm("N/A");
     }
 
     function handleQty(key: string, change: number) {
@@ -647,38 +691,109 @@ export function usePOS() {
     }
 
     const paymentNumber = useMemo(() => {
+        if (paymentMode === "CREDIT" && payment.trim() === "") return 0;
         const val = Number(payment);
         return Number.isFinite(val) ? val : NaN;
-    }, [payment]);
+    }, [payment, paymentMode]);
 
     const change = useMemo(() => {
         if (!Number.isFinite(paymentNumber)) return 0;
         return Math.max(0, paymentNumber - total);
     }, [paymentNumber, total]);
 
-    async function handlePlaceOrder(): Promise<boolean> {
-        if (!validateStockOrAlert()) return false;
+    const vatableSales = useMemo(() => {
+        if (taxType !== "VAT") return 0;
+        return Math.round((total / 1.12) * 100) / 100;
+    }, [taxType, total]);
+
+    const vatAmount = useMemo(() => {
+        if (taxType !== "VAT") return 0;
+        return Math.round((vatableSales * 0.12) * 100) / 100;
+    }, [taxType, vatableSales]);
+
+    const creditDueDate = useMemo(() => {
+        if (paymentMode !== "CREDIT") return "";
+        const days = String(creditTerm || "").startsWith("30") ? 30 : 15;
+        const due = new Date();
+        due.setHours(0, 0, 0, 0);
+        due.setDate(due.getDate() + days);
+        return due.toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+        });
+    }, [paymentMode, creditTerm]);
+
+    const canPlaceOrder = useMemo(() => {
+        if (cartItems.length === 0) return false;
+        if (!customerName.trim()) return false;
+        if (!Number.isFinite(paymentNumber)) return false;
+
+        if (paymentMode === "CASH") {
+            return paymentNumber >= total;
+        }
+
+        if (!customerContactNumber.trim()) return false;
+        if (!creditTerm || creditTerm === "N/A") return false;
+        return paymentNumber >= 0 && paymentNumber <= total;
+    }, [
+        cartItems.length,
+        customerName,
+        customerContactNumber,
+        paymentNumber,
+        paymentMode,
+        creditTerm,
+        total,
+    ]);
+
+    async function handlePlaceOrder(): Promise<Order | null> {
+        if (!validateStockOrAlert()) return null;
 
         if (cartItems.length === 0) {
             alert("Please add at least 1 item to the order.");
-            return false;
+            return null;
         }
 
         const existingOrders = orders;
 
-        if (!Number.isFinite(paymentNumber)) {
-            alert("Please enter a valid payment amount.");
-            return false;
+        const normalizedCustomerName = customerName.trim();
+        const normalizedCustomerAddress = "N/A";
+
+        if (!normalizedCustomerName) {
+            alert("Customer name is required.");
+            return null;
         }
 
-        if (paymentNumber < total) {
-            alert("Payment must be equal or greater than the total.");
-            return false;
+        if (paymentMode === "CREDIT" && !customerContactNumber.trim()) {
+            alert("Customer contact number is required for credit sales.");
+            return null;
+        }
+
+        if (paymentMode === "CREDIT" && (!creditTerm || creditTerm === "N/A")) {
+            alert("Please select a credit term for credit sales.");
+            return null;
+        }
+
+        if (!Number.isFinite(paymentNumber)) {
+            alert("Please enter a valid payment amount.");
+            return null;
+        }
+
+        if (paymentMode === "CASH" && paymentNumber < total) {
+            alert("Payment must be equal or greater than the total for a cash sale.");
+            return null;
+        }
+
+        if (paymentMode === "CREDIT" && paymentNumber > total) {
+            alert("Customer payment cannot exceed the order total for a credit sale.");
+            return null;
         }
 
         const items: OrderItem[] = cartItems.map((i) => ({
             name: i.name,
             quantity: i.qty,
+            unitPrice: i.price,
+            lineTotal: i.lineTotal,
         }));
 
         const now = new Date();
@@ -692,16 +807,37 @@ export function usePOS() {
 
         const todaysCount = existingOrders.filter((o) => o.date === todayKey).length;
 
-        const customerName = `Customer ${todaysCount + 1}`;
+        const finalCustomerName = "Walk-in";
         const orderId = createPosTransactionId(existingOrders, now);
         const dbDate = `${year}-${month}-${day}`;
 
         const newOrder: Order = {
             id: orderId,
-            customer: customerName,
+            customer: finalCustomerName,
+            customerAddress: normalizedCustomerAddress,
+            customerContactNumber:
+                paymentMode === "CREDIT" ? customerContactNumber.trim() : null,
             items,
             total,
             date: todayKey,
+            paymentMode,
+            creditTerm: paymentMode === "CREDIT" ? creditTerm : "N/A",
+            taxType,
+            vatableSales,
+            vatAmount,
+            customerPayment: paymentNumber,
+            changeDue: paymentMode === "CASH" ? change : 0,
+            creditDueDate: paymentMode === "CREDIT" ? creditDueDate : null,
+            totalPaid: paymentNumber,
+            balance: paymentMode === "CREDIT" ? Math.max(0, total - paymentNumber) : 0,
+            collectionStatus:
+                paymentMode === "CREDIT"
+                    ? paymentNumber >= total
+                        ? "PAID"
+                        : paymentNumber > 0
+                            ? "PARTIAL"
+                            : "PENDING"
+                    : "PAID",
             branchId: activeBranchId
                 ? Number(activeBranchId)
                 : null,
@@ -713,7 +849,7 @@ export function usePOS() {
 
         if (!token) {
             alert("No token found. Please log in again.");
-            return false;
+            return null;
         }
 
         const itemText =
@@ -732,6 +868,13 @@ export function usePOS() {
                     action: "create_order",
                     order_id: newOrder.id,
                     customer_name: newOrder.customer,
+                    customer_contact_number:
+                        paymentMode === "CREDIT" ? customerContactNumber.trim() : "",
+                    payment_mode: paymentMode,
+                    credit_term: paymentMode === "CREDIT" ? creditTerm : "N/A",
+                    tax_type: taxType,
+                    customer_payment: Number(paymentNumber.toFixed(2)),
+                    change_due: Number(change.toFixed(2)),
                     item: itemText,
                     total: newOrder.total,
                     order_date: dbDate,
@@ -751,10 +894,35 @@ export function usePOS() {
                 error?: string;
                 order?: {
                     orderId?: string;
+                    controlNumber?: string | null;
                     branchId?: number | string | null;
                     branchName?: string | null;
+                    customerName?: string;
+                    customerAddress?: string | null;
+                    customerContactNumber?: string | null;
+                    paymentMode?: string | null;
+                    creditTerm?: string | null;
+                    creditDueDate?: string | null;
+                    taxType?: string | null;
+                    vatableSales?: number | string | null;
+                    vatAmount?: number | string | null;
+                    customerPayment?: number | string | null;
+                    totalPaid?: number | string | null;
+                    balance?: number | string | null;
+                    collectionStatus?: string | null;
+                    changeDue?: number | string | null;
+                    cashierId?: number | string | null;
+                    cashierName?: string | null;
+                    cashierRole?: string | null;
                     totalCost?: number;
                     profit?: number;
+                    orderItems?: Array<{
+                        name: string;
+                        quantity: number;
+                        unitPrice?: number;
+                        lineTotal?: number;
+                        costPrice?: number;
+                    }>;
                 };
             }>(orderRes);
 
@@ -763,7 +931,7 @@ export function usePOS() {
                     orderData?.error ||
                     "Failed to save order to database."
                 );
-                return false;
+                return null;
             }
 
             /*
@@ -778,6 +946,58 @@ export function usePOS() {
                         orderData?.order?.orderId ||
                         newOrder.id
                     ),
+                controlNumber: orderData?.order?.controlNumber ?? null,
+                customer: orderData?.order?.customerName || newOrder.customer,
+                customerAddress:
+                    orderData?.order?.customerAddress ?? newOrder.customerAddress,
+                customerContactNumber:
+                    orderData?.order?.customerContactNumber ??
+                    newOrder.customerContactNumber ??
+                    null,
+                paymentMode: orderData?.order?.paymentMode || newOrder.paymentMode,
+                creditTerm: orderData?.order?.creditTerm || newOrder.creditTerm,
+                creditDueDate:
+                    orderData?.order?.creditDueDate ?? newOrder.creditDueDate ?? null,
+                taxType: orderData?.order?.taxType || newOrder.taxType,
+                vatableSales: Number(
+                    orderData?.order?.vatableSales ?? newOrder.vatableSales ?? 0
+                ),
+                vatAmount: Number(
+                    orderData?.order?.vatAmount ?? newOrder.vatAmount ?? 0
+                ),
+                customerPayment: Number(
+                    orderData?.order?.customerPayment ?? newOrder.customerPayment ?? 0
+                ),
+                totalPaid: Number(
+                    orderData?.order?.totalPaid ?? newOrder.totalPaid ?? 0
+                ),
+                balance: Number(
+                    orderData?.order?.balance ?? newOrder.balance ?? 0
+                ),
+                collectionStatus:
+                    orderData?.order?.collectionStatus ??
+                    newOrder.collectionStatus ??
+                    null,
+                changeDue: Number(
+                    orderData?.order?.changeDue ?? newOrder.changeDue ?? 0
+                ),
+                cashierId:
+                    orderData?.order?.cashierId == null
+                        ? null
+                        : Number(orderData.order.cashierId),
+                cashierName: orderData?.order?.cashierName ?? null,
+                cashierRole: orderData?.order?.cashierRole ?? null,
+                items:
+                    Array.isArray(orderData?.order?.orderItems) &&
+                    orderData!.order!.orderItems!.length > 0
+                        ? orderData!.order!.orderItems!.map((item) => ({
+                            name: item.name,
+                            quantity: Number(item.quantity || 0),
+                            unitPrice: Number(item.unitPrice || 0),
+                            lineTotal: Number(item.lineTotal || 0),
+                            costPrice: Number(item.costPrice || 0),
+                        }))
+                        : newOrder.items,
                 branchId:
                     orderData?.order?.branchId == null
                         ? newOrder.branchId
@@ -840,11 +1060,135 @@ export function usePOS() {
             );
             setOrders(updatedOrders);
 
-            resetOrderDraft();
-            return true;
+            resetOrderDraft("Walk-in");
+            return persistedOrder;
         } catch (err) {
             console.error(err);
             alert("Failed to place order.");
+            return null;
+        }
+    }
+
+    async function recordCreditPayment(
+        orderId: string,
+        amount: number,
+        paymentMethod: string,
+        referenceNumber = ""
+    ): Promise<boolean> {
+        const token = sessionStorage.getItem("token");
+        if (!token) {
+            alert("No token found. Please log in again.");
+            return false;
+        }
+
+        try {
+            const res = await fetch("/api/pos", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    action: "record_collection",
+                    order_id: orderId,
+                    amount,
+                    payment_method: paymentMethod,
+                    reference_number: referenceNumber,
+                }),
+            });
+
+            const data = await safeJson<{ success?: boolean; error?: string }>(res);
+
+            if (!res.ok || !data.success) {
+                alert(data.error || "Failed to record credit payment.");
+                return false;
+            }
+
+            await loadData();
+            return true;
+        } catch (error) {
+            console.error(error);
+            alert("Failed to record credit payment.");
+            return false;
+        }
+    }
+
+    async function getCollectionHistory(orderId: string): Promise<CreditCollection[]> {
+        const token = sessionStorage.getItem("token");
+        if (!token) return [];
+
+        try {
+            const res = await fetch("/api/pos", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    action: "get_collection_history",
+                    order_id: orderId,
+                }),
+            });
+
+            const data = await safeJson<{
+                collections?: CreditCollection[];
+                error?: string;
+            }>(res);
+
+            if (!res.ok || !Array.isArray(data.collections)) {
+                return [];
+            }
+
+            return data.collections.map((entry) => ({
+                ...entry,
+                id: Number(entry.id),
+                amount: Number(entry.amount || 0),
+            }));
+        } catch (error) {
+            console.warn("Collection history fetch failed:", error);
+            return [];
+        }
+    }
+
+    async function updateTaxRegistration(
+        registration: "VAT_REGISTERED" | "NON_VAT"
+    ): Promise<boolean> {
+        const token = sessionStorage.getItem("token");
+        if (!token) {
+            alert("No token found. Please log in again.");
+            return false;
+        }
+
+        try {
+            const res = await fetch("/api/pos", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    action: "update_tax_registration",
+                    tax_registration: registration,
+                }),
+            });
+
+            const data = await safeJson<{
+                success?: boolean;
+                taxType?: string;
+                error?: string;
+            }>(res);
+
+            if (!res.ok || !data.success) {
+                alert(data.error || "Failed to update tax registration.");
+                return false;
+            }
+
+            setTaxType(String(data.taxType).toUpperCase() === "NON_VAT" ? "NON_VAT" : "VAT");
+            await loadData();
+            return true;
+        } catch (error) {
+            console.error(error);
+            alert("Failed to update tax registration.");
             return false;
         }
     }
@@ -879,8 +1223,11 @@ export function usePOS() {
                 return backendProfit;
             }
 
-            // Compatibility fallback for any cached/older order object that
-            // does not yet contain backend profit.
+            // Branch users must never derive or receive product-cost/profit
+            // information client-side. Owner-only compatibility fallback for
+            // older cached orders is retained below.
+            if (!isOwner) return 0;
+
             return order.items.reduce((itemSum, item) => {
                 const buyableItem = allBuyableItems.find(
                     (p) => p.name === item.name
@@ -997,6 +1344,17 @@ export function usePOS() {
 
         payment,
         setPayment,
+        customerName,
+        setCustomerName,
+        setCustomerAddress,
+        customerContactNumber,
+        setCustomerContactNumber,
+        paymentMode,
+        setPaymentMode,
+        creditTerm,
+        setCreditTerm,
+        taxType,
+        setTaxType,
 
         isOwner,
         activeBranchName,
@@ -1015,7 +1373,14 @@ export function usePOS() {
         cartItems,
 
         change,
+        vatableSales,
+        vatAmount,
+        creditDueDate,
+        canPlaceOrder,
         handlePlaceOrder,
+        recordCreditPayment,
+        getCollectionHistory,
+        updateTaxRegistration,
 
         todayOrders,
 

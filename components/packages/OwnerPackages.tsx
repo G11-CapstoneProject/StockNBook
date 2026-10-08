@@ -7,6 +7,7 @@ import {
     RefreshCw,
     Search,
 } from "lucide-react";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     useCallback,
     useEffect,
@@ -295,26 +296,42 @@ export default function OwnerPackages() {
     );
 
     const loadPackagesForAllBranches = useCallback(
-        async (branchList: Branch[], signal?: AbortSignal) => {
+        async (_branchList: Branch[], signal?: AbortSignal) => {
             setLoadingPackages(true);
             setError("");
 
             try {
-                if (branchList.length === 0) {
-                    setPackages([]);
-                    setLoadedPackageScope("all");
-                    return;
-                }
+                const token = getToken();
+                const savedStoreId =
+                    sessionStorage.getItem("store_id") ||
+                    localStorage.getItem("store_id");
+                const storeId = savedStoreId ? Number(savedStoreId) : null;
 
-                const packageGroups = await Promise.all(
-                    branchList.map((branch) =>
-                        requestPackagesForBranch(branch.id, signal)
-                    )
-                );
+                // Owner get_packages already supports store-wide scope when
+                // branch_id is omitted. Use one request instead of N requests
+                // (one per branch), which scales much better as branches grow.
+                const response = await fetch("/api/packages", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    },
+                    body: JSON.stringify({
+                        action: "get_packages",
+                        ...(storeId ? { store_id: storeId } : {}),
+                    }),
+                    signal,
+                });
+
+                const data = (await response.json()) as PackagesResponse;
+
+                if (!response.ok) {
+                    throw new Error(data.error || "Unable to load plans.");
+                }
 
                 if (signal?.aborted) return;
 
-                setPackages(packageGroups.flat());
+                setPackages(Array.isArray(data.packages) ? data.packages : []);
                 setLoadedPackageScope("all");
             } catch (requestError) {
                 if (signal?.aborted) return;
@@ -331,7 +348,7 @@ export default function OwnerPackages() {
                 }
             }
         },
-        [requestPackagesForBranch]
+        []
     );
 
     useEffect(() => {
@@ -790,16 +807,9 @@ export default function OwnerPackages() {
                             )}
                         </div>
 
-                        {loadingBranches ? (
-                            <EmptyState
-                                title="Loading branches..."
-                                detail="Please wait while branch choices are being loaded."
-                            />
-                        ) : loadingPackages || !hasLoadedSelectedScope ? (
-                            <EmptyState
-                                title="Loading branch packages..."
-                                detail="Please wait while packages are being loaded."
-                            />
+                        {(loadingBranches && branches.length === 0) ||
+                        ((loadingPackages || !hasLoadedSelectedScope) && packages.length === 0) ? (
+                            <ModuleSkeleton variant="packages" />
                         ) : filteredPackages.length === 0 ? (
                             <EmptyState
                                 title="No packages found."

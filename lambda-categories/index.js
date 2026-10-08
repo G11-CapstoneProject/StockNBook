@@ -5,12 +5,24 @@ const fs = require("fs");
 const JWT_SECRET = "stocknbook-secret-key";
 
 const dbConfig = {
-    host: "127.0.0.1",
-    user: "root",
-    password: "BTA5EYVWLfWcebF",
-    database: "stocknbook",
+    host: process.env.DB_HOST || "127.0.0.1",
+    user: process.env.DB_USER || "root",
+    password: process.env.DB_PASSWORD || "BTA5EYVWLfWcebF",
+    database: process.env.DB_NAME || "stocknbook",
+    port: Number(process.env.DB_PORT || 3306),
     ssl: { rejectUnauthorized: false },
 };
+
+// Category reads happen on Inventory/POS startup. Pooling avoids repeating the
+// TCP/TLS/database handshake for each module refresh as the app scales.
+const dbPool = mysql.createPool({
+    ...dbConfig,
+    waitForConnections: true,
+    connectionLimit: Number(process.env.DB_POOL_SIZE || 6),
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+});
 
 function badRequest(headers, message) {
     return {
@@ -124,8 +136,8 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 async function logEmployeeAction(connection, entry) {
     await connection.execute(
         `INSERT INTO employee_actions
-             (store_id, branch_id, employee_id, employee_name, employee_role,
-              module, reference_number, action, reference_id, details)
+         (store_id, branch_id, employee_id, employee_name, employee_role,
+          module, reference_number, action, reference_id, details)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             entry.storeId,
@@ -164,28 +176,38 @@ async function ensureDefaultCategories(connection, storeId) {
         return;
     }
 
-    for (const categoryName of DEFAULT_CATEGORIES) {
-        const [existing] = await connection.execute(
-            `SELECT id
-             FROM categories
-             WHERE store_id = ?
-               AND LOWER(category_name) = LOWER(?)
-                 LIMIT 1`,
-            [parsedStoreId, categoryName]
-        );
+    // The old implementation issued one SELECT per default category on every
+    // Inventory/POS load. Read the existing names once, then insert only the
+    // genuinely missing defaults in a single multi-row statement.
+    const [rows] = await connection.execute(
+        `SELECT category_name
+         FROM categories
+         WHERE store_id = ?`,
+        [parsedStoreId]
+    );
 
-        if (existing.length === 0) {
-            await connection.execute(
-                `INSERT INTO categories (
-                    store_id,
-                    category_name,
-                    status
-                )
-                 VALUES (?, ?, ?)`,
-                [parsedStoreId, categoryName, "active"]
-            );
-        }
-    }
+    const existingNames = new Set(
+        rows.map((row) => String(row.category_name || "").trim().toLowerCase())
+    );
+
+    const missing = DEFAULT_CATEGORIES.filter(
+        (categoryName) => !existingNames.has(categoryName.toLowerCase())
+    );
+
+    if (missing.length === 0) return;
+
+    const placeholders = missing.map(() => "(?, ?, ?)").join(", ");
+    const params = missing.flatMap((categoryName) => [
+        parsedStoreId,
+        categoryName,
+        "active",
+    ]);
+
+    await connection.execute(
+        `INSERT INTO categories (store_id, category_name, status)
+         VALUES ${placeholders}`,
+        params
+    );
 }
 
 async function ensureStoreExists(connection, storeId) {
@@ -199,7 +221,7 @@ async function ensureStoreExists(connection, storeId) {
         `SELECT id
          FROM stores
          WHERE id = ?
-         LIMIT 1`,
+             LIMIT 1`,
         [parsedStoreId]
     );
 
@@ -238,7 +260,7 @@ exports.handler = async (event) => {
     let connection;
 
     try {
-        connection = await mysql.createConnection(dbConfig);
+        connection = await dbPool.getConnection();
 
         console.log("[lambda-categories] action:", action);
 
@@ -634,7 +656,7 @@ exports.handler = async (event) => {
         return serverError(headers, err);
     } finally {
         if (connection) {
-            await connection.end();
+            connection.release();
         }
     }
 };

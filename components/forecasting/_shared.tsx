@@ -1,6 +1,7 @@
 "use client";
 
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     CalendarDays,
     ChevronDown,
@@ -1070,14 +1071,7 @@ export function buildScopedBookingForecast(
 }
 
 export function ForecastLoadingState() {
-    return (
-        <div className="flex min-h-[260px] items-center justify-center rounded-[14px] border border-[#E6DDF0] bg-white p-6 shadow-sm">
-            <div className="flex items-center gap-3 text-sm font-semibold text-[#5F4E75]">
-                <LoaderCircle size={19} className="animate-spin text-[#4E2C66]" />
-                Loading live demand forecast data...
-            </div>
-        </div>
-    );
+    return <ModuleSkeleton variant="forecasting" />;
 }
 
 export function ForecastErrorState({ message }: { message: string }) {

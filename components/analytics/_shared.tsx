@@ -8,6 +8,7 @@ import {
     useState,
     type ReactNode,
 } from "react";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     BarChart3,
     Building2,
@@ -1071,9 +1072,9 @@ function PeriodSelector({
 
 export function AnalyticsLoadingScreen() {
     return (
-        <main className="flex min-h-screen items-center justify-center bg-[#FDFAF4] text-[#1A1220]">
-            <p className="text-sm text-[#7A6E88]">Loading analytics...</p>
-        </main>
+        <div className="bg-[#FDFAF4] px-6 py-4 text-[#1A1220]">
+            <ModuleSkeleton variant="analytics" />
+        </div>
     );
 }
 
@@ -1194,6 +1195,15 @@ export function AnalyticsWorkspace({
 
     useEffect(() => {
         void loadAnalytics();
+    }, [loadAnalytics]);
+
+    useEffect(() => {
+        const handleRefresh = () => {
+            void loadAnalytics();
+        };
+
+        window.addEventListener("stocknbook-refresh-analytics", handleRefresh);
+        return () => window.removeEventListener("stocknbook-refresh-analytics", handleRefresh);
     }, [loadAnalytics]);
 
 
@@ -1325,9 +1335,7 @@ export function AnalyticsWorkspace({
             )}
 
             {loading && !data ? (
-                <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-8 text-center text-sm text-[#7A6A84] shadow-sm">
-                    Loading live analytics records...
-                </div>
+                <ModuleSkeleton variant="analytics" />
             ) : data ? (
                 <>
                     {!data.hasData && (

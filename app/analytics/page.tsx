@@ -76,7 +76,7 @@ export default function AnalyticsPage() {
                 : "Review sales performance, customer demand, and branch insights";
 
     return (
-        <RequirePermission>
+        <RequirePermission permission="analytics">
             <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
                 <RoleSidebar />
 
@@ -106,7 +106,7 @@ export default function AnalyticsPage() {
 
                                 <button
                                     type="button"
-                                    onClick={() => window.location.reload()}
+                                    onClick={() => window.dispatchEvent(new Event("stocknbook-refresh-analytics"))}
                                     className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                                 >
                                     <RefreshCw size={16} />

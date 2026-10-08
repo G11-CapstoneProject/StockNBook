@@ -1,6 +1,7 @@
 "use client";
 
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -324,11 +325,14 @@ export default function SubscriptionPage() {
         }
     }
 
-    if (userLoading || loading) {
+    if (userLoading || (loading && !data)) {
         return (
-            <main className="flex min-h-screen items-center justify-center bg-[#FDFAF4] text-[#1A1220]">
-                <p className="text-sm text-[#7A6E88]">Loading subscription...</p>
-            </main>
+            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
+                <RoleSidebar />
+                <main className="min-w-0 flex-1 overflow-y-auto px-6 py-4">
+                    <ModuleSkeleton variant="subscription" />
+                </main>
+            </div>
         );
     }
 

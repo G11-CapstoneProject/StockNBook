@@ -13,6 +13,41 @@ const dbConfig = {
     ssl: { rejectUnauthorized: false },
 };
 
+// Reuse database connections across warm requests. This avoids paying the
+// TCP/TLS/database handshake cost for every dashboard API call.
+const dbPool = mysql.createPool({
+    ...dbConfig,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+});
+
+
+let bookingItemsCostSchemaCache = null;
+
+async function getBookingItemsCostSchema(connection) {
+    if (bookingItemsCostSchemaCache) {
+        return bookingItemsCostSchemaCache;
+    }
+
+    const [columnRows] = await connection.query(`SHOW COLUMNS FROM booking_items`);
+    const availableColumns = new Set(
+        columnRows.map((row) => String(row.Field || row.field || "").toLowerCase())
+    );
+
+    bookingItemsCostSchemaCache = {
+        quantityColumn: [
+            "used_quantity",
+            "booked_quantity",
+            "quantity",
+            "reserved_quantity",
+        ].find((column) => availableColumns.has(column)) || null,
+        hasUnitCost: availableColumns.has("unit_cost"),
+    };
+
+    return bookingItemsCostSchemaCache;
+}
+
 const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
@@ -45,6 +80,12 @@ function parseBody(event) {
 function toNumber(value, fallback = 0) {
     const num = Number(value ?? fallback);
     return Number.isFinite(num) ? num : fallback;
+}
+
+function normalizeDateFilter(value) {
+    const text = String(value ?? "").trim();
+    if (!text) return null;
+    return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
 }
 
 function safeParseJSON(value) {
@@ -434,8 +475,159 @@ async function insertBookingItems(connection, items) {
     );
 }
 
+
+async function getBookingV2InventoryForUpdate(connection, storeId, branchId, productId, variantId) {
+    const [rows] = await connection.execute(
+        `SELECT id, store_id, branch_id, product_id, variant_id,
+                quantity_on_hand, cost_price
+         FROM branch_inventory
+         WHERE store_id = ?
+           AND branch_id = ?
+           AND product_id = ?
+           AND variant_id <=> ?
+           AND status = 'active'
+         LIMIT 1
+         FOR UPDATE`,
+        [storeId, branchId, productId, variantId || null]
+    );
+    return rows[0] || null;
+}
+
+async function consumeBookingV2Batches(connection, inventoryId, quantity) {
+    let remaining = Math.max(0, Number(quantity || 0));
+    if (remaining <= 0) return;
+
+    const [batches] = await connection.execute(
+        `SELECT id, remaining_quantity
+         FROM inventory_batches
+         WHERE branch_inventory_id = ? AND remaining_quantity > 0
+         ORDER BY (expiration_date IS NULL) ASC,
+                  expiration_date ASC,
+                  received_at ASC,
+                  id ASC
+         FOR UPDATE`,
+        [inventoryId]
+    );
+
+    for (const batch of batches) {
+        if (remaining <= 0) break;
+        const available = Math.max(0, Number(batch.remaining_quantity || 0));
+        const take = Math.min(available, remaining);
+        if (take <= 0) continue;
+
+        await connection.execute(
+            `UPDATE inventory_batches
+             SET remaining_quantity = remaining_quantity - ?,
+                 status = CASE WHEN remaining_quantity - ? <= 0 THEN 'depleted' ELSE status END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [take, take, batch.id]
+        );
+        remaining -= take;
+    }
+
+    if (remaining > 0) {
+        throw new Error(
+            `Database V2 batch balance is short by ${remaining} unit(s) for inventory #${inventoryId}. ` +
+            `Run the V2 verification/backfill before changing booking inventory.`
+        );
+    }
+}
+
+async function addBookingReturnBatch(connection, inventoryRow, quantity, bookingId, bookingItemId) {
+    const qty = Math.max(0, Number(quantity || 0));
+    if (qty <= 0) return;
+
+    const batchCode = `V2-BKG-RETURN-${bookingId}-${bookingItemId}-${inventoryRow.id}`.slice(0, 100);
+    await connection.execute(
+        `INSERT INTO inventory_batches
+         (store_id, branch_id, branch_inventory_id, batch_code,
+          received_quantity, remaining_quantity, unit_cost, received_at,
+          expiration_date, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, 'active')`,
+        [
+            inventoryRow.store_id,
+            inventoryRow.branch_id,
+            inventoryRow.id,
+            batchCode,
+            qty,
+            qty,
+            Number(inventoryRow.cost_price || 0),
+        ]
+    );
+}
+
+async function adjustBookingV2Inventory(connection, options) {
+    const row = await getBookingV2InventoryForUpdate(
+        connection,
+        options.storeId,
+        options.branchId,
+        options.productId,
+        options.variantId
+    );
+
+    if (!row) {
+        throw new Error(
+            `Database V2 inventory row is missing for product ${options.productId}` +
+            `${options.variantId ? ` variant ${options.variantId}` : ""}. Run the V2 backfill/verification.`
+        );
+    }
+
+    const delta = Number(options.quantityDelta || 0);
+    const before = Number(row.quantity_on_hand || 0);
+    const after = before + delta;
+
+    if (after < 0) {
+        throw new Error(
+            `Database V2 stock mismatch for product ${options.productId}. Available: ${before}, needed: ${Math.abs(delta)}.`
+        );
+    }
+
+    if (delta < 0) {
+        await consumeBookingV2Batches(connection, row.id, Math.abs(delta));
+    } else if (delta > 0) {
+        await addBookingReturnBatch(
+            connection,
+            row,
+            delta,
+            options.bookingId,
+            options.bookingItemId
+        );
+    }
+
+    await connection.execute(
+        `UPDATE branch_inventory
+         SET quantity_on_hand = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [after, row.id]
+    );
+
+    const actor = options.actor || { id: null, role: "SYSTEM", name: "StockNBook" };
+    await connection.execute(
+        `INSERT INTO inventory_movements
+         (store_id, branch_id, branch_inventory_id, movement_type,
+          quantity_delta, quantity_before, quantity_after,
+          reference_type, reference_id, actor_id, actor_role, actor_name, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'BOOKING', ?, ?, ?, ?, ?)`,
+        [
+            options.storeId,
+            options.branchId,
+            row.id,
+            options.movementType,
+            delta,
+            before,
+            after,
+            String(options.bookingId),
+            actor.id ?? null,
+            actor.role || null,
+            actor.name || null,
+            options.notes || null,
+        ]
+    );
+}
+
 async function reserveBookingInventory(connection, options) {
-    const { bookingId, storeId, branchId } = options;
+    const { bookingId, storeId, branchId, actor = null } = options;
 
     const params = [Number(bookingId), Number(storeId)];
     let branchFilter = "";
@@ -587,6 +779,19 @@ async function reserveBookingInventory(connection, options) {
             );
         }
 
+        await adjustBookingV2Inventory(connection, {
+            storeId,
+            branchId,
+            productId,
+            variantId,
+            quantityDelta: -qtyToReserve,
+            movementType: "BOOKING_RESERVE",
+            bookingId,
+            bookingItemId,
+            actor,
+            notes: `Reserved ${qtyToReserve} unit(s) for ${itemLabel}.`,
+        });
+
         await connection.execute(
             `
                 UPDATE booking_items
@@ -651,7 +856,7 @@ function getUsedQuantityForItem(item, usedItems) {
 }
 
 async function restoreBookingInventoryOnCancel(connection, options) {
-    const { bookingId, storeId, branchId, usedItems = [] } = options;
+    const { bookingId, storeId, branchId, usedItems = [], actor = null } = options;
 
     const params = [Number(bookingId), Number(storeId)];
     let branchFilter = "";
@@ -753,6 +958,21 @@ async function restoreBookingInventoryOnCancel(connection, options) {
                     updateParams
                 );
             }
+        }
+
+        if (qtyToRestore > 0) {
+            await adjustBookingV2Inventory(connection, {
+                storeId,
+                branchId,
+                productId,
+                variantId,
+                quantityDelta: qtyToRestore,
+                movementType: "BOOKING_RELEASE",
+                bookingId,
+                bookingItemId,
+                actor,
+                notes: `Released ${qtyToRestore} unused reserved unit(s) for ${itemLabel}.`,
+            });
         }
 
         const nextInventoryStatus =
@@ -1073,7 +1293,7 @@ exports.handler = async (event) => {
         const body = parseBody(event);
         const action = body.action;
 
-        connection = await mysql.createConnection(dbConfig);
+        connection = await dbPool.getConnection();
 
         // ── PUBLIC: create_booking ────────────────────────────────────────────
         if (action === "create_booking") {
@@ -1395,6 +1615,18 @@ exports.handler = async (event) => {
         if (action === "get_booking_page_bookings") {
             const { branch_id, branchId } = body;
             const requestedBranchId = branch_id || branchId;
+            const rawDateFrom = body.date_from ?? body.dateFrom;
+            const rawDateTo = body.date_to ?? body.dateTo;
+            const dateFrom = normalizeDateFilter(rawDateFrom);
+            const dateTo = normalizeDateFilter(rawDateTo);
+
+            if ((rawDateFrom && !dateFrom) || (rawDateTo && !dateTo)) {
+                return response(400, { error: "Invalid booking date filter. Use YYYY-MM-DD." });
+            }
+
+            if (dateFrom && dateTo && dateFrom > dateTo) {
+                return response(400, { error: "date_from cannot be later than date_to." });
+            }
 
             let query = `
                 SELECT
@@ -1411,6 +1643,16 @@ exports.handler = async (event) => {
             if (requestedBranchId) {
                 query += ` AND bookings.branch_id = ?`;
                 params.push(Number(requestedBranchId));
+            }
+
+            if (dateFrom) {
+                query += ` AND bookings.event_date >= ?`;
+                params.push(dateFrom);
+            }
+
+            if (dateTo) {
+                query += ` AND bookings.event_date <= ?`;
+                params.push(dateTo);
             }
 
             query += ` ORDER BY bookings.created_at DESC`;
@@ -1496,24 +1738,25 @@ exports.handler = async (event) => {
         if (action === "get_booking_costs") {
             const { branch_id, branchId } = body;
             const requestedBranchId = branch_id || branchId;
+            const rawDateFrom = body.date_from ?? body.dateFrom;
+            const rawDateTo = body.date_to ?? body.dateTo;
+            const dateFrom = normalizeDateFilter(rawDateFrom);
+            const dateTo = normalizeDateFilter(rawDateTo);
 
-            const [columnRows] = await connection.query(`SHOW COLUMNS FROM booking_items`);
-            const availableColumns = new Set(
-                columnRows.map((row) => String(row.Field || row.field || "").toLowerCase())
-            );
+            if ((rawDateFrom && !dateFrom) || (rawDateTo && !dateTo)) {
+                return response(400, { error: "Invalid booking cost date filter. Use YYYY-MM-DD." });
+            }
 
-            const quantityColumn = [
-                "used_quantity",
-                "booked_quantity",
-                "quantity",
-                "reserved_quantity",
-            ].find((column) => availableColumns.has(column));
+            if (dateFrom && dateTo && dateFrom > dateTo) {
+                return response(400, { error: "date_from cannot be later than date_to." });
+            }
+
+            const { quantityColumn, hasUnitCost } =
+                await getBookingItemsCostSchema(connection);
 
             if (!quantityColumn) {
                 return response(200, { success: true, costs: {} });
             }
-
-            const hasUnitCost = availableColumns.has("unit_cost");
             const quantityExpression = `COALESCE(NULLIF(bi.${quantityColumn}, 0), 0)`;
             const unitCostExpression = hasUnitCost
                 ? `COALESCE(NULLIF(bi.unit_cost, 0), CASE WHEN bi.variant_id IS NOT NULL THEN pv.original_price ELSE p.original_price END, 0)`
@@ -1527,14 +1770,14 @@ exports.handler = async (event) => {
                     ${quantityExpression} AS quantityUsed,
                     ${unitCostExpression} AS unitCost
                 FROM booking_items bi
-                INNER JOIN bookings b
-                    ON b.id = bi.booking_id
-                LEFT JOIN products p
-                    ON p.id = bi.product_id
-                   AND p.store_id = b.store_id
-                LEFT JOIN product_variants pv
-                    ON pv.id = bi.variant_id
-                   AND pv.product_id = bi.product_id
+                         INNER JOIN bookings b
+                                    ON b.id = bi.booking_id
+                         LEFT JOIN products p
+                                   ON p.id = bi.product_id
+                                       AND p.store_id = b.store_id
+                         LEFT JOIN product_variants pv
+                                   ON pv.id = bi.variant_id
+                                       AND pv.product_id = bi.product_id
                 WHERE b.store_id = ?
             `;
 
@@ -1543,6 +1786,16 @@ exports.handler = async (event) => {
             if (requestedBranchId) {
                 query += ` AND b.branch_id = ?`;
                 params.push(Number(requestedBranchId));
+            }
+
+            if (dateFrom) {
+                query += ` AND b.event_date >= ?`;
+                params.push(dateFrom);
+            }
+
+            if (dateTo) {
+                query += ` AND b.event_date <= ?`;
+                params.push(dateTo);
             }
 
             query += ` ORDER BY bi.booking_id, bi.id`;
@@ -1708,6 +1961,13 @@ exports.handler = async (event) => {
                 usedQuantity: 0,
             };
 
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decodedToken,
+                tokenRole,
+                store_id
+            );
+
             await connection.beginTransaction();
             try {
                 // 1️⃣ Update booking status
@@ -1726,6 +1986,7 @@ exports.handler = async (event) => {
                         bookingId: Number(booking_id),
                         storeId: rows[0].store_id,
                         branchId: requestedBranchId || rows[0].branch_id || null,
+                        actor: actingEmployee,
                     });
 
                     if (!inventoryResult.ok) {
@@ -1743,6 +2004,7 @@ exports.handler = async (event) => {
                         storeId: rows[0].store_id,
                         branchId: requestedBranchId || rows[0].branch_id || null,
                         usedItems,
+                        actor: actingEmployee,
                     });
 
                     if (!inventoryResult.ok) {
@@ -1769,13 +2031,6 @@ exports.handler = async (event) => {
 
             const bookingRef = buildBookingReference(rows[0], booking_id);
             const customerName = rows[0].name || "customer";
-
-            const actingEmployee = await getActingEmployee(
-                connection,
-                decodedToken,
-                tokenRole,
-                store_id
-            );
 
             await logEmployeeAction(connection, {
                 storeId: store_id,
@@ -2105,7 +2360,7 @@ exports.handler = async (event) => {
         });
     } finally {
         if (connection) {
-            await connection.end();
+            connection.release();
         }
     }
 };

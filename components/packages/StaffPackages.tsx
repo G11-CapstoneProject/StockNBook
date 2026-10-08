@@ -1,6 +1,7 @@
 "use client";
 
 import { RefreshCw, Search } from "lucide-react";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useEffect, useMemo, useState } from "react";
 import {
     getToken,
@@ -175,13 +176,14 @@ export default function StaffPackages() {
         setIsRefreshing(true);
 
         try {
-            if (storeId && canManage) {
-                await fetchProducts(storeId, branchId);
-            }
-
-            if (branchId && canView) {
-                await fetchPackages(branchId);
-            }
+            await Promise.all([
+                storeId && canManage
+                    ? fetchProducts(storeId, branchId)
+                    : Promise.resolve(),
+                branchId && canView
+                    ? fetchPackages(branchId)
+                    : Promise.resolve(),
+            ]);
         } finally {
             setIsRefreshing(false);
         }
@@ -347,11 +349,8 @@ export default function StaffPackages() {
                                 title="No package access."
                                 detail="Please contact your manager to update your staff package access."
                             />
-                        ) : loading ? (
-                            <EmptyState
-                                title="Loading packages..."
-                                detail="Please wait while packages are being loaded."
-                            />
+                        ) : loading && packages.length === 0 ? (
+                            <ModuleSkeleton variant="packages" />
                         ) : filteredPackages.length === 0 ? (
                             <EmptyState
                                 title={

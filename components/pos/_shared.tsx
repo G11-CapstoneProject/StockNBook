@@ -139,6 +139,20 @@ export type PosOrdersApiResponse = {
     orders?: ApiOrder[];
     taxType?: string | null;
     taxRegistration?: string | null;
+    pagination?: {
+        page: number;
+        pageSize: number;
+        total: number;
+        totalPages: number;
+        hasPrevious: boolean;
+        hasMore: boolean;
+    } | null;
+    summary?: {
+        transactions: number;
+        sales: number;
+        cost: number;
+        profit: number;
+    } | null;
     error?: string;
 };
 
@@ -235,6 +249,23 @@ export type CreditCollection = {
     paymentDate: string;
     receivedByName?: string | null;
     receivedByRole?: string | null;
+};
+
+export type CreditCheckStatus =
+    | "UNVERIFIED"
+    | "NEW"
+    | "CLEARED"
+    | "OUTSTANDING"
+    | "OVERDUE";
+
+export type CreditCheckResult = {
+    status: CreditCheckStatus;
+    restricted: boolean;
+    matchedOrders: number;
+    openOrders: number;
+    outstandingBalance: number;
+    overdueBalance: number;
+    oldestDueDate?: string | null;
 };
 
 export type CartItem = {
@@ -598,6 +629,7 @@ export function OrdersTable({
                                 scrollAreaClassName = "",
                                 stickyHeader = false,
                                 allowHorizontalScroll = true,
+                                renderActions,
                             }: {
     title: string;
     subtitle: string;
@@ -609,6 +641,7 @@ export function OrdersTable({
     scrollAreaClassName?: string;
     stickyHeader?: boolean;
     allowHorizontalScroll?: boolean;
+    renderActions?: (order: Order) => ReactNode;
 }) {
     return (
         <section
@@ -667,6 +700,12 @@ export function OrdersTable({
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Date
                         </th>
+
+                        {renderActions && (
+                            <th className="px-4 py-3 text-center text-xs font-semibold text-[#806A8C]">
+                                Actions
+                            </th>
+                        )}
                     </tr>
                     </thead>
 
@@ -674,7 +713,7 @@ export function OrdersTable({
                     {orders.length === 0 ? (
                         <tr>
                             <td
-                                colSpan={showBranch ? 5 : 4}
+                                colSpan={(showBranch ? 5 : 4) + (renderActions ? 1 : 0)}
                                 className="px-4 py-10 text-center text-sm text-[#9B8AAA]"
                             >
                                 {emptyText}
@@ -723,6 +762,12 @@ export function OrdersTable({
                                 <td className="truncate px-4 py-3 text-sm text-[#7A6A84]">
                                     {order.date}
                                 </td>
+
+                                {renderActions && (
+                                    <td className="px-4 py-3 text-center">
+                                        {renderActions(order)}
+                                    </td>
+                                )}
                             </tr>
                         ))
                     )}

@@ -1,6 +1,8 @@
 "use client";
 
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
+import RequirePermission from "@/components/permissions/RequirePermission";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     CheckCircle2,
     ChevronDown,
@@ -537,369 +539,228 @@ export default function ManagerStaffManagementPage() {
     };
 
     return (
-        <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
-            <RoleSidebar />
+        <RequirePermission permission="staff_management">
+            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
+                <RoleSidebar />
 
-            <main className="min-w-0 flex-1 overflow-y-auto">
-                <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
-                    <div className="flex min-h-[86px] flex-wrap items-center justify-between gap-4 px-6 py-3.5">
-                        <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-3">
-                                <h1 className="text-[26px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                                    Staff Management
-                                </h1>
+                <main className="min-w-0 flex-1 overflow-y-auto">
+                    <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
+                        <div className="flex min-h-[86px] flex-wrap items-center justify-between gap-4 px-6 py-3.5">
+                            <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-3">
+                                    <h1 className="text-[26px] font-bold tracking-[-0.02em] text-[#1A1220]">
+                                        Staff Management
+                                    </h1>
+                                </div>
+                                <p className="mt-1 text-[12px] text-[#7A6A84]">
+                                    Manage staff members and their access for your branch.
+                                </p>
                             </div>
-                            <p className="mt-1 text-[12px] text-[#7A6A84]">
-                                Manage staff members and their access for your branch.
-                            </p>
-                        </div>
 
-                        <div className="flex items-center gap-2.5">
+                            <div className="flex items-center gap-2.5">
                             <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
                                 {currentDateTime ? formatCurrentDateTime(currentDateTime) : "Loading date..."}
                             </span>
 
-                            <button
-                                type="button"
-                                onClick={() => void loadStaff()}
-                                disabled={pageLoading}
-                                aria-label="Refresh staff"
-                                className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                                <RefreshCw size={16} className={pageLoading ? "animate-spin" : ""} />
-                                Refresh
-                            </button>
-                        </div>
-                    </div>
-                </header>
-
-                <section className="space-y-4 px-6 py-5">
-                    <div className="grid gap-4 md:grid-cols-3">
-                        <SummaryCard
-                            icon={<UsersRound size={25} strokeWidth={2} />}
-                            title="Total Staff"
-                            value={staffSummary.total}
-                            subtitle="Across your branch"
-                            tone="purple"
-                        />
-                        <SummaryCard
-                            icon={<CheckCircle2 size={25} strokeWidth={2} />}
-                            title="Active Staff"
-                            value={staffSummary.active}
-                            subtitle="Currently active"
-                            tone="green"
-                        />
-                        <SummaryCard
-                            icon={<UserX size={25} strokeWidth={2} />}
-                            title="Inactive Staff"
-                            value={staffSummary.inactive}
-                            subtitle="Currently inactive"
-                            tone="red"
-                        />
-                    </div>
-
-                    <div className="flex flex-col gap-3 lg:flex-row">
-                        <div className="relative min-w-0 flex-1">
-                            <Search
-                                size={18}
-                                className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                            />
-
-                            <input
-                                value={staffSearch}
-                                onChange={(event) =>
-                                    setStaffSearch(event.target.value)
-                                }
-                                placeholder="Search staff name, email, branch, or role..."
-                                className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                            />
-
-                            {staffSearch && (
                                 <button
                                     type="button"
-                                    onClick={() => setStaffSearch("")}
-                                    aria-label="Clear staff search"
-                                    className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
+                                    onClick={() => void loadStaff()}
+                                    disabled={pageLoading}
+                                    aria-label="Refresh staff"
+                                    className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
                                 >
-                                    <X size={15} />
+                                    <RefreshCw size={16} className={pageLoading ? "animate-spin" : ""} />
+                                    Refresh
                                 </button>
-                            )}
+                            </div>
+                        </div>
+                    </header>
+
+                    <section className="space-y-4 px-6 py-5">
+                        <div className="grid gap-4 md:grid-cols-3">
+                            <SummaryCard
+                                icon={<UsersRound size={25} strokeWidth={2} />}
+                                title="Total Staff"
+                                value={staffSummary.total}
+                                subtitle="Across your branch"
+                                tone="purple"
+                            />
+                            <SummaryCard
+                                icon={<CheckCircle2 size={25} strokeWidth={2} />}
+                                title="Active Staff"
+                                value={staffSummary.active}
+                                subtitle="Currently active"
+                                tone="green"
+                            />
+                            <SummaryCard
+                                icon={<UserX size={25} strokeWidth={2} />}
+                                title="Inactive Staff"
+                                value={staffSummary.inactive}
+                                subtitle="Currently inactive"
+                                tone="red"
+                            />
                         </div>
 
-                        <div className="flex shrink-0 gap-2.5">
-                            <div className="relative">
-                                <Filter
-                                    size={16}
-                                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
+                        <div className="flex flex-col gap-3 lg:flex-row">
+                            <div className="relative min-w-0 flex-1">
+                                <Search
+                                    size={18}
+                                    className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
                                 />
 
-                                <select
-                                    value={statusFilter}
+                                <input
+                                    value={staffSearch}
                                     onChange={(event) =>
-                                        setStatusFilter(
-                                            event.target.value as StaffStatusFilter
-                                        )
+                                        setStaffSearch(event.target.value)
                                     }
-                                    aria-label="Filter staff by status"
-                                    className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                                >
-                                    <option value="all">All Status</option>
-                                    <option value="active">Active</option>
-                                    <option value="inactive">Inactive</option>
-                                    <option value="pending">Pending</option>
-                                </select>
-
-                                <ChevronDown
-                                    size={15}
-                                    className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]"
+                                    placeholder="Search staff name, email, branch, or role..."
+                                    className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                 />
+
+                                {staffSearch && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setStaffSearch("")}
+                                        aria-label="Clear staff search"
+                                        className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
+                                    >
+                                        <X size={15} />
+                                    </button>
+                                )}
                             </div>
 
-                            <button
-                                type="button"
-                                onClick={() => setShowAddDialog(true)}
-                                title="Add a staff member"
-                                className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
-                                style={{
-                                    backgroundColor: "#2B174C",
-                                    border: "1px solid #2B174C",
-                                    color: "#FFFFFF",
-                                    boxShadow:
-                                        "0 4px 10px rgba(43, 23, 76, 0.22)",
-                                }}
-                            >
-                                <Plus
-                                    size={18}
-                                    strokeWidth={2.2}
-                                    color="#FFFFFF"
-                                />
-                                <span style={{ color: "#FFFFFF" }}>
+                            <div className="flex shrink-0 gap-2.5">
+                                <div className="relative">
+                                    <Filter
+                                        size={16}
+                                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
+                                    />
+
+                                    <select
+                                        value={statusFilter}
+                                        onChange={(event) =>
+                                            setStatusFilter(
+                                                event.target.value as StaffStatusFilter
+                                            )
+                                        }
+                                        aria-label="Filter staff by status"
+                                        className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                    >
+                                        <option value="all">All Status</option>
+                                        <option value="active">Active</option>
+                                        <option value="inactive">Inactive</option>
+                                        <option value="pending">Pending</option>
+                                    </select>
+
+                                    <ChevronDown
+                                        size={15}
+                                        className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]"
+                                    />
+                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setShowAddDialog(true)}
+                                    title="Add a staff member"
+                                    className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
+                                    style={{
+                                        backgroundColor: "#2B174C",
+                                        border: "1px solid #2B174C",
+                                        color: "#FFFFFF",
+                                        boxShadow:
+                                            "0 4px 10px rgba(43, 23, 76, 0.22)",
+                                    }}
+                                >
+                                    <Plus
+                                        size={18}
+                                        strokeWidth={2.2}
+                                        color="#FFFFFF"
+                                    />
+                                    <span style={{ color: "#FFFFFF" }}>
                                         Add Staff
                                     </span>
-                            </button>
+                                </button>
+                            </div>
                         </div>
-                    </div>
 
-                    {inviteLink && (
-                        <section className="rounded-[18px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
-                            <div className="flex items-center gap-3">
+                        {inviteLink && (
+                            <section className="rounded-[18px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
+                                <div className="flex items-center gap-3">
                                 <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EEF4FF] text-[#3367D6]">
                                     <Mail size={18} />
                                 </span>
-                                <div>
-                                    <h2 className="text-[16px] font-bold text-[#1A1220]">
-                                        Latest invite link
-                                    </h2>
-                                    <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                        Copy this link and use it to activate the staff account.
-                                    </p>
+                                    <div>
+                                        <h2 className="text-[16px] font-bold text-[#1A1220]">
+                                            Latest invite link
+                                        </h2>
+                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                            Copy this link and use it to activate the staff account.
+                                        </p>
+                                    </div>
                                 </div>
-                            </div>
 
-                            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-                                <input
-                                    readOnly
-                                    value={inviteLink}
-                                    className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#5F4E75] outline-none"
-                                />
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        navigator.clipboard.writeText(inviteLink);
-                                        alert("Staff invite link copied!");
-                                    }}
-                                    className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                                >
-                                    <Copy size={15} />
-                                    Copy
-                                </button>
-                            </div>
-                        </section>
-                    )}
+                                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                                    <input
+                                        readOnly
+                                        value={inviteLink}
+                                        className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#5F4E75] outline-none"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            navigator.clipboard.writeText(inviteLink);
+                                            alert("Staff invite link copied!");
+                                        }}
+                                        className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                    >
+                                        <Copy size={15} />
+                                        Copy
+                                    </button>
+                                </div>
+                            </section>
+                        )}
 
-                    <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                            <div className="flex min-w-0 items-center gap-3">
+                        <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                <div className="flex min-w-0 items-center gap-3">
                                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={21} strokeWidth={2} />
                                 </span>
 
-                                <div className="min-w-0">
-                                    <h2 className="text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">
-                                        Staff List
-                                    </h2>
-                                    <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                        Staff members assigned to {branchName}.
-                                    </p>
+                                    <div className="min-w-0">
+                                        <h2 className="text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">
+                                            Staff List
+                                        </h2>
+                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                            Staff members assigned to {branchName}.
+                                        </p>
+                                    </div>
                                 </div>
-                            </div>
 
-                            <span className="inline-flex items-center rounded-full bg-[#F5EEFF] px-3 py-1.5 text-xs font-semibold text-[#6D35D4]">
+                                <span className="inline-flex items-center rounded-full bg-[#F5EEFF] px-3 py-1.5 text-xs font-semibold text-[#6D35D4]">
                                 {filteredStaff.length}{" "}
-                                {filteredStaff.length === 1
-                                    ? "staff member"
-                                    : "staff members"}
+                                    {filteredStaff.length === 1
+                                        ? "staff member"
+                                        : "staff members"}
                             </span>
-                        </div>
-
-                        {pageLoading ? (
-                            <div className="flex min-h-[180px] items-center justify-center px-4 text-sm text-[#7A6A84]">
-                                Loading staff...
                             </div>
-                        ) : filteredStaff.length === 0 ? (
-                            <div className="flex min-h-[180px] flex-col items-center justify-center px-4 text-center">
+
+                            {pageLoading && staffList.length === 0 ? (
+                                <div className="p-4"><ModuleSkeleton variant="team" /></div>
+                            ) : filteredStaff.length === 0 ? (
+                                <div className="flex min-h-[180px] flex-col items-center justify-center px-4 text-center">
                                 <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={22} />
                                 </span>
-                                <p className="mt-3 text-sm font-semibold text-[#1A1220]">
-                                    No staff found.
-                                </p>
-                                <p className="mt-1 text-sm text-[#7A6A84]">
-                                    Try another name, email, role, or status.
-                                </p>
-                            </div>
-                        ) : (
-                            <div className="overflow-x-auto p-4">
-                                <div
-                                    className="overflow-hidden rounded-[14px]"
-                                    style={{
-                                        boxShadow:
-                                            "inset 0 0 0 1px #EAE2F0",
-                                    }}
-                                >
-                                    <table className="w-full min-w-[900px] border-collapse font-sans">
-                                        <thead className="bg-[#FBF8FF]">
-                                        <tr className="border-b border-[#E6DDF0]">
-                                            <TableHeader>Staff</TableHeader>
-                                            <TableHeader>Access</TableHeader>
-                                            <TableHeader>Status</TableHeader>
-                                            <TableHeader align="right">
-                                                Actions
-                                            </TableHeader>
-                                        </tr>
-                                        </thead>
-
-                                        <tbody>
-                                        {filteredStaff.map((staff) => (
-                                            <tr
-                                                key={staff.id}
-                                                className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
-                                            >
-                                                <td className="px-5 py-3">
-                                                    <div className="min-w-0">
-                                                        <p className="truncate text-sm font-bold text-[#1A1220]">
-                                                            {staff.name}
-                                                        </p>
-
-                                                        <p className="truncate text-xs text-[#7A6A84]">
-                                                            {staff.email}
-                                                        </p>
-                                                    </div>
-                                                </td>
-
-                                                <td className="px-5 py-3">
-                                                    <div className="flex flex-wrap gap-1.5">
-                                                        {formatRoleSummary(staff.permissions)
-                                                            .split(" & ")
-                                                            .map((access) => (
-                                                                <span
-                                                                    key={access}
-                                                                    className="rounded-full bg-[#F5EEFF] px-2.5 py-1 text-[11px] font-semibold text-[#6D35D4]"
-                                                                >
-                                                                    {access}
-                                                                </span>
-                                                            ))}
-                                                    </div>
-                                                </td>
-
-                                                <td className="px-5 py-3">
-                                                    <StatusBadge
-                                                        label={
-                                                            staff.status === "Accepted"
-                                                                ? "Active"
-                                                                : "Inactive"
-                                                        }
-                                                        tone={
-                                                            staff.status === "Accepted"
-                                                                ? "green"
-                                                                : "red"
-                                                        }
-                                                    />
-                                                </td>
-
-                                                <td className="px-5 py-3 text-right">
-                                                    <div className="flex justify-end gap-2">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => handleEditStaff(staff)}
-                                                            className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg border border-[#D7C7E8] bg-white px-3 text-xs font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]"
-                                                        >
-                                                            <Pencil size={13} />
-                                                            Edit
-                                                        </button>
-
-                                                        <button
-                                                            type="button"
-                                                            disabled={deletingStaffId === staff.id}
-                                                            onClick={() => void handleDeleteStaff(staff)}
-                                                            className="inline-flex h-[34px] items-center justify-center rounded-lg bg-[#A33E20] px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
-                                                        >
-                                                            {deletingStaffId === staff.id
-                                                                ? "Deleting..."
-                                                                : "Delete"}
-                                                        </button>
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-
-                                <div className="px-1 pt-4 text-xs text-[#7A6A84]">
-                                    Showing {filteredStaff.length} of {staffList.length}{" "}
-                                    {staffList.length === 1
-                                        ? "staff member"
-                                        : "staff members"}
-                                </div>
-                            </div>
-                        )}
-                    </section>
-
-                    <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                            <div className="flex min-w-0 items-center gap-3">
-                                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]">
-                                    <Clock3 size={20} />
-                                </span>
-                                <div className="min-w-0">
-                                    <h2 className="text-[18px] font-bold text-[#1A1220]">
-                                        Pending Invites
-                                    </h2>
-                                    <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                        Invitations waiting to be accepted.
+                                    <p className="mt-3 text-sm font-semibold text-[#1A1220]">
+                                        No staff found.
+                                    </p>
+                                    <p className="mt-1 text-sm text-[#7A6A84]">
+                                        Try another name, email, role, or status.
                                     </p>
                                 </div>
-                            </div>
-
-                            <span className="inline-flex items-center rounded-full bg-[#FFF7E8] px-3 py-1.5 text-xs font-semibold text-[#A56607]">
-                                {filteredPendingInvites.length} pending
-                            </span>
-                        </div>
-
-                        <div className="p-4">
-                            {pageLoading ? (
-                                <EmptyState text="Loading invites..." />
-                            ) : filteredPendingInvites.length === 0 ? (
-                                <EmptyState
-                                    text={
-                                        staffSearch || statusFilter === "pending"
-                                            ? "No pending invite matched your filter."
-                                            : "No pending invites yet."
-                                    }
-                                />
                             ) : (
-                                <div className="overflow-x-auto">
+                                <div className="overflow-x-auto p-4">
                                     <div
                                         className="overflow-hidden rounded-[14px]"
                                         style={{
@@ -907,325 +768,466 @@ export default function ManagerStaffManagementPage() {
                                                 "inset 0 0 0 1px #EAE2F0",
                                         }}
                                     >
-                                        <table className="w-full min-w-[820px] border-collapse font-sans">
+                                        <table className="w-full min-w-[900px] border-collapse font-sans">
                                             <thead className="bg-[#FBF8FF]">
                                             <tr className="border-b border-[#E6DDF0]">
-                                                <TableHeader>Email</TableHeader>
-                                                <TableHeader>Invitation</TableHeader>
+                                                <TableHeader>Staff</TableHeader>
                                                 <TableHeader>Access</TableHeader>
+                                                <TableHeader>Status</TableHeader>
                                                 <TableHeader align="right">
                                                     Actions
                                                 </TableHeader>
                                             </tr>
                                             </thead>
+
                                             <tbody>
-                                            {filteredPendingInvites.map(
-                                                (invite) => (
-                                                    <tr
-                                                        key={invite.id}
-                                                        className="border-b border-[#EEE7F2] bg-white last:border-b-0"
-                                                    >
-                                                        <td className="px-5 py-3 text-sm font-semibold text-[#1A1220]">
-                                                            {invite.email}
-                                                        </td>
-                                                        <td className="px-5 py-3 text-xs text-[#7A6A84]">
-                                                            Invited {invite.invitedAt}
-                                                            <br />
-                                                            Expires {invite.expiresAt}
-                                                        </td>
-                                                        <td className="max-w-[420px] px-5 py-3 text-xs text-[#806A8C]">
-                                                            <p className="truncate">
-                                                                {formatPermissions(
-                                                                    invite.permissions
-                                                                )}
+                                            {filteredStaff.map((staff) => (
+                                                <tr
+                                                    key={staff.id}
+                                                    className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
+                                                >
+                                                    <td className="px-5 py-3">
+                                                        <div className="min-w-0">
+                                                            <p className="truncate text-sm font-bold text-[#1A1220]">
+                                                                {staff.name}
                                                             </p>
-                                                        </td>
-                                                        <td className="px-5 py-3 text-right">
-                                                            <div className="inline-flex items-center gap-2">
-                                                                <StatusBadge
-                                                                    label="Pending"
-                                                                    tone="gold"
-                                                                />
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() =>
-                                                                        handleResendInvite(
-                                                                            invite.email
-                                                                        )
-                                                                    }
-                                                                    className="inline-flex h-[38px] items-center justify-center gap-2 rounded-xl border border-[#D7C7E8] bg-white px-4 text-xs font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
-                                                                >
-                                                                    <Send size={14} />
-                                                                    Resend
-                                                                </button>
-                                                            </div>
-                                                        </td>
-                                                    </tr>
-                                                )
-                                            )}
+
+                                                            <p className="truncate text-xs text-[#7A6A84]">
+                                                                {staff.email}
+                                                            </p>
+                                                        </div>
+                                                    </td>
+
+                                                    <td className="px-5 py-3">
+                                                        <div className="flex flex-wrap gap-1.5">
+                                                            {formatRoleSummary(staff.permissions)
+                                                                .split(" & ")
+                                                                .map((access) => (
+                                                                    <span
+                                                                        key={access}
+                                                                        className="rounded-full bg-[#F5EEFF] px-2.5 py-1 text-[11px] font-semibold text-[#6D35D4]"
+                                                                    >
+                                                                    {access}
+                                                                </span>
+                                                                ))}
+                                                        </div>
+                                                    </td>
+
+                                                    <td className="px-5 py-3">
+                                                        <StatusBadge
+                                                            label={
+                                                                staff.status === "Accepted"
+                                                                    ? "Active"
+                                                                    : "Inactive"
+                                                            }
+                                                            tone={
+                                                                staff.status === "Accepted"
+                                                                    ? "green"
+                                                                    : "red"
+                                                            }
+                                                        />
+                                                    </td>
+
+                                                    <td className="px-5 py-3 text-right">
+                                                        <div className="flex justify-end gap-2">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleEditStaff(staff)}
+                                                                className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg border border-[#D7C7E8] bg-white px-3 text-xs font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]"
+                                                            >
+                                                                <Pencil size={13} />
+                                                                Edit
+                                                            </button>
+
+                                                            <button
+                                                                type="button"
+                                                                disabled={deletingStaffId === staff.id}
+                                                                onClick={() => void handleDeleteStaff(staff)}
+                                                                className="inline-flex h-[34px] items-center justify-center rounded-lg bg-[#A33E20] px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
+                                                            >
+                                                                {deletingStaffId === staff.id
+                                                                    ? "Deleting..."
+                                                                    : "Delete"}
+                                                            </button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
                                             </tbody>
                                         </table>
                                     </div>
+
+                                    <div className="px-1 pt-4 text-xs text-[#7A6A84]">
+                                        Showing {filteredStaff.length} of {staffList.length}{" "}
+                                        {staffList.length === 1
+                                            ? "staff member"
+                                            : "staff members"}
+                                    </div>
                                 </div>
                             )}
-                        </div>
-                    </section>
-                </section>
-            </main>
+                        </section>
 
-            {showAddDialog && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm"
-                    onMouseDown={() => {
-                        if (!loading) {
-                            setShowAddDialog(false);
-                        }
-                    }}
-                >
+                        <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                <div className="flex min-w-0 items-center gap-3">
+                                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]">
+                                    <Clock3 size={20} />
+                                </span>
+                                    <div className="min-w-0">
+                                        <h2 className="text-[18px] font-bold text-[#1A1220]">
+                                            Pending Invites
+                                        </h2>
+                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                            Invitations waiting to be accepted.
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <span className="inline-flex items-center rounded-full bg-[#FFF7E8] px-3 py-1.5 text-xs font-semibold text-[#A56607]">
+                                {filteredPendingInvites.length} pending
+                            </span>
+                            </div>
+
+                            <div className="p-4">
+                                {pageLoading ? (
+                                    <EmptyState text="Loading invites..." />
+                                ) : filteredPendingInvites.length === 0 ? (
+                                    <EmptyState
+                                        text={
+                                            staffSearch || statusFilter === "pending"
+                                                ? "No pending invite matched your filter."
+                                                : "No pending invites yet."
+                                        }
+                                    />
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <div
+                                            className="overflow-hidden rounded-[14px]"
+                                            style={{
+                                                boxShadow:
+                                                    "inset 0 0 0 1px #EAE2F0",
+                                            }}
+                                        >
+                                            <table className="w-full min-w-[820px] border-collapse font-sans">
+                                                <thead className="bg-[#FBF8FF]">
+                                                <tr className="border-b border-[#E6DDF0]">
+                                                    <TableHeader>Email</TableHeader>
+                                                    <TableHeader>Invitation</TableHeader>
+                                                    <TableHeader>Access</TableHeader>
+                                                    <TableHeader align="right">
+                                                        Actions
+                                                    </TableHeader>
+                                                </tr>
+                                                </thead>
+                                                <tbody>
+                                                {filteredPendingInvites.map(
+                                                    (invite) => (
+                                                        <tr
+                                                            key={invite.id}
+                                                            className="border-b border-[#EEE7F2] bg-white last:border-b-0"
+                                                        >
+                                                            <td className="px-5 py-3 text-sm font-semibold text-[#1A1220]">
+                                                                {invite.email}
+                                                            </td>
+                                                            <td className="px-5 py-3 text-xs text-[#7A6A84]">
+                                                                Invited {invite.invitedAt}
+                                                                <br />
+                                                                Expires {invite.expiresAt}
+                                                            </td>
+                                                            <td className="max-w-[420px] px-5 py-3 text-xs text-[#806A8C]">
+                                                                <p className="truncate">
+                                                                    {formatPermissions(
+                                                                        invite.permissions
+                                                                    )}
+                                                                </p>
+                                                            </td>
+                                                            <td className="px-5 py-3 text-right">
+                                                                <div className="inline-flex items-center gap-2">
+                                                                    <StatusBadge
+                                                                        label="Pending"
+                                                                        tone="gold"
+                                                                    />
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() =>
+                                                                            handleResendInvite(
+                                                                                invite.email
+                                                                            )
+                                                                        }
+                                                                        className="inline-flex h-[38px] items-center justify-center gap-2 rounded-xl border border-[#D7C7E8] bg-white px-4 text-xs font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
+                                                                    >
+                                                                        <Send size={14} />
+                                                                        Resend
+                                                                    </button>
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    )
+                                                )}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </section>
+                    </section>
+                </main>
+
+                {showAddDialog && (
                     <div
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="add-staff-dialog-title"
-                        className="max-h-[78vh] w-full max-w-[1120px] overflow-y-auto rounded-[22px] border border-[#E6DDF0] bg-white shadow-2xl"
-                        onMouseDown={(event) =>
-                            event.stopPropagation()
-                        }
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm"
+                        onMouseDown={() => {
+                            if (!loading) {
+                                setShowAddDialog(false);
+                            }
+                        }}
                     >
-                        <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-6 py-5">
-                            <div>
-                                <h2
-                                    id="add-staff-dialog-title"
-                                    className="text-[22px] font-bold tracking-[-0.02em] text-[#1A1220]"
+                        <div
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="add-staff-dialog-title"
+                            className="max-h-[78vh] w-full max-w-[1120px] overflow-y-auto rounded-[22px] border border-[#E6DDF0] bg-white shadow-2xl"
+                            onMouseDown={(event) =>
+                                event.stopPropagation()
+                            }
+                        >
+                            <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-6 py-5">
+                                <div>
+                                    <h2
+                                        id="add-staff-dialog-title"
+                                        className="text-[22px] font-bold tracking-[-0.02em] text-[#1A1220]"
+                                    >
+                                        Add Staff
+                                    </h2>
+                                    <p className="mt-1 text-sm text-[#7A6A84]">
+                                        Send an email invite and choose which features this staff member can access.
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (!loading) {
+                                            setShowAddDialog(false);
+                                        }
+                                    }}
+                                    disabled={loading}
+                                    aria-label="Close Add Staff dialog"
+                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
-                                    Add Staff
-                                </h2>
-                                <p className="mt-1 text-sm text-[#7A6A84]">
-                                    Send an email invite and choose which features this staff member can access.
-                                </p>
+                                    <X size={18} />
+                                </button>
+                            </div>
+
+                            <div className="space-y-5 px-6 py-5">
+                                <div className="rounded-[18px] border border-[#E6DDF0] bg-[#FFFEFC] p-5">
+                                    <div className="flex items-start gap-3">
+                                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#EFE8F8] text-[#4E2C66]">
+                                            <UserPlus size={19} />
+                                        </div>
+                                        <div>
+                                            <h3 className="text-[17px] font-bold text-[#1A1220]">Add a staff member</h3>
+                                            <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
+                                                Access applies to {branchName} only.
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <div className="mt-5 grid gap-4 md:grid-cols-2">
+                                        <FormInput
+                                            label="Full name"
+                                            placeholder="Pedro Ramos"
+                                            value={staffName}
+                                            onChange={setStaffName}
+                                        />
+                                        <FormInput
+                                            label="Email address"
+                                            placeholder="pedro@example.com"
+                                            value={staffEmail}
+                                            onChange={setStaffEmail}
+                                            type="email"
+                                        />
+                                    </div>
+
+                                    <div className="mt-5 border-t border-[#E6DDF0] pt-5">
+                                        <h3 className="text-[16px] font-bold text-[#1A1220]">Feature access</h3>
+                                        <p className="mt-1 text-xs text-[#7A6A84]">Choose which modules this staff member can access.</p>
+
+                                        <div className="mt-4 space-y-3">
+                                            <AccessModeRow
+                                                label="POS / Sales"
+                                                value={permissions.pos_access}
+                                                onChange={(value) => updateFeatureAccess("pos", value as AccessMode)}
+                                            />
+                                            <AccessModeRow
+                                                label="Bookings"
+                                                value={permissions.bookings_access}
+                                                onChange={(value) => updateFeatureAccess("bookings", value as AccessMode)}
+                                            />
+                                            <AccessModeRow
+                                                label="Inventory"
+                                                value={permissions.inventory_access}
+                                                onChange={(value) => updateFeatureAccess("inventory", value as AccessMode)}
+                                            />
+                                            <AccessModeRow
+                                                label="Packages"
+                                                value={permissions.package_access}
+                                                onChange={(value) => updateFeatureAccess("packages", value as AccessMode)}
+                                            />
+                                            <AccessModeRow
+                                                label="Reports"
+                                                value={permissions.reports_access}
+                                                allowView={false}
+                                                onChange={(value) => updateReportsAccess(value as ReportsAccessMode)}
+                                            />
+                                            <AccessModeRow
+                                                label="Analytics"
+                                                value={permissions.analytics_access}
+                                                allowView={false}
+                                                locked={planAccessLoading || !planAccess.hasAnalytics}
+                                                lockText={
+                                                    planAccessLoading
+                                                        ? "Checking plan..."
+                                                        : `Not included in ${planAccess.name} plan`
+                                                }
+                                                onChange={(value) => updateFeatureAccess("analytics", value as AccessMode)}
+                                            />
+                                            <AccessModeRow
+                                                label="Forecasting"
+                                                value={permissions.forecasting_access}
+                                                allowView={false}
+                                                locked={planAccessLoading || !planAccess.hasForecasting}
+                                                lockText={
+                                                    planAccessLoading
+                                                        ? "Checking plan..."
+                                                        : `Not included in ${planAccess.name} plan`
+                                                }
+                                                onChange={(value) => updateFeatureAccess("forecasting", value as AccessMode)}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="sticky bottom-0 z-10 grid gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4 sm:grid-cols-2">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        clearForm();
+                                        setShowAddDialog(false);
+                                    }}
+                                    className="inline-flex h-[44px] items-center justify-center gap-2 rounded-xl border border-[#DCCFE8] bg-white px-5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
+                                >
+                                    <RotateCcw size={16} />
+                                    Cancel
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={handleSendInvite}
+                                    disabled={loading}
+                                    className="inline-flex h-[44px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                    <Send size={16} />
+                                    {loading ? "Sending..." : "Send invite"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {editingStaff && (
+                    <ModalShell onClose={() => !savingEdit && setEditingStaff(null)}>
+                        <div className="shrink-0 flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
+                            <div>
+                                <h2 className="text-[18px] font-bold text-[#1A1220]">Edit staff access</h2>
+                                <p className="mt-1 text-sm text-[#7A6A84]">Update permissions for {editingStaff.name}.</p>
                             </div>
                             <button
                                 type="button"
-                                onClick={() => {
-                                    if (!loading) {
-                                        setShowAddDialog(false);
-                                    }
-                                }}
-                                disabled={loading}
-                                aria-label="Close Add Staff dialog"
-                                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-50"
+                                onClick={() => setEditingStaff(null)}
+                                className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#7A6A84] transition hover:bg-[#F7F1FF]"
                             >
                                 <X size={18} />
                             </button>
                         </div>
 
-                        <div className="space-y-5 px-6 py-5">
-                            <div className="rounded-[18px] border border-[#E6DDF0] bg-[#FFFEFC] p-5">
-                                <div className="flex items-start gap-3">
-                                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#EFE8F8] text-[#4E2C66]">
-                                        <UserPlus size={19} />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-[17px] font-bold text-[#1A1220]">Add a staff member</h3>
-                                        <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                            Access applies to {branchName} only.
-                                        </p>
-                                    </div>
-                                </div>
-
-                                <div className="mt-5 grid gap-4 md:grid-cols-2">
-                                    <FormInput
-                                        label="Full name"
-                                        placeholder="Pedro Ramos"
-                                        value={staffName}
-                                        onChange={setStaffName}
-                                    />
-                                    <FormInput
-                                        label="Email address"
-                                        placeholder="pedro@example.com"
-                                        value={staffEmail}
-                                        onChange={setStaffEmail}
-                                        type="email"
-                                    />
-                                </div>
-
-                                <div className="mt-5 border-t border-[#E6DDF0] pt-5">
-                                    <h3 className="text-[16px] font-bold text-[#1A1220]">Feature access</h3>
-                                    <p className="mt-1 text-xs text-[#7A6A84]">Choose which modules this staff member can access.</p>
-
-                                    <div className="mt-4 space-y-3">
-                                        <AccessModeRow
-                                            label="POS / Sales"
-                                            value={permissions.pos_access}
-                                            onChange={(value) => updateFeatureAccess("pos", value as AccessMode)}
-                                        />
-                                        <AccessModeRow
-                                            label="Bookings"
-                                            value={permissions.bookings_access}
-                                            onChange={(value) => updateFeatureAccess("bookings", value as AccessMode)}
-                                        />
-                                        <AccessModeRow
-                                            label="Inventory"
-                                            value={permissions.inventory_access}
-                                            onChange={(value) => updateFeatureAccess("inventory", value as AccessMode)}
-                                        />
-                                        <AccessModeRow
-                                            label="Packages"
-                                            value={permissions.package_access}
-                                            onChange={(value) => updateFeatureAccess("packages", value as AccessMode)}
-                                        />
-                                        <AccessModeRow
-                                            label="Reports"
-                                            value={permissions.reports_access}
-                                            allowView={false}
-                                            onChange={(value) => updateReportsAccess(value as ReportsAccessMode)}
-                                        />
-                                        <AccessModeRow
-                                            label="Analytics"
-                                            value={permissions.analytics_access}
-                                            allowView={false}
-                                            locked={planAccessLoading || !planAccess.hasAnalytics}
-                                            lockText={
-                                                planAccessLoading
-                                                    ? "Checking plan..."
-                                                    : `Not included in ${planAccess.name} plan`
-                                            }
-                                            onChange={(value) => updateFeatureAccess("analytics", value as AccessMode)}
-                                        />
-                                        <AccessModeRow
-                                            label="Forecasting"
-                                            value={permissions.forecasting_access}
-                                            allowView={false}
-                                            locked={planAccessLoading || !planAccess.hasForecasting}
-                                            lockText={
-                                                planAccessLoading
-                                                    ? "Checking plan..."
-                                                    : `Not included in ${planAccess.name} plan`
-                                            }
-                                            onChange={(value) => updateFeatureAccess("forecasting", value as AccessMode)}
-                                        />
-                                    </div>
-                                </div>
+                        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5">
+                            <div className="space-y-3">
+                                <AccessModeRow
+                                    label="POS / Sales"
+                                    value={editPermissions.pos_access}
+                                    onChange={(value) => updateEditFeatureAccess("pos", value as AccessMode)}
+                                />
+                                <AccessModeRow
+                                    label="Bookings"
+                                    value={editPermissions.bookings_access}
+                                    onChange={(value) => updateEditFeatureAccess("bookings", value as AccessMode)}
+                                />
+                                <AccessModeRow
+                                    label="Inventory"
+                                    value={editPermissions.inventory_access}
+                                    onChange={(value) => updateEditFeatureAccess("inventory", value as AccessMode)}
+                                />
+                                <AccessModeRow
+                                    label="Packages"
+                                    value={editPermissions.package_access}
+                                    onChange={(value) => updateEditFeatureAccess("packages", value as AccessMode)}
+                                />
+                                <AccessModeRow
+                                    label="Reports"
+                                    value={editPermissions.reports_access}
+                                    allowView={false}
+                                    onChange={(value) => updateEditReportsAccess(value as ReportsAccessMode)}
+                                />
+                                <AccessModeRow
+                                    label="Analytics"
+                                    value={editPermissions.analytics_access}
+                                    allowView={false}
+                                    locked={planAccessLoading || !planAccess.hasAnalytics}
+                                    lockText={
+                                        planAccessLoading
+                                            ? "Checking plan..."
+                                            : `Not included in ${planAccess.name} plan`
+                                    }
+                                    onChange={(value) => updateEditFeatureAccess("analytics", value as AccessMode)}
+                                />
+                                <AccessModeRow
+                                    label="Forecasting"
+                                    value={editPermissions.forecasting_access}
+                                    allowView={false}
+                                    locked={planAccessLoading || !planAccess.hasForecasting}
+                                    lockText={
+                                        planAccessLoading
+                                            ? "Checking plan..."
+                                            : `Not included in ${planAccess.name} plan`
+                                    }
+                                    onChange={(value) => updateEditFeatureAccess("forecasting", value as AccessMode)}
+                                />
                             </div>
                         </div>
 
-                        <div className="sticky bottom-0 z-10 grid gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4 sm:grid-cols-2">
+                        <div className="shrink-0 grid gap-3 border-t border-[#E9E0EF] bg-white px-6 py-4 sm:grid-cols-2">
                             <button
                                 type="button"
-                                onClick={() => {
-                                    clearForm();
-                                    setShowAddDialog(false);
-                                }}
-                                className="inline-flex h-[44px] items-center justify-center gap-2 rounded-xl border border-[#DCCFE8] bg-white px-5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
+                                onClick={() => setEditingStaff(null)}
+                                className="inline-flex h-[44px] items-center justify-center rounded-xl border border-[#DCCFE8] bg-white px-5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
                             >
-                                <RotateCcw size={16} />
                                 Cancel
                             </button>
-
                             <button
                                 type="button"
-                                onClick={handleSendInvite}
-                                disabled={loading}
-                                className="inline-flex h-[44px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={handleSaveEdit}
+                                disabled={savingEdit}
+                                className="inline-flex h-[44px] items-center justify-center rounded-xl bg-[#2B174C] px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
                             >
-                                <Send size={16} />
-                                {loading ? "Sending..." : "Send invite"}
+                                {savingEdit ? "Saving..." : "Save changes"}
                             </button>
                         </div>
-                    </div>
-                </div>
-            )}
-
-            {editingStaff && (
-                <ModalShell onClose={() => !savingEdit && setEditingStaff(null)}>
-                    <div className="shrink-0 flex items-start justify-between gap-4 border-b border-[#E9E0EF] px-6 py-5">
-                        <div>
-                            <h2 className="text-[18px] font-bold text-[#1A1220]">Edit staff access</h2>
-                            <p className="mt-1 text-sm text-[#7A6A84]">Update permissions for {editingStaff.name}.</p>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={() => setEditingStaff(null)}
-                            className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#7A6A84] transition hover:bg-[#F7F1FF]"
-                        >
-                            <X size={18} />
-                        </button>
-                    </div>
-
-                    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5">
-                        <div className="space-y-3">
-                            <AccessModeRow
-                                label="POS / Sales"
-                                value={editPermissions.pos_access}
-                                onChange={(value) => updateEditFeatureAccess("pos", value as AccessMode)}
-                            />
-                            <AccessModeRow
-                                label="Bookings"
-                                value={editPermissions.bookings_access}
-                                onChange={(value) => updateEditFeatureAccess("bookings", value as AccessMode)}
-                            />
-                            <AccessModeRow
-                                label="Inventory"
-                                value={editPermissions.inventory_access}
-                                onChange={(value) => updateEditFeatureAccess("inventory", value as AccessMode)}
-                            />
-                            <AccessModeRow
-                                label="Packages"
-                                value={editPermissions.package_access}
-                                onChange={(value) => updateEditFeatureAccess("packages", value as AccessMode)}
-                            />
-                            <AccessModeRow
-                                label="Reports"
-                                value={editPermissions.reports_access}
-                                allowView={false}
-                                onChange={(value) => updateEditReportsAccess(value as ReportsAccessMode)}
-                            />
-                            <AccessModeRow
-                                label="Analytics"
-                                value={editPermissions.analytics_access}
-                                allowView={false}
-                                locked={planAccessLoading || !planAccess.hasAnalytics}
-                                lockText={
-                                    planAccessLoading
-                                        ? "Checking plan..."
-                                        : `Not included in ${planAccess.name} plan`
-                                }
-                                onChange={(value) => updateEditFeatureAccess("analytics", value as AccessMode)}
-                            />
-                            <AccessModeRow
-                                label="Forecasting"
-                                value={editPermissions.forecasting_access}
-                                allowView={false}
-                                locked={planAccessLoading || !planAccess.hasForecasting}
-                                lockText={
-                                    planAccessLoading
-                                        ? "Checking plan..."
-                                        : `Not included in ${planAccess.name} plan`
-                                }
-                                onChange={(value) => updateEditFeatureAccess("forecasting", value as AccessMode)}
-                            />
-                        </div>
-                    </div>
-
-                    <div className="shrink-0 grid gap-3 border-t border-[#E9E0EF] bg-white px-6 py-4 sm:grid-cols-2">
-                        <button
-                            type="button"
-                            onClick={() => setEditingStaff(null)}
-                            className="inline-flex h-[44px] items-center justify-center rounded-xl border border-[#DCCFE8] bg-white px-5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
-                        >
-                            Cancel
-                        </button>
-                        <button
-                            type="button"
-                            onClick={handleSaveEdit}
-                            disabled={savingEdit}
-                            className="inline-flex h-[44px] items-center justify-center rounded-xl bg-[#2B174C] px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            {savingEdit ? "Saving..." : "Save changes"}
-                        </button>
-                    </div>
-                </ModalShell>
-            )}
-        </div>
+                    </ModalShell>
+                )}
+            </div>
+        </RequirePermission>
     );
 }
 

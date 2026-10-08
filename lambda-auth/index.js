@@ -1364,6 +1364,15 @@ const dbConfig = {
     ssl: { rejectUnauthorized: false },
 };
 
+// Reuse database connections across warm requests. This avoids paying the
+// TCP/TLS/database handshake cost for every dashboard API call.
+const dbPool = mysql.createPool({
+    ...dbConfig,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+});
+
 
 
 function getBearerTokenFromEvent(event) {
@@ -1789,7 +1798,7 @@ module.exports.handler = async (event) => {
     let connection;
 
     try {
-        connection = await mysql.createConnection(dbConfig);
+        connection = await dbPool.getConnection();
 
         if (action === "get_subscription") {
             const token = getBearerTokenFromEvent(event);
@@ -5944,7 +5953,7 @@ module.exports.handler = async (event) => {
         };
     } finally {
         if (connection) {
-            await connection.end();
+            connection.release();
         }
     }
 };

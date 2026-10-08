@@ -1,6 +1,7 @@
 "use client";
 
 import { RefreshCw, Search } from "lucide-react";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useEffect, useMemo, useState } from "react";
 import {
     getToken,
@@ -149,13 +150,10 @@ export default function ManagerPackages() {
         setIsRefreshing(true);
 
         try {
-            if (storeId) {
-                await fetchProducts(storeId, branchId);
-            }
-
-            if (branchId) {
-                await fetchPackages(branchId);
-            }
+            await Promise.all([
+                storeId ? fetchProducts(storeId, branchId) : Promise.resolve(),
+                branchId ? fetchPackages(branchId) : Promise.resolve(),
+            ]);
         } finally {
             setIsRefreshing(false);
         }
@@ -303,11 +301,8 @@ export default function ManagerPackages() {
                             </div>
                         )}
 
-                        {loading ? (
-                            <EmptyState
-                                title="Loading packages..."
-                                detail="Please wait while packages are being loaded."
-                            />
+                        {loading && packages.length === 0 ? (
+                            <ModuleSkeleton variant="packages" />
                         ) : filteredPackages.length === 0 ? (
                             <EmptyState
                                 title="No packages yet."

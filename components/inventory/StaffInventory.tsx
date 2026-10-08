@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { useInventoryController } from "@/hooks/useInventory";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     BranchInventoryView,
     InventoryDialogs,
@@ -66,13 +67,13 @@ export default function StaffInventory() {
 
                         <button
                             type="button"
-                            onClick={() => window.location.reload()}
+                            onClick={() => void inv.refreshAll()}
                             aria-label="Refresh inventory"
                             title="Refresh inventory"
                             className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                         >
-                            <RefreshCw size={16} />
-                            Refresh
+                            <RefreshCw size={16} className={inv.refreshing ? "animate-spin" : ""} />
+                            {inv.refreshing ? "Refreshing..." : "Refresh"}
                         </button>
 
                     </div>
@@ -80,7 +81,11 @@ export default function StaffInventory() {
             </header>
 
             <section className="px-5 py-5">
-                <BranchInventoryView inv={inv} title="Products" />
+                {inv.loading ? (
+                    <ModuleSkeleton variant="inventory" />
+                ) : (
+                    <BranchInventoryView inv={inv} title="Products" />
+                )}
             </section>
 
             <InventoryDialogs inv={inv} />

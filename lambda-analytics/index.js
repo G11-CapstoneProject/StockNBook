@@ -22,12 +22,25 @@ const {
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 
 const dbConfig = {
-    host: "127.0.0.1",
-    user: "root",
-    password: "BTA5EYVWLfWcebF",
-    database: "stocknbook",
+    host: process.env.DB_HOST || "127.0.0.1",
+    user: process.env.DB_USER || "root",
+    password: process.env.DB_PASSWORD || "BTA5EYVWLfWcebF",
+    database: process.env.DB_NAME || "stocknbook",
+    port: Number(process.env.DB_PORT || 3306),
     ssl: { rejectUnauthorized: false },
 };
+
+// Reuse database connections across warm Lambda invocations. Analytics issues
+// several aggregate queries in parallel, so opening a brand-new connection on
+// every request adds avoidable latency under load.
+const dbPool = mysql.createPool({
+    ...dbConfig,
+    waitForConnections: true,
+    connectionLimit: Number(process.env.DB_POOL_SIZE || 8),
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+});
 
 
 const headers = {
@@ -226,7 +239,7 @@ exports.handler = async (event) => {
             });
         }
 
-        connection = await mysql.createConnection(dbConfig);
+        connection = await dbPool.getConnection();
 
         const requestedBranchId = getRequestedBranchId(body);
         const scope = await resolveScope(
@@ -236,22 +249,28 @@ exports.handler = async (event) => {
         );
         const range = buildRange(body);
 
+        // Scope/auth checks above need one dedicated connection. Release it before
+        // the independent analytics aggregates so the pool can execute those
+        // queries concurrently instead of queueing all three on one connection.
+        connection.release();
+        connection = null;
+
         // The sales query starts at the previous comparison period so the engine can
         // calculate current-period growth against an equal earlier period.
         const [salesRows, productRevenueRows, bookingRows] = await Promise.all([
-            getSalesRows(connection, {
+            getSalesRows(dbPool, {
                 storeId: scope.storeId,
                 branchId: scope.branchId,
                 startDate: range.previousStartDate,
                 endDate: range.endDate,
             }),
-            getProductRevenueRows(connection, {
+            getProductRevenueRows(dbPool, {
                 storeId: scope.storeId,
                 branchId: scope.branchId,
                 startDate: range.startDate,
                 endDate: range.endDate,
             }),
-            getBookings(connection, {
+            getBookings(dbPool, {
                 storeId: scope.storeId,
                 branchId: scope.branchId,
                 startDate: range.startDate,
@@ -287,7 +306,7 @@ exports.handler = async (event) => {
         return jsonResponse(statusCode, { error: message });
     } finally {
         if (connection) {
-            await connection.end();
+            connection.release();
         }
     }
 };

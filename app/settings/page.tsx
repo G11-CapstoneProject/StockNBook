@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import RequirePermission from "@/components/permissions/RequirePermission";
 import { QRCodeCanvas } from "qrcode.react";
 import {
@@ -198,7 +199,14 @@ export default function SettingsPage() {
     };
 
     if (!mounted) {
-        return null;
+        return (
+            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
+                <RoleSidebar />
+                <main className="min-w-0 flex-1 overflow-y-auto px-6 py-4">
+                    <ModuleSkeleton variant="settings" />
+                </main>
+            </div>
+        );
     }
 
     return (

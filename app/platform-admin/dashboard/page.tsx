@@ -21,7 +21,7 @@ import {
     X,
 } from "lucide-react";
 
-type Plan = "Starter" | "Business" | "Enterprise" | string;
+type Plan = "Starter" | "Growth" | "Scale" | string;
 type PaymentStatus = "PENDING" | "APPROVED" | "REJECTED";
 
 type GCashPaymentSettings = {
@@ -32,6 +32,28 @@ type GCashPaymentSettings = {
 };
 
 const PAYMENT_SETTINGS_STORAGE_KEY = "stocknbook_platform_gcash_settings";
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function normalizeSubscriptionStatus(value: unknown) {
+    return String(value ?? "").trim().toUpperCase();
+}
+
+function getDaysUntilExpiration(value: unknown): number | null {
+    if (!value) return null;
+
+    const expiration = new Date(String(value));
+    if (Number.isNaN(expiration.getTime())) return null;
+
+    const now = new Date();
+    const todayDay = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+    const expirationDay = Date.UTC(
+        expiration.getFullYear(),
+        expiration.getMonth(),
+        expiration.getDate()
+    );
+
+    return Math.round((expirationDay - todayDay) / DAY_MS);
+}
 
 const defaultGcashPaymentSettings: GCashPaymentSettings = {
     accountName: "StockNBook Admin",
@@ -85,9 +107,11 @@ function PlanBadge({ plan }: { plan: Plan }) {
     const badgeStyle =
         plan === "Starter"
             ? "border-[#B7E5C2] bg-[#E6F6EA] text-[#226B36]"
-            : plan === "Business"
-                ? "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]"
-                : "border-[#D8C5F3] bg-[#F1EBFF] text-[#6D35D4]";
+            : plan === "Growth"
+                ? "border-[#D8C5F3] bg-[#F1EBFF] text-[#6D35D4]"
+                : plan === "Scale"
+                    ? "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]"
+                    : "border-[#D8C5F3] bg-[#F1EBFF] text-[#6D35D4]";
 
     return (
         <span className={`inline-flex rounded-md border px-2 py-0.5 text-[10px] font-bold ${badgeStyle}`}>
@@ -225,34 +249,70 @@ export default function PlatformAdminDashboardPage() {
             const bizData = await bizRes.json();
             if (bizData.businesses) {
                 // Renewal Watch
+                // Backend may return "EXPIRING" for subscriptions that are
+                // within 7 days of expiration. Keep both ACTIVE and EXPIRING.
                 const expiring = bizData.businesses
-                    .filter((b: any) => b.subscription_status === 'ACTIVE' && b.expiration_date)
                     .map((b: any) => {
-                        const daysLeft = Math.ceil((new Date(b.expiration_date).getTime() - Date.now()) / (1000 * 3600 * 24));
-                        return { ...b, daysLeft };
+                        const subscriptionStatus = normalizeSubscriptionStatus(
+                            b.subscription_status
+                        );
+                        const expirationValue =
+                            b.expiration_date ?? b.expires_at ?? null;
+                        const daysLeft = getDaysUntilExpiration(expirationValue);
+
+                        return {
+                            ...b,
+                            subscriptionStatus,
+                            expirationValue,
+                            daysLeft,
+                        };
                     })
-                    .filter((b: any) => b.daysLeft <= 7 && b.daysLeft >= 0)
+                    .filter((b: any) => {
+                        const watchableStatus =
+                            b.subscriptionStatus === "ACTIVE" ||
+                            b.subscriptionStatus === "EXPIRING";
+
+                        return (
+                            watchableStatus &&
+                            b.daysLeft !== null &&
+                            b.daysLeft >= 0 &&
+                            b.daysLeft <= 7
+                        );
+                    })
+                    .sort((a: any, b: any) => Number(a.daysLeft) - Number(b.daysLeft))
                     .map((b: any) => ({
                         storeName: b.store_name_snapshot,
                         ownerEmail: b.owner_email || "Owner",
                         plan: b.plan_name,
-                        expirationDate: new Date(b.expiration_date).toLocaleDateString(),
-                        daysLeft: b.daysLeft,
-                        initials: (b.store_name_snapshot || "ST").substring(0, 2).toUpperCase()
+                        expirationDate: new Date(b.expirationValue).toLocaleDateString(),
+                        daysLeft: Number(b.daysLeft),
+                        initials: (b.store_name_snapshot || "ST")
+                            .substring(0, 2)
+                            .toUpperCase(),
                     }));
+
                 setExpiringSubscriptions(expiring);
 
                 // Plan Distribution Calculator
                 const distMap: Record<string, number> = {};
                 bizData.businesses.forEach((b: any) => {
-                    if (b.subscription_status === 'ACTIVE' && b.plan_name) {
+                    const subscriptionStatus = normalizeSubscriptionStatus(
+                        b.subscription_status
+                    );
+
+                    if (
+                        (subscriptionStatus === "ACTIVE" ||
+                            subscriptionStatus === "EXPIRING") &&
+                        b.plan_name
+                    ) {
                         distMap[b.plan_name] = (distMap[b.plan_name] || 0) + 1;
                     }
                 });
+
                 const planColors: Record<string, {bar: string, track: string}> = {
                     "Starter": { bar: "#16834A", track: "#E6F7EE" },
-                    "Business": { bar: "#A56607", track: "#FFF8E8" },
-                    "Enterprise": { bar: "#6D35D4", track: "#F1EBFF" }
+                    "Growth": { bar: "#6D35D4", track: "#F1EBFF" },
+                    "Scale": { bar: "#A56607", track: "#FFF8E8" }
                 };
 
                 setPlanDistribution(Object.entries(distMap).map(([plan, count]) => ({
@@ -273,7 +333,11 @@ export default function PlatformAdminDashboardPage() {
                     title: log.action.replace(/_/g, ' '),
                     detail: log.reason || "Action performed by admin",
                     time: new Date(log.created_at).toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', month: 'short', day: 'numeric' }),
-                    tone: log.action.includes('APPROVED') ? 'green' : (log.action.includes('REJECTED') ? 'red' : 'purple'),
+                    tone: String(log.action || "").toUpperCase().includes("APPROVED")
+                        ? "green"
+                        : String(log.action || "").toUpperCase().includes("REJECTED")
+                            ? "red"
+                            : "purple",
                     icon: <Activity size={15} />
                 })));
             }

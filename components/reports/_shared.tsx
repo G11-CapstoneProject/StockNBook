@@ -9,7 +9,7 @@ import {
     useMemo,
     useState,
 } from "react";
-import * as XLSX from "xlsx";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     ArrowLeft,
     ArrowRight,
@@ -4767,6 +4767,10 @@ export function ReportsWorkspace({
         ]);
         const request: Record<string, unknown> = {
             action: "get_orders",
+            // Reports already has an explicit selected date range. Push it to
+            // SQL instead of downloading historical POS rows and filtering in React.
+            date_from: startDate,
+            date_to: endDate,
         };
         const numericBranchId = Number(scopedSalesBranchId);
 
@@ -4863,6 +4867,10 @@ export function ReportsWorkspace({
         const request: Record<string, unknown> = {
             action: "get_booking_page_bookings",
             role: initialRole,
+            // Keep booking reports scalable by applying the selected period in
+            // the backend query rather than filtering a full booking history.
+            date_from: startDate,
+            date_to: endDate,
         };
         const numericBranchId = Number(scopedSalesBranchId);
 
@@ -6131,11 +6139,14 @@ export function ReportsWorkspace({
         );
     }
 
-    function exportExcel(
+    async function exportExcel(
         table: ExportTable,
         filenamePrefix = "stocknbook-full-inventory",
         sheetName = "Inventory Report"
     ) {
+        // Spreadsheet generation is an export-only feature. Lazy-load XLSX so
+        // normal report viewing does not pay the bundle/parse cost on startup.
+        const XLSX = await import("xlsx");
         const worksheet = XLSX.utils.aoa_to_sheet([
             [table.title],
             [`Store: ${activeStoreName}`],
@@ -6336,12 +6347,7 @@ export function ReportsWorkspace({
 
                 <div className="mt-4 pb-12">
                     {loading && !report && !liveSalesState.ready ? (
-                        <div className="flex min-h-[400px] w-full items-center justify-center rounded-[14px] border border-[#E5DDEA] bg-white">
-                            <div className="flex flex-col items-center gap-3">
-                                <RefreshCw className="h-6 w-6 animate-spin text-[#7C4DFF]" />
-                                <p className="text-[12px] font-semibold text-[#8A7A91]">Loading reports...</p>
-                            </div>
-                        </div>
+                        <ModuleSkeleton variant="reports" />
                     ) : (
                         <>
                             {selectedReport === "inventory" && (

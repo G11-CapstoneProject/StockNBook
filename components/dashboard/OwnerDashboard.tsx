@@ -35,7 +35,7 @@
  *   what the adviser's "should have science" requirement is asking for.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
@@ -154,6 +154,37 @@ type Order = {
 type PeriodOption = "month" | "quarter" | "year";
 type TrendRange = 6 | 12;
 
+type OwnerPosDailyMetric = {
+    date: string;
+    sales: number;
+    cost: number;
+};
+
+type OwnerPosBranchRow = {
+    key: string;
+    name: string;
+    amount: number;
+};
+
+type OwnerPosTopProduct = {
+    key: string;
+    name: string;
+    sales: number;
+    units: number;
+};
+
+type OwnerPosSummary = {
+    daily: OwnerPosDailyMetric[];
+    branchPerformance: Record<PeriodOption, OwnerPosBranchRow[]>;
+    topProducts: Record<PeriodOption, OwnerPosTopProduct[]>;
+};
+
+const EMPTY_OWNER_POS_SUMMARY: OwnerPosSummary = {
+    daily: [],
+    branchPerformance: { month: [], quarter: [], year: [] },
+    topProducts: { month: [], quarter: [], year: [] },
+};
+
 /* ----------------------------------------------------------------------- */
 /* Generic parsing helpers (kept consistent with the rest of the app)      */
 /* ----------------------------------------------------------------------- */
@@ -202,6 +233,13 @@ function formatCurrentDashboardDateTime(value: Date) {
         .toLowerCase();
 
     return `${dateLabel} | ${timeLabel}`;
+}
+
+function formatDashboardIsoDate(value: Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
 }
 
 type ApiRecord = Record<string, unknown>;
@@ -514,6 +552,64 @@ function normalizePackageRecord(value: unknown): PackageRecord {
     };
 }
 
+function normalizeOwnerPosSummary(value: unknown): OwnerPosSummary {
+    const raw = toRecord(value);
+
+    const normalizeDaily = (source: unknown): OwnerPosDailyMetric[] =>
+        Array.isArray(source)
+            ? source.map((item) => {
+                const row = toRecord(item);
+                return {
+                    date: readText(row, ["date"]),
+                    sales: readNumber(row, ["sales"]),
+                    cost: readNumber(row, ["cost"]),
+                };
+            }).filter((row) => row.date)
+            : [];
+
+    const normalizeBranchRows = (source: unknown): OwnerPosBranchRow[] =>
+        Array.isArray(source)
+            ? source.map((item) => {
+                const row = toRecord(item);
+                return {
+                    key: readText(row, ["key"], "unassigned"),
+                    name: readText(row, ["name"], "Unassigned"),
+                    amount: readNumber(row, ["amount"]),
+                };
+            })
+            : [];
+
+    const normalizeTopRows = (source: unknown): OwnerPosTopProduct[] =>
+        Array.isArray(source)
+            ? source.map((item) => {
+                const row = toRecord(item);
+                return {
+                    key: readText(row, ["key"]),
+                    name: readText(row, ["name"], "Unnamed Product"),
+                    sales: readNumber(row, ["sales"]),
+                    units: readNumber(row, ["units"]),
+                };
+            }).filter((row) => row.name)
+            : [];
+
+    const branchPerformance = toRecord(raw.branchPerformance);
+    const topProducts = toRecord(raw.topProducts);
+
+    return {
+        daily: normalizeDaily(raw.daily),
+        branchPerformance: {
+            month: normalizeBranchRows(branchPerformance.month),
+            quarter: normalizeBranchRows(branchPerformance.quarter),
+            year: normalizeBranchRows(branchPerformance.year),
+        },
+        topProducts: {
+            month: normalizeTopRows(topProducts.month),
+            quarter: normalizeTopRows(topProducts.quarter),
+            year: normalizeTopRows(topProducts.year),
+        },
+    };
+}
+
 function normalizeName(value: string) {
     return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -779,7 +875,7 @@ function getInventoryPortfolioCostRatio(products: InventoryProduct[]) {
 }
 
 function buildOwnerAnalytics(
-    orders: Order[],
+    posSummary: OwnerPosSummary,
     bookings: Booking[],
     packages: PackageRecord[],
     products: InventoryProduct[],
@@ -796,17 +892,16 @@ function buildOwnerAnalytics(
     }));
     const bucketByKey = new Map(buckets.map((bucket) => [bucket.key, bucket]));
 
-    orders.filter(isPosSaleOrder).forEach((order) => {
-        const date = getOrderDate(order);
+    // POS data is already aggregated server-side. This keeps the browser from
+    // downloading and reducing thousands of historical order/order-item rows.
+    posSummary.daily.forEach((point) => {
+        const date = parseFlexibleDate(point.date);
         if (!date) return;
         const bucket = bucketByKey.get(monthKey(date));
         if (!bucket) return;
 
-        const revenue = Number(order.total || 0);
-        const cost = getOrderCost(order);
-        bucket.posSales += Number.isFinite(revenue) ? revenue : 0;
-        if (cost !== null) bucket.posCost += cost;
-        else bucket.uncostedSales += Math.max(0, revenue);
+        bucket.posSales += Math.max(0, Number(point.sales || 0));
+        bucket.posCost += Math.max(0, Number(point.cost || 0));
     });
 
     bookings.filter(isRealizedBooking).forEach((booking) => {
@@ -842,9 +937,9 @@ function buildOwnerAnalytics(
             ? Math.max(0, Math.min(100, ((sales - bucket.uncostedSales) / sales) * 100))
             : 100;
 
-        // Legacy rows without an item-level cost use the portfolio's observed
-        // COGS ratio from costed sales. This is a data-derived fallback, not a
-        // hard-coded profit margin, and keeps owner KPIs numeric.
+        // Legacy booking rows without an item-level cost use the portfolio's
+        // observed COGS ratio from costed sales. POS cost is already aggregated
+        // from the same order-item/product cost sources used by the prior API.
         const fallbackCost = bucket.uncostedSales > 0
             ? bucket.uncostedSales * portfolioCostRatio
             : 0;
@@ -869,7 +964,7 @@ function buildOwnerAnalytics(
 }
 
 function getMonthToDateMetrics(
-    orders: Order[],
+    posSummary: OwnerPosSummary,
     bookings: Booking[],
     packages: PackageRecord[],
     products: InventoryProduct[],
@@ -890,14 +985,11 @@ function getMonthToDateMetrics(
     let cost = 0;
     let uncostedSales = 0;
 
-    orders.filter(isPosSaleOrder).forEach((order) => {
-        const date = getOrderDate(order);
+    posSummary.daily.forEach((point) => {
+        const date = parseFlexibleDate(point.date);
         if (!date || date < monthStart || date >= monthEnd) return;
-        const revenue = Math.max(0, Number(order.total || 0));
-        sales += revenue;
-        const orderCost = getOrderCost(order);
-        if (orderCost === null) uncostedSales += revenue;
-        else cost += orderCost;
+        sales += Math.max(0, Number(point.sales || 0));
+        cost += Math.max(0, Number(point.cost || 0));
     });
 
     bookings.filter(isRealizedBooking).forEach((booking) => {
@@ -923,9 +1015,8 @@ function getMonthToDateMetrics(
     };
 }
 
-
 function aggregateBranchPerformance(
-    orders: Order[],
+    posSummary: OwnerPosSummary,
     bookings: Booking[],
     branches: Branch[],
     period: PeriodOption,
@@ -936,11 +1027,8 @@ function aggregateBranchPerformance(
     const nameById = new Map(branches.map((branch) => [String(branch.id), branch.branchName]));
     const totals = new Map<string, number>();
 
-    orders.filter(isPosSaleOrder).forEach((order) => {
-        const date = getOrderDate(order);
-        if (!date || date < start || date >= end) return;
-        const key = order.branchId !== null && order.branchId !== undefined ? String(order.branchId) : "unassigned";
-        totals.set(key, (totals.get(key) || 0) + Number(order.total || 0));
+    posSummary.branchPerformance[period].forEach((row) => {
+        totals.set(row.key, (totals.get(row.key) || 0) + Number(row.amount || 0));
     });
 
     bookings.filter(isRealizedBooking).forEach((booking) => {
@@ -950,10 +1038,17 @@ function aggregateBranchPerformance(
         totals.set(key, (totals.get(key) || 0) + getDashboardBookingTotalPrice(booking));
     });
 
+    const backendNames = new Map(
+        posSummary.branchPerformance[period].map((row) => [row.key, row.name]),
+    );
+
     return Array.from(totals.entries())
         .map(([key, amount]) => ({
             key,
-            name: key === "unassigned" ? "Unassigned" : nameById.get(key) || `Branch #${key}`,
+            name:
+                key === "unassigned"
+                    ? "Unassigned"
+                    : backendNames.get(key) || nameById.get(key) || `Branch #${key}`,
             amount,
         }))
         .sort((a, b) => b.amount - a.amount);
@@ -962,7 +1057,7 @@ function aggregateBranchPerformance(
 type TopItemRow = { key: string; name: string; sales: number; units: number };
 
 function aggregateTopItems(
-    orders: Order[],
+    posSummary: OwnerPosSummary,
     bookings: Booking[],
     period: PeriodOption,
     reference: Date,
@@ -971,32 +1066,12 @@ function aggregateTopItems(
     const end = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate() + 1);
     const map = new Map<string, TopItemRow>();
 
-    orders.filter(isPosSaleOrder).forEach((order) => {
-        const date = getOrderDate(order);
-        if (!date || date < start || date >= end) return;
-
-        (order.items || []).forEach((item) => {
-            const name = (item.name || "").trim();
-            if (!name) return;
-
-            const qty = Number(item.quantity || 0);
-            const unitPrice = Number(
-                item.unitPrice ??
-                item.unit_price ??
-                item.price ??
-                item.sellingPrice ??
-                item.selling_price ??
-                item.salesPrice ??
-                item.sales_price ??
-                0,
-            );
-            const lineTotal = Number(item.lineTotal ?? item.line_total ?? qty * unitPrice);
-
-            const key = `product:${name.toLowerCase()}`;
-            const existing = map.get(key) || { key, name, sales: 0, units: 0 };
-            existing.sales += Number.isFinite(lineTotal) ? lineTotal : qty * unitPrice;
-            existing.units += qty;
-            map.set(key, existing);
+    posSummary.topProducts[period].forEach((row) => {
+        map.set(row.key, {
+            key: row.key,
+            name: row.name,
+            sales: Number(row.sales || 0),
+            units: Number(row.units || 0),
         });
     });
 
@@ -1059,18 +1134,198 @@ function niceStep(value: number) {
 /* Main component                                                          */
 /* ----------------------------------------------------------------------- */
 
+
+
+/* ----------------------------------------------------------------------- */
+/* Initial dashboard skeleton                                               */
+/* ----------------------------------------------------------------------- */
+
+function OwnerSkeletonBar({ className = "" }: { className?: string }) {
+    return <div className={`rounded-full bg-[#ECE7F0] ${className}`} />;
+}
+
+function OwnerMetricSkeleton() {
+    return (
+        <div className="flex min-h-[126px] items-center gap-4 rounded-2xl border border-[#E9E0EF] bg-white px-5 py-4 shadow-sm">
+            <div className="h-14 w-14 shrink-0 rounded-full bg-[#EEE9F4]" />
+            <div className="min-w-0 flex-1">
+                <OwnerSkeletonBar className="h-3 w-24" />
+                <OwnerSkeletonBar className="mt-3 h-7 w-28" />
+                <OwnerSkeletonBar className="mt-3 h-2.5 w-36 max-w-full" />
+            </div>
+        </div>
+    );
+}
+
+function OwnerTrendSkeleton() {
+    return (
+        <div className="min-h-[330px] rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                    <div className="h-9 w-9 rounded-lg bg-[#EEE9F4]" />
+                    <div>
+                        <OwnerSkeletonBar className="h-3.5 w-44" />
+                        <OwnerSkeletonBar className="mt-2 h-2.5 w-72 max-w-full" />
+                    </div>
+                </div>
+                <div className="h-8 w-28 rounded-lg bg-[#F1EDF4]" />
+            </div>
+            <div className="relative mt-5 h-[215px] overflow-hidden rounded-xl">
+                {[25, 70, 115, 160].map((top) => (
+                    <div key={top} className="absolute left-10 right-3 h-px bg-[#F0EBF3]" style={{ top }} />
+                ))}
+                <svg viewBox="0 0 760 210" className="absolute inset-0 h-full w-full" aria-hidden="true">
+                    <path d="M40 122 L105 102 L170 135 L235 145 L300 118 L365 120 L430 90 L495 122 L560 122 L625 130 L700 126" fill="none" stroke="#E2DCE8" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M40 150 L105 136 L170 158 L235 163 L300 145 L365 146 L430 125 L495 145 L560 145 L625 151 L700 149" fill="none" stroke="#ECE6F0" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M40 172 L105 158 L170 175 L235 179 L300 165 L365 166 L430 148 L495 164 L560 164 L625 168 L700 167" fill="none" stroke="#F1ECF4" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <div className="absolute bottom-1 left-10 right-3 flex justify-between">
+                    {[0, 1, 2, 3, 4, 5, 6].map((item) => (
+                        <div key={item} className="h-2 w-9 rounded-full bg-[#EEE9F2]" />
+                    ))}
+                </div>
+            </div>
+            <div className="mt-2 flex justify-center gap-6">
+                {[0, 1, 2].map((item) => (
+                    <div key={item} className="flex items-center gap-2">
+                        <div className="h-2.5 w-2.5 rounded-full bg-[#E5DFEA]" />
+                        <OwnerSkeletonBar className="h-2.5 w-16" />
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function OwnerBranchSkeleton() {
+    return (
+        <div className="min-h-[330px] rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                    <div className="h-9 w-9 rounded-lg bg-[#EEE9F4]" />
+                    <div>
+                        <OwnerSkeletonBar className="h-3.5 w-32" />
+                        <OwnerSkeletonBar className="mt-2 h-2.5 w-40" />
+                    </div>
+                </div>
+                <div className="h-8 w-20 rounded-lg bg-[#F1EDF4]" />
+            </div>
+            <div className="mt-7 space-y-5">
+                {[0, 1, 2, 3].map((item) => (
+                    <div key={item}>
+                        <div className="flex items-center justify-between gap-3">
+                            <OwnerSkeletonBar className="h-2.5 w-28" />
+                            <OwnerSkeletonBar className="h-3 w-16" />
+                        </div>
+                        <div className="mt-2 h-2 rounded-full bg-[#F2EEF5]">
+                            <div className="h-full rounded-full bg-[#E3DCE9]" style={{ width: `${78 - item * 13}%` }} />
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function OwnerTopItemsSkeleton() {
+    return (
+        <div className="min-h-[290px] rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                    <div className="h-9 w-9 rounded-lg bg-[#EEE9F4]" />
+                    <div>
+                        <OwnerSkeletonBar className="h-3.5 w-36" />
+                        <OwnerSkeletonBar className="mt-2 h-2.5 w-44" />
+                    </div>
+                </div>
+                <div className="h-8 w-20 rounded-lg bg-[#F1EDF4]" />
+            </div>
+            <div className="mt-5 divide-y divide-[#F2EDF4]">
+                {[0, 1, 2, 3].map((item) => (
+                    <div key={item} className="grid grid-cols-[32px_1fr_auto] items-center gap-3 py-3.5">
+                        <div className="h-7 w-7 rounded-full bg-[#EEE9F4]" />
+                        <div>
+                            <OwnerSkeletonBar className="h-2.5 w-48 max-w-full" />
+                            <OwnerSkeletonBar className="mt-2 h-2 w-24" />
+                        </div>
+                        <OwnerSkeletonBar className="h-3 w-16" />
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function OwnerForecastSkeleton() {
+    return (
+        <div className="min-h-[290px] rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                    <div className="h-9 w-9 rounded-lg bg-[#EEE9F4]" />
+                    <div>
+                        <OwnerSkeletonBar className="h-3.5 w-28" />
+                        <OwnerSkeletonBar className="mt-2 h-2.5 w-44" />
+                    </div>
+                </div>
+                <OwnerSkeletonBar className="h-2.5 w-20" />
+            </div>
+            <div className="mt-7 rounded-xl border border-[#EFE8F3] bg-[#FBF9FC] p-4">
+                <div className="flex items-start justify-between gap-4">
+                    <div>
+                        <OwnerSkeletonBar className="h-2.5 w-36" />
+                        <OwnerSkeletonBar className="mt-3 h-7 w-32" />
+                        <OwnerSkeletonBar className="mt-3 h-2.5 w-44" />
+                    </div>
+                    <div className="h-12 w-12 rounded-full bg-[#EEE9F4]" />
+                </div>
+            </div>
+            <div className="mt-5 grid grid-cols-2 gap-3">
+                {[0, 1].map((item) => (
+                    <div key={item} className="rounded-xl bg-[#FAF8FC] p-3">
+                        <OwnerSkeletonBar className="h-2.5 w-20" />
+                        <OwnerSkeletonBar className="mt-3 h-4 w-24" />
+                        <OwnerSkeletonBar className="mt-2 h-2 w-16" />
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function OwnerDashboardSkeleton() {
+    return (
+        <div className="mx-auto max-w-none space-y-4 animate-pulse" role="status" aria-label="Loading owner dashboard">
+            <span className="sr-only">Loading owner dashboard data</span>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
+                {[0, 1, 2, 3].map((item) => <OwnerMetricSkeleton key={item} />)}
+            </div>
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-3" aria-hidden="true">
+                <div className="xl:col-span-2"><OwnerTrendSkeleton /></div>
+                <OwnerBranchSkeleton />
+            </div>
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.45fr_1fr]" aria-hidden="true">
+                <OwnerTopItemsSkeleton />
+                <OwnerForecastSkeleton />
+            </div>
+        </div>
+    );
+}
+
 export default function OwnerDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
 
     const [branches, setBranches] = useState<Branch[]>([]);
     const [bookings, setBookings] = useState<Booking[]>([]);
-    const [orders, setOrders] = useState<Order[]>([]);
+    const [posSummary, setPosSummary] = useState<OwnerPosSummary>(EMPTY_OWNER_POS_SUMMARY);
     const [inventoryProducts, setInventoryProducts] = useState<InventoryProduct[]>([]);
     const [packages, setPackages] = useState<PackageRecord[]>([]);
     const [loadError, setLoadError] = useState("");
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
+    const [hasLoadedDashboard, setHasLoadedDashboard] = useState(false);
+    const loadInFlightRef = useRef(false);
+    const posRefreshInFlightRef = useRef(false);
 
     const [trendRange, setTrendRange] = useState<TrendRange>(12);
     const [branchPeriod, setBranchPeriod] = useState<PeriodOption>("month");
@@ -1095,29 +1350,36 @@ export default function OwnerDashboard() {
 
         if (!token) {
             setLoadError("Unable to load the owner dashboard because no login token was found.");
+            setHasLoadedDashboard(true);
             return;
         }
+
+        // Prevent React Strict Mode/Fast Refresh from starting a duplicate copy
+        // of the owner dashboard requests while one is in flight.
+        if (loadInFlightRef.current) return;
+        loadInFlightRef.current = true;
 
         if (!silent) setIsRefreshing(true);
         setLoadError("");
 
         try {
             /*
-             * Load all dashboard sources at the same time, then commit the
-             * resulting state together. The previous version loaded bookings,
-             * and POS orders one after another and updated React state
-             * after each request. That caused a temporary "booking-only" render
-             * (POS = ₱0), followed by a second render when POS data arrived.
-             * It is why the KPI values and chart changed while Refreshing...
+             * Load the independent dashboard sources at the same time. POS uses
+             * a dashboard-specific aggregate action instead of downloading full
+             * historical orders and order items into the browser. This preserves
+             * the same KPI/chart behavior while drastically reducing server work,
+             * JSON size, transfer time, and client-side aggregation.
              */
-            const ordersDateFrom = new Date(
-                currentDateTime.getFullYear(),
-                currentDateTime.getMonth() - 12,
-                1,
-            ).toISOString().slice(0, 10);
-            const ordersDateTo = currentDateTime.toISOString().slice(0, 10);
+            const ordersDateFrom = formatDashboardIsoDate(
+                new Date(
+                    currentDateTime.getFullYear(),
+                    currentDateTime.getMonth() - 12,
+                    1,
+                ),
+            );
+            const ordersDateTo = formatDashboardIsoDate(currentDateTime);
 
-            const [branchesResult, bookingsResult, bookingCostsResult, ordersResult, productsResult, packagesResult] =
+            const [branchesResult, bookingsResult, bookingCostsResult, posSummaryResult, productsResult, packagesResult] =
                 await Promise.allSettled([
                     fetch("/api/branches", {
                         method: "GET",
@@ -1134,6 +1396,8 @@ export default function OwnerDashboard() {
                             action: "get_booking_page_bookings",
                             role: "owner",
                             store_id: storeId ? Number(storeId) : undefined,
+                            date_from: ordersDateFrom,
+                            date_to: ordersDateTo,
                         }),
                         cache: "no-store",
                     }),
@@ -1147,6 +1411,8 @@ export default function OwnerDashboard() {
                             action: "get_booking_costs",
                             role: "owner",
                             store_id: storeId ? Number(storeId) : undefined,
+                            date_from: ordersDateFrom,
+                            date_to: ordersDateTo,
                         }),
                         cache: "no-store",
                     }),
@@ -1157,8 +1423,7 @@ export default function OwnerDashboard() {
                             Authorization: `Bearer ${token}`,
                         },
                         body: JSON.stringify({
-                            action: "get_orders",
-                            include_order_items: true,
+                            action: "get_owner_dashboard_summary",
                             date_from: ordersDateFrom,
                             date_to: ordersDateTo,
                         }),
@@ -1196,7 +1461,7 @@ export default function OwnerDashboard() {
             // producing another misleading intermediate state.
             let nextBranches = branches;
             let nextBookings = bookings;
-            let nextOrders = orders;
+            let nextPosSummary = posSummary;
             let nextInventoryProducts = inventoryProducts;
             let nextPackages = packages;
             const errors: string[] = [];
@@ -1264,112 +1529,48 @@ export default function OwnerDashboard() {
                 errors.push("Unable to load booking inventory cost data.");
             }
 
-            if (ordersResult.status === "fulfilled") {
+            if (posSummaryResult.status === "fulfilled") {
                 try {
-                    const response = ordersResult.value;
-                    const responseText = await response.text();
+                    const response = posSummaryResult.value;
+                    const data = await response.json().catch(() => ({}));
 
-                    let data: {
-                        orders?: unknown[];
-                        error?: unknown;
-                        message?: unknown;
-                    } = {};
+                    if (response.ok && data?.summary && typeof data.summary === "object") {
+                        nextPosSummary = normalizeOwnerPosSummary(data.summary);
 
-                    try {
-                        data = responseText ? JSON.parse(responseText) : {};
-                    } catch {
-                        data = {};
-                    }
-
-                    if (response.ok && Array.isArray(data.orders)) {
-                        nextOrders = data.orders.map(normalizeOrder);
+                        if (data?.meta?.queryTimingsMs) {
+                            console.info(
+                                "Owner dashboard POS summary timings:",
+                                data.meta.queryTimingsMs,
+                            );
+                        }
                     } else {
-                        /*
-                         * The detailed Owner request asks /api/pos to include
-                         * structured order_items. If that secondary detail query
-                         * fails, retry the same date-scoped sales request without
-                         * order-item expansion so the Owner can still see the
-                         * authoritative sales / cost / profit summary.
-                         *
-                         * This does NOT hide a genuine POS failure: if the
-                         * fallback also fails, the actual backend error is shown
-                         * in the dashboard instead of the old generic message.
-                         */
-                        console.error("Owner dashboard detailed POS request failed:", {
+                        const backendMessage = String(
+                            data?.error ||
+                            data?.message ||
+                            `POS dashboard summary returned HTTP ${response.status}.`,
+                        );
+
+                        console.error("Owner dashboard POS summary request failed:", {
                             status: response.status,
                             response: data,
                         });
 
-                        const fallbackResponse = await fetch("/api/pos", {
-                            method: "POST",
-                            headers: {
-                                "Content-Type": "application/json",
-                                Authorization: `Bearer ${token}`,
-                            },
-                            body: JSON.stringify({
-                                action: "get_orders",
-                                include_order_items: false,
-                                date_from: ordersDateFrom,
-                                date_to: ordersDateTo,
-                            }),
-                            cache: "no-store",
-                        });
-
-                        const fallbackText = await fallbackResponse.text();
-
-                        let fallbackData: {
-                            orders?: unknown[];
-                            error?: unknown;
-                            message?: unknown;
-                        } = {};
-
-                        try {
-                            fallbackData = fallbackText
-                                ? JSON.parse(fallbackText)
-                                : {};
-                        } catch {
-                            fallbackData = {};
-                        }
-
-                        if (
-                            fallbackResponse.ok &&
-                            Array.isArray(fallbackData.orders)
-                        ) {
-                            console.warn(
-                                "Owner dashboard loaded POS summary without detailed order items because the detailed request failed.",
-                            );
-                            nextOrders = fallbackData.orders.map(normalizeOrder);
-                        } else {
-                            const backendMessage = String(
-                                fallbackData.error ||
-                                fallbackData.message ||
-                                data.error ||
-                                data.message ||
-                                `POS API returned HTTP ${fallbackResponse.status || response.status}.`,
-                            );
-
-                            console.error("Owner dashboard POS fallback failed:", {
-                                status: fallbackResponse.status,
-                                response: fallbackData,
-                            });
-
-                            errors.push(`Unable to load POS sales data: ${backendMessage}`);
-                        }
+                        errors.push(`Unable to load POS dashboard summary: ${backendMessage}`);
                     }
                 } catch (error) {
-                    console.error("Owner dashboard POS processing failed:", error);
+                    console.error("Owner dashboard POS summary processing failed:", error);
                     errors.push(
                         error instanceof Error
-                            ? `Unable to load POS sales data: ${error.message}`
-                            : "Unable to load POS sales data.",
+                            ? `Unable to load POS dashboard summary: ${error.message}`
+                            : "Unable to load POS dashboard summary.",
                     );
                 }
             } else {
-                console.warn("Owner dashboard orders fetch failed:", ordersResult.reason);
+                console.warn("Owner dashboard POS summary fetch failed:", posSummaryResult.reason);
                 errors.push(
-                    ordersResult.reason instanceof Error
-                        ? `Unable to load POS sales data: ${ordersResult.reason.message}`
-                        : "Unable to load POS sales data.",
+                    posSummaryResult.reason instanceof Error
+                        ? `Unable to load POS dashboard summary: ${posSummaryResult.reason.message}`
+                        : "Unable to load POS dashboard summary.",
                 );
             }
 
@@ -1418,18 +1619,93 @@ export default function OwnerDashboard() {
             // complete snapshot to the new complete snapshot in one render.
             setBranches(nextBranches);
             setBookings(nextBookings);
-            setOrders(nextOrders);
+            setPosSummary(nextPosSummary);
             setInventoryProducts(nextInventoryProducts);
             setPackages(nextPackages);
             setLoadError(errors.join(" "));
         } finally {
+            loadInFlightRef.current = false;
             if (!silent) setIsRefreshing(false);
+            setHasLoadedDashboard(true);
+        }
+    }
+
+    async function refreshOwnerPosSummary() {
+        if (posRefreshInFlightRef.current) return;
+
+        const token = getSavedItem("token");
+        if (!token) return;
+
+        posRefreshInFlightRef.current = true;
+
+        try {
+            const now = new Date();
+            const dateFrom = formatDashboardIsoDate(
+                new Date(now.getFullYear(), now.getMonth() - 12, 1),
+            );
+            const dateTo = formatDashboardIsoDate(now);
+
+            const response = await fetch("/api/pos", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    action: "get_owner_dashboard_summary",
+                    date_from: dateFrom,
+                    date_to: dateTo,
+                }),
+                cache: "no-store",
+            });
+
+            const data = await response.json().catch(() => ({}));
+
+            if (response.ok && data?.summary && typeof data.summary === "object") {
+                setPosSummary(normalizeOwnerPosSummary(data.summary));
+
+                if (data?.meta?.queryTimingsMs) {
+                    console.info(
+                        "Owner POS near-real-time refresh timings:",
+                        data.meta.queryTimingsMs,
+                    );
+                }
+            }
+        } catch (error) {
+            // Keep the last successful POS snapshot. A transient background
+            // refresh failure should never blank or interrupt the dashboard.
+            console.warn("Owner POS background refresh failed:", error);
+        } finally {
+            posRefreshInFlightRef.current = false;
         }
     }
 
     useEffect(() => {
         // Initial load. The Refresh button still works exactly as before.
         void loadOwnerDashboard();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    useEffect(() => {
+        /*
+         * POS is the most time-sensitive Owner metric. Refresh only the compact
+         * POS summary every 15 seconds instead of re-downloading bookings,
+         * products, packages and branches at the same rate. Pause while the tab
+         * is hidden and refresh once when the user comes back.
+         */
+        const refreshIfVisible = () => {
+            if (document.visibilityState === "visible") {
+                void refreshOwnerPosSummary();
+            }
+        };
+
+        const posTimer = window.setInterval(refreshIfVisible, 15_000);
+        document.addEventListener("visibilitychange", refreshIfVisible);
+
+        return () => {
+            window.clearInterval(posTimer);
+            document.removeEventListener("visibilitychange", refreshIfVisible);
+        };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -1449,26 +1725,26 @@ export default function OwnerDashboard() {
         // Keep the timer closure aligned with the latest successfully displayed
         // snapshot so a partial API failure can still preserve existing data.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [branches, bookings, orders, user]);
+    }, [branches, bookings, user]);
 
     const referenceDateKey = currentDateTime.toDateString();
 
     const analytics = useMemo(
-        () => buildOwnerAnalytics(orders, bookings, packages, inventoryProducts, 13, currentDateTime),
+        () => buildOwnerAnalytics(posSummary, bookings, packages, inventoryProducts, 13, currentDateTime),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [orders, bookings, packages, inventoryProducts, referenceDateKey],
+        [posSummary, bookings, packages, inventoryProducts, referenceDateKey],
     );
 
     const branchRows = useMemo(
-        () => aggregateBranchPerformance(orders, bookings, branches, branchPeriod, currentDateTime),
+        () => aggregateBranchPerformance(posSummary, bookings, branches, branchPeriod, currentDateTime),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [orders, bookings, branches, branchPeriod, referenceDateKey],
+        [posSummary, bookings, branches, branchPeriod, referenceDateKey],
     );
 
     const topItems = useMemo(
-        () => aggregateTopItems(orders, bookings, topPeriod, currentDateTime),
+        () => aggregateTopItems(posSummary, bookings, topPeriod, currentDateTime),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [orders, bookings, topPeriod, referenceDateKey],
+        [posSummary, bookings, topPeriod, referenceDateKey],
     );
 
     const monthly = analytics.monthly;
@@ -1478,7 +1754,7 @@ export default function OwnerDashboard() {
     // Growth badges compare the same elapsed number of days against the prior month,
     // rather than comparing a partial current month with the previous full month.
     const currentMtd = getMonthToDateMetrics(
-        orders,
+        posSummary,
         bookings,
         packages,
         inventoryProducts,
@@ -1487,7 +1763,7 @@ export default function OwnerDashboard() {
         analytics.portfolioCostRatio,
     );
     const previousMtd = getMonthToDateMetrics(
-        orders,
+        posSummary,
         bookings,
         packages,
         inventoryProducts,
@@ -1600,8 +1876,13 @@ export default function OwnerDashboard() {
                 </div>
             </header>
 
-            <section className="px-6 py-5 font-sans">
-                <div className="mx-auto max-w-none space-y-4">
+            <section
+                aria-busy={!hasLoadedDashboard || isRefreshing}
+                className="px-6 py-5 font-sans"
+            >
+                {!hasLoadedDashboard ? <OwnerDashboardSkeleton /> : null}
+
+                <div className={`mx-auto max-w-none space-y-4 ${!hasLoadedDashboard ? "hidden" : ""}`}>
                     {loadError && (
                         <div className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs font-medium text-[#C32F2F]">
                             {loadError}

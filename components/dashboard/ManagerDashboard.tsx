@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
@@ -15,14 +15,43 @@ import {
     Sparkles,
     TriangleAlert,
 } from "lucide-react";
-import {
-    DashboardExportMenu,
-    exportTableAsDoc,
-    exportTableAsExcel,
-    exportTableAsPdf,
-    type ExportContext,
-    type ExportTable,
-} from "./_shared";
+import DashboardExportMenu from "./DashboardExportMenu";
+import type { ExportContext, ExportTable } from "./_shared";
+
+// Keep the very large Reports/_shared module out of the initial dashboard bundle.
+// It is loaded only if the user actually exports a dashboard table.
+function exportTableAsPdf(
+    table: ExportTable,
+    context: ExportContext,
+    filenamePrefix: string,
+) {
+    void import("./_shared")
+        .then((module) => module.exportTableAsPdf(table, context, filenamePrefix))
+        .catch((error) => console.error("Dashboard PDF export failed:", error));
+}
+
+function exportTableAsExcel(
+    table: ExportTable,
+    context: ExportContext,
+    filenamePrefix: string,
+    sheetName = "Report",
+) {
+    void import("./_shared")
+        .then((module) =>
+            module.exportTableAsExcel(table, context, filenamePrefix, sheetName),
+        )
+        .catch((error) => console.error("Dashboard XLSX export failed:", error));
+}
+
+function exportTableAsDoc(
+    table: ExportTable,
+    context: ExportContext,
+    filenamePrefix: string,
+) {
+    void import("./_shared")
+        .then((module) => module.exportTableAsDoc(table, context, filenamePrefix))
+        .catch((error) => console.error("Dashboard DOC export failed:", error));
+}
 
 type Branch = {
     id: number;
@@ -1040,6 +1069,185 @@ function formatDashboardTime(dateValue?: string, explicitTime?: string) {
     return Number.isNaN(parsedDate.getTime()) ? "" : format(parsedDate);
 }
 
+
+
+/* ----------------------------------------------------------------------- */
+/* Initial dashboard skeleton                                               */
+/* ----------------------------------------------------------------------- */
+
+function ManagerSkeletonBar({ className = "" }: { className?: string }) {
+    return <div className={`rounded-full bg-[#ECE7F0] ${className}`} />;
+}
+
+function ManagerMetricSkeleton() {
+    return (
+        <div className="flex min-h-[128px] items-center gap-4 rounded-2xl border border-[#E9E0EF] bg-white px-5 py-4 shadow-sm">
+            <div className="h-14 w-14 shrink-0 rounded-full bg-[#EEE9F4]" />
+            <div className="min-w-0 flex-1">
+                <ManagerSkeletonBar className="h-3 w-28" />
+                <ManagerSkeletonBar className="mt-3 h-7 w-12" />
+                <ManagerSkeletonBar className="mt-3 h-2.5 w-36 max-w-full" />
+            </div>
+        </div>
+    );
+}
+
+function ManagerDonutSkeleton() {
+    return (
+        <div className="h-full min-h-[350px] rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                    <div className="h-9 w-9 rounded-lg bg-[#EEE9F4]" />
+                    <div>
+                        <ManagerSkeletonBar className="h-3.5 w-28" />
+                        <ManagerSkeletonBar className="mt-2 h-2.5 w-40" />
+                    </div>
+                </div>
+                <div className="h-8 w-20 rounded-lg bg-[#F1EDF4]" />
+            </div>
+
+            <div className="mt-12 flex items-center justify-center gap-8">
+                <div className="flex h-36 w-36 shrink-0 items-center justify-center rounded-full border-[20px] border-[#EEE9F2]">
+                    <div className="space-y-2 text-center">
+                        <ManagerSkeletonBar className="mx-auto h-6 w-10" />
+                        <ManagerSkeletonBar className="mx-auto h-2.5 w-16" />
+                    </div>
+                </div>
+                <div className="w-full max-w-[150px] space-y-4">
+                    {[0, 1, 2, 3].map((item) => (
+                        <div key={item} className="flex items-center gap-2">
+                            <div className="h-2.5 w-2.5 rounded-full bg-[#E7E1EC]" />
+                            <ManagerSkeletonBar className="h-2.5 flex-1" />
+                            <ManagerSkeletonBar className="h-2.5 w-7" />
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function ManagerAttentionSkeleton() {
+    return (
+        <div className="h-full min-h-[350px] overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
+            <div className="flex items-center justify-between border-b border-[#EEE7F2] p-4">
+                <div className="flex items-center gap-2.5">
+                    <div className="h-9 w-9 rounded-lg bg-[#F3EDEE]" />
+                    <div>
+                        <ManagerSkeletonBar className="h-3.5 w-36" />
+                        <ManagerSkeletonBar className="mt-2 h-2.5 w-44" />
+                    </div>
+                </div>
+                <div className="h-8 w-16 rounded-lg bg-[#F1EDF4]" />
+            </div>
+            <div className="grid grid-cols-[1.4fr_.8fr_.7fr] gap-3 border-b border-[#F0EAF3] px-4 py-3">
+                <ManagerSkeletonBar className="h-2.5 w-16" />
+                <ManagerSkeletonBar className="h-2.5 w-14" />
+                <ManagerSkeletonBar className="h-2.5 w-12" />
+            </div>
+            <div className="divide-y divide-[#F3EEF5]">
+                {[0, 1, 2, 3, 4].map((item) => (
+                    <div key={item} className="grid grid-cols-[1.4fr_.8fr_.7fr] items-center gap-3 px-4 py-4">
+                        <div>
+                            <ManagerSkeletonBar className="h-2.5 w-32 max-w-full" />
+                            <ManagerSkeletonBar className="mt-2 h-2 w-20" />
+                        </div>
+                        <ManagerSkeletonBar className="h-2.5 w-16" />
+                        <div className="h-5 w-16 rounded-full bg-[#F1EDEF]" />
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function ManagerTrendSkeleton() {
+    return (
+        <div className="min-h-[300px] rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                    <div className="h-9 w-9 rounded-lg bg-[#EEE9F4]" />
+                    <div>
+                        <ManagerSkeletonBar className="h-3.5 w-32" />
+                        <ManagerSkeletonBar className="mt-2 h-2.5 w-48" />
+                    </div>
+                </div>
+                <div className="h-8 w-24 rounded-lg bg-[#F1EDF4]" />
+            </div>
+            <div className="relative mt-6 h-[185px] overflow-hidden rounded-xl">
+                {[20, 60, 100, 140].map((top) => (
+                    <div key={top} className="absolute left-8 right-3 h-px bg-[#F0EBF3]" style={{ top }} />
+                ))}
+                <svg viewBox="0 0 700 180" className="absolute inset-0 h-full w-full" aria-hidden="true">
+                    <path d="M35 130 L120 112 L205 124 L290 92 L375 105 L460 70 L545 95 L665 78" fill="none" stroke="#E4DEE9" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M35 145 L120 138 L205 142 L290 126 L375 130 L460 110 L545 120 L665 115" fill="none" stroke="#EEE8F2" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <div className="absolute bottom-1 left-8 right-3 flex justify-between">
+                    {[0, 1, 2, 3, 4, 5, 6, 7].map((item) => (
+                        <div key={item} className="h-2 w-8 rounded-full bg-[#EEE9F2]" />
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function ManagerForecastSkeleton() {
+    return (
+        <div className="min-h-[300px] rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                    <div className="h-9 w-9 rounded-lg bg-[#EEE9F4]" />
+                    <div>
+                        <ManagerSkeletonBar className="h-3.5 w-32" />
+                        <ManagerSkeletonBar className="mt-2 h-2.5 w-44" />
+                    </div>
+                </div>
+                <div className="h-8 w-20 rounded-lg bg-[#F1EDF4]" />
+            </div>
+            <div className="mt-5 divide-y divide-[#F2EDF4]">
+                {[0, 1, 2].map((item) => (
+                    <div key={item} className="grid grid-cols-[1.45fr_.65fr_.65fr_.55fr] items-center gap-3 py-4">
+                        <div>
+                            <ManagerSkeletonBar className="h-2.5 w-44 max-w-full" />
+                            <ManagerSkeletonBar className="mt-2 h-2 w-28" />
+                        </div>
+                        <div className="h-5 w-16 rounded-full bg-[#F1EDF4]" />
+                        <div>
+                            <ManagerSkeletonBar className="h-2 w-10" />
+                            <ManagerSkeletonBar className="mt-2 h-3 w-14" />
+                        </div>
+                        <div>
+                            <ManagerSkeletonBar className="h-2 w-10" />
+                            <ManagerSkeletonBar className="mt-2 h-3 w-12" />
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function ManagerDashboardSkeleton() {
+    return (
+        <div className="mx-auto max-w-none space-y-4 animate-pulse" role="status" aria-label="Loading manager dashboard">
+            <span className="sr-only">Loading manager dashboard data</span>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
+                {[0, 1, 2, 3].map((item) => <ManagerMetricSkeleton key={item} />)}
+            </div>
+            <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-12" aria-hidden="true">
+                <div className="xl:col-span-4"><ManagerDonutSkeleton /></div>
+                <div className="xl:col-span-4"><ManagerDonutSkeleton /></div>
+                <div className="xl:col-span-4"><ManagerAttentionSkeleton /></div>
+            </div>
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2" aria-hidden="true">
+                <ManagerTrendSkeleton />
+                <ManagerForecastSkeleton />
+            </div>
+        </div>
+    );
+}
+
 export default function ManagerDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
@@ -1048,12 +1256,23 @@ export default function ManagerDashboard() {
     const [bookingsError, setBookingsError] = useState("");
     const [orders, setOrders] = useState<Order[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
-    const [, setRestockMovements] = useState<RestockMovementRecord[]>([]);
-    const [, setAdjustmentMovements] = useState<AdjustmentMovementRecord[]>([]);
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
+    const [hasLoadedDashboard, setHasLoadedDashboard] = useState(false);
     const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
     const [stockAlertFilter, setStockAlertFilter] = useState<"all" | "low" | "out">("all");
+    const [bookingTrendRange, setBookingTrendRange] = useState<BookingTrendRange>("8w");
+
+    // Primitive dashboard identity values stay stable even when useCurrentUser()
+    // replaces its user object after hydration. This prevents an unnecessary
+    // second full dashboard fetch when the actual IDs did not change.
+    const dashboardStoreId =
+        getUserValue(user, "store_id") ||
+        getUserValue(user, "storeId") ||
+        getSavedItem("store_id") ||
+        getSavedItem("stocknbook_store_id");
+    const dashboardBranchId = getAssignedBranchId(user);
+    const loadInFlightRef = useRef(false);
 
     useEffect(() => {
         const timer = window.setInterval(() => {
@@ -1065,43 +1284,35 @@ export default function ManagerDashboard() {
 
     const loadManagerDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
         const token = getSavedItem("token");
-        const storeId =
-            getUserValue(user, "store_id") ||
-            getUserValue(user, "storeId") ||
-            getSavedItem("store_id") ||
-            getSavedItem("stocknbook_store_id");
-        const branchId = getAssignedBranchId(user);
-        const assignedBranchName = getAssignedBranchName(user);
+        const storeId = dashboardStoreId;
+        const branchId = dashboardBranchId;
 
         if (!token || !branchId) {
             setBookings([]);
             setOrders([]);
             setProducts([]);
-            setRestockMovements([]);
-            setAdjustmentMovements([]);
             setBookingsError("No assigned branch was found for this account.");
+            setHasLoadedDashboard(true);
             return;
         }
+
+        // React Strict Mode intentionally re-runs effects in development.
+        // Ignore a duplicate dashboard load while the first one is still active.
+        if (loadInFlightRef.current) return;
+        loadInFlightRef.current = true;
 
         if (!silent) setIsRefreshing(true);
         setBookingsError("");
 
         try {
             const now = new Date();
-            const movementStart = new Date(now);
-            movementStart.setDate(movementStart.getDate() - 56);
 
-            const reportQuery = new URLSearchParams({
-                branch: assignedBranchName,
-                month: movementStart.toISOString().slice(0, 7),
-                startDate: movementStart.toISOString().slice(0, 10),
-                endDate: now.toISOString().slice(0, 10),
-                role: "manager",
-                assignedBranch: assignedBranchName,
-                branch_id: String(branchId),
-            });
+            // The manager inventory forecast only reads the last 30 days of POS
+            // movement, so keep the dashboard transaction request date-scoped.
+            const ordersStart = new Date(now);
+            ordersStart.setDate(ordersStart.getDate() - 30);
 
-            const [bookingsResult, productsResult, ordersResult, reportsResult] =
+            const [bookingsResult, productsResult, ordersResult] =
                 await Promise.allSettled([
                     fetch("/api/bookings", {
                         method: "POST",
@@ -1139,13 +1350,9 @@ export default function ManagerDashboard() {
                             action: "get_orders",
                             branch_id: Number(branchId),
                             include_order_items: true,
-                            date_from: movementStart.toISOString().slice(0, 10),
+                            date_from: ordersStart.toISOString().slice(0, 10),
                             date_to: now.toISOString().slice(0, 10),
                         }),
-                        cache: "no-store",
-                    }),
-                    fetch(`/api/reports?${reportQuery.toString()}`, {
-                        headers: { Authorization: `Bearer ${token}` },
                         cache: "no-store",
                     }),
                 ]);
@@ -1215,48 +1422,12 @@ export default function ManagerDashboard() {
                 console.warn("Manager dashboard orders fetch failed:", ordersResult.reason);
             }
 
-            if (reportsResult.status === "fulfilled") {
-                try {
-                    const response = reportsResult.value;
-                    const payload = await response.json().catch(() => ({}));
-                    const reportData = payload?.data && typeof payload.data === "object" ? payload.data : {};
-
-                    if (response.ok && payload?.success) {
-                        const rawRestocks = firstDefined(toRecord(reportData), [
-                            "restockHistory",
-                            "restock_history",
-                            "restocks",
-                            "inventoryRestocks",
-                            "inventory_restocks",
-                        ]);
-                        const restocks = Array.isArray(rawRestocks)
-                            ? rawRestocks.map(normalizeRestockMovement)
-                            : [];
-                        setRestockMovements(
-                            restocks.filter((item) =>
-                                !item.branchId || String(item.branchId) === String(branchId),
-                            ),
-                        );
-
-                        setAdjustmentMovements(extractAdjustmentMovements(reportData, branchId));
-                    } else {
-                        setRestockMovements([]);
-                        setAdjustmentMovements([]);
-                    }
-                } catch (error) {
-                    console.warn("Manager dashboard reports parsing failed:", error);
-                    setRestockMovements([]);
-                    setAdjustmentMovements([]);
-                }
-            } else {
-                console.warn("Manager dashboard reports fetch failed:", reportsResult.reason);
-                setRestockMovements([]);
-                setAdjustmentMovements([]);
-            }
         } finally {
+            loadInFlightRef.current = false;
             if (!silent) setIsRefreshing(false);
+            setHasLoadedDashboard(true);
         }
-    }, [user]);
+    }, [dashboardStoreId, dashboardBranchId]);
 
     useEffect(() => {
         void loadManagerDashboard();
@@ -1318,9 +1489,11 @@ export default function ManagerDashboard() {
     );
 
     const bookingTrend = useMemo(
-        () => buildBookingStatusTrend(bookings, currentDateTime),
-        [bookings, currentDateTime],
+        () => buildBookingStatusTrend(bookings, currentDateTime, bookingTrendRange),
+        [bookings, currentDateTime, bookingTrendRange],
     );
+
+    const bookingTrendConfig = BOOKING_TREND_RANGE_CONFIG[bookingTrendRange];
 
     const inventoryForecast = useMemo(
         () => buildManagerInventoryForecast(products, orders, currentDateTime),
@@ -1371,8 +1544,13 @@ export default function ManagerDashboard() {
                 </div>
             </header>
 
-            <section className="px-6 py-5 font-sans">
-                <div className="mx-auto max-w-none space-y-4">
+            <section
+                aria-busy={!hasLoadedDashboard || isRefreshing}
+                className="px-6 py-5 font-sans"
+            >
+                {!hasLoadedDashboard ? <ManagerDashboardSkeleton /> : null}
+
+                <div className={`mx-auto max-w-none space-y-4 ${!hasLoadedDashboard ? "hidden" : ""}`}>
                     {bookingsError && (
                         <div className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs font-medium text-[#C32F2F]">
                             {bookingsError}
@@ -1457,9 +1635,11 @@ export default function ManagerDashboard() {
                     <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
                         <ManagerLineChartPanel
                             title="Booking Status Trend"
-                            subtitle="Weekly booking status over the last 8 weeks"
+                            subtitle={bookingTrendConfig.subtitle}
                             icon={<BarChart3 size={18} />}
-                            periodLabel="Last 8 Weeks"
+                            periodValue={bookingTrendRange}
+                            periodOptions={BOOKING_TREND_RANGE_OPTIONS}
+                            onPeriodChange={setBookingTrendRange}
                             data={bookingTrend}
                             series={[
                                 { key: "pending", label: "Pending", color: "#F5B51B" },
@@ -1496,18 +1676,6 @@ export default function ManagerDashboard() {
 /* Manager role dashboard helpers                                           */
 /* ----------------------------------------------------------------------- */
 
-type RestockMovementRecord = {
-    date: string;
-    quantityAdded: number;
-    branchId?: string | number;
-};
-
-type AdjustmentMovementRecord = {
-    date: string;
-    quantityChanged: number;
-    branchId?: string | number;
-};
-
 type ManagerSegment = {
     label: string;
     value: number;
@@ -1521,6 +1689,46 @@ type ManagerAttentionItem = {
     status: "Expired" | "Out of Stock" | "Very Low Stock" | "Expiring Soon" | "Low Stock";
     detail: string;
     priority: number;
+};
+
+type BookingTrendRange = "8w" | "3m" | "6m" | "12m";
+
+type BookingTrendRangeOption = {
+    value: BookingTrendRange;
+    label: string;
+};
+
+const BOOKING_TREND_RANGE_OPTIONS: BookingTrendRangeOption[] = [
+    { value: "8w", label: "Last 8 Weeks" },
+    { value: "3m", label: "Last 3 Months" },
+    { value: "6m", label: "Last 6 Months" },
+    { value: "12m", label: "Last 12 Months" },
+];
+
+const BOOKING_TREND_RANGE_CONFIG: Record<
+    BookingTrendRange,
+    { subtitle: string; bucket: "week" | "month"; bucketCount: number }
+> = {
+    "8w": {
+        subtitle: "Weekly booking status over the last 8 weeks",
+        bucket: "week",
+        bucketCount: 8,
+    },
+    "3m": {
+        subtitle: "Weekly booking status over the last 3 months",
+        bucket: "week",
+        bucketCount: 13,
+    },
+    "6m": {
+        subtitle: "Monthly booking status over the last 6 months",
+        bucket: "month",
+        bucketCount: 6,
+    },
+    "12m": {
+        subtitle: "Monthly booking status over the last 12 months",
+        bucket: "month",
+        bucketCount: 12,
+    },
 };
 
 type ManagerTrendPoint = {
@@ -1552,88 +1760,6 @@ function parseManagerDate(value?: string | null) {
     if (!raw) return null;
     const parsed = new Date(raw);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function normalizeRestockMovement(value: unknown): RestockMovementRecord {
-    const raw = toRecord(value);
-    return {
-        date: readText(raw, ["date", "createdAt", "created_at", "restockDate", "restock_date"]),
-        quantityAdded: Math.max(
-            0,
-            readNumber(raw, ["quantityAdded", "quantity_added", "quantity", "qty"], 0),
-        ),
-        branchId:
-            firstDefined(raw, ["branchId", "branch_id"]) as string | number | undefined,
-    };
-}
-
-function normalizeAdjustmentMovement(value: unknown): AdjustmentMovementRecord {
-    const raw = toRecord(value);
-    const rawQuantity = readNullableNumber(raw, [
-        "quantityChanged",
-        "quantity_changed",
-        "quantityChange",
-        "quantity_change",
-        "adjustmentQuantity",
-        "adjustment_quantity",
-        "difference",
-        "delta",
-    ]);
-
-    return {
-        date: readText(raw, ["date", "createdAt", "created_at", "updatedAt", "updated_at"]),
-        quantityChanged: Math.abs(Number(rawQuantity || 0)),
-        branchId:
-            firstDefined(raw, ["branchId", "branch_id"]) as string | number | undefined,
-    };
-}
-
-function extractAdjustmentMovements(reportData: unknown, branchId: string) {
-    const raw = toRecord(reportData);
-    const direct = firstDefined(raw, [
-        "inventoryAdjustments",
-        "inventory_adjustments",
-        "stockAdjustments",
-        "stock_adjustments",
-        "adjustmentHistory",
-        "adjustment_history",
-        "inventoryAdjustmentHistory",
-    ]);
-
-    if (Array.isArray(direct)) {
-        return direct
-            .map(normalizeAdjustmentMovement)
-            .filter(
-                (item) =>
-                    item.quantityChanged > 0 &&
-                    (!item.branchId || String(item.branchId) === String(branchId)),
-            );
-    }
-
-    const employeeActions = firstDefined(raw, ["employeeActions", "employee_actions"]);
-    if (!Array.isArray(employeeActions)) return [];
-
-    return employeeActions
-        .filter((value) => {
-            const action = toRecord(value);
-            const moduleName = readText(action, ["module"]);
-            const text = [
-                readText(action, ["action"]),
-                readText(action, ["details"]),
-                readText(action, ["description"]),
-            ]
-                .join(" ")
-                .toLowerCase();
-            const actionBranchId = firstDefined(action, ["branchId", "branch_id"]);
-
-            return (
-                moduleName.toLowerCase().includes("inventory") &&
-                /(adjust|correction|damag|missing|return|expire)/.test(text) &&
-                (!actionBranchId || String(actionBranchId) === String(branchId))
-            );
-        })
-        .map(normalizeAdjustmentMovement)
-        .filter((item) => item.quantityChanged > 0);
 }
 
 function managerAttentionKey(productName: string, variantName: string) {
@@ -1798,27 +1924,62 @@ function startOfManagerWeek(value: Date) {
     return date;
 }
 
-function getLastEightManagerWeeks(reference: Date) {
+function getManagerWeeklyBuckets(reference: Date, count: number) {
     const currentWeek = startOfManagerWeek(reference);
-    return Array.from({ length: 8 }, (_, index) => {
+
+    return Array.from({ length: count }, (_, index) => {
         const start = new Date(currentWeek);
-        start.setDate(start.getDate() - (7 - index) * 7);
+        start.setDate(start.getDate() - (count - 1 - index) * 7);
+
         const end = new Date(start);
         end.setDate(end.getDate() + 7);
+
         return {
             start,
             end,
-            label: start.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+            label: start.toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+            }),
         };
     });
 }
 
-function buildBookingStatusTrend(bookings: Booking[], reference: Date): ManagerTrendPoint[] {
-    const weeks = getLastEightManagerWeeks(reference);
+function getManagerMonthlyBuckets(reference: Date, count: number) {
+    return Array.from({ length: count }, (_, index) => {
+        const monthsBack = count - 1 - index;
+        const start = new Date(
+            reference.getFullYear(),
+            reference.getMonth() - monthsBack,
+            1,
+        );
+        const end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
 
-    return weeks.map((week) => {
+        return {
+            start,
+            end,
+            label: start.toLocaleDateString("en-US", {
+                month: "short",
+                ...(count >= 12 ? { year: "2-digit" as const } : {}),
+            }),
+        };
+    });
+}
+
+function buildBookingStatusTrend(
+    bookings: Booking[],
+    reference: Date,
+    range: BookingTrendRange,
+): ManagerTrendPoint[] {
+    const config = BOOKING_TREND_RANGE_CONFIG[range];
+    const buckets =
+        config.bucket === "week"
+            ? getManagerWeeklyBuckets(reference, config.bucketCount)
+            : getManagerMonthlyBuckets(reference, config.bucketCount);
+
+    return buckets.map((bucket) => {
         const point: ManagerTrendPoint = {
-            label: week.label,
+            label: bucket.label,
             pending: 0,
             confirmed: 0,
             completed: 0,
@@ -1827,7 +1988,7 @@ function buildBookingStatusTrend(bookings: Booking[], reference: Date): ManagerT
 
         bookings.forEach((booking) => {
             const date = parseManagerDate(booking.createdAt || booking.date);
-            if (!date || date < week.start || date >= week.end) return;
+            if (!date || date < bucket.start || date >= bucket.end) return;
 
             const status = normalizeDashboardBookingStatus(booking.status);
             if (status === "Completed") point.completed = Number(point.completed) + 1;
@@ -2441,14 +2602,18 @@ function ManagerLineChartPanel({
                                    title,
                                    subtitle,
                                    icon,
-                                   periodLabel,
+                                   periodValue,
+                                   periodOptions,
+                                   onPeriodChange,
                                    data,
                                    series,
                                }: {
     title: string;
     subtitle: string;
     icon: React.ReactNode;
-    periodLabel: string;
+    periodValue: BookingTrendRange;
+    periodOptions: BookingTrendRangeOption[];
+    onPeriodChange: (value: BookingTrendRange) => void;
     data: ManagerTrendPoint[];
     series: ManagerLineSeries[];
 }) {
@@ -2464,9 +2629,22 @@ function ManagerLineChartPanel({
                         <p className="truncate text-[11px] text-[#9A8DA8]">{subtitle}</p>
                     </div>
                 </div>
-                <span className="shrink-0 rounded-lg border border-[#E6DDF0] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#5F4E75] shadow-sm">
-                    {periodLabel}
-                </span>
+                <label className="relative shrink-0">
+                    <span className="sr-only">Booking trend period</span>
+                    <select
+                        value={periodValue}
+                        onChange={(event) =>
+                            onPeriodChange(event.target.value as BookingTrendRange)
+                        }
+                        className="h-8 cursor-pointer rounded-lg border border-[#E6DDF0] bg-white px-2.5 pr-7 text-[11px] font-semibold text-[#5F4E75] shadow-sm outline-none transition focus:border-[#BCA7D7] focus:ring-2 focus:ring-[#EDE4FA]"
+                    >
+                        {periodOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                                {option.label}
+                            </option>
+                        ))}
+                    </select>
+                </label>
             </div>
 
             <div className="mt-2 min-h-0 flex-1">
@@ -2484,7 +2662,7 @@ function ManagerLineChartPanel({
                         <span
                             key={item.key}
                             className="inline-flex items-center gap-1.5"
-                            title={total === 0 ? `${item.label}: no recorded movement in this period` : `${item.label}: ${total.toLocaleString("en-PH")} units in this period`}
+                            title={total === 0 ? `${item.label}: no recorded movement in this period` : `${item.label}: ${total.toLocaleString("en-PH")} bookings in this period`}
                         >
                             <span
                                 className="h-2.5 w-2.5 rounded-full"
@@ -2690,18 +2868,27 @@ function ManagerMultiLineChart({
                 );
             })}
 
-            {data.map((point, index) => (
-                <text
-                    key={`${point.label}-${index}`}
-                    x={xFor(index)}
-                    y={height - 9}
-                    textAnchor="middle"
-                    fontSize="9.5"
-                    fill="#9A8DA8"
-                >
-                    {point.label}
-                </text>
-            ))}
+            {data.map((point, index) => {
+                const shouldShowLabel =
+                    data.length <= 10 ||
+                    index % 2 === 0 ||
+                    index === data.length - 1;
+
+                if (!shouldShowLabel) return null;
+
+                return (
+                    <text
+                        key={`${point.label}-${index}`}
+                        x={xFor(index)}
+                        y={height - 9}
+                        textAnchor="middle"
+                        fontSize="9.5"
+                        fill="#9A8DA8"
+                    >
+                        {point.label}
+                    </text>
+                );
+            })}
         </svg>
     );
 }

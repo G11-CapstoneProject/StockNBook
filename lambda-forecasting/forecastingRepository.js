@@ -298,33 +298,40 @@ async function getInventoryItems(connection, { storeId, branchId = null }) {
     let query = `
         SELECT
             p.id AS product_id,
-            p.store_id,
-            p.branch_id,
+            bi.store_id,
+            bi.branch_id,
             p.name AS product_name,
             p.category,
-            p.stock AS product_stock,
-            p.alert_level AS product_alert_level,
-            pv.id AS variant_id,
+            bi.quantity_on_hand AS inventory_stock,
+            bi.reorder_level AS inventory_alert_level,
+            bi.variant_id AS variant_id,
             pv.variant_values,
-            pv.stock AS variant_stock,
-            pv.alert_level AS variant_alert_level,
             b.branch_name
-        FROM products p
+        FROM branch_inventory bi
+                 INNER JOIN products p
+                            ON p.id = bi.product_id
+                                AND p.store_id = bi.store_id
+                                AND p.branch_id = bi.branch_id
                  LEFT JOIN product_variants pv
-                           ON pv.product_id = p.id
+                           ON pv.id = bi.variant_id
+                               AND pv.product_id = p.id
                  LEFT JOIN branches b
-                           ON b.id = p.branch_id
-        WHERE p.store_id = ?
+                           ON b.id = bi.branch_id
+                               AND b.store_id = bi.store_id
+        WHERE bi.store_id = ?
+          AND bi.status = 'active'
+          AND p.deleted_at IS NULL
+          AND (bi.variant_id IS NULL OR pv.deleted_at IS NULL)
     `;
 
     const params = [storeId];
 
     if (branchId) {
-        query += " AND p.branch_id = ?";
+        query += " AND bi.branch_id = ?";
         params.push(branchId);
     }
 
-    query += " ORDER BY p.name ASC, pv.id ASC";
+    query += " ORDER BY p.name ASC, bi.variant_id ASC";
 
     const [rows] = await connection.execute(query, params);
 
@@ -352,12 +359,8 @@ async function getInventoryItems(connection, { storeId, branchId = null }) {
             branchId: Number(row.branch_id),
             branchName: String(row.branch_name || "Unnamed Branch"),
             isVariant,
-            onHandQuantity: isVariant
-                ? toSafeNumber(row.variant_stock)
-                : toSafeNumber(row.product_stock),
-            lowStockThreshold: isVariant
-                ? toSafeNumber(row.variant_alert_level)
-                : toSafeNumber(row.product_alert_level),
+            onHandQuantity: toSafeNumber(row.inventory_stock),
+            lowStockThreshold: toSafeNumber(row.inventory_alert_level),
         };
     });
 }
@@ -729,34 +732,34 @@ async function getUpcomingBookingAllocationSummary(
         SELECT
             COUNT(*) AS expected_bookings,
             SUM(
-                CASE
-                    WHEN LOWER(TRIM(COALESCE(b.status, ''))) = 'preparing'
-                        THEN 1
-                    ELSE 0
-                END
+                    CASE
+                        WHEN LOWER(TRIM(COALESCE(b.status, ''))) = 'preparing'
+                            THEN 1
+                        ELSE 0
+                        END
             ) AS preparing_bookings,
             SUM(
-                CASE
-                    WHEN LOWER(TRIM(COALESCE(b.status, ''))) IN (
-                        'confirmed',
-                        'approved'
-                    )
-                        THEN 1
-                    ELSE 0
-                END
+                    CASE
+                        WHEN LOWER(TRIM(COALESCE(b.status, ''))) IN (
+                                                                     'confirmed',
+                                                                     'approved'
+                            )
+                            THEN 1
+                        ELSE 0
+                        END
             ) AS confirmed_bookings,
             SUM(
-                CASE
-                    WHEN NOT EXISTS (
-                        SELECT 1
-                        FROM booking_items bi
-                        WHERE bi.booking_id = b.id
-                    )
-                        THEN 1
-                    ELSE 0
-                END
+                    CASE
+                        WHEN NOT EXISTS (
+                            SELECT 1
+                            FROM booking_items bi
+                            WHERE bi.booking_id = b.id
+                        )
+                            THEN 1
+                        ELSE 0
+                        END
             ) AS bookings_without_allocation
-        ${bookingWhere}
+            ${bookingWhere}
     `;
 
     let allocationQuery = `
@@ -764,24 +767,24 @@ async function getUpcomingBookingAllocationSummary(
             bi.product_id,
             bi.variant_id,
             COALESCE(
-                MAX(NULLIF(TRIM(bi.product_name), '')),
-                MAX(NULLIF(TRIM(p.name), '')),
-                CONCAT('Product ', bi.product_id)
+                    MAX(NULLIF(TRIM(bi.product_name), '')),
+                    MAX(NULLIF(TRIM(p.name), '')),
+                    CONCAT('Product ', bi.product_id)
             ) AS item_name,
             SUM(COALESCE(bi.quantity, 0)) AS quantity
         FROM bookings b
-        INNER JOIN booking_items bi
-            ON bi.booking_id = b.id
-        LEFT JOIN products p
-            ON p.id = bi.product_id
-           AND p.store_id = b.store_id
+                 INNER JOIN booking_items bi
+                            ON bi.booking_id = b.id
+                 LEFT JOIN products p
+                           ON p.id = bi.product_id
+                               AND p.store_id = b.store_id
         WHERE b.store_id = ?
           AND b.event_date BETWEEN ? AND ?
           AND LOWER(TRIM(COALESCE(b.status, ''))) IN (
-              'confirmed',
-              'preparing',
-              'approved'
-          )
+                                                      'confirmed',
+                                                      'preparing',
+                                                      'approved'
+            )
           AND bi.product_id IS NOT NULL
     `;
 

@@ -11,6 +11,7 @@ import ManagerForecast from "@/components/forecasting/ManagerForecast";
 import OwnerForecast from "@/components/forecasting/OwnerForecast";
 import StaffForecast from "@/components/forecasting/staffForecast";
 import {
+    ForecastLoadingState,
     formatCurrentDateTime,
     useLiveForecasting,
 } from "@/components/forecasting/_shared";
@@ -58,7 +59,7 @@ export default function ForecastingPage() {
     }
 
     return (
-        <RequirePermission>
+        <RequirePermission permission="forecasting">
             <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
                 <RoleSidebar />
 
@@ -108,9 +109,7 @@ export default function ForecastingPage() {
 
                     <section className="space-y-4 px-6 py-4">
                         {userLoading ? (
-                            <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-6 text-sm text-[#7A6A84] shadow-sm">
-                                Loading your forecast access...
-                            </div>
+                            <ForecastLoadingState />
                         ) : (
                             <PlanFeatureGate feature="forecasting">
                                 {role === "owner" ? (

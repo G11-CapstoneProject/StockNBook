@@ -1,6 +1,8 @@
 "use client";
 
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
+import RequirePermission from "@/components/permissions/RequirePermission";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     type ReactNode,
     useCallback,
@@ -801,287 +803,286 @@ export default function BranchManagersPage() {
     };
 
     return (
-        <div
-            className="flex min-h-screen font-sans text-[#1A1220]"
-            style={{ backgroundColor: "#FDFAF4" }}
-        >
-            <RoleSidebar />
+        <RequirePermission ownerOnly>
+            <div
+                className="flex min-h-screen font-sans text-[#1A1220]"
+                style={{ backgroundColor: "#FDFAF4" }}
+            >
+                <RoleSidebar />
 
-            <main className="min-w-0 flex-1 overflow-y-auto font-sans">
-                <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
-                    <div className="flex min-h-[86px] flex-wrap items-center justify-between gap-4 px-6 py-3.5">
-                        <div className="min-w-0">
-                            <h1 className="text-[26px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                                Branch Managers
-                            </h1>
-                            <p className="mt-1 text-[12px] text-[#7A6A84]">
-                                Manage branch managers and their access across all branches.
-                            </p>
-                        </div>
+                <main className="min-w-0 flex-1 overflow-y-auto font-sans">
+                    <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
+                        <div className="flex min-h-[86px] flex-wrap items-center justify-between gap-4 px-6 py-3.5">
+                            <div className="min-w-0">
+                                <h1 className="text-[26px] font-bold tracking-[-0.02em] text-[#1A1220]">
+                                    Branch Managers
+                                </h1>
+                                <p className="mt-1 text-[12px] text-[#7A6A84]">
+                                    Manage branch managers and their access across all branches.
+                                </p>
+                            </div>
 
-                        <div className="flex items-center gap-2.5">
+                            <div className="flex items-center gap-2.5">
                             <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
                                 {currentDateTime
                                     ? formatCurrentDateTime(currentDateTime)
                                     : "Loading date..."}
                             </span>
 
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    void loadSubscriptionPlan();
-                                    void loadManagers();
-                                }}
-                                disabled={loading}
-                                aria-label="Refresh branch managers"
-                                title="Refresh branch managers"
-                                className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                                <RefreshCw
-                                    size={16}
-                                    className={loading ? "animate-spin" : ""}
-                                />
-                                {loading ? "Refreshing..." : "Refresh"}
-                            </button>
-                        </div>
-                    </div>
-                </header>
-
-                <section className="space-y-4 px-6 py-5">
-                    <div className="grid gap-4 md:grid-cols-3">
-                        <StatCard
-                            title="Total Managers"
-                            value={totals.total}
-                            subtitle="Across all branches"
-                            icon={<UsersRound size={25} strokeWidth={2} />}
-                            tone="violet"
-                        />
-                        <StatCard
-                            title="Active Managers"
-                            value={totals.active}
-                            subtitle="Currently active"
-                            icon={<UserCheck size={25} strokeWidth={2} />}
-                            tone="green"
-                        />
-                        <StatCard
-                            title="Inactive Managers"
-                            value={totals.inactive}
-                            subtitle="Currently inactive"
-                            icon={<UserX size={25} strokeWidth={2} />}
-                            tone="red"
-                        />
-                    </div>
-
-                    <div className="flex flex-col gap-3 lg:flex-row">
-                        <div className="relative min-w-0 flex-1">
-                            <Search
-                                size={18}
-                                className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                            />
-
-                            <input
-                                value={search}
-                                onChange={(event) =>
-                                    setSearch(event.target.value)
-                                }
-                                placeholder="Search manager name, email, branch, or status..."
-                                className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                            />
-
-                            {search && (
                                 <button
                                     type="button"
-                                    onClick={() => setSearch("")}
-                                    aria-label="Clear manager search"
-                                    className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
+                                    onClick={() => {
+                                        void loadSubscriptionPlan();
+                                        void loadManagers();
+                                    }}
+                                    disabled={loading}
+                                    aria-label="Refresh branch managers"
+                                    title="Refresh branch managers"
+                                    className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
                                 >
-                                    <X size={15} />
+                                    <RefreshCw
+                                        size={16}
+                                        className={loading ? "animate-spin" : ""}
+                                    />
+                                    {loading ? "Refreshing..." : "Refresh"}
                                 </button>
-                            )}
+                            </div>
+                        </div>
+                    </header>
+
+                    <section className="space-y-4 px-6 py-5">
+                        <div className="grid gap-4 md:grid-cols-3">
+                            <StatCard
+                                title="Total Managers"
+                                value={totals.total}
+                                subtitle="Across all branches"
+                                icon={<UsersRound size={25} strokeWidth={2} />}
+                                tone="violet"
+                            />
+                            <StatCard
+                                title="Active Managers"
+                                value={totals.active}
+                                subtitle="Currently active"
+                                icon={<UserCheck size={25} strokeWidth={2} />}
+                                tone="green"
+                            />
+                            <StatCard
+                                title="Inactive Managers"
+                                value={totals.inactive}
+                                subtitle="Currently inactive"
+                                icon={<UserX size={25} strokeWidth={2} />}
+                                tone="red"
+                            />
                         </div>
 
-                        <div className="flex shrink-0 gap-2.5">
-                            <div className="relative">
-                                <Filter
-                                    size={16}
-                                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
+                        <div className="flex flex-col gap-3 lg:flex-row">
+                            <div className="relative min-w-0 flex-1">
+                                <Search
+                                    size={18}
+                                    className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
                                 />
 
-                                <select
-                                    value={statusFilter}
+                                <input
+                                    value={search}
                                     onChange={(event) =>
-                                        setStatusFilter(
-                                            event.target.value as
-                                                | "all"
-                                                | ManagerStatus
-                                        )
+                                        setSearch(event.target.value)
                                     }
-                                    aria-label="Filter managers by status"
-                                    className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                                >
-                                    <option value="all">
-                                        All Status
-                                    </option>
-                                    <option value="active">
-                                        Active
-                                    </option>
-                                    <option value="inactive">
-                                        Inactive
-                                    </option>
-                                    <option value="pending">
-                                        Pending
-                                    </option>
-                                </select>
+                                    placeholder="Search manager name, email, branch, or status..."
+                                    className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                />
 
-                                <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#806A8C]">
-                                        ▾
-                                    </span>
+                                {search && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setSearch("")}
+                                        aria-label="Clear manager search"
+                                        className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
+                                    >
+                                        <X size={15} />
+                                    </button>
+                                )}
                             </div>
 
-                            <button
-                                type="button"
-                                onClick={openAddManagerModal}
-                                title="Add a manager to a branch without an assigned manager"
-                                className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
-                                style={{
-                                    backgroundColor: "#2B174C",
-                                    border: "1px solid #2B174C",
-                                    color: "#FFFFFF",
-                                    boxShadow:
-                                        "0 4px 10px rgba(43, 23, 76, 0.22)",
-                                }}
-                            >
-                                <Plus
-                                    size={18}
-                                    strokeWidth={2.2}
-                                    color="#FFFFFF"
-                                />
-                                <span style={{ color: "#FFFFFF" }}>
+                            <div className="flex shrink-0 gap-2.5">
+                                <div className="relative">
+                                    <Filter
+                                        size={16}
+                                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
+                                    />
+
+                                    <select
+                                        value={statusFilter}
+                                        onChange={(event) =>
+                                            setStatusFilter(
+                                                event.target.value as
+                                                    | "all"
+                                                    | ManagerStatus
+                                            )
+                                        }
+                                        aria-label="Filter managers by status"
+                                        className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                    >
+                                        <option value="all">
+                                            All Status
+                                        </option>
+                                        <option value="active">
+                                            Active
+                                        </option>
+                                        <option value="inactive">
+                                            Inactive
+                                        </option>
+                                        <option value="pending">
+                                            Pending
+                                        </option>
+                                    </select>
+
+                                    <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#806A8C]">
+                                        ▾
+                                    </span>
+                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={openAddManagerModal}
+                                    title="Add a manager to a branch without an assigned manager"
+                                    className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
+                                    style={{
+                                        backgroundColor: "#2B174C",
+                                        border: "1px solid #2B174C",
+                                        color: "#FFFFFF",
+                                        boxShadow:
+                                            "0 4px 10px rgba(43, 23, 76, 0.22)",
+                                    }}
+                                >
+                                    <Plus
+                                        size={18}
+                                        strokeWidth={2.2}
+                                        color="#FFFFFF"
+                                    />
+                                    <span style={{ color: "#FFFFFF" }}>
                                         Add Manager
                                     </span>
-                            </button>
+                                </button>
+                            </div>
                         </div>
-                    </div>
 
-                    {error && (
-                        <div className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-4 py-3 text-sm font-medium text-[#9B1C1C]">
-                            {error}
-                        </div>
-                    )}
+                        {error && (
+                            <div className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-4 py-3 text-sm font-medium text-[#9B1C1C]">
+                                {error}
+                            </div>
+                        )}
 
-                    <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-4">
-                            <div className="flex min-w-0 items-center gap-3">
+                        <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-4">
+                                <div className="flex min-w-0 items-center gap-3">
                                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={21} strokeWidth={2} />
                                 </span>
 
-                                <div className="min-w-0">
-                                    <h2 className="text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">
-                                        Manager List
-                                    </h2>
-                                    <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                        Managers assigned across all branches.
-                                    </p>
+                                    <div className="min-w-0">
+                                        <h2 className="text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">
+                                            Manager List
+                                        </h2>
+                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                            Managers assigned across all branches.
+                                        </p>
+                                    </div>
                                 </div>
-                            </div>
 
-                            <span className="inline-flex items-center rounded-full bg-[#F5EEFF] px-3 py-1.5 text-xs font-semibold text-[#6D35D4]">
+                                <span className="inline-flex items-center rounded-full bg-[#F5EEFF] px-3 py-1.5 text-xs font-semibold text-[#6D35D4]">
                                 {filteredManagers.length}{" "}
-                                {filteredManagers.length === 1
-                                    ? "manager"
-                                    : "managers"}
+                                    {filteredManagers.length === 1
+                                        ? "manager"
+                                        : "managers"}
                             </span>
-                        </div>
-
-                        {loading ? (
-                            <div className="flex min-h-[180px] items-center justify-center px-4 text-sm text-[#7A6A84]">
-                                Loading branch managers...
                             </div>
-                        ) : filteredManagers.length === 0 ? (
-                            <div className="flex min-h-[180px] flex-col items-center justify-center px-4 text-center">
+
+                            {loading && managers.length === 0 ? (
+                                <div className="p-4"><ModuleSkeleton variant="team" /></div>
+                            ) : filteredManagers.length === 0 ? (
+                                <div className="flex min-h-[180px] flex-col items-center justify-center px-4 text-center">
                                 <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={22} />
                                 </span>
-                                <p className="mt-3 text-sm font-semibold text-[#1A1220]">
-                                    No managers found.
-                                </p>
-                                <p className="mt-1 text-sm text-[#7A6A84]">
-                                    Try another manager name, email, branch, or status.
-                                </p>
-                            </div>
-                        ) : (
-                            <div className="overflow-x-auto p-4">
-                                <div
-                                    className="overflow-hidden rounded-[14px]"
-                                    style={{
-                                        boxShadow:
-                                            "inset 0 0 0 1px #EAE2F0",
-                                    }}
-                                >
-                                    <table className="w-full min-w-[820px] border-collapse font-sans">
-                                        <thead className="bg-[#FBF8FF]">
-                                        <tr className="border-b border-[#E6DDF0]">
-                                            <TableHeader>
-                                                Manager
-                                            </TableHeader>
-                                            <TableHeader>
-                                                Branch
-                                            </TableHeader>
-                                            <TableHeader>
-                                                Status
-                                            </TableHeader>
-                                            <TableHeader align="right">
-                                                Actions
-                                            </TableHeader>
-                                        </tr>
-                                        </thead>
+                                    <p className="mt-3 text-sm font-semibold text-[#1A1220]">
+                                        No managers found.
+                                    </p>
+                                    <p className="mt-1 text-sm text-[#7A6A84]">
+                                        Try another manager name, email, branch, or status.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="overflow-x-auto p-4">
+                                    <div
+                                        className="overflow-hidden rounded-[14px]"
+                                        style={{
+                                            boxShadow:
+                                                "inset 0 0 0 1px #EAE2F0",
+                                        }}
+                                    >
+                                        <table className="w-full min-w-[820px] border-collapse font-sans">
+                                            <thead className="bg-[#FBF8FF]">
+                                            <tr className="border-b border-[#E6DDF0]">
+                                                <TableHeader>
+                                                    Manager
+                                                </TableHeader>
+                                                <TableHeader>
+                                                    Branch
+                                                </TableHeader>
+                                                <TableHeader>
+                                                    Status
+                                                </TableHeader>
+                                                <TableHeader align="right">
+                                                    Actions
+                                                </TableHeader>
+                                            </tr>
+                                            </thead>
 
-                                        <tbody>
-                                        {filteredManagers.map(
-                                            (manager) => {
-                                                const isDeleting =
-                                                    deletingId ===
-                                                    manager.id;
+                                            <tbody>
+                                            {filteredManagers.map(
+                                                (manager) => {
+                                                    const isDeleting =
+                                                        deletingId ===
+                                                        manager.id;
 
-                                                return (
-                                                    <tr
-                                                        key={manager.id}
-                                                        className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
-                                                    >
-                                                        <td className="px-5 py-4">
-                                                            <div className="flex min-w-0 items-center gap-3">
+                                                    return (
+                                                        <tr
+                                                            key={manager.id}
+                                                            className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
+                                                        >
+                                                            <td className="px-5 py-4">
+                                                                <div className="flex min-w-0 items-center gap-3">
                                                                     <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-sm font-bold text-[#6D35D4]">
                                                                         {getManagerInitials(
                                                                             manager.name
                                                                         )}
                                                                     </span>
 
-                                                                <div className="min-w-0">
-                                                                    <p className="truncate text-sm font-bold text-[#1A1220]">
-                                                                        {
-                                                                            manager.name
-                                                                        }
-                                                                    </p>
-                                                                    <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-[#7A6A84]">
-                                                                        <Mail
-                                                                            size={
-                                                                                12
+                                                                    <div className="min-w-0">
+                                                                        <p className="truncate text-sm font-bold text-[#1A1220]">
+                                                                            {
+                                                                                manager.name
                                                                             }
-                                                                            className="shrink-0 text-[#806A8C]"
-                                                                        />
-                                                                        <span className="truncate">
+                                                                        </p>
+                                                                        <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-[#7A6A84]">
+                                                                            <Mail
+                                                                                size={
+                                                                                    12
+                                                                                }
+                                                                                className="shrink-0 text-[#806A8C]"
+                                                                            />
+                                                                            <span className="truncate">
                                                                                 {
                                                                                     manager.email
                                                                                 }
                                                                             </span>
-                                                                    </p>
+                                                                        </p>
+                                                                    </div>
                                                                 </div>
-                                                            </div>
-                                                        </td>
+                                                            </td>
 
-                                                        <td className="px-5 py-4">
-                                                            <div className="flex min-w-0 items-center gap-2.5">
+                                                            <td className="px-5 py-4">
+                                                                <div className="flex min-w-0 items-center gap-2.5">
                                                                     <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
                                                                         <Building2
                                                                             size={
@@ -1093,15 +1094,15 @@ export default function BranchManagersPage() {
                                                                         />
                                                                     </span>
 
-                                                                <span className="truncate text-sm font-semibold text-[#1A1220]">
+                                                                    <span className="truncate text-sm font-semibold text-[#1A1220]">
                                                                         {
                                                                             manager.branch
                                                                         }
                                                                     </span>
-                                                            </div>
-                                                        </td>
+                                                                </div>
+                                                            </td>
 
-                                                        <td className="px-5 py-4">
+                                                            <td className="px-5 py-4">
                                                                 <span
                                                                     className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold ${getStatusClass(
                                                                         manager.status
@@ -1122,97 +1123,97 @@ export default function BranchManagersPage() {
                                                                         manager.status
                                                                     )}
                                                                 </span>
-                                                        </td>
+                                                            </td>
 
-                                                        <td className="px-5 py-4 text-right">
-                                                            <button
-                                                                type="button"
-                                                                disabled={
-                                                                    isDeleting
-                                                                }
-                                                                onClick={() =>
-                                                                    void deleteManager(
-                                                                        manager
-                                                                    )
-                                                                }
-                                                                className="inline-flex h-[38px] items-center justify-center rounded-xl bg-[#A33E20] px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
-                                                            >
-                                                                {isDeleting
-                                                                    ? "Deleting..."
-                                                                    : "Delete"}
-                                                            </button>
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            }
-                                        )}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        )}
-                    </section>
-                </section>
-
-                {showPlanLimitDialog && (
-                    <PlanLimitDialog
-                        title="Staff account limit reached"
-                        plan={subscriptionPlan}
-                        currentCount={managers.length}
-                        limit={getManagerLimit(subscriptionPlan)}
-                        onClose={() => setShowPlanLimitDialog(false)}
-                        onViewPlans={() => router.push("/subscription")}
-                    />
-                )}
-
-                {showAddManagerModal && (
-                    <div
-                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm"
-                        onMouseDown={closeAddManagerModal}
-                    >
-                        <div
-                            role="dialog"
-                            aria-modal="true"
-                            aria-labelledby="add-manager-dialog-title"
-                            className="max-h-[78vh] w-full max-w-[1120px] overflow-y-auto rounded-[22px] border border-[#E6DDF0] bg-white shadow-2xl"
-                            onMouseDown={(event) =>
-                                event.stopPropagation()
-                            }
-                        >
-                            <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-6 py-5">
-                                <div>
-                                    <h2
-                                        id="add-manager-dialog-title"
-                                        className="text-[22px] font-bold tracking-[-0.02em] text-[#1A1220]"
-                                    >
-                                        Add Manager
-                                    </h2>
-                                    <p className="mt-1 text-sm text-[#7A6A84]">
-                                        Assign a manager to an existing branch
-                                        that currently has no manager.
-                                    </p>
-                                </div>
-
-                                <button
-                                    type="button"
-                                    onClick={closeAddManagerModal}
-                                    disabled={addingManager}
-                                    aria-label="Close Add Manager dialog"
-                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                    <X size={18} />
-                                </button>
-                            </div>
-
-                            <div className="space-y-5 px-6 py-5">
-                                {addManagerError && (
-                                    <div className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-4 py-3 text-sm font-medium text-[#9B1C1C]">
-                                        {addManagerError}
+                                                            <td className="px-5 py-4 text-right">
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={
+                                                                        isDeleting
+                                                                    }
+                                                                    onClick={() =>
+                                                                        void deleteManager(
+                                                                            manager
+                                                                        )
+                                                                    }
+                                                                    className="inline-flex h-[38px] items-center justify-center rounded-xl bg-[#A33E20] px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
+                                                                >
+                                                                    {isDeleting
+                                                                        ? "Deleting..."
+                                                                        : "Delete"}
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                }
+                                            )}
+                                            </tbody>
+                                        </table>
                                     </div>
-                                )}
+                                </div>
+                            )}
+                        </section>
+                    </section>
 
-                                <div className="rounded-2xl border border-[#E8DFF0] bg-[#FFFEFC] p-5">
-                                    <div className="mb-4 flex items-center gap-3">
+                    {showPlanLimitDialog && (
+                        <PlanLimitDialog
+                            title="Staff account limit reached"
+                            plan={subscriptionPlan}
+                            currentCount={managers.length}
+                            limit={getManagerLimit(subscriptionPlan)}
+                            onClose={() => setShowPlanLimitDialog(false)}
+                            onViewPlans={() => router.push("/subscription")}
+                        />
+                    )}
+
+                    {showAddManagerModal && (
+                        <div
+                            className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm"
+                            onMouseDown={closeAddManagerModal}
+                        >
+                            <div
+                                role="dialog"
+                                aria-modal="true"
+                                aria-labelledby="add-manager-dialog-title"
+                                className="max-h-[78vh] w-full max-w-[1120px] overflow-y-auto rounded-[22px] border border-[#E6DDF0] bg-white shadow-2xl"
+                                onMouseDown={(event) =>
+                                    event.stopPropagation()
+                                }
+                            >
+                                <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-6 py-5">
+                                    <div>
+                                        <h2
+                                            id="add-manager-dialog-title"
+                                            className="text-[22px] font-bold tracking-[-0.02em] text-[#1A1220]"
+                                        >
+                                            Add Manager
+                                        </h2>
+                                        <p className="mt-1 text-sm text-[#7A6A84]">
+                                            Assign a manager to an existing branch
+                                            that currently has no manager.
+                                        </p>
+                                    </div>
+
+                                    <button
+                                        type="button"
+                                        onClick={closeAddManagerModal}
+                                        disabled={addingManager}
+                                        aria-label="Close Add Manager dialog"
+                                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        <X size={18} />
+                                    </button>
+                                </div>
+
+                                <div className="space-y-5 px-6 py-5">
+                                    {addManagerError && (
+                                        <div className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-4 py-3 text-sm font-medium text-[#9B1C1C]">
+                                            {addManagerError}
+                                        </div>
+                                    )}
+
+                                    <div className="rounded-2xl border border-[#E8DFF0] bg-[#FFFEFC] p-5">
+                                        <div className="mb-4 flex items-center gap-3">
                                         <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#F1E9FF] text-[#6D35D4]">
                                             <Building2
                                                 size={20}
@@ -1220,83 +1221,83 @@ export default function BranchManagersPage() {
                                             />
                                         </span>
 
-                                        <div>
-                                            <h3 className="font-bold text-[#1A1220]">
-                                                Branch assignment
-                                            </h3>
-                                            <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                Only branches without an
-                                                assigned manager are shown.
-                                            </p>
+                                            <div>
+                                                <h3 className="font-bold text-[#1A1220]">
+                                                    Branch assignment
+                                                </h3>
+                                                <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                                    Only branches without an
+                                                    assigned manager are shown.
+                                                </p>
+                                            </div>
                                         </div>
-                                    </div>
 
-                                    <label
-                                        htmlFor="add-manager-branch"
-                                        className="mb-2 block text-sm font-semibold text-[#1A1220]"
-                                    >
-                                        Branch
-                                    </label>
-
-                                    <div className="relative">
-                                        <select
-                                            id="add-manager-branch"
-                                            value={selectedBranchId}
-                                            disabled={
-                                                loadingBranches ||
-                                                addingManager ||
-                                                availableBranches.length === 0
-                                            }
-                                            onChange={(event) =>
-                                                setSelectedBranchId(
-                                                    event.target.value
-                                                )
-                                            }
-                                            className="h-[46px] w-full appearance-none rounded-xl border border-[#E6DDF0] bg-white px-3 pr-10 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#9B8AAA]"
+                                        <label
+                                            htmlFor="add-manager-branch"
+                                            className="mb-2 block text-sm font-semibold text-[#1A1220]"
                                         >
-                                            <option value="">
-                                                {loadingBranches
-                                                    ? "Loading available branches..."
-                                                    : availableBranches.length ===
-                                                    0
-                                                        ? "No branches without a manager"
-                                                        : "Select a branch"}
-                                            </option>
+                                            Branch
+                                        </label>
 
-                                            {availableBranches.map(
-                                                (branch) => (
-                                                    <option
-                                                        key={branch.id}
-                                                        value={branch.id}
-                                                    >
-                                                        {branch.branchName} —{" "}
-                                                        {branch.status ===
-                                                        "inactive"
-                                                            ? "Inactive"
-                                                            : "Active"}
-                                                    </option>
-                                                )
-                                            )}
-                                        </select>
+                                        <div className="relative">
+                                            <select
+                                                id="add-manager-branch"
+                                                value={selectedBranchId}
+                                                disabled={
+                                                    loadingBranches ||
+                                                    addingManager ||
+                                                    availableBranches.length === 0
+                                                }
+                                                onChange={(event) =>
+                                                    setSelectedBranchId(
+                                                        event.target.value
+                                                    )
+                                                }
+                                                className="h-[46px] w-full appearance-none rounded-xl border border-[#E6DDF0] bg-white px-3 pr-10 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#9B8AAA]"
+                                            >
+                                                <option value="">
+                                                    {loadingBranches
+                                                        ? "Loading available branches..."
+                                                        : availableBranches.length ===
+                                                        0
+                                                            ? "No branches without a manager"
+                                                            : "Select a branch"}
+                                                </option>
 
-                                        <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#806A8C]">
+                                                {availableBranches.map(
+                                                    (branch) => (
+                                                        <option
+                                                            key={branch.id}
+                                                            value={branch.id}
+                                                        >
+                                                            {branch.branchName} —{" "}
+                                                            {branch.status ===
+                                                            "inactive"
+                                                                ? "Inactive"
+                                                                : "Active"}
+                                                        </option>
+                                                    )
+                                                )}
+                                            </select>
+
+                                            <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#806A8C]">
                                             ▾
                                         </span>
+                                        </div>
+
+                                        {!loadingBranches &&
+                                            availableBranches.length === 0 && (
+                                                <p className="mt-3 rounded-xl border border-[#E6D9BA] bg-[#FFFBF0] px-4 py-3 text-xs leading-5 text-[#6F6043]">
+                                                    Every branch already has a
+                                                    manager. Create another branch
+                                                    without a manager before adding
+                                                    a new manager here.
+                                                </p>
+                                            )}
                                     </div>
 
-                                    {!loadingBranches &&
-                                        availableBranches.length === 0 && (
-                                            <p className="mt-3 rounded-xl border border-[#E6D9BA] bg-[#FFFBF0] px-4 py-3 text-xs leading-5 text-[#6F6043]">
-                                                Every branch already has a
-                                                manager. Create another branch
-                                                without a manager before adding
-                                                a new manager here.
-                                            </p>
-                                        )}
-                                </div>
-
-                                <div className="rounded-2xl border border-[#E8DFF0] bg-white p-5">
-                                    <div className="mb-4 flex items-center gap-3">
+                                    <div className="rounded-2xl border border-[#E8DFF0] bg-white p-5">
+                                        <div className="mb-4 flex items-center gap-3">
                                         <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EEF4FF] text-[#3367D6]">
                                             <UserPlus
                                                 size={20}
@@ -1304,40 +1305,40 @@ export default function BranchManagersPage() {
                                             />
                                         </span>
 
-                                        <div>
-                                            <h3 className="font-bold text-[#1A1220]">
-                                                Manager details
-                                            </h3>
-                                            <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                Enter the manager who will
-                                                receive the account activation
-                                                invitation.
-                                            </p>
+                                            <div>
+                                                <h3 className="font-bold text-[#1A1220]">
+                                                    Manager details
+                                                </h3>
+                                                <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                                    Enter the manager who will
+                                                    receive the account activation
+                                                    invitation.
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="grid gap-4 sm:grid-cols-2">
+                                            <ManagerDialogInput
+                                                label="Manager name"
+                                                value={newManagerName}
+                                                onChange={setNewManagerName}
+                                                placeholder="e.g. Ana Cruz"
+                                                disabled={addingManager}
+                                            />
+
+                                            <ManagerDialogInput
+                                                label="Manager email"
+                                                value={newManagerEmail}
+                                                onChange={setNewManagerEmail}
+                                                placeholder="manager@email.com"
+                                                type="email"
+                                                disabled={addingManager}
+                                            />
                                         </div>
                                     </div>
 
-                                    <div className="grid gap-4 sm:grid-cols-2">
-                                        <ManagerDialogInput
-                                            label="Manager name"
-                                            value={newManagerName}
-                                            onChange={setNewManagerName}
-                                            placeholder="e.g. Ana Cruz"
-                                            disabled={addingManager}
-                                        />
-
-                                        <ManagerDialogInput
-                                            label="Manager email"
-                                            value={newManagerEmail}
-                                            onChange={setNewManagerEmail}
-                                            placeholder="manager@email.com"
-                                            type="email"
-                                            disabled={addingManager}
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="rounded-2xl border border-[#E8DFF0] bg-white p-5">
-                                    <div className="mb-4 flex items-center gap-3">
+                                    <div className="rounded-2xl border border-[#E8DFF0] bg-white p-5">
+                                        <div className="mb-4 flex items-center gap-3">
                                         <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EAF8EF] text-[#188348]">
                                             <ShieldCheck
                                                 size={20}
@@ -1345,20 +1346,20 @@ export default function BranchManagersPage() {
                                             />
                                         </span>
 
-                                        <div>
-                                            <h3 className="font-bold text-[#1A1220]">
-                                                Manager permissions
-                                            </h3>
-                                            <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                Managers automatically get
-                                                full access to all modules.
-                                            </p>
+                                            <div>
+                                                <h3 className="font-bold text-[#1A1220]">
+                                                    Manager permissions
+                                                </h3>
+                                                <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                                    Managers automatically get
+                                                    full access to all modules.
+                                                </p>
+                                            </div>
                                         </div>
-                                    </div>
 
-                                    <div className="flex items-start gap-2 rounded-xl border border-[#E8DFF0] bg-[#FBF8FF] px-4 py-3 text-xs leading-5 text-[#5B4A73]">
-                                        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#188348]" />
-                                        <span>
+                                        <div className="flex items-start gap-2 rounded-xl border border-[#E8DFF0] bg-[#FBF8FF] px-4 py-3 text-xs leading-5 text-[#5B4A73]">
+                                            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#188348]" />
+                                            <span>
                                             Managers get full access to every
                                             module for this branch —
                                             Dashboard, Bookings, Packages,
@@ -1366,56 +1367,57 @@ export default function BranchManagersPage() {
                                             Sales/POS, Reports, Staff
                                             Management, and Branch Settings.
                                         </span>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-xl border border-[#E6D9BA] bg-[#FFFBF0] px-4 py-3 text-xs leading-5 text-[#6F6043]">
+                                        The selected manager will be saved as
+                                        Pending, and an account activation email
+                                        will be sent automatically. The invitation
+                                        expires after 7 days.
                                     </div>
                                 </div>
 
-                                <div className="rounded-xl border border-[#E6D9BA] bg-[#FFFBF0] px-4 py-3 text-xs leading-5 text-[#6F6043]">
-                                    The selected manager will be saved as
-                                    Pending, and an account activation email
-                                    will be sent automatically. The invitation
-                                    expires after 7 days.
+                                <div className="sticky bottom-0 flex gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4">
+                                    <button
+                                        type="button"
+                                        onClick={closeAddManagerModal}
+                                        disabled={addingManager}
+                                        className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-5 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        Cancel
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            void handleAddManager()
+                                        }
+                                        disabled={
+                                            addingManager ||
+                                            loadingBranches ||
+                                            availableBranches.length === 0
+                                        }
+                                        className="flex flex-1 items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                                        style={{
+                                            backgroundColor: "#2B174C",
+                                            border: "1px solid #2B174C",
+                                            boxShadow:
+                                                "0 4px 10px rgba(43, 23, 76, 0.18)",
+                                        }}
+                                    >
+                                        <UserPlus size={17} />
+                                        {addingManager
+                                            ? "Sending invitation..."
+                                            : "Add manager"}
+                                    </button>
                                 </div>
                             </div>
-
-                            <div className="sticky bottom-0 flex gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4">
-                                <button
-                                    type="button"
-                                    onClick={closeAddManagerModal}
-                                    disabled={addingManager}
-                                    className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-5 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                    Cancel
-                                </button>
-
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        void handleAddManager()
-                                    }
-                                    disabled={
-                                        addingManager ||
-                                        loadingBranches ||
-                                        availableBranches.length === 0
-                                    }
-                                    className="flex flex-1 items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                                    style={{
-                                        backgroundColor: "#2B174C",
-                                        border: "1px solid #2B174C",
-                                        boxShadow:
-                                            "0 4px 10px rgba(43, 23, 76, 0.18)",
-                                    }}
-                                >
-                                    <UserPlus size={17} />
-                                    {addingManager
-                                        ? "Sending invitation..."
-                                        : "Add manager"}
-                                </button>
-                            </div>
                         </div>
-                    </div>
-                )}
-            </main>
-        </div>
+                    )}
+                </main>
+            </div>
+        </RequirePermission>
     );
 }
 

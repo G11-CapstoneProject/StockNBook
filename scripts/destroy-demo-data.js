@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 /**
- * Removes only the demo dataset created by seed-demo-data.js.
+ * Removes only the demo dataset created by seed-demo-data.js, including the
+ * 25-month POS summary rows, restock history, and employee activity fixtures.
  * Real stores are not matched unless they use the same explicit SEED_RUN_TAG
  * slug/email namespace.
  *
@@ -9,6 +10,8 @@
  *
  * To target a different seed run:
  *   SEED_RUN_TAG=another-run node destroy-demo-data.js
+ *
+ * Database credentials are read from .env.local (DB_ROOT_PASSWORD / DB_NAME).
  */
 require("dotenv").config({ path: ".env.local" });
 const fs = require("fs");
@@ -34,8 +37,8 @@ function dbConfig() {
     return {
         host: "127.0.0.1",
         user: "root",
-        password: "BTA5EYVWLfWcebF",
-        database: "stocknbook",
+        password: process.env.DB_ROOT_PASSWORD || "BTA5EYVWLfWcebF",
+        database: process.env.DB_NAME || "stocknbook",
         ssl: { rejectUnauthorized: false },
     };
 }
@@ -153,23 +156,69 @@ async function deleteChildByParent(db, relation) {
     console.log(`Deleted ${totalDeleted.toLocaleString()} rows from ${childTable}.`);
 }
 
-async function deleteRowsScopedByColumn(db, tableName, columnName, tempTableName) {
+async function deleteRowsScopedByColumn(
+    db,
+    tableName,
+    columnName,
+    tempTableName
+) {
     if (!(await tableExists(db, tableName))) return;
 
     const columns = await getTableColumns(db, tableName);
     if (!columns.has(columnName)) return;
 
-    const [result] = await db.query(
-        `DELETE scoped
-         FROM ${quoteIdentifier(tableName)} AS scoped
-        INNER JOIN ${quoteIdentifier(tempTableName)} AS seeded
-        ON scoped.${quoteIdentifier(columnName)} = seeded.id`
+    const [seededStores] = await db.query(
+        `SELECT id FROM ${quoteIdentifier(tempTableName)} ORDER BY id`
     );
 
-    console.log(`Deleted ${Number(result.affectedRows || 0).toLocaleString()} rows from ${tableName}.`);
+    let totalDeleted = 0;
+
+    for (const seeded of seededStores) {
+        const storeId = Number(seeded.id);
+        let attempt = 0;
+
+        while (true) {
+            try {
+                const [result] = await db.query(
+                    `DELETE FROM ${quoteIdentifier(tableName)}
+                     WHERE ${quoteIdentifier(columnName)} = ?`,
+                    [storeId]
+                );
+                totalDeleted += Number(
+                    result.affectedRows || 0
+                );
+                break;
+            } catch (error) {
+                const retryable =
+                    Number(error?.errno) === 1205 ||
+                    String(
+                        error?.code || ""
+                    ).toUpperCase() === "ER_LOCK_DEADLOCK";
+
+                if (!retryable || attempt >= 4) {
+                    throw error;
+                }
+
+                attempt += 1;
+                const waitMs = attempt * 1000;
+                console.warn(
+                    `Lock encountered while deleting ${tableName} ` +
+                    `for store ${storeId}; retrying in ${waitMs}ms ` +
+                    `(attempt ${attempt}/4)...`
+                );
+                await new Promise((resolve) =>
+                    setTimeout(resolve, waitMs)
+                );
+            }
+        }
+    }
+
+    console.log(
+        `Deleted ${totalDeleted.toLocaleString()} rows from ${tableName}.`
+    );
 }
 
-async function deleteStoreScopedTables(db) {
+async function deleteStoreScopedTables(db, excludedTables = new Set()) {
     const [tables] = await db.execute(
         `SELECT DISTINCT TABLE_NAME
          FROM INFORMATION_SCHEMA.COLUMNS
@@ -181,6 +230,8 @@ async function deleteStoreScopedTables(db) {
 
     for (const row of tables) {
         const tableName = String(row.TABLE_NAME);
+        if (excludedTables.has(tableName)) continue;
+
         const [result] = await db.query(
             `DELETE scoped
              FROM ${quoteIdentifier(tableName)} AS scoped
@@ -189,6 +240,24 @@ async function deleteStoreScopedTables(db) {
         );
 
         console.log(`Deleted ${Number(result.affectedRows || 0).toLocaleString()} rows from ${tableName}.`);
+    }
+}
+
+
+async function deleteDemoInviteOtps(db) {
+    for (const tableName of ["manager_invite_otps", "staff_invite_otps"]) {
+        if (!(await tableExists(db, tableName))) continue;
+        const columns = await getTableColumns(db, tableName);
+        if (!columns.has("email")) continue;
+
+        const [result] = await db.execute(
+            `DELETE FROM ${quoteIdentifier(tableName)} WHERE email LIKE ?`,
+            [`%@${STORE_EMAIL_DOMAIN}`]
+        );
+
+        console.log(
+            `Deleted ${Number(result.affectedRows || 0).toLocaleString()} demo OTP rows from ${tableName}.`
+        );
     }
 }
 
@@ -215,6 +284,36 @@ async function main() {
 
         await db.query("SET FOREIGN_KEY_CHECKS = 0");
         foreignKeyChecksDisabled = true;
+
+        /*
+         * Remove the high-volume 25-month dashboard/report support rows first.
+         * These all scope directly by store_id and may otherwise remain large
+         * while child/parent transaction rows are being deleted.
+         */
+        const explicitStoreScopedTables = new Set([
+            // Database V2 inventory children first, then the inventory parent.
+            // Keeping this order makes cleanup safe and predictable.
+            "inventory_movements",
+            "inventory_batches",
+            "branch_inventory",
+            "pos_product_monthly_summary",
+            "pos_daily_summary",
+            "restock_history",
+            "employee_actions",
+        ]);
+
+        for (const tableName of explicitStoreScopedTables) {
+            await deleteRowsScopedByColumn(
+                db,
+                tableName,
+                "store_id",
+                "tmp_perf_destroy_store_ids"
+            );
+        }
+
+        // V2 invite OTP rows do not contain store_id, so clean only the demo
+        // email namespace. This never touches real-user OTP rows.
+        await deleteDemoInviteOtps(db);
 
         const childRelations = [
             ["order_items", "order_id", "orders", "order_id"],
@@ -246,7 +345,10 @@ async function main() {
             "tmp_perf_destroy_store_ids"
         );
 
-        await deleteStoreScopedTables(db);
+        await deleteStoreScopedTables(
+            db,
+            explicitStoreScopedTables
+        );
 
         const [storeResult] = await db.query(
             `DELETE store_row

@@ -22,6 +22,7 @@ import {
     useInventoryController,
     type InventoryController,
 } from "@/hooks/useInventory";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 
 /* -------------------------------------------------------------------------- */
 /*                                  TYPES                                     */
@@ -770,9 +771,7 @@ export default function ManagerInventory() {
 
     const branchBadge = inv.assignedBranchName || "Assigned Branch";
     const managerBranchId = Number(
-        (inv as any).assignedBranchId ??
-        (inv as any).branchId ??
-        (inv as any).selectedBranchId
+        inv.assignedBranchId || inv.selectedBranchId || 0
     );
 
     const managerProducts = React.useMemo(
@@ -792,9 +791,21 @@ export default function ManagerInventory() {
             const token = sessionStorage.getItem("token");
             if (!token) return;
 
+            const now = new Date();
+            const thirtyDaysAgo = new Date(now);
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            const toLocalDate = (value: Date) => {
+                const year = value.getFullYear();
+                const month = String(value.getMonth() + 1).padStart(2, "0");
+                const day = String(value.getDate()).padStart(2, "0");
+                return `${year}-${month}-${day}`;
+            };
+
             const request: Record<string, unknown> = {
                 action: "get_orders",
                 include_order_items: true,
+                date_from: toLocalDate(thirtyDaysAgo),
+                date_to: toLocalDate(now),
             };
 
             if (Number.isFinite(managerBranchId) && managerBranchId > 0) {
@@ -886,6 +897,14 @@ export default function ManagerInventory() {
         return base.filter((product) => getProductStatus(product) === statusFilter);
     }, [inv.filteredProducts, managerProducts, statusFilter]);
 
+    if (inv.loading) {
+        return (
+            <section className="px-6 py-4 font-sans">
+                <ModuleSkeleton variant="inventory" />
+            </section>
+        );
+    }
+
     return (
         <>
             <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
@@ -915,11 +934,11 @@ export default function ManagerInventory() {
 
                         <button
                             type="button"
-                            onClick={() => window.location.reload()}
+                            onClick={() => void inv.refreshAll()}
                             className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                         >
-                            <RefreshCw size={16} />
-                            Refresh
+                            <RefreshCw size={16} className={inv.refreshing ? "animate-spin" : ""} />
+                            {inv.refreshing ? "Refreshing..." : "Refresh"}
                         </button>
                     </div>
                 </div>

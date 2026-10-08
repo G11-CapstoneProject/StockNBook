@@ -12,6 +12,15 @@ const dbConfig = {
     ssl: { rejectUnauthorized: false },
 };
 
+// Reuse database connections across warm requests. This avoids paying the
+// TCP/TLS/database handshake cost for every dashboard API call.
+const dbPool = mysql.createPool({
+    ...dbConfig,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+});
+
 function jsonResponse(statusCode, headers, body) {
     return { statusCode, headers, body: JSON.stringify(body) };
 }
@@ -156,8 +165,8 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 async function logEmployeeAction(connection, entry) {
     await connection.execute(
         `INSERT INTO employee_actions
-             (store_id, branch_id, employee_id, employee_name, employee_role,
-              module, reference_number, action, reference_id, details)
+         (store_id, branch_id, employee_id, employee_name, employee_role,
+          module, reference_number, action, reference_id, details)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             entry.storeId,
@@ -404,6 +413,66 @@ function getIncomingPackage(body) {
     };
 }
 
+
+async function replacePackageItemsV2(connection, packageId, storeId, branchId, inclusions) {
+    // Validate tenant/branch ownership before writing normalized package relations.
+    for (const inclusion of inclusions) {
+        const params = [inclusion.productId, storeId, branchId];
+        let query = `
+            SELECT p.id
+            FROM products p
+            WHERE p.id = ?
+              AND p.store_id = ?
+              AND p.branch_id = ?
+              AND p.deleted_at IS NULL
+        `;
+
+        if (inclusion.variantId) {
+            query += `
+              AND EXISTS (
+                  SELECT 1
+                  FROM product_variants pv
+                  WHERE pv.id = ?
+                    AND pv.product_id = p.id
+                    AND pv.deleted_at IS NULL
+              )`;
+            params.push(inclusion.variantId);
+        }
+
+        query += " LIMIT 1";
+        const [rows] = await connection.execute(query, params);
+        if (!rows.length) {
+            throw new Error(
+                `Package inclusion references a product/variant that does not belong to this store branch (product ${inclusion.productId}).`
+            );
+        }
+    }
+
+    await connection.execute(
+        "DELETE FROM package_items WHERE package_id = ?",
+        [packageId]
+    );
+
+    if (!Array.isArray(inclusions) || inclusions.length === 0) return;
+
+    const placeholders = inclusions.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
+    const params = inclusions.flatMap((inclusion, index) => [
+        packageId,
+        inclusion.productId,
+        inclusion.variantId || null,
+        Number(inclusion.quantity || 1),
+        Number(inclusion.unitSalesPrice || inclusion.unit_price || 0),
+        index,
+    ]);
+
+    await connection.execute(
+        `INSERT INTO package_items
+         (package_id, product_id, variant_id, quantity, unit_price_snapshot, sort_order)
+         VALUES ${placeholders}`,
+        params
+    );
+}
+
 function validatePackageInput(pkg) {
     if (!pkg.name) return "Package name is required.";
 
@@ -489,7 +558,7 @@ exports.handler = async (event) => {
     let connection;
 
     try {
-        connection = await mysql.createConnection(dbConfig);
+        connection = await dbPool.getConnection();
 
         // ── PUBLIC: get_public_packages for customer portal ─────────────
         // ── PUBLIC: GET PACKAGES FOR CUSTOMER BOOKING PORTAL ─────────────
@@ -817,6 +886,14 @@ exports.handler = async (event) => {
 
                 const packageId = Number(result.insertId);
 
+                await replacePackageItemsV2(
+                    connection,
+                    packageId,
+                    storeId,
+                    activeBranchId,
+                    pkg.inclusions
+                );
+
                 const actingEmployee = await getActingEmployee(
                     connection,
                     decoded,
@@ -951,6 +1028,14 @@ exports.handler = async (event) => {
                     return notFound(headers, "Package not found.");
                 }
 
+                await replacePackageItemsV2(
+                    connection,
+                    packageId,
+                    storeId,
+                    branchId,
+                    pkg.inclusions
+                );
+
                 const actingEmployee = await getActingEmployee(
                     connection,
                     decoded,
@@ -1064,7 +1149,7 @@ exports.handler = async (event) => {
         return serverError(headers, error);
     } finally {
         if (connection) {
-            await connection.end();
+            connection.release();
         }
     }
 };

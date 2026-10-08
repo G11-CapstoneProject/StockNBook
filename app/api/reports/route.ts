@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import mysql, { type Connection } from "mysql2/promise";
+import mysql, { type Connection, type PoolConnection } from "mysql2/promise";
 import jwt from "jsonwebtoken";
 import { handler as forecastingHandler } from "../../../lambda-forecasting/index.js";
 
@@ -21,6 +21,10 @@ type DateRange = {
     endDate: string;
     label: string;
 };
+
+// Avoid running CREATE TABLE IF NOT EXISTS on every Reports request.
+// The schema check is only needed once per warm server process.
+let restockHistoryTableEnsured = false;
 
 function asPositiveInteger(value: unknown) {
     const parsed = Number(value);
@@ -106,6 +110,13 @@ function databaseConfig() {
         port: 3306,
     };
 }
+
+const reportsPool = mysql.createPool({
+    ...databaseConfig(),
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+});
 
 function jsonError(message: string, status: number) {
     return NextResponse.json(
@@ -222,37 +233,40 @@ async function loadInventory(
     let query = `
         SELECT
             p.id AS product_id,
-            p.branch_id,
+            bi.branch_id,
             p.name AS product_name,
             p.category,
-            p.stock,
-            p.alert_level,
-            p.original_price,
-            p.sales_price,
+            bi.quantity_on_hand AS inventory_stock,
+            bi.reorder_level AS inventory_alert_level,
+            bi.cost_price AS inventory_cost_price,
+            bi.sales_price AS inventory_sales_price,
             p.has_variants,
             br.branch_name,
-            pv.id AS variant_id,
-            pv.variant_values,
-            pv.stock AS variant_stock,
-            pv.alert_level AS variant_alert_level,
-            pv.original_price AS variant_original_price,
-            pv.sales_price AS variant_sales_price
-        FROM products p
+            bi.variant_id AS variant_id,
+            pv.variant_values
+        FROM branch_inventory bi
+                 INNER JOIN products p
+                            ON p.id = bi.product_id
+                                AND p.store_id = bi.store_id
+                                AND p.branch_id = bi.branch_id
                  LEFT JOIN branches br
-                           ON br.id = p.branch_id AND br.store_id = p.store_id
+                           ON br.id = bi.branch_id AND br.store_id = bi.store_id
                  LEFT JOIN product_variants pv
-                           ON pv.product_id = p.id
-        WHERE p.store_id = ?
+                           ON pv.id = bi.variant_id AND pv.product_id = p.id
+        WHERE bi.store_id = ?
+          AND bi.status = 'active'
+          AND p.deleted_at IS NULL
+          AND (bi.variant_id IS NULL OR pv.deleted_at IS NULL)
     `;
 
     const params: Array<number> = [storeId];
 
     if (branchId) {
-        query += " AND p.branch_id = ?";
+        query += " AND bi.branch_id = ?";
         params.push(branchId);
     }
 
-    query += " ORDER BY br.branch_name ASC, p.name ASC, pv.id ASC";
+    query += " ORDER BY br.branch_name ASC, p.name ASC, bi.variant_id ASC";
 
     const [rows] = await connection.execute(query, params);
     const grouped = new Map<string, Record<string, unknown>>();
@@ -266,10 +280,10 @@ async function loadInventory(
                 product: asText(rawRow.product_name) || "Unnamed Product",
                 category: asText(rawRow.category) || "Uncategorized",
                 branch: asText(rawRow.branch_name) || "Unassigned Branch",
-                stock: asNumber(rawRow.stock),
-                reorderLevel: asNumber(rawRow.alert_level),
-                costPrice: asNumber(rawRow.original_price),
-                salesPrice: asNumber(rawRow.sales_price),
+                stock: asNumber(rawRow.inventory_stock),
+                reorderLevel: asNumber(rawRow.inventory_alert_level),
+                costPrice: asNumber(rawRow.inventory_cost_price),
+                salesPrice: asNumber(rawRow.inventory_sales_price),
                 variants: [] as Array<Record<string, unknown>>,
             };
 
@@ -291,16 +305,16 @@ async function loadInventory(
                     .filter(Boolean)
                     .join(" / ") || "Variant";
 
-            const variantStock = asNumber(rawRow.variant_stock);
-            const variantAlert = asNumber(rawRow.variant_alert_level);
+            const variantStock = asNumber(rawRow.inventory_stock);
+            const variantAlert = asNumber(rawRow.inventory_alert_level);
 
             (product.variants as Array<Record<string, unknown>>).push({
                 id: String(rawRow.variant_id),
                 name: variantName,
                 stock: variantStock,
                 reorderLevel: variantAlert,
-                costPrice: asNumber(rawRow.variant_original_price),
-                salesPrice: asNumber(rawRow.variant_sales_price),
+                costPrice: asNumber(rawRow.inventory_cost_price),
+                salesPrice: asNumber(rawRow.inventory_sales_price),
                 status: getInventoryStatus(variantStock, variantAlert),
             });
         }
@@ -348,6 +362,8 @@ async function loadInventory(
 
 
 async function ensureRestockHistoryTable(connection: Connection) {
+    if (restockHistoryTableEnsured) return;
+
     await connection.execute(`
         CREATE TABLE IF NOT EXISTS restock_history (
                                                        id BIGINT NOT NULL AUTO_INCREMENT,
@@ -369,6 +385,8 @@ async function ensureRestockHistoryTable(connection: Connection) {
             INDEX idx_restock_created_at (created_at)
             )
     `);
+
+    restockHistoryTableEnsured = true;
 }
 
 async function loadRestockHistory(
@@ -397,7 +415,8 @@ async function loadRestockHistory(
                            ON br.id = rh.branch_id
                                AND br.store_id = rh.store_id
         WHERE rh.store_id = ?
-          AND DATE(rh.created_at) BETWEEN ? AND ?
+          AND rh.created_at >= CONCAT(?, ' 00:00:00')
+          AND rh.created_at < DATE_ADD(CONCAT(?, ' 00:00:00'), INTERVAL 1 DAY)
     `;
 
     const params: Array<number | string> = [
@@ -657,8 +676,8 @@ async function loadEmployeeActions(
                                AND br.store_id = ea.store_id
 
         WHERE ea.store_id = ?
-          AND DATE(ea.created_at)
-            BETWEEN ? AND ?
+          AND ea.created_at >= CONCAT(?, ' 00:00:00')
+          AND ea.created_at < DATE_ADD(CONCAT(?, ' 00:00:00'), INTERVAL 1 DAY)
     `;
 
     const params: Array<number | string> = [
@@ -810,7 +829,7 @@ async function loadForecastReport(
 }
 
 export async function GET(request: NextRequest) {
-    let connection: Connection | null = null;
+    let connection: PoolConnection | null = null;
 
     try {
         const range = resolveDateRange(new URL(request.url).searchParams);
@@ -836,8 +855,9 @@ export async function GET(request: NextRequest) {
         const requestedBranchId = asPositiveInteger(
             searchParams.get("branch_id") || searchParams.get("branchId")
         );
+        const scope = asText(searchParams.get("scope")).toLowerCase();
 
-        connection = await mysql.createConnection(databaseConfig());
+        connection = await reportsPool.getConnection();
 
         let branchId: number | null = null;
 
@@ -859,6 +879,23 @@ export async function GET(request: NextRequest) {
             }
 
             branchId = requestedBranchId;
+        }
+
+        // Staff dashboard only needs today's employee activity. Allow it to
+        // request that small slice without loading inventory, sales, bookings,
+        // restock history, and forecasting from the full Reports workspace.
+        if (scope === "employee_actions" || scope === "employee-actions") {
+            const employeeActions = await loadEmployeeActions(
+                connection,
+                storeId,
+                branchId,
+                range
+            );
+
+            return NextResponse.json({
+                success: true,
+                data: { employeeActions },
+            });
         }
 
         const [
@@ -964,7 +1001,7 @@ export async function GET(request: NextRequest) {
         return jsonError(message, 500);
     } finally {
         if (connection) {
-            await connection.end();
+            connection.release();
         }
     }
 }

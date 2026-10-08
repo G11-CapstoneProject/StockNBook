@@ -9,6 +9,7 @@ import {
     Search,
     Wallet,
 } from "lucide-react";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     Booking,
     BookingAccess,
@@ -682,10 +683,8 @@ export default function StaffBookings() {
             </header>
 
             <section className="px-6 py-4">
-                {loading ? (
-                    <div className="rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-10 text-center text-sm text-[#9B8AAA] shadow-sm">
-                        Loading bookings...
-                    </div>
+                {loading && bookings.length === 0 ? (
+                    <ModuleSkeleton variant="bookings" />
                 ) : !canView ? (
                     <div className="rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-10 text-center shadow-sm">
                         <p className="text-sm font-bold text-[#1A1220]">

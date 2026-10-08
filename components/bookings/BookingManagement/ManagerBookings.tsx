@@ -10,6 +10,7 @@ import {
     Search,
     Wallet,
 } from "lucide-react";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     Booking,
     CalendarDropdown,
@@ -811,10 +812,8 @@ export default function ManagerBookings() {
                     </div>
                 )}
 
-                {loading ? (
-                    <div className="rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-10 text-center text-sm text-[#9B8AAA] shadow-sm">
-                        Loading bookings...
-                    </div>
+                {loading && bookings.length === 0 ? (
+                    <ModuleSkeleton variant="bookings" />
                 ) : filtered.length === 0 ? (
                     <div className="rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-10 text-center text-sm text-[#9B8AAA] shadow-sm">
                         No bookings found.

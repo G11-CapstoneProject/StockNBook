@@ -4,35 +4,41 @@ import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import OwnerBookings from "@/components/bookings/BookingManagement/OwnerBookings";
 import ManagerBookings from "@/components/bookings/BookingManagement/ManagerBookings";
 import StaffBookings from "@/components/bookings/BookingManagement/StaffBookings";
-import { useEffect, useState } from "react";
+import RequirePermission from "@/components/permissions/RequirePermission";
+import { ModulePageSkeleton } from "@/components/loading/ModuleSkeletons";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 export default function BookingsPage() {
-    const [role, setRole] = useState("");
-    const [ready, setReady] = useState(false);
+    const { user, loading } = useCurrentUser();
+    const role = String((user as { role?: string } | null)?.role || "").toLowerCase();
 
-    useEffect(() => {
-        const savedRole = sessionStorage.getItem("role") || "owner";
-        setRole(savedRole.toLowerCase());
-        setReady(true);
-    }, []);
+    if (loading) {
+        return (
+            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
+                <RoleSidebar />
+                <main className="min-w-0 flex-1 overflow-y-auto">
+                    <ModulePageSkeleton variant="bookings" />
+                </main>
+            </div>
+        );
+    }
 
-    if (!ready) return null;
+    if (!user) return null;
 
     return (
-        <div
-            style={{
-                backgroundColor: "#FDFAF4",
-                fontFamily: "DM Sans, Inter, Arial, sans-serif",
-            }}
-            className="flex min-h-screen text-[#1A1220]"
-        >
-            <RoleSidebar />
-
-            <main className="flex-1 overflow-y-auto">
-                {role === "owner" && <OwnerBookings />}
-                {role === "manager" && <ManagerBookings />}
-                {role === "staff" && <StaffBookings />}
-            </main>
-        </div>
+        <RequirePermission permission="bookings">
+            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
+                <RoleSidebar />
+                <main className="min-w-0 flex-1 overflow-y-auto">
+                    {role === "owner" ? (
+                        <OwnerBookings />
+                    ) : role === "manager" ? (
+                        <ManagerBookings />
+                    ) : (
+                        <StaffBookings />
+                    )}
+                </main>
+            </div>
+        </RequirePermission>
     );
 }

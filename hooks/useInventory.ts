@@ -1,8 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
-import * as XLSX from "xlsx";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     type Branch,
     type Category,
@@ -279,6 +278,9 @@ async function parseImportFileToPreviewProducts({
     branchId: string;
     branchName: string | null;
 }): Promise<ImportPreviewProduct[]> {
+    // XLSX is only needed when a user actually imports a spreadsheet.
+    // Lazy-loading it keeps the large parser out of the initial Inventory bundle.
+    const XLSX = await import("xlsx");
     const buffer = await file.arrayBuffer();
     const workbook = XLSX.read(buffer, {
         type: "array",
@@ -691,6 +693,10 @@ export function useInventoryController() {
     const [manualCategories, setManualCategories] = useState<Category[]>([]);
     const [branches, setBranches] = useState<Branch[]>([]);
     const [packages, setPackages] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
+    const refreshInFlightRef = useRef<Promise<void> | null>(null);
+    const hasLoadedRef = useRef(false);
 
     const [storeName] = useState(session.storeName);
     const [storeId] = useState(session.storeId);
@@ -884,13 +890,34 @@ export function useInventoryController() {
         }
     }, [assignedBranchId, isBranchUser, storeId]);
 
-    const refreshAll = useCallback(async () => {
-        await Promise.all([
+    const refreshAll = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+        // React Strict Mode can run mount effects twice in development. Reuse the
+        // same in-flight refresh instead of issuing four duplicate API requests.
+        if (refreshInFlightRef.current) {
+            await refreshInFlightRef.current;
+            return;
+        }
+
+        if (!hasLoadedRef.current) setLoading(true);
+        else if (!silent) setRefreshing(true);
+
+        const request = Promise.all([
             loadProducts(),
             loadCategories(),
             loadBranches(),
             loadPackages(),
-        ]);
+        ]).then(() => undefined);
+
+        refreshInFlightRef.current = request;
+
+        try {
+            await request;
+        } finally {
+            refreshInFlightRef.current = null;
+            hasLoadedRef.current = true;
+            setLoading(false);
+            setRefreshing(false);
+        }
     }, [loadBranches, loadCategories, loadProducts, loadPackages]);
 
     useEffect(() => {
@@ -1779,6 +1806,8 @@ export function useInventoryController() {
         products,
         setProducts,
         manualCategories,
+        loading,
+        refreshing,
         setManualCategories,
         branches,
 

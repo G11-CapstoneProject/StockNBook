@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 export type CurrentUser = {
     role: "owner" | "manager" | "staff";
@@ -17,6 +17,26 @@ export type CurrentUser = {
 };
 
 const REFRESH_INTERVAL = 15000;
+const SHARED_RESPONSE_TTL = 2_000;
+
+type CurrentUserResponse = {
+    ok: boolean;
+    status: number;
+    data: CurrentUser & { error?: string };
+};
+
+/*
+ * useCurrentUser is mounted by the dashboard page, role sidebar, permission
+ * gates, and role dashboard components. A ref inside the hook only protects a
+ * single component instance, so several instances could still request
+ * /api/current-user at the same time. Keep one module-level request/result so
+ * all hook instances share the same network call during a render/focus burst.
+ */
+let sharedRequest: Promise<CurrentUserResponse> | null = null;
+let sharedRequestToken = "";
+let sharedResult: CurrentUserResponse | null = null;
+let sharedResultToken = "";
+let sharedResultAt = 0;
 
 function getToken() {
     if (typeof window === "undefined") return "";
@@ -76,17 +96,86 @@ function syncUserToSession(user: CurrentUser) {
 
 function hasUserChanged(oldUser: CurrentUser | null, newUser: CurrentUser) {
     if (!oldUser) return true;
-
     return JSON.stringify(oldUser) !== JSON.stringify(newUser);
+}
+
+async function requestCurrentUser(
+    token: string,
+    force = false,
+): Promise<CurrentUserResponse> {
+    const now = Date.now();
+
+    if (
+        !force &&
+        sharedResult &&
+        sharedResultToken === token &&
+        now - sharedResultAt < SHARED_RESPONSE_TTL
+    ) {
+        return sharedResult;
+    }
+
+    if (sharedRequest && sharedRequestToken === token) {
+        return sharedRequest;
+    }
+
+    sharedRequestToken = token;
+
+    const request = (async () => {
+        const res = await fetch("/api/current-user", {
+            method: "GET",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                Accept: "application/json",
+            },
+            cache: "no-store",
+        });
+
+        let data: CurrentUser & { error?: string };
+
+        try {
+            data = await res.json();
+        } catch {
+            throw new Error(
+                `Current-user API returned an invalid response (${res.status})`,
+            );
+        }
+
+        return {
+            ok: res.ok,
+            status: res.status,
+            data,
+        };
+    })();
+
+    sharedRequest = request;
+
+    try {
+        const result = await request;
+
+        // Cache only successful identity responses. Authentication failures
+        // should remain authoritative and network/server errors are handled by
+        // the caller without replacing a valid session snapshot.
+        if (result.ok) {
+            sharedResult = result;
+            sharedResultToken = token;
+            sharedResultAt = Date.now();
+        }
+
+        return result;
+    } finally {
+        if (sharedRequest === request) {
+            sharedRequest = null;
+            sharedRequestToken = "";
+        }
+    }
 }
 
 export function useCurrentUser() {
     const [user, setUser] = useState<CurrentUser | null>(() => getSessionUser());
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
-    const requestInFlightRef = useRef(false);
 
-    const loadUser = useCallback(async (silent = false) => {
+    const loadUser = useCallback(async (silent = false, force = false) => {
         const cachedUser = getSessionUser();
 
         if (cachedUser) {
@@ -112,51 +201,22 @@ export function useCurrentUser() {
             return;
         }
 
-        /*
-         * Avoid multiple /api/current-user calls running at the same time.
-         * The hook refreshes on an interval and also when the window regains
-         * focus, so without this guard duplicate requests can overlap.
-         */
-        if (requestInFlightRef.current) {
-            return;
-        }
-
-        requestInFlightRef.current = true;
-
         try {
-            const res = await fetch("/api/current-user", {
-                method: "GET",
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    Accept: "application/json",
-                },
-                cache: "no-store",
-            });
+            const result = await requestCurrentUser(token, force);
+            const data = result.data;
 
-            let data: CurrentUser & {
-                error?: string;
-            };
-
-            try {
-                data = await res.json();
-            } catch {
-                throw new Error(
-                    `Current-user API returned an invalid response (${res.status})`
-                );
-            }
-
-            if (!res.ok) {
+            if (!result.ok) {
                 /*
                  * A real 401/403 means the server rejected the token.
                  * Other server failures should not erase a valid cached user.
                  */
-                if (res.status === 401 || res.status === 403) {
+                if (result.status === 401 || result.status === 403) {
                     setUser(null);
                     setError(data.error || "Unauthorized");
                 } else {
                     setError(
                         data.error ||
-                        `Failed to refresh user (${res.status})`
+                        `Failed to refresh user (${result.status})`,
                     );
                 }
 
@@ -168,7 +228,7 @@ export function useCurrentUser() {
             setUser((previousUser) => {
                 if (hasUserChanged(previousUser, data)) {
                     window.dispatchEvent(
-                        new Event("stocknbook-current-user-refreshed")
+                        new Event("stocknbook-current-user-refreshed"),
                     );
 
                     return data;
@@ -181,18 +241,15 @@ export function useCurrentUser() {
         } catch (err) {
             /*
              * Network errors such as "Failed to fetch" should not wipe out
-             * the cached logged-in user. Keep the cached session so pages
-             * such as Owner POS can continue using the correct account data.
+             * the cached logged-in user. Keep the cached session so pages can
+             * continue using the correct account data.
              */
             const message =
                 err instanceof Error
                     ? err.message
                     : "Failed to load user";
 
-            console.warn(
-                "current-user refresh unavailable:",
-                message
-            );
+            console.warn("current-user refresh unavailable:", message);
 
             if (!cachedUser) {
                 setUser(null);
@@ -202,8 +259,6 @@ export function useCurrentUser() {
                 setError("");
             }
         } finally {
-            requestInFlightRef.current = false;
-
             if (!silent) {
                 setLoading(false);
             }
@@ -211,20 +266,24 @@ export function useCurrentUser() {
     }, []);
 
     useEffect(() => {
-        loadUser(false);
+        void loadUser(false);
 
         const refreshSilently = () => {
-            loadUser(true);
+            void loadUser(true);
+        };
+
+        const refreshPermissions = () => {
+            void loadUser(true, true);
         };
 
         const interval = window.setInterval(refreshSilently, REFRESH_INTERVAL);
 
-        window.addEventListener("stocknbook-permissions-updated", refreshSilently);
+        window.addEventListener("stocknbook-permissions-updated", refreshPermissions);
         window.addEventListener("focus", refreshSilently);
 
         return () => {
             window.clearInterval(interval);
-            window.removeEventListener("stocknbook-permissions-updated", refreshSilently);
+            window.removeEventListener("stocknbook-permissions-updated", refreshPermissions);
             window.removeEventListener("focus", refreshSilently);
         };
     }, [loadUser]);

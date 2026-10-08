@@ -15,6 +15,7 @@ import {
     Wallet,
 } from "lucide-react";
 import { useInventoryController } from "@/hooks/useInventory";
+import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { EmptyInventory, type Branch, type Product } from "./_shared";
 
 const OWNER_EXPIRING_SOON_DAYS = 30;
@@ -849,12 +850,24 @@ function OwnerInventoryContent() {
                 }));
             }
 
+            const now = new Date();
+            const thirtyDaysAgo = new Date(now);
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            const toLocalDate = (value: Date) => {
+                const year = value.getFullYear();
+                const month = String(value.getMonth() + 1).padStart(2, "0");
+                const day = String(value.getDate()).padStart(2, "0");
+                return `${year}-${month}-${day}`;
+            };
+
             const request: Record<string, unknown> = {
                 action: "get_orders",
-                // The current POS backend only returns structured orderItems
-                // when this flag is explicitly true. Fast/slow moving products
-                // need productId + quantity from those order_items rows.
+                // This panel only uses the last 30 days for fast/slow movement.
+                // Keep the backend request date-scoped so sales growth does not
+                // make Inventory progressively slower over time.
                 include_order_items: true,
+                date_from: toLocalDate(thirtyDaysAgo),
+                date_to: toLocalDate(now),
             };
 
             const numericBranchId = Number(inv.selectedBranchId);
@@ -1042,6 +1055,14 @@ function OwnerInventoryContent() {
             document.removeEventListener("mousedown", handleOutsideClick);
         };
     }, [isAllBranchesView, selectedBranch]);
+
+    if (inv.loading) {
+        return (
+            <section className="px-6 py-4 font-sans">
+                <ModuleSkeleton variant="inventory" />
+            </section>
+        );
+    }
 
     return (
         <section className="px-6 py-4 font-sans">

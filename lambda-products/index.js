@@ -13,6 +13,15 @@ const dbConfig = {
     ssl: { rejectUnauthorized: false },
 };
 
+// Reuse database connections across warm requests. This avoids paying the
+// TCP/TLS/database handshake cost for every dashboard API call.
+const dbPool = mysql.createPool({
+    ...dbConfig,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+});
+
 function jsonResponse(statusCode, headers, body) {
     return {
         statusCode,
@@ -277,19 +286,27 @@ async function attachVariants(connection, products) {
 
     const [variantRows] = await connection.execute(
         `SELECT
-             id,
-             product_id AS productId,
-             variant_values AS variantValues,
-             stock,
-             alert_level AS alertLevel,
-             original_price AS originalPrice,
-             sales_price AS salesPrice,
-             expiration_date AS expirationDate,
-             created_at AS createdAt
-         FROM product_variants
-         WHERE product_id IN (${placeholders})
-           AND deleted_at IS NULL
-         ORDER BY id ASC`,
+             pv.id,
+             pv.product_id AS productId,
+             pv.variant_values AS variantValues,
+             COALESCE(bi.quantity_on_hand, pv.stock) AS stock,
+             COALESCE(bi.reorder_level, pv.alert_level) AS alertLevel,
+             COALESCE(bi.cost_price, pv.original_price) AS originalPrice,
+             COALESCE(bi.sales_price, pv.sales_price) AS salesPrice,
+             pv.expiration_date AS expirationDate,
+             pv.created_at AS createdAt
+         FROM product_variants pv
+                  INNER JOIN products p
+                             ON p.id = pv.product_id
+                  LEFT JOIN branch_inventory bi
+                            ON bi.store_id = p.store_id
+                                AND bi.branch_id = p.branch_id
+                                AND bi.product_id = p.id
+                                AND bi.variant_id = pv.id
+                                AND bi.status = 'active'
+         WHERE pv.product_id IN (${placeholders})
+           AND pv.deleted_at IS NULL
+         ORDER BY pv.id ASC`,
         productIds
     );
 
@@ -345,10 +362,10 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
             branches.branch_name AS branchName,
             products.name,
             products.category,
-            products.stock,
-            products.alert_level AS alertLevel,
-            products.original_price AS originalPrice,
-            products.sales_price AS salesPrice,
+            COALESCE(bi.quantity_on_hand, products.stock) AS stock,
+            COALESCE(bi.reorder_level, products.alert_level) AS alertLevel,
+            COALESCE(bi.cost_price, products.original_price) AS originalPrice,
+            COALESCE(bi.sales_price, products.sales_price) AS salesPrice,
             products.expiration_date AS expirationDate,
             products.has_variants AS hasVariants,
             products.created_at AS createdAt
@@ -356,6 +373,12 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
                  LEFT JOIN branches
                            ON products.branch_id = branches.id
                                AND products.store_id = branches.store_id
+                 LEFT JOIN branch_inventory bi
+                           ON bi.store_id = products.store_id
+                               AND bi.branch_id = products.branch_id
+                               AND bi.product_id = products.id
+                               AND bi.variant_id IS NULL
+                               AND bi.status = 'active'
         WHERE products.store_id = ?
           AND products.deleted_at IS NULL
     `;
@@ -722,6 +745,428 @@ async function recordRestockHistory(
     }
 }
 
+
+/* -------------------------------------------------------------------------- */
+/* Database V2 inventory synchronization                                      */
+/* -------------------------------------------------------------------------- */
+
+function inventoryVariantKey(variantId) {
+    return variantId == null ? "regular" : `variant:${Number(variantId)}`;
+}
+
+async function consumeInventoryBatches(connection, branchInventoryId, quantity) {
+    let remaining = Math.max(0, Number(quantity || 0));
+    if (remaining <= 0) return;
+
+    const [batches] = await connection.execute(
+        `SELECT id, remaining_quantity
+         FROM inventory_batches
+         WHERE branch_inventory_id = ?
+           AND remaining_quantity > 0
+         ORDER BY (expiration_date IS NULL) ASC,
+                  expiration_date ASC,
+                  received_at ASC,
+                  id ASC
+         FOR UPDATE`,
+        [branchInventoryId]
+    );
+
+    for (const batch of batches) {
+        if (remaining <= 0) break;
+
+        const available = Math.max(0, Number(batch.remaining_quantity || 0));
+        const take = Math.min(available, remaining);
+        if (take <= 0) continue;
+
+        await connection.execute(
+            `UPDATE inventory_batches
+             SET remaining_quantity = remaining_quantity - ?,
+                 status = CASE
+                              WHEN remaining_quantity - ? <= 0 THEN 'depleted'
+                              ELSE status
+                          END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [take, take, batch.id]
+        );
+
+        remaining -= take;
+    }
+
+    if (remaining > 0) {
+        throw new Error(
+            `Database V2 batch balance is short by ${remaining} unit(s) for inventory #${branchInventoryId}. ` +
+            `Run the V2 verification/backfill before changing stock.`
+        );
+    }
+}
+
+async function createInventoryBatch(connection, inventoryRow, quantity, expirationDate, movementType, referenceId) {
+    const qty = Math.max(0, Number(quantity || 0));
+    if (qty <= 0) return;
+
+    const safeType = String(movementType || "ADJUSTMENT_IN")
+        .replace(/[^A-Za-z0-9_-]/g, "_")
+        .slice(0, 24);
+    const ref = String(referenceId || inventoryRow.product_id || "item")
+        .replace(/[^A-Za-z0-9_-]/g, "_")
+        .slice(0, 40);
+    const batchCode = `V2-${safeType}-${ref}-${inventoryRow.id}-${Date.now()}`.slice(0, 100);
+
+    await connection.execute(
+        `INSERT INTO inventory_batches
+         (store_id, branch_id, branch_inventory_id, batch_code,
+          received_quantity, remaining_quantity, unit_cost, received_at,
+          expiration_date, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)`,
+        [
+            inventoryRow.store_id,
+            inventoryRow.branch_id,
+            inventoryRow.id,
+            batchCode,
+            qty,
+            qty,
+            Number(inventoryRow.cost_price || 0),
+            expirationDate || null,
+            expirationDate && String(expirationDate).slice(0, 10) < new Date().toISOString().slice(0, 10)
+                ? "expired"
+                : "active",
+        ]
+    );
+}
+
+async function insertInventoryMovement(connection, inventoryRow, options) {
+    const before = Number(options.quantityBefore || 0);
+    const after = Number(options.quantityAfter || 0);
+    const delta = after - before;
+
+    if (delta === 0 && !options.force) return;
+
+    const actor = options.actor || { id: null, role: "SYSTEM", name: "StockNBook" };
+
+    await connection.execute(
+        `INSERT INTO inventory_movements
+         (store_id, branch_id, branch_inventory_id, movement_type,
+          quantity_delta, quantity_before, quantity_after,
+          reference_type, reference_id, actor_id, actor_role, actor_name, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            inventoryRow.store_id,
+            inventoryRow.branch_id,
+            inventoryRow.id,
+            String(options.movementType || "ADJUSTMENT").slice(0, 40),
+            delta,
+            before,
+            after,
+            options.referenceType ? String(options.referenceType).slice(0, 40) : null,
+            options.referenceId != null ? String(options.referenceId).slice(0, 255) : null,
+            actor.id ?? null,
+            actor.role ? String(actor.role).slice(0, 40) : null,
+            actor.name ? String(actor.name).slice(0, 255) : null,
+            options.notes ? String(options.notes).slice(0, 500) : null,
+        ]
+    );
+}
+
+async function getLegacyInventoryTargets(connection, storeId, branchId, productId) {
+    const [productRows] = await connection.execute(
+        `SELECT id, store_id, branch_id, stock, alert_level, original_price,
+                sales_price, expiration_date, has_variants
+         FROM products
+         WHERE id = ? AND store_id = ? AND branch_id = ? AND deleted_at IS NULL
+         LIMIT 1`,
+        [productId, storeId, branchId]
+    );
+
+    if (!productRows.length) return [];
+    const product = productRows[0];
+
+    const [variantRows] = await connection.execute(
+        `SELECT id, stock, alert_level, original_price, sales_price, expiration_date
+         FROM product_variants
+         WHERE product_id = ? AND deleted_at IS NULL
+         ORDER BY id ASC`,
+        [productId]
+    );
+
+    if (Number(product.has_variants || 0) === 1 && variantRows.length > 0) {
+        return variantRows.map((variant) => ({
+            storeId: Number(product.store_id),
+            branchId: Number(product.branch_id),
+            productId: Number(product.id),
+            variantId: Number(variant.id),
+            quantity: Math.max(0, Number(variant.stock || 0)),
+            reorderLevel: Math.max(0, Number(variant.alert_level || 0)),
+            costPrice: Number(variant.original_price || 0),
+            salesPrice: Number(variant.sales_price || 0),
+            expirationDate: variant.expiration_date || null,
+        }));
+    }
+
+    return [{
+        storeId: Number(product.store_id),
+        branchId: Number(product.branch_id),
+        productId: Number(product.id),
+        variantId: null,
+        quantity: Math.max(0, Number(product.stock || 0)),
+        reorderLevel: Math.max(0, Number(product.alert_level || 0)),
+        costPrice: Number(product.original_price || 0),
+        salesPrice: Number(product.sales_price || 0),
+        expirationDate: product.expiration_date || null,
+    }];
+}
+
+async function syncProductInventoryV2(connection, options) {
+    const targets = await getLegacyInventoryTargets(
+        connection,
+        options.storeId,
+        options.branchId,
+        options.productId
+    );
+
+    const [existingRows] = await connection.execute(
+        `SELECT id, store_id, branch_id, product_id, variant_id,
+                quantity_on_hand, reorder_level, cost_price, sales_price, status
+         FROM branch_inventory
+         WHERE store_id = ? AND branch_id = ? AND product_id = ?
+         FOR UPDATE`,
+        [options.storeId, options.branchId, options.productId]
+    );
+
+    const existingByKey = new Map(
+        existingRows.map((row) => [inventoryVariantKey(row.variant_id), row])
+    );
+    const targetKeys = new Set(targets.map((target) => inventoryVariantKey(target.variantId)));
+
+    // Rows for removed/replaced variants remain for audit history, but are no longer active.
+    for (const row of existingRows) {
+        const key = inventoryVariantKey(row.variant_id);
+        if (targetKeys.has(key) || String(row.status || "").toLowerCase() !== "active") continue;
+
+        const before = Number(row.quantity_on_hand || 0);
+        if (before > 0) {
+            await consumeInventoryBatches(connection, row.id, before);
+            await insertInventoryMovement(connection, row, {
+                movementType: "PRODUCT_STRUCTURE_CHANGE",
+                quantityBefore: before,
+                quantityAfter: 0,
+                referenceType: "PRODUCT",
+                referenceId: options.productId,
+                actor: options.actor,
+                notes: "Archived an inventory row because the product/variant structure changed.",
+            });
+        }
+
+        await connection.execute(
+            `UPDATE branch_inventory
+             SET quantity_on_hand = 0, status = 'inactive', updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [row.id]
+        );
+    }
+
+    for (const target of targets) {
+        const key = inventoryVariantKey(target.variantId);
+        let row = existingByKey.get(key);
+        let before = row ? Number(row.quantity_on_hand || 0) : 0;
+
+        if (!row) {
+            const [insertResult] = await connection.execute(
+                `INSERT INTO branch_inventory
+                 (store_id, branch_id, product_id, variant_id, quantity_on_hand,
+                  reorder_level, cost_price, sales_price, status)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+                [
+                    target.storeId,
+                    target.branchId,
+                    target.productId,
+                    target.variantId,
+                    target.quantity,
+                    target.reorderLevel,
+                    target.costPrice,
+                    target.salesPrice,
+                ]
+            );
+
+            row = {
+                id: Number(insertResult.insertId),
+                store_id: target.storeId,
+                branch_id: target.branchId,
+                product_id: target.productId,
+                variant_id: target.variantId,
+                quantity_on_hand: target.quantity,
+                reorder_level: target.reorderLevel,
+                cost_price: target.costPrice,
+                sales_price: target.salesPrice,
+                status: "active",
+            };
+            before = 0;
+        } else {
+            await connection.execute(
+                `UPDATE branch_inventory
+                 SET quantity_on_hand = ?, reorder_level = ?, cost_price = ?,
+                     sales_price = ?, status = 'active', updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [
+                    target.quantity,
+                    target.reorderLevel,
+                    target.costPrice,
+                    target.salesPrice,
+                    row.id,
+                ]
+            );
+            row = {
+                ...row,
+                quantity_on_hand: target.quantity,
+                reorder_level: target.reorderLevel,
+                cost_price: target.costPrice,
+                sales_price: target.salesPrice,
+                status: "active",
+            };
+        }
+
+        const after = Number(target.quantity || 0);
+        const delta = after - before;
+
+        if (delta < 0) {
+            await consumeInventoryBatches(connection, row.id, Math.abs(delta));
+        } else if (delta > 0) {
+            await createInventoryBatch(
+                connection,
+                row,
+                delta,
+                target.expirationDate,
+                options.isCreate ? "INITIAL_STOCK" : "RESTOCK",
+                options.productId
+            );
+        }
+
+        if (delta !== 0) {
+            await insertInventoryMovement(connection, row, {
+                movementType: options.isCreate
+                    ? "INITIAL_STOCK"
+                    : delta > 0
+                        ? "RESTOCK"
+                        : "ADJUSTMENT_OUT",
+                quantityBefore: before,
+                quantityAfter: after,
+                referenceType: "PRODUCT",
+                referenceId: options.productId,
+                actor: options.actor,
+                notes: options.isCreate
+                    ? "Initial inventory created with the product."
+                    : "Inventory synchronized from the product update during the V2 migration period.",
+            });
+        }
+    }
+}
+
+async function archiveProductInventoryV2(connection, options) {
+    const [rows] = await connection.execute(
+        `SELECT id, store_id, branch_id, product_id, variant_id,
+                quantity_on_hand, reorder_level, cost_price, sales_price, status
+         FROM branch_inventory
+         WHERE store_id = ? AND branch_id = ? AND product_id = ? AND status = 'active'
+         FOR UPDATE`,
+        [options.storeId, options.branchId, options.productId]
+    );
+
+    for (const row of rows) {
+        const before = Number(row.quantity_on_hand || 0);
+        if (before > 0) {
+            await consumeInventoryBatches(connection, row.id, before);
+            await insertInventoryMovement(connection, row, {
+                movementType: "PRODUCT_ARCHIVE",
+                quantityBefore: before,
+                quantityAfter: 0,
+                referenceType: "PRODUCT",
+                referenceId: options.productId,
+                actor: options.actor,
+                notes: "Inventory archived because the product was removed from future operations.",
+            });
+        }
+
+        await connection.execute(
+            `UPDATE branch_inventory
+             SET quantity_on_hand = 0, status = 'inactive', updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [row.id]
+        );
+    }
+}
+
+async function syncLegacyProductVariants(connection, productId, incomingVariants) {
+    const [existingRows] = await connection.execute(
+        `SELECT id, variant_values
+         FROM product_variants
+         WHERE product_id = ? AND deleted_at IS NULL
+         FOR UPDATE`,
+        [productId]
+    );
+
+    const bySignature = new Map();
+    for (const row of existingRows) {
+        bySignature.set(getVariantSignature(parseVariantValues(row.variant_values)), row);
+    }
+
+    const retainedIds = new Set();
+
+    for (const variant of incomingVariants) {
+        const signature = getVariantSignature(variant.variantValues);
+        const existing = bySignature.get(signature);
+
+        if (existing) {
+            await connection.execute(
+                `UPDATE product_variants
+                 SET variant_values = ?, stock = ?, alert_level = ?, original_price = ?,
+                     sales_price = ?, expiration_date = ?, deleted_at = NULL
+                 WHERE id = ? AND product_id = ?`,
+                [
+                    JSON.stringify(variant.variantValues || {}),
+                    Number(variant.stock || 0),
+                    Number(variant.alertLevel || 0),
+                    Number(variant.originalPrice || 0),
+                    Number(variant.salesPrice || 0),
+                    variant.expirationDate || null,
+                    existing.id,
+                    productId,
+                ]
+            );
+            retainedIds.add(Number(existing.id));
+        } else {
+            const [result] = await connection.execute(
+                `INSERT INTO product_variants
+                 (product_id, variant_values, stock, alert_level, original_price, sales_price, expiration_date)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    productId,
+                    JSON.stringify(variant.variantValues || {}),
+                    Number(variant.stock || 0),
+                    Number(variant.alertLevel || 0),
+                    Number(variant.originalPrice || 0),
+                    Number(variant.salesPrice || 0),
+                    variant.expirationDate || null,
+                ]
+            );
+            retainedIds.add(Number(result.insertId));
+        }
+    }
+
+    const toArchive = existingRows
+        .map((row) => Number(row.id))
+        .filter((id) => !retainedIds.has(id));
+
+    if (toArchive.length > 0) {
+        const placeholders = toArchive.map(() => "?").join(",");
+        await connection.execute(
+            `UPDATE product_variants
+             SET deleted_at = NOW()
+             WHERE product_id = ? AND id IN (${placeholders}) AND deleted_at IS NULL`,
+            [productId, ...toArchive]
+        );
+    }
+}
+
 /*
  * The JWT issued at login only carries ids (store_id / manager_id /
  * staff_id) and an email — never a display name. To log a real,
@@ -844,7 +1289,7 @@ exports.handler = async (event) => {
     let connection;
 
     try {
-        connection = await mysql.createConnection(dbConfig);
+        connection = await dbPool.getConnection();
 
         const authHeader =
             event?.headers?.authorization ||
@@ -1028,6 +1473,14 @@ exports.handler = async (event) => {
                 storeId
             );
 
+            await syncProductInventoryV2(connection, {
+                storeId,
+                branchId: activeBranchId,
+                productId,
+                actor: actingEmployee,
+                isCreate: true,
+            });
+
             await logEmployeeAction(connection, {
                 storeId,
                 branchId: activeBranchId,
@@ -1189,15 +1642,34 @@ exports.handler = async (event) => {
                 return notFound(headers, "Product not found");
             }
 
-            await connection.execute(
-                "DELETE FROM product_variants WHERE product_id = ?",
-                [id]
-            );
-
             if (hasVariants) {
-                await insertProductVariants(connection, id, incomingVariants);
+                await syncLegacyProductVariants(connection, id, incomingVariants);
+            } else {
+                await connection.execute(
+                    `UPDATE product_variants
+                     SET deleted_at = NOW()
+                     WHERE product_id = ? AND deleted_at IS NULL`,
+                    [id]
+                );
             }
 
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decoded,
+                tokenRole,
+                storeId
+            );
+
+            await syncProductInventoryV2(connection, {
+                storeId,
+                branchId: activeBranchId,
+                productId: id,
+                actor: actingEmployee,
+                isCreate: false,
+            });
+
+            // Fetch after V2 synchronization because getProductById now prefers
+            // branch_inventory values during the cutover period.
             const product = await getProductById(
                 connection,
                 storeId,
@@ -1224,13 +1696,6 @@ exports.handler = async (event) => {
             );
 
             const stockDelta = getTotalStock(product) - getTotalStock(existing);
-
-            const actingEmployee = await getActingEmployee(
-                connection,
-                decoded,
-                tokenRole,
-                storeId
-            );
 
             await logEmployeeAction(connection, {
                 storeId,
@@ -1274,8 +1739,22 @@ exports.handler = async (event) => {
 
             await connection.beginTransaction();
 
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decoded,
+                tokenRole,
+                storeId
+            );
+
+            await archiveProductInventoryV2(connection, {
+                storeId,
+                branchId: activeBranchId,
+                productId: id,
+                actor: actingEmployee,
+            });
+
             // Soft-delete variants too, since they can also be referenced
-            // by order_items/booking_items and would hit the same FK error.
+            // by order_items/booking_items and the V2 inventory audit trail.
             await connection.execute(
                 "UPDATE product_variants SET deleted_at = NOW() WHERE product_id = ? AND deleted_at IS NULL",
                 [id]
@@ -1303,13 +1782,6 @@ exports.handler = async (event) => {
                 return notFound(headers, "Product not found");
             }
 
-            const actingEmployee = await getActingEmployee(
-                connection,
-                decoded,
-                tokenRole,
-                storeId
-            );
-
             await logEmployeeAction(connection, {
                 storeId,
                 branchId: activeBranchId,
@@ -1332,7 +1804,7 @@ exports.handler = async (event) => {
         return serverError(headers, err);
     } finally {
         if (connection) {
-            await connection.end();
+            connection.release();
         }
     }
 };

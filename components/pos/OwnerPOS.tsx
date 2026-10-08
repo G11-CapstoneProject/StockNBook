@@ -142,6 +142,20 @@ function normalizeBranchName(value: string | null | undefined) {
         .replace(/\s+/g, " ");
 }
 
+function maskCustomerContact(value?: string | null) {
+    let digits = String(value || "").replace(/\D/g, "");
+
+    if (digits.startsWith("63") && digits.length === 12) {
+        digits = `0${digits.slice(2)}`;
+    } else if (digits.length === 10 && digits.startsWith("9")) {
+        digits = `0${digits}`;
+    }
+
+    if (digits.length < 7) return value || "—";
+
+    return `${digits.slice(0, 2)}${"*".repeat(Math.max(4, digits.length - 6))}${digits.slice(-4)}`;
+}
+
 function buildProductCostLookup(products: Product[]) {
     const lookup = new Map<string, number>();
 
@@ -383,7 +397,7 @@ function OwnerAuditTable({
                                     <p className="truncate font-semibold text-[#1A1220]">{order.customer || "—"}</p>
                                     <p className="mt-1 truncate text-[10px] text-[#806A8C]">{getBranchName(order)}</p>
                                     {order.customerContactNumber && (
-                                        <p className="mt-1 truncate text-[10px] text-[#806A8C]">{order.customerContactNumber}</p>
+                                        <p className="mt-1 truncate text-[10px] text-[#806A8C]">{maskCustomerContact(order.customerContactNumber)}</p>
                                     )}
                                 </div>
 
@@ -621,6 +635,17 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
     }, [endDate, hasDateFilter, scopeSales.orders, startDate]);
 
     const overviewTotals = useMemo(() => {
+        const serverSummary = pos.ownerOrderSummary;
+
+        if (serverSummary) {
+            return {
+                sales: Number(serverSummary.sales || 0),
+                cost: Number(serverSummary.cost || 0),
+                profit: Number(serverSummary.profit || 0),
+                transactions: Number(serverSummary.transactions || 0),
+            };
+        }
+
         const ordersToCalculate = hasDateFilter
             ? dateFilteredOrders
             : scopeSales.orders;
@@ -631,35 +656,19 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                 const backendCost = Number(order.cost);
                 const backendProfit = Number(order.profit);
 
-                /*
-                 * Prefer the exact per-order metrics returned by the POS
-                 * backend. They are calculated from order_items using the
-                 * order's product_id / variant_id, so branch changes now
-                 * produce the correct branch-specific cost and profit.
-                 *
-                 * Keep the old lookup only as a compatibility fallback for
-                 * any older cached order that does not yet contain metrics.
-                 */
                 let orderProfit = backendProfit;
                 let orderCost = backendCost;
 
                 if (!Number.isFinite(orderProfit)) {
-                    orderProfit = (
-                        Array.isArray(order.items) ? order.items : []
-                    ).reduce((itemProfit, item) => {
-                        const key = normalizeOrderItemName(item.name);
-                        const unitProfit = productProfitLookup.get(key);
-
-                        if (unitProfit === undefined) {
-                            return itemProfit;
-                        }
-
-                        return (
-                            itemProfit +
-                            Number(unitProfit || 0) *
-                            Number(item.quantity || 0)
-                        );
-                    }, 0);
+                    orderProfit = (Array.isArray(order.items) ? order.items : []).reduce(
+                        (itemProfit, item) => {
+                            const key = normalizeOrderItemName(item.name);
+                            const unitProfit = productProfitLookup.get(key);
+                            if (unitProfit === undefined) return itemProfit;
+                            return itemProfit + Number(unitProfit || 0) * Number(item.quantity || 0);
+                        },
+                        0,
+                    );
                 }
 
                 if (!Number.isFinite(orderCost)) {
@@ -670,19 +679,14 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                 totals.cost += orderCost;
                 totals.profit += orderProfit;
                 totals.transactions += 1;
-
                 return totals;
             },
-            {
-                sales: 0,
-                cost: 0,
-                profit: 0,
-                transactions: 0,
-            },
+            { sales: 0, cost: 0, profit: 0, transactions: 0 },
         );
     }, [
         dateFilteredOrders,
         hasDateFilter,
+        pos.ownerOrderSummary,
         productProfitLookup,
         scopeSales.orders,
     ]);
@@ -848,6 +852,22 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
 
     const handleTaxRegistrationChange = async (value: string) => {
         const registration = value === "NON_VAT" ? "NON_VAT" : "VAT_REGISTERED";
+        const currentRegistration =
+            pos.taxType === "NON_VAT" ? "NON_VAT" : "VAT_REGISTERED";
+
+        if (registration === currentRegistration) return;
+
+        const label =
+            registration === "NON_VAT"
+                ? "Non-VAT Registered"
+                : "VAT Registered (12%)";
+
+        const confirmed = window.confirm(
+            `Change the business tax registration to ${label}? This applies to future POS transactions only and does not recalculate historical sales.`
+        );
+
+        if (!confirmed) return;
+
         setTaxSaving(true);
         await pos.updateTaxRegistration(registration);
         setTaxSaving(false);
@@ -861,13 +881,15 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
         ? ` ${dateRangeDescription}`
         : "";
 
+    const matchedTransactionCount = Number(pos.ownerOrderTotal || visibleOrders.length);
+
     const tableSubtitle = isAllBranchesView
-        ? `${visibleOrders.length} transaction${
-            visibleOrders.length !== 1 ? "s" : ""
-        } shown across all branches${dateRangeSuffix}.`
-        : `${visibleOrders.length} transaction${
-            visibleOrders.length !== 1 ? "s" : ""
-        } shown for ${selectedBranch?.branchName || "this branch"}${dateRangeSuffix}.`;
+        ? `${matchedTransactionCount} transaction${
+            matchedTransactionCount !== 1 ? "s" : ""
+        } matched across all branches${dateRangeSuffix}.`
+        : `${matchedTransactionCount} transaction${
+            matchedTransactionCount !== 1 ? "s" : ""
+        } matched for ${selectedBranch?.branchName || "this branch"}${dateRangeSuffix}.`;
 
     const hasActiveFilters = Boolean(
         orderIdQuery.trim() || startDate || endDate,
@@ -965,7 +987,7 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                         <div>
                             <p className="text-sm font-bold text-[#1A1220]">Business Tax Registration</p>
                             <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                Owner-controlled. Manager and Staff POS only read this setting.
+                                Owner-controlled. Manager and Staff POS only read this setting. Changes apply to future POS transactions only.
                             </p>
                         </div>
 
@@ -994,9 +1016,11 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
 
                             <input
                                 value={orderIdQuery}
-                                onChange={(event) =>
-                                    setOrderIdQuery(event.target.value)
-                                }
+                                onChange={(event) => {
+                                    const value = event.target.value;
+                                    setOrderIdQuery(value);
+                                    pos.setOwnerOrderSearch(value);
+                                }}
                                 placeholder="Search order, control no., or customer..."
                                 aria-label="Search order ID"
                                 className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
@@ -1203,6 +1227,7 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                                     const today = getLocalDateInputValue();
 
                                     setOrderIdQuery("");
+                                    pos.setOwnerOrderSearch("");
                                     setStartDate(today);
                                     setEndDate(today);
                                     pos.setOwnerOrderDateRange(today, today);
@@ -1227,6 +1252,31 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                                     : "No orders found for this branch."
                         }
                     />
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-3 shadow-sm">
+                        <p className="text-xs text-[#7A6A84]">
+                            Page {pos.ownerOrderPage} of {pos.ownerOrderTotalPages} · {pos.ownerOrderTotal} matching transaction{pos.ownerOrderTotal !== 1 ? "s" : ""}
+                        </p>
+
+                        <div className="flex items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={() => pos.setOwnerOrderPage(Math.max(1, pos.ownerOrderPage - 1))}
+                                disabled={pos.ownerOrderPage <= 1}
+                                className="rounded-xl border border-[#D8CBE7] px-3.5 py-2 text-xs font-semibold text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                                Previous
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => pos.setOwnerOrderPage(Math.min(pos.ownerOrderTotalPages, pos.ownerOrderPage + 1))}
+                                disabled={pos.ownerOrderPage >= pos.ownerOrderTotalPages}
+                                className="rounded-xl bg-[#2B174C] px-3.5 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                                Next
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </main>
         </div>

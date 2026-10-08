@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
@@ -25,20 +25,44 @@ import {
     X,
     Zap,
 } from "lucide-react";
-import {
-    DashboardExportMenu,
-    exportTableAsDoc,
-    exportTableAsExcel,
-    exportTableAsPdf,
-    type ExportContext,
-    type ExportTable,
-} from "./_shared";
+import DashboardExportMenu from "./DashboardExportMenu";
+import type { ExportContext, ExportTable } from "./_shared";
 
-type Branch = {
-    id: number;
-    branchName: string;
-    managerName?: string;
-};
+// Keep the very large Reports/_shared module out of the initial dashboard bundle.
+// It is loaded only if the user actually exports a dashboard table.
+function exportTableAsPdf(
+    table: ExportTable,
+    context: ExportContext,
+    filenamePrefix: string,
+) {
+    void import("./_shared")
+        .then((module) => module.exportTableAsPdf(table, context, filenamePrefix))
+        .catch((error) => console.error("Dashboard PDF export failed:", error));
+}
+
+function exportTableAsExcel(
+    table: ExportTable,
+    context: ExportContext,
+    filenamePrefix: string,
+    sheetName = "Report",
+) {
+    void import("./_shared")
+        .then((module) =>
+            module.exportTableAsExcel(table, context, filenamePrefix, sheetName),
+        )
+        .catch((error) => console.error("Dashboard XLSX export failed:", error));
+}
+
+function exportTableAsDoc(
+    table: ExportTable,
+    context: ExportContext,
+    filenamePrefix: string,
+) {
+    void import("./_shared")
+        .then((module) => module.exportTableAsDoc(table, context, filenamePrefix))
+        .catch((error) => console.error("Dashboard DOC export failed:", error));
+}
+
 
 type Booking = {
     id: number;
@@ -545,20 +569,6 @@ function readNullableNumber(record: ApiRecord, keys: string[]) {
     const parsed = Number(value);
 
     return Number.isFinite(parsed) ? parsed : null;
-}
-
-function normalizeBranch(value: unknown): Branch {
-    const raw = toRecord(value);
-
-    return {
-        id: readNumber(raw, ["id", "branch_id", "branchId"]),
-        branchName: readText(
-            raw,
-            ["branchName", "branch_name", "name", "branch"],
-            "Unnamed Branch",
-        ),
-        managerName: readText(raw, ["managerName", "manager_name", "manager"]),
-    };
 }
 
 function normalizeBooking(value: unknown): Booking {
@@ -1609,11 +1619,310 @@ function formatNextBookingCountdown(target: Date | null, reference: Date) {
         : `in ${hours} hour${hours === 1 ? "" : "s"}`;
 }
 
+
+
+/* ----------------------------------------------------------------------- */
+/* Initial dashboard skeleton                                               */
+/* ----------------------------------------------------------------------- */
+
+function StaffSkeletonBar({ className = "" }: { className?: string }) {
+    return <div className={`rounded-full bg-[#ECE7F0] ${className}`} />;
+}
+
+function StaffMetricSkeleton() {
+    return (
+        <div className="flex min-h-[116px] items-center gap-4 rounded-[16px] bg-white px-5 py-4 shadow-sm">
+            <div className="h-14 w-14 shrink-0 rounded-full bg-[#EEE9F4]" />
+            <div className="min-w-0 flex-1">
+                <StaffSkeletonBar className="h-[14px] w-28" />
+                <StaffSkeletonBar className="mt-2 h-7 w-12" />
+                <StaffSkeletonBar className="mt-2 h-[11px] w-36 max-w-full" />
+            </div>
+        </div>
+    );
+}
+
+function StaffTodayWorkSkeleton() {
+    return (
+        <section
+            className="grid h-[318px] max-h-[318px] min-h-[318px] grid-rows-[auto_minmax(0,1fr)_24px] overflow-hidden rounded-2xl bg-white shadow-sm"
+            style={{ height: 318, minHeight: 318, maxHeight: 318 }}
+        >
+            <div className="border-b border-[#EEE8F2] px-5 py-3">
+                <div className="flex items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                        <div className="h-9 w-9 shrink-0 rounded-lg bg-[#EEE9F4]" />
+                        <div className="min-w-0">
+                            <StaffSkeletonBar className="h-[18px] w-28" />
+                            <StaffSkeletonBar className="mt-2 h-[11px] w-48 max-w-full" />
+                        </div>
+                    </div>
+                    <div className="h-7 w-32 shrink-0 rounded-full bg-[#F1EDF4]" />
+                </div>
+
+                <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                    <div className="h-7 w-16 rounded-full bg-[#E8E2EC]" />
+                    <div className="h-7 w-24 rounded-full bg-[#F1EDF4]" />
+                    <div className="h-7 w-24 rounded-full bg-[#F1EDF4]" />
+                </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-hidden">
+                <table className="w-full table-fixed border-collapse">
+                    <colgroup>
+                        <col className="w-[13%]" />
+                        <col className="w-[25%]" />
+                        <col className="w-[20%]" />
+                        <col className="w-[18%]" />
+                        <col className="w-[24%]" />
+                    </colgroup>
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[34px] border-b border-[#EEE8F2]">
+                        <th className="px-4 py-2"><StaffSkeletonBar className="mx-auto h-2.5 w-8" /></th>
+                        <th className="px-4 py-2"><StaffSkeletonBar className="h-2.5 w-16" /></th>
+                        <th className="px-3 py-2"><StaffSkeletonBar className="h-2.5 w-14" /></th>
+                        <th className="px-4 py-2"><StaffSkeletonBar className="mx-auto h-2.5 w-12" /></th>
+                        <th className="px-4 py-2"><StaffSkeletonBar className="mx-auto h-2.5 w-10" /></th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {[0, 1, 2, 3].map((item) => (
+                        <tr key={item} className="h-[45px] border-b border-[#F1ECF4] last:border-b-0">
+                            <td className="px-4 py-2.5"><StaffSkeletonBar className="mx-auto h-2.5 w-12" /></td>
+                            <td className="px-4 py-2.5"><StaffSkeletonBar className="h-2.5 w-[82%]" /></td>
+                            <td className="px-3 py-2.5"><StaffSkeletonBar className="h-2.5 w-[76%]" /></td>
+                            <td className="px-3 py-2.5"><div className="mx-auto h-5 w-16 rounded-full bg-[#F1EDF4]" /></td>
+                            <td className="px-4 py-2.5"><StaffSkeletonBar className="mx-auto h-2.5 w-12" /></td>
+                        </tr>
+                    ))}
+                    </tbody>
+                </table>
+            </div>
+
+            <div className="h-6 shrink-0 border-t border-[#EEE8F2] bg-[#FCFAFE]" />
+        </section>
+    );
+}
+
+function StaffQuickActionsSkeleton() {
+    return (
+        <section className="flex h-[318px] min-h-[318px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
+            <div className="shrink-0 px-4 pt-4">
+                <div className="flex items-center gap-3">
+                    <div className="h-9 w-9 shrink-0 rounded-lg bg-[#EEE9F4]" />
+                    <div className="min-w-0 flex-1">
+                        <StaffSkeletonBar className="h-[15px] w-24" />
+                        <StaffSkeletonBar className="mt-2 h-[11px] w-40 max-w-full" />
+                    </div>
+                </div>
+            </div>
+
+            <div className="mt-3 flex min-h-0 flex-1 flex-col gap-2 px-4 pb-4 pt-1">
+                {[0, 1, 2, 3, 4].map((item) => (
+                    <div key={item} className="flex h-10 shrink-0 items-center justify-between rounded-lg bg-[#F8F5FB] px-3">
+                        <div className="flex min-w-0 items-center gap-3">
+                            <div className="h-7 w-7 shrink-0 rounded-md bg-[#EDE7F2]" />
+                            <StaffSkeletonBar className="h-2.5 w-28 max-w-full" />
+                        </div>
+                        <div className="h-3.5 w-3.5 rounded-full bg-[#E9E3EE]" />
+                    </div>
+                ))}
+            </div>
+        </section>
+    );
+}
+
+function StaffTasksSkeleton() {
+    return (
+        <section
+            className="grid h-[344px] max-h-[344px] min-h-[344px] grid-rows-[auto_minmax(0,1fr)_24px] overflow-hidden rounded-2xl bg-white shadow-sm"
+            style={{ height: 344, minHeight: 344, maxHeight: 344 }}
+        >
+            <div className="border-b border-[#EEE8F2] px-5 py-4">
+                <div className="flex items-center gap-3">
+                    <div className="h-9 w-9 shrink-0 rounded-lg bg-[#EEE9F4]" />
+                    <div className="min-w-0 flex-1">
+                        <StaffSkeletonBar className="h-[15px] w-28" />
+                        <StaffSkeletonBar className="mt-2 h-[11px] w-40 max-w-full" />
+                    </div>
+                </div>
+                <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                    <div className="h-7 w-16 rounded-full bg-[#E8E2EC]" />
+                    <div className="h-7 w-24 rounded-full bg-[#F1EDF4]" />
+                    <div className="h-7 w-24 rounded-full bg-[#F1EDF4]" />
+                </div>
+            </div>
+
+            <div className="min-h-0 overflow-hidden">
+                <table className="w-full table-fixed border-collapse">
+                    <colgroup>
+                        <col className="w-[8%]" />
+                        <col className="w-[32%]" />
+                        <col className="w-[24%]" />
+                        <col className="w-[16%]" />
+                        <col className="w-[20%]" />
+                    </colgroup>
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[34px] border-b border-[#EEE8F2]">
+                        <th className="px-2 py-2"><div className="mx-auto h-3 w-3 rounded-full bg-[#E7E0EC]" /></th>
+                        <th className="px-3 py-2"><StaffSkeletonBar className="h-2.5 w-20" /></th>
+                        <th className="px-3 py-2"><StaffSkeletonBar className="h-2.5 w-14" /></th>
+                        <th className="px-3 py-2"><StaffSkeletonBar className="mx-auto h-2.5 w-8" /></th>
+                        <th className="px-3 py-2"><StaffSkeletonBar className="mx-auto h-2.5 w-10" /></th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {[0, 1, 2, 3].map((item) => (
+                        <tr key={item} className="h-[45px] border-b border-[#F1ECF4] last:border-b-0">
+                            <td className="px-2 py-2.5"><div className="mx-auto h-4 w-4 rounded-full bg-[#EAE4EF]" /></td>
+                            <td className="px-3 py-2.5"><StaffSkeletonBar className="h-2.5 w-[82%]" /></td>
+                            <td className="px-3 py-2.5"><StaffSkeletonBar className="h-2.5 w-[74%]" /></td>
+                            <td className="px-3 py-2.5"><StaffSkeletonBar className="mx-auto h-2.5 w-10" /></td>
+                            <td className="px-3 py-2.5"><StaffSkeletonBar className="mx-auto h-2.5 w-11" /></td>
+                        </tr>
+                    ))}
+                    </tbody>
+                </table>
+            </div>
+
+            <div className="h-6 border-t border-[#EEE8F2] bg-[#FCFAFE]" />
+        </section>
+    );
+}
+
+function StaffEfficiencySkeleton() {
+    return (
+        <section className="flex h-[344px] max-h-[344px] min-h-[344px] flex-col overflow-hidden rounded-2xl bg-white shadow-sm">
+            <div className="flex items-center gap-3 border-b border-[#EEE8F2] px-5 py-3.5">
+                <div className="h-9 w-9 shrink-0 rounded-lg bg-[#EEE9F4]" />
+                <div className="min-w-0 flex-1">
+                    <StaffSkeletonBar className="h-[15px] w-28" />
+                    <StaffSkeletonBar className="mt-2 h-[11px] w-40 max-w-full" />
+                </div>
+            </div>
+
+            <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 py-2.5">
+                {[0, 1, 2].map((item) => (
+                    <div key={item}>
+                        <div className="flex items-center justify-between gap-3">
+                            <StaffSkeletonBar className="h-2.5 w-28" />
+                            <StaffSkeletonBar className="h-2.5 w-10" />
+                        </div>
+                        <div className="mt-1.5 flex items-center gap-2">
+                            <div className="h-2 flex-1 overflow-hidden rounded-full bg-[#F1ECF6]">
+                                <div className="h-full rounded-full bg-[#DDD5E5]" style={{ width: `${72 - item * 14}%` }} />
+                            </div>
+                            <StaffSkeletonBar className="h-2 w-8" />
+                        </div>
+                    </div>
+                ))}
+
+                <div className="flex items-center justify-between border-t border-[#F1ECF4] pt-2">
+                    <div className="flex items-center gap-2">
+                        <div className="h-7 w-7 rounded-full bg-[#EEE9F4]" />
+                        <StaffSkeletonBar className="h-2.5 w-32" />
+                    </div>
+                    <StaffSkeletonBar className="h-3 w-6" />
+                </div>
+
+                <div className="mt-auto rounded-xl bg-[#F8F5FC] px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                            <div className="h-7 w-7 rounded-full bg-white shadow-sm" />
+                            <div>
+                                <StaffSkeletonBar className="h-2 w-16" />
+                                <StaffSkeletonBar className="mt-2 h-3 w-24" />
+                            </div>
+                        </div>
+                        <div className="text-right">
+                            <StaffSkeletonBar className="ml-auto h-2.5 w-12" />
+                            <StaffSkeletonBar className="ml-auto mt-2 h-2 w-16" />
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div className="h-6 shrink-0 border-t border-[#EEE8F2] bg-[#FCFAFE]" />
+        </section>
+    );
+}
+
+function StaffActivitySkeleton() {
+    return (
+        <section className="grid h-[344px] max-h-[344px] min-h-[344px] grid-rows-[auto_minmax(0,1fr)_24px] overflow-hidden rounded-2xl bg-white shadow-sm">
+            <div className="flex items-center gap-3 border-b border-[#EEE8F2] px-5 py-4">
+                <div className="h-9 w-9 shrink-0 rounded-lg bg-[#EEE9F4]" />
+                <div className="min-w-0 flex-1">
+                    <StaffSkeletonBar className="h-[15px] w-28" />
+                    <StaffSkeletonBar className="mt-2 h-[11px] w-36 max-w-full" />
+                </div>
+            </div>
+
+            <div className="min-h-0 overflow-hidden">
+                <table className="w-full table-fixed border-collapse">
+                    <colgroup>
+                        <col className="w-[14%]" />
+                        <col className="w-[46%]" />
+                        <col className="w-[18%]" />
+                        <col className="w-[22%]" />
+                    </colgroup>
+                    <thead className="bg-[#FBFAFD]">
+                    <tr className="h-[30px] border-b border-[#EEE8F2]">
+                        <th className="px-2.5 py-1"><StaffSkeletonBar className="mx-auto h-2 w-7" /></th>
+                        <th className="px-2.5 py-1"><StaffSkeletonBar className="h-2 w-14" /></th>
+                        <th className="px-2.5 py-1"><StaffSkeletonBar className="h-2 w-8" /></th>
+                        <th className="px-2.5 py-1"><StaffSkeletonBar className="h-2 w-10" /></th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {[0, 1, 2, 3, 4].map((item) => (
+                        <tr key={item} className="h-[43px]">
+                            <td className="px-2.5 py-2.5"><div className="mx-auto h-7 w-7 rounded-full bg-[#EEE9F4]" /></td>
+                            <td className="px-2.5 py-2.5"><StaffSkeletonBar className="h-2.5 w-[82%]" /></td>
+                            <td className="px-2.5 py-2.5"><StaffSkeletonBar className="h-2.5 w-10" /></td>
+                            <td className="px-2.5 py-2.5"><div className="h-5 w-14 rounded-full bg-[#F1EDF4]" /></td>
+                        </tr>
+                    ))}
+                    </tbody>
+                </table>
+            </div>
+
+            <div className="h-6 border-t border-[#EEE8F2] bg-[#FCFAFE]" />
+        </section>
+    );
+}
+
+function StaffDashboardSkeleton() {
+    return (
+        <div className="mx-auto max-w-none space-y-4 animate-pulse" role="status" aria-label="Loading staff dashboard">
+            <span className="sr-only">Loading staff dashboard data</span>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
+                {[0, 1, 2, 3].map((item) => <StaffMetricSkeleton key={item} />)}
+            </div>
+
+            <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3" aria-hidden="true">
+                <div className="h-full min-h-0 min-w-0 xl:col-span-2">
+                    <StaffTodayWorkSkeleton />
+                </div>
+                <div className="h-full min-h-0 min-w-0">
+                    <StaffQuickActionsSkeleton />
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3" aria-hidden="true">
+                <div className="h-full min-h-0 min-w-0"><StaffTasksSkeleton /></div>
+                <div className="h-full min-h-0 min-w-0"><StaffEfficiencySkeleton /></div>
+                <div className="h-full min-h-0 min-w-0"><StaffActivitySkeleton /></div>
+            </div>
+        </div>
+    );
+}
+
 export default function StaffDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
 
-    const [branches, setBranches] = useState<Branch[]>([]);
     const [bookings, setBookings] = useState<Booking[]>([]);
     const [bookingsError, setBookingsError] = useState("");
     const [orders, setOrders] = useState<Order[]>([]);
@@ -1624,6 +1933,15 @@ export default function StaffDashboard() {
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(true);
     const [hasLoadedDashboard, setHasLoadedDashboard] = useState(false);
+
+    const dashboardStoreId =
+        getUserValue(user, "store_id") ||
+        getUserValue(user, "storeId") ||
+        getSavedItem("store_id") ||
+        getSavedItem("stocknbook_store_id");
+    const dashboardBranchId = getAssignedBranchId(user);
+    const dashboardBranchName = getAssignedBranchName(user);
+    const loadInFlightRef = useRef(false);
 
     useEffect(() => {
         const timer = window.setInterval(() => {
@@ -1637,16 +1955,11 @@ export default function StaffDashboard() {
 
     const loadStaffDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
         const token = getSavedItem("token");
-        const storeId =
-            getUserValue(user, "store_id") ||
-            getUserValue(user, "storeId") ||
-            getSavedItem("store_id") ||
-            getSavedItem("stocknbook_store_id");
-        const branchId = getAssignedBranchId(user);
-        const assignedBranchName = getAssignedBranchName(user);
+        const storeId = dashboardStoreId;
+        const branchId = dashboardBranchId;
+        const assignedBranchName = dashboardBranchName;
 
         if (!token || !branchId) {
-            setBranches([]);
             setBookings([]);
             setOrders([]);
             setProducts([]);
@@ -1658,204 +1971,44 @@ export default function StaffDashboard() {
             return;
         }
 
+        // In development, React Strict Mode runs effects twice. Without this
+        // guard that creates two simultaneous bookings/products/POS/report loads.
+        if (loadInFlightRef.current) return;
+        loadInFlightRef.current = true;
+
         if (!silent) setIsRefreshing(true);
+        setBookingsError("");
 
-        try {
-            try {
-                const branchesRes = await fetch("/api/branches", {
-                    method: "GET",
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                    cache: "no-store",
-                });
+        const now = new Date();
+        const today = formatLocalIsoDate(now);
+        const reportQuery = new URLSearchParams({
+            branch: assignedBranchName,
+            month: today.slice(0, 7),
+            startDate: today,
+            endDate: today,
+            role: "staff",
+            assignedBranch: assignedBranchName,
+            branch_id: String(branchId),
+            scope: "employee_actions",
+        });
 
-                const branchesData = await branchesRes.json().catch(() => ({}));
+        // Employee actions are useful, but they are not required for the first
+        // dashboard paint. Start that request now and finish it in the background.
+        const reportsPromise = fetch(`/api/reports?${reportQuery.toString()}`, {
+            method: "GET",
+            headers: { Authorization: `Bearer ${token}` },
+            cache: "no-store",
+        });
 
-                if (branchesRes.ok && Array.isArray(branchesData.branches)) {
-                    const normalizedBranches: Branch[] = (branchesData.branches as unknown[]).map(normalizeBranch);
-                    const assignedBranches = normalizedBranches.filter(
-                        (branch) => String(branch.id) === String(branchId),
-                    );
-
-                    setBranches(
-                        assignedBranches.length > 0
-                            ? assignedBranches
-                            : [
-                                {
-                                    id: Number(branchId),
-                                    branchName: assignedBranchName,
-                                },
-                            ],
-                    );
-                }
-            } catch (error) {
-                console.warn("Staff dashboard branches fetch failed:", error);
-            }
-
-            try {
-                setBookingsError("");
-
-                const bookingsRes = await fetch("/api/bookings", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_booking_page_bookings",
-                        role: "staff",
-                        store_id: storeId ? Number(storeId) : undefined,
-                        branch_id: Number(branchId),
-                    }),
-                    cache: "no-store",
-                });
-
-                const bookingsText = await bookingsRes.text();
-                const bookingsData: {
-                    bookings?: unknown[];
-                    error?: unknown;
-                    message?: unknown;
-                    details?: unknown;
-                } = bookingsText ? JSON.parse(bookingsText) : {};
-
-                if (!bookingsRes.ok) {
-                    const message = String(
-                        bookingsData.error ||
-                        bookingsData.message ||
-                        "Unable to load booking data.",
-                    );
-
-                    console.error("Staff dashboard bookings request failed:", {
-                        status: bookingsRes.status,
-                        response: bookingsData,
-                    });
-                    setBookings([]);
-                    setBookingsError(message);
-                } else if (Array.isArray(bookingsData.bookings)) {
-                    const normalizedBookings = bookingsData.bookings.map(normalizeBooking);
-                    setBookings(
-                        normalizedBookings.filter((booking) =>
-                            belongsToAssignedBranch(booking, branchId),
-                        ),
-                    );
-                } else {
-                    setBookings([]);
-                    setBookingsError("Bookings API returned an invalid response.");
-                }
-            } catch (error) {
-                console.error("Staff dashboard bookings fetch failed:", error);
-                setBookings([]);
-                setBookingsError(
-                    error instanceof Error
-                        ? error.message
-                        : "Unable to load booking data.",
-                );
-            }
-
-            try {
-                const productsRes = await fetch("/api/products", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_products",
-                        branch_id: Number(branchId),
-                    }),
-                    cache: "no-store",
-                });
-
-                const productsData = await productsRes.json().catch(() => ({}));
-
-                if (productsRes.ok && Array.isArray(productsData.products)) {
-                    const normalizedProducts: Product[] = (productsData.products as unknown[]).map(normalizeProduct);
-
-                    /*
-                     * The products request is already scoped to the assigned branch.
-                     * Some product payloads do not repeat branch_id on every row, so
-                     * do not discard those rows. Still reject an explicitly different
-                     * branch if the API does return one.
-                     */
-                    setProducts(
-                        normalizedProducts.filter((product) => {
-                            const productBranchId =
-                                product.branchId ?? product.branch_id;
-
-                            return (
-                                productBranchId === null ||
-                                productBranchId === undefined ||
-                                String(productBranchId) === String(branchId)
-                            );
-                        }),
-                    );
-                }
-            } catch (error) {
-                console.warn("Staff dashboard products fetch failed:", error);
-            }
-
-            try {
-                const ordersRes = await fetch("/api/pos", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_orders",
-                        branch_id: Number(branchId),
-                    }),
-                    cache: "no-store",
-                });
-
-                const ordersData = await ordersRes.json().catch(() => ({}));
-
-                if (ordersRes.ok && Array.isArray(ordersData.orders)) {
-                    const normalizedOrders: Order[] = (ordersData.orders as unknown[]).map(normalizeOrder);
-                    setOrders(
-                        normalizedOrders.filter((order) =>
-                            belongsToAssignedBranch(order, branchId),
-                        ),
-                    );
-                }
-            } catch (error) {
-                console.warn("Staff dashboard orders fetch failed:", error);
-            }
-
-            try {
-                const now = new Date();
-                const today = formatLocalIsoDate(now);
-                const reportQuery = new URLSearchParams({
-                    branch: assignedBranchName,
-                    month: today.slice(0, 7),
-                    startDate: today,
-                    endDate: today,
-                    role: "staff",
-                    assignedBranch: assignedBranchName,
-                    branch_id: String(branchId),
-                });
-
-                const reportsRes = await fetch(
-                    `/api/reports?${reportQuery.toString()}`,
-                    {
-                        method: "GET",
-                        headers: {
-                            Authorization: `Bearer ${token}`,
-                        },
-                        cache: "no-store",
-                    },
-                );
-
+        void reportsPromise
+            .then(async (reportsRes) => {
                 const reportsData = await reportsRes.json().catch(() => ({}));
                 const reportPayload =
-                    reportsData?.data &&
-                    typeof reportsData.data === "object"
+                    reportsData?.data && typeof reportsData.data === "object"
                         ? reportsData.data
                         : {};
                 const rawEmployeeActions =
-                    reportPayload.employeeActions ??
-                    reportPayload.employee_actions;
+                    reportPayload.employeeActions ?? reportPayload.employee_actions;
 
                 if (
                     reportsRes.ok &&
@@ -1869,25 +2022,167 @@ export default function StaffDashboard() {
                 } else {
                     console.warn(
                         "Staff dashboard employee actions were not available from Reports API.",
-                        {
-                            status: reportsRes.status,
-                            response: reportsData,
-                        },
+                        { status: reportsRes.status, response: reportsData },
                     );
                 }
-            } catch (error) {
-                // Keep the last successfully loaded activity data during a
-                // temporary reports failure instead of flashing an empty panel.
-                console.warn(
-                    "Staff dashboard employee actions fetch failed:",
-                    error,
-                );
+            })
+            .catch((error) => {
+                console.warn("Staff dashboard employee actions fetch failed:", error);
+            });
+
+        try {
+            // These requests used to run one-by-one. Run them together so total
+            // wait time is approximately the slowest request, not their sum.
+            const [bookingsResult, productsResult, ordersResult] =
+                await Promise.allSettled([
+                    fetch("/api/bookings", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_booking_page_bookings",
+                            role: "staff",
+                            store_id: storeId ? Number(storeId) : undefined,
+                            branch_id: Number(branchId),
+                            date_from: today,
+                            date_to: today,
+                        }),
+                        cache: "no-store",
+                    }),
+                    fetch("/api/products", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_products",
+                            branch_id: Number(branchId),
+                        }),
+                        cache: "no-store",
+                    }),
+                    fetch("/api/pos", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            action: "get_orders",
+                            branch_id: Number(branchId),
+                            include_order_items: true,
+                            // Staff dashboard calculations only use today's POS
+                            // transactions, so do not download the entire order history.
+                            date_from: today,
+                            date_to: today,
+                        }),
+                        cache: "no-store",
+                    }),
+                ]);
+
+            if (bookingsResult.status === "fulfilled") {
+                try {
+                    const bookingsRes = bookingsResult.value;
+                    const bookingsText = await bookingsRes.text();
+                    const bookingsData: {
+                        bookings?: unknown[];
+                        error?: unknown;
+                        message?: unknown;
+                        details?: unknown;
+                    } = bookingsText ? JSON.parse(bookingsText) : {};
+
+                    if (!bookingsRes.ok) {
+                        const message = String(
+                            bookingsData.error ||
+                            bookingsData.message ||
+                            "Unable to load booking data.",
+                        );
+                        console.error("Staff dashboard bookings request failed:", {
+                            status: bookingsRes.status,
+                            response: bookingsData,
+                        });
+                        setBookings([]);
+                        setBookingsError(message);
+                    } else if (Array.isArray(bookingsData.bookings)) {
+                        const normalizedBookings = bookingsData.bookings.map(normalizeBooking);
+                        setBookings(
+                            normalizedBookings.filter((booking) =>
+                                belongsToAssignedBranch(booking, branchId),
+                            ),
+                        );
+                    } else {
+                        setBookings([]);
+                        setBookingsError("Bookings API returned an invalid response.");
+                    }
+                } catch (error) {
+                    console.error("Staff dashboard bookings parsing failed:", error);
+                    setBookings([]);
+                    setBookingsError("Unable to load booking data.");
+                }
+            } else {
+                console.error("Staff dashboard bookings fetch failed:", bookingsResult.reason);
+                setBookingsError("Unable to load booking data.");
             }
+
+            if (productsResult.status === "fulfilled") {
+                try {
+                    const productsRes = productsResult.value;
+                    const productsData = await productsRes.json().catch(() => ({}));
+                    if (productsRes.ok && Array.isArray(productsData.products)) {
+                        const normalizedProducts: Product[] =
+                            (productsData.products as unknown[]).map(normalizeProduct);
+                        setProducts(
+                            normalizedProducts.filter((product) => {
+                                const productBranchId = product.branchId ?? product.branch_id;
+                                return (
+                                    productBranchId === null ||
+                                    productBranchId === undefined ||
+                                    String(productBranchId) === String(branchId)
+                                );
+                            }),
+                        );
+                    }
+                } catch (error) {
+                    console.warn("Staff dashboard products parsing failed:", error);
+                }
+            } else {
+                console.warn("Staff dashboard products fetch failed:", productsResult.reason);
+            }
+
+            if (ordersResult.status === "fulfilled") {
+                try {
+                    const ordersRes = ordersResult.value;
+                    const ordersData = await ordersRes.json().catch(() => ({}));
+                    if (ordersRes.ok && Array.isArray(ordersData.orders)) {
+                        const normalizedOrders: Order[] =
+                            (ordersData.orders as unknown[]).map(normalizeOrder);
+                        setOrders(
+                            normalizedOrders.filter((order) =>
+                                belongsToAssignedBranch(order, branchId),
+                            ),
+                        );
+                    }
+                } catch (error) {
+                    console.warn("Staff dashboard orders parsing failed:", error);
+                }
+            } else {
+                console.warn("Staff dashboard orders fetch failed:", ordersResult.reason);
+            }
+
+            // Primary dashboard data is ready. Do not keep the whole page blank
+            // while the secondary employee-actions request finishes.
+            setHasLoadedDashboard(true);
+            if (!silent) setIsRefreshing(false);
+
         } finally {
+            loadInFlightRef.current = false;
+            // Covers early parsing errors before the normal primary-ready path.
             if (!silent) setIsRefreshing(false);
             setHasLoadedDashboard(true);
         }
-    }, [user]);
+    }, [dashboardStoreId, dashboardBranchId, dashboardBranchName]);
 
     useEffect(() => {
         void loadStaffDashboard();
@@ -1917,7 +2212,7 @@ export default function StaffDashboard() {
     );
 
     const dashboardBranchLabel =
-        branches[0]?.branchName || getAssignedBranchName(user);
+        dashboardBranchName;
 
     const bookingPermissionValue = getDashboardPermissionValue(user, [
         "booking_access",
@@ -2578,9 +2873,11 @@ export default function StaffDashboard() {
             </header>
 
             <section
-                aria-busy={isRefreshing}
+                aria-busy={!hasLoadedDashboard || isRefreshing}
                 className="min-h-[calc(100vh-88px)] bg-[#FFFDF8] px-6 py-5 font-sans"
             >
+                {!hasLoadedDashboard ? <StaffDashboardSkeleton /> : null}
+
                 <div className={`mx-auto max-w-none space-y-4 ${!hasLoadedDashboard ? "hidden" : ""}`}>
                     {bookingsError && (
                         <div className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs font-medium text-[#C32F2F]">

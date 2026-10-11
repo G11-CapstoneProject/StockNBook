@@ -59,7 +59,7 @@ const defaultGcashPaymentSettings: GCashPaymentSettings = {
     accountName: "StockNBook Admin",
     gcashNumber: "0917 123 4567",
     instruction: "Include your store name",
-    qrImage: "/gcash-qr.png",
+    qrImage: "",
 };
 
 type PaymentRequest = {
@@ -381,14 +381,52 @@ export default function PlatformAdminDashboardPage() {
     }
 
     function handleGcashQrUpload(event: ChangeEvent<HTMLInputElement>) {
-        const file = event.target.files?.[0];
-        if (!file || !file.type.startsWith("image/")) return;
+        const file = event.currentTarget.files?.[0];
+        // Reset so re-selecting the same image after an error still triggers onChange.
+        event.currentTarget.value = "";
+        if (!file) return;
 
+        if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+            window.alert("Please select a PNG, JPG, JPEG, or WEBP GCash QR image.");
+            return;
+        }
+        if (file.size > 5 * 1024 * 1024) {
+            window.alert("The QR image must be 5 MB or smaller. Please select a smaller image.");
+            return;
+        }
+
+        // Store a reasonably sized, PNG-based QR image rather than the original
+        // full-resolution phone screenshot. Keep edges sharp for QR scanning.
         const fileReader = new FileReader();
+        fileReader.onerror = () => window.alert("Unable to read the QR image. Please try again.");
         fileReader.onload = () => {
-            const uploadedImage = String(fileReader.result || "");
-            if (!uploadedImage) return;
-            setGcashSettingsForm((current) => ({ ...current, qrImage: uploadedImage }));
+            const image = new Image();
+            image.onerror = () => window.alert("The selected QR image could not be opened.");
+            image.onload = () => {
+                let scale = Math.min(1, 1200 / Math.max(image.naturalWidth, image.naturalHeight));
+                for (let attempt = 0; attempt < 5; attempt++) {
+                    const canvas = document.createElement("canvas");
+                    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+                    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+                    const context = canvas.getContext("2d");
+                    if (!context) {
+                        window.alert("Image processing is unavailable in this browser.");
+                        return;
+                    }
+                    context.fillStyle = "#FFFFFF";
+                    context.fillRect(0, 0, canvas.width, canvas.height);
+                    context.imageSmoothingEnabled = false;
+                    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+                    const uploadedImage = canvas.toDataURL("image/png");
+                    if (uploadedImage.length <= 1_500_000) {
+                        setGcashSettingsForm((current) => ({ ...current, qrImage: uploadedImage }));
+                        return;
+                    }
+                    scale *= 0.8;
+                }
+                window.alert("This QR image is too detailed to process. Please upload a cropped QR image instead of a full-screen screenshot.");
+            };
+            image.src = String(fileReader.result || "");
         };
         fileReader.readAsDataURL(file);
     }
@@ -398,7 +436,7 @@ export default function PlatformAdminDashboardPage() {
             accountName: gcashSettingsForm.accountName.trim() || defaultGcashPaymentSettings.accountName,
             gcashNumber: gcashSettingsForm.gcashNumber.trim() || defaultGcashPaymentSettings.gcashNumber,
             instruction: gcashSettingsForm.instruction.trim() || defaultGcashPaymentSettings.instruction,
-            qrImage: gcashSettingsForm.qrImage || defaultGcashPaymentSettings.qrImage,
+            qrImage: gcashSettingsForm.qrImage,
         };
 
         const token = sessionStorage.getItem("token") || localStorage.getItem("token") || "";
@@ -441,7 +479,7 @@ export default function PlatformAdminDashboardPage() {
         <div className="flex min-h-screen bg-[#FFFDF8] font-sans text-[#1A1220]">
             <PlatformAdminSidebar onOpenSettings={openGcashSettings} />
 
-            <div className="flex min-w-0 flex-1 flex-col">
+            <div className="flex min-w-0 flex-1 flex-col overflow-x-hidden">
                 <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
                     <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
                         <div className="min-w-0">
@@ -656,7 +694,7 @@ export default function PlatformAdminDashboardPage() {
                                 </span>
                                     <div className="min-w-0">
                                         <h3 className="truncate text-[18px] font-bold leading-6 text-[#24152F]">GCash Platform Payment Settings</h3>
-                                        <p className="mt-0.5 truncate text-[9px] leading-5 text-[#8A7D92]">Manage payment QR and instructions shown to store owners</p>
+                                        <p className="mt-0.5 truncate text-[9px] leading-5 text-[#8A7D92]">Owners see these payment details, the admin note, and clear checkout instructions</p>
                                     </div>
                                 </div>
                                 <button
@@ -669,15 +707,22 @@ export default function PlatformAdminDashboardPage() {
                             </div>
 
                             <div className="mt-4 flex flex-col items-center gap-6 sm:flex-row">
-                                <img
-                                    src={gcashSettings.qrImage}
-                                    alt="GCash QR Code"
-                                    className="h-28 w-28 rounded-xl border border-[#E6DDF0] bg-[#FAF8FF] p-2 object-contain"
-                                />
+                                {gcashSettings.qrImage ? (
+                                    <img
+                                        src={gcashSettings.qrImage}
+                                        alt="GCash QR Code"
+                                        className="h-28 w-28 rounded-xl border border-[#E6DDF0] bg-[#FAF8FF] p-2 object-contain"
+                                    />
+                                ) : (
+                                    <div className="flex h-28 w-28 flex-col items-center justify-center rounded-xl border border-dashed border-[#D8CDE2] bg-[#FAF8FF] text-center text-[#8A7D92]">
+                                        <QrCode size={28} className="text-[#6D35D4]" />
+                                        <span className="mt-2 px-2 text-[9px] leading-4">No QR uploaded</span>
+                                    </div>
+                                )}
                                 <div className="space-y-2 text-xs">
                                     <p><span className="font-semibold text-[#8A7D92]">Account Name:</span> <strong className="text-[#1A1220]">{gcashSettings.accountName}</strong></p>
                                     <p><span className="font-semibold text-[#8A7D92]">GCash Number:</span> <strong className="text-[#1A1220]">{gcashSettings.gcashNumber}</strong></p>
-                                    <p><span className="font-semibold text-[#8A7D92]">Instructions:</span> <strong className="text-[#1A1220]">{gcashSettings.instruction}</strong></p>
+                                    <p className="break-words whitespace-pre-wrap"><span className="font-semibold text-[#8A7D92]">Additional Payment Note:</span> <strong className="text-[#1A1220]">{gcashSettings.instruction}</strong></p>
                                 </div>
                             </div>
                         </div>
@@ -688,7 +733,7 @@ export default function PlatformAdminDashboardPage() {
 
             {isGcashSettingsOpen && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm">
-                    <div className="w-full max-w-lg rounded-[18px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">
+                    <div className="max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto rounded-[18px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">
                         <div className="flex items-center justify-between border-b border-[#EEE8F2] pb-4">
                             <h3 className="text-lg font-bold text-[#1A1220]">Edit GCash Details</h3>
                             <button type="button" onClick={closeGcashSettings} className="text-[#806A8C] hover:text-[#1A1220]">
@@ -698,10 +743,16 @@ export default function PlatformAdminDashboardPage() {
 
                         <div className="mt-4 space-y-4 text-xs">
                             <div className="flex items-center gap-4">
-                                <img src={gcashSettingsForm.qrImage} alt="Preview" className="h-20 w-20 rounded-lg border border-[#E6DDF0] p-1 object-contain" />
+                                {gcashSettingsForm.qrImage ? (
+                                    <img src={gcashSettingsForm.qrImage} alt="Preview" className="h-20 w-20 rounded-lg border border-[#E6DDF0] p-1 object-contain" />
+                                ) : (
+                                    <div className="flex h-20 w-20 items-center justify-center rounded-lg border border-dashed border-[#D8CDE2] bg-[#FAF8FF] text-[#6D35D4]">
+                                        <QrCode size={24} />
+                                    </div>
+                                )}
                                 <label className="cursor-pointer rounded-xl border border-[#E6DDF0] bg-[#FAF8FF] px-3.5 py-2 text-xs font-semibold text-[#6D35D4] transition hover:bg-[#F1EBFF]">
                                     Upload New QR
-                                    <input type="file" accept="image/*" onChange={handleGcashQrUpload} className="hidden" />
+                                    <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleGcashQrUpload} className="hidden" />
                                 </label>
                             </div>
 
@@ -724,12 +775,15 @@ export default function PlatformAdminDashboardPage() {
                             </label>
 
                             <label className="block space-y-1">
-                                <span className="font-semibold text-[#1A1220]">Instruction</span>
-                                <input
+                                <span className="font-semibold text-[#1A1220]">Additional Payment Note</span>
+                                <textarea
                                     value={gcashSettingsForm.instruction}
                                     onChange={(e) => setGcashSettingsForm((c) => ({ ...c, instruction: e.target.value }))}
-                                    className="w-full rounded-xl border border-[#E6DDF0] p-2.5 outline-none transition focus:border-[#2B174C]"
+                                    rows={3}
+                                    placeholder="Enter any special payment instructions for store owners."
+                                    className="w-full resize-y rounded-xl border border-[#E6DDF0] p-2.5 outline-none transition focus:border-[#2B174C]"
                                 />
+                                <p className="text-[11px] leading-4 text-[#8A7D92]">This note appears below the GCash account details. Owners will always see the standard step-by-step payment guide as well.</p>
                             </label>
                         </div>
 

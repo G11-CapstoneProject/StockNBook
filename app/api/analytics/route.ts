@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handler } from "../../../lambda-analytics/index.js";
+import { requireEffectivePlanFeature } from "../_helpers/require-effective-plan-feature";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -107,6 +108,9 @@ export async function POST(request: NextRequest) {
                 }
             );
         }
+
+        const subscriptionGate = await requireEffectivePlanFeature(authHeader, "has_analytics");
+        if (subscriptionGate) return subscriptionGate;
 
         console.log(
             "ANALYTICS LOCAL ROUTE BODY:",

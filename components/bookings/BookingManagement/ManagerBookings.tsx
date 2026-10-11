@@ -24,6 +24,7 @@ import {
     getBalance,
     getBranchGroupName,
     getRequiredDownPayment,
+    getSavedBookingAccess,
     getTotalPrice,
     normalizeBooking,
     peso,
@@ -70,6 +71,7 @@ function formatCurrentDateTime(value: Date) {
 
 
 export default function ManagerBookings() {
+    const canManage = getSavedBookingAccess("manager") === "full";
     const [bookings, setBookings] = useState<Booking[]>([]);
     const [branchName, setBranchName] = useState("Assigned Branch");
     const [loading, setLoading] = useState(true);
@@ -850,12 +852,12 @@ export default function ManagerBookings() {
                                     <BookingRow
                                         key={booking.id}
                                         b={booking}
-                                        canManage
-                                        onUpdateStatus={updateStatus}
-                                        onSetPrice={setPriceModal}
-                                        onRecordDownPayment={recordDownPayment}
-                                        onMarkFullyPaid={markFullyPaid}
-                                        onCancelBooking={openCancelModal}
+                                        canManage={canManage}
+                                        onUpdateStatus={canManage ? updateStatus : undefined}
+                                        onSetPrice={canManage ? setPriceModal : undefined}
+                                        onRecordDownPayment={canManage ? recordDownPayment : undefined}
+                                        onMarkFullyPaid={canManage ? markFullyPaid : undefined}
+                                        onCancelBooking={canManage ? openCancelModal : undefined}
                                     />
                                 ))}
                                 </tbody>
@@ -865,14 +867,14 @@ export default function ManagerBookings() {
                 )}
             </section>
 
-            {priceModal && (
+            {priceModal && canManage && (
                 <PriceModal
                     booking={priceModal}
                     onConfirm={handlePriceConfirm}
                     onClose={() => setPriceModal(null)}
                 />
             )}
-            {cancelModal && (
+            {cancelModal && canManage && (
                 <CancelInventoryModal
                     booking={cancelModal}
                     items={cancelItems}

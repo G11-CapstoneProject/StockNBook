@@ -47,7 +47,7 @@ export const colors = {
 // ---------------------------------------------------------------------------
 
 export function AdminPageShell({ children }: { children: ReactNode }) {
-    return <div className="flex min-w-0 flex-1 flex-col">{children}</div>;
+    return <div className="flex min-w-0 flex-1 flex-col overflow-x-hidden">{children}</div>;
 }
 
 export function AdminHeader({
@@ -61,10 +61,10 @@ export function AdminHeader({
 }) {
     return (
         <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
-            <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
+            <div className="flex min-h-[88px] min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
                 <div className="min-w-0">
-                    <h1 className="truncate text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">{title}</h1>
-                    <p className="mt-1 truncate text-[12px] text-[#7A6A84]">{subtitle}</p>
+                    <h1 className="break-words text-xl font-bold tracking-[-0.02em] text-[#1A1220] sm:text-[25px]">{title}</h1>
+                    <p className="mt-1 text-[12px] leading-5 text-[#7A6A84]">{subtitle}</p>
                 </div>
                 {action}
             </div>
@@ -74,7 +74,7 @@ export function AdminHeader({
 
 export function AdminSection({ children }: { children: ReactNode }) {
     return (
-        <section className="flex-1 overflow-y-auto px-6 py-5 font-sans">
+        <section className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-4 font-sans sm:px-6 sm:py-5">
             <div className="mx-auto max-w-none space-y-3.5">{children}</div>
         </section>
     );
@@ -144,7 +144,7 @@ export function KpiTile({
         {icon}
       </span>
             <div className="min-w-0 flex-1">
-                <p className="whitespace-nowrap text-[12px] font-semibold leading-4 text-[#4B3E55]">{label}</p>
+                <p className="break-words text-[12px] font-semibold leading-4 text-[#4B3E55]">{label}</p>
                 <p className={`mt-1 text-[25px] font-bold leading-none ${tintText}`}>{value}</p>
             </div>
         </div>

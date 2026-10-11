@@ -22,6 +22,8 @@ import {
     LayoutDashboard,
     LineChart,
     LockKeyhole,
+    Menu,
+    X,
     LogOut,
     Package,
     Settings,
@@ -58,13 +60,17 @@ type SidebarItem = {
     lockTitle?: string;
 };
 
+type SubscriptionPlanFeatures = {
+    name?: string | null;
+    has_analytics?: boolean;
+    has_forecasting?: boolean;
+};
+
 type SubscriptionResponse = {
     subscription?: {
-        plan?: {
-            name?: string | null;
-            has_analytics?: boolean;
-            has_forecasting?: boolean;
-        };
+        status?: string | null;
+        plan?: SubscriptionPlanFeatures;
+        effective_plan?: SubscriptionPlanFeatures | null;
     };
 };
 
@@ -386,6 +392,28 @@ export default function RoleSidebar() {
 
     const [logoFailed, setLogoFailed] =
         useState(false);
+    const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+    // A mobile drawer is navigation only: no subscription/RBAC behavior changes.
+    useEffect(() => {
+        if (!mobileMenuOpen) return;
+        const oldOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+        const onEscape = (event: KeyboardEvent) => {
+            if (event.key === "Escape") setMobileMenuOpen(false);
+        };
+        const desktopLayout = window.matchMedia("(min-width: 1024px)");
+        const onDesktopResize = () => {
+            if (desktopLayout.matches) setMobileMenuOpen(false);
+        };
+        window.addEventListener("keydown", onEscape);
+        desktopLayout.addEventListener("change", onDesktopResize);
+        return () => {
+            document.body.style.overflow = oldOverflow;
+            window.removeEventListener("keydown", onEscape);
+            desktopLayout.removeEventListener("change", onDesktopResize);
+        };
+    }, [mobileMenuOpen]);
 
     /*
      * null means the subscription is still being checked (or could not
@@ -510,7 +538,19 @@ export default function RoleSidebar() {
                     return;
                 }
 
-                const plan = data.subscription?.plan;
+                // Use the server-calculated effective access plan. The
+                // subscribed plan is historical after expiration.
+                const subscription = data.subscription;
+                const expired = String(subscription?.status || "")
+                    .toUpperCase() === "EXPIRED";
+                const plan = subscription?.effective_plan ??
+                    (expired
+                        ? {
+                            name: "Starter",
+                            has_analytics: false,
+                            has_forecasting: false,
+                        }
+                        : subscription?.plan);
 
                 if (!plan) {
                     return;
@@ -542,9 +582,26 @@ export default function RoleSidebar() {
             "stocknbook-subscription-updated",
             refreshPlanFeatures,
         );
+        // Keep locks in sync when subscription access changes in another tab
+        // or when an active paid plan expires while this page remains open.
+        window.addEventListener("focus", refreshPlanFeatures);
+        const onVisibilityChange = () => {
+            if (document.visibilityState === "visible") {
+                refreshPlanFeatures();
+            }
+        };
+        document.addEventListener("visibilitychange", onVisibilityChange);
+        const refreshInterval = window.setInterval(() => {
+            if (document.visibilityState === "visible") {
+                refreshPlanFeatures();
+            }
+        }, 30_000);
 
         return () => {
             cancelled = true;
+            window.clearInterval(refreshInterval);
+            window.removeEventListener("focus", refreshPlanFeatures);
+            document.removeEventListener("visibilitychange", onVisibilityChange);
             window.removeEventListener(
                 "stocknbook-subscription-updated",
                 refreshPlanFeatures,
@@ -624,11 +681,22 @@ export default function RoleSidebar() {
         permission: string,
     ) => getAccessLevel(permission) !== "none";
 
+    // Managers receive Analytics and Forecasting by default when no
+    // per-manager permission has been configured. Explicit "none" still wins.
+    // The effective subscription plan separately controls the lock icon and
+    // the feature/API gates continue to enforce paid-plan eligibility.
+    const hasExplicitPermission = (permission: string) =>
+        Object.prototype.hasOwnProperty.call(permissions, permission);
+
     const canViewAnalytics =
-        role === "owner" || canAccess("analytics");
+        role === "owner" ||
+        canAccess("analytics") ||
+        (role === "manager" && !hasExplicitPermission("analytics"));
 
     const canViewForecasting =
-        role === "owner" || canAccess("forecasting");
+        role === "owner" ||
+        canAccess("forecasting") ||
+        (role === "manager" && !hasExplicitPermission("forecasting"));
 
     const canViewSettings =
         role === "owner" ||
@@ -642,34 +710,73 @@ export default function RoleSidebar() {
     };
 
     return (
-        <aside className="flex min-h-screen w-[216px] shrink-0 flex-col self-stretch bg-[#1E1035] font-sans text-white shadow-[2px_0_12px_rgba(19,8,44,0.10)]">
-            {/* StockNBook logo */}
-            <div className="border-b border-white/[0.08] px-4 py-4">
-                <Link
-                    href="/dashboard"
-                    className="flex items-center gap-3 rounded-lg outline-none transition-opacity hover:opacity-95 focus-visible:ring-2 focus-visible:ring-[#E8C15B]"
+        <>
+            {/* Navigation remains visible on phones without taking up page width. */}
+            <header className="fixed inset-x-0 top-0 z-[25] flex h-14 items-center gap-3 border-b border-[#422B64] bg-[#1E1035] px-3 text-white shadow-sm lg:hidden">
+                <button
+                    type="button"
+                    onClick={() => setMobileMenuOpen(true)}
+                    aria-label="Open navigation menu"
+                    aria-controls="stocknbook-business-navigation"
+                    aria-expanded={mobileMenuOpen}
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8C15B]"
                 >
-                    {logoFailed ? (
-                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#E2A61A] text-[13px] font-extrabold tracking-[-0.08em] text-[#241142]">
-                            SN
-                        </div>
-                    ) : (
-                        <Image
-                            src="/logo.png"
-                            alt="StockNBook logo"
-                            width={48}
-                            height={48}
-                            priority
-                            onError={() =>
-                                setLogoFailed(true)
-                            }
-                            className="h-12 w-12 shrink-0 rounded-xl object-contain"
-                        />
-                    )}
-
-                    <span
-                        className={`${lora.className} block min-w-0 truncate text-[18px] font-bold leading-none tracking-[-0.045em]`}
+                    <Menu size={21} />
+                </button>
+                <div className="min-w-0 flex-1">
+                    <p className="text-sm font-bold leading-tight">Stock<span className="text-[#E2A61A]">N</span>Book</p>
+                    <p className="truncate text-[11px] text-white/65">{storeName}</p>
+                </div>
+            </header>
+            {mobileMenuOpen && (
+                <button
+                    type="button"
+                    aria-label="Close navigation menu"
+                    className="fixed inset-0 z-[30] bg-[#140B24]/65 lg:hidden"
+                    onClick={() => setMobileMenuOpen(false)}
+                />
+            )}
+            <aside
+                id="stocknbook-business-navigation"
+                data-stocknbook-sidebar
+                aria-label="Business navigation"
+                className={`fixed inset-y-0 left-0 z-[35] flex max-h-dvh w-[min(85vw,280px)] shrink-0 flex-col overflow-y-auto bg-[#1E1035] font-sans text-white shadow-[2px_0_12px_rgba(19,8,44,0.10)] transition-transform duration-200 lg:static lg:z-auto lg:min-h-screen lg:max-h-none lg:w-[216px] lg:translate-x-0 lg:overflow-y-visible ${mobileMenuOpen ? "visible translate-x-0" : "invisible -translate-x-full lg:visible"}`}
+            >
+                <button
+                    type="button"
+                    onClick={() => setMobileMenuOpen(false)}
+                    aria-label="Close navigation"
+                    className="absolute right-2 top-5 flex h-9 w-9 items-center justify-center rounded-md text-white/80 hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8C15B] lg:hidden"
+                >
+                    <X size={19} />
+                </button>
+                {/* StockNBook logo */}
+                <div className="border-b border-white/[0.08] px-4 py-4">
+                    <Link
+                        href="/dashboard"
+                        className="flex items-center gap-3 rounded-lg outline-none transition-opacity hover:opacity-95 focus-visible:ring-2 focus-visible:ring-[#E8C15B]"
                     >
+                        {logoFailed ? (
+                            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#E2A61A] text-[13px] font-extrabold tracking-[-0.08em] text-[#241142]">
+                                SN
+                            </div>
+                        ) : (
+                            <Image
+                                src="/logo.png"
+                                alt="StockNBook logo"
+                                width={48}
+                                height={48}
+                                priority
+                                onError={() =>
+                                    setLogoFailed(true)
+                                }
+                                className="h-12 w-12 shrink-0 rounded-xl object-contain"
+                            />
+                        )}
+
+                        <span
+                            className={`${lora.className} block min-w-0 truncate text-[18px] font-bold leading-none tracking-[-0.045em]`}
+                        >
                         <span className="text-white">
                             Stock
                         </span>
@@ -682,283 +789,284 @@ export default function RoleSidebar() {
                             Book
                         </span>
                     </span>
-                </Link>
-            </div>
+                    </Link>
+                </div>
 
-            {/* Store, user and branch information */}
-            <div className="border-b border-white/[0.08] px-4 py-4">
-                <div className="min-w-0">
-                    <p
-                        title={storeName}
-                        className="w-full whitespace-normal break-words text-[15px] font-extrabold leading-snug tracking-[-0.02em] text-white [overflow-wrap:anywhere]"
-                    >
-                        {storeName}
-                    </p>
+                {/* Store, user and branch information */}
+                <div className="border-b border-white/[0.08] px-4 py-4">
+                    <div className="min-w-0">
+                        <p
+                            title={storeName}
+                            className="w-full whitespace-normal break-words text-[15px] font-extrabold leading-snug tracking-[-0.02em] text-white [overflow-wrap:anywhere]"
+                        >
+                            {storeName}
+                        </p>
 
-                    <p
-                        title={personName}
-                        className="mt-1.5 w-full whitespace-normal break-words text-[11px] font-semibold leading-snug text-white [overflow-wrap:anywhere]"
-                    >
-                        {personName}
-                    </p>
+                        <p
+                            title={personName}
+                            className="mt-1.5 w-full whitespace-normal break-words text-[11px] font-semibold leading-snug text-white [overflow-wrap:anywhere]"
+                        >
+                            {personName}
+                        </p>
 
-                    <span className="mt-1.5 inline-flex rounded-md bg-[#B77D1B] px-2.5 py-0.5 text-[8px] font-semibold leading-none text-white shadow-sm">
+                        <span className="mt-1.5 inline-flex rounded-md bg-[#B77D1B] px-2.5 py-0.5 text-[8px] font-semibold leading-none text-white shadow-sm">
                         {roleLabel}
                     </span>
 
-                    {profileBranchName && (
-                        <p
-                            title={
-                                profileBranchName
-                            }
-                            className="mt-1.5 w-full whitespace-normal break-words text-[9px] font-medium leading-snug text-white/45 [overflow-wrap:anywhere]"
-                        >
-                            {profileBranchName}
-                        </p>
-                    )}
+                        {profileBranchName && (
+                            <p
+                                title={
+                                    profileBranchName
+                                }
+                                className="mt-1.5 w-full whitespace-normal break-words text-[9px] font-medium leading-snug text-white/45 [overflow-wrap:anywhere]"
+                            >
+                                {profileBranchName}
+                            </p>
+                        )}
+                    </div>
                 </div>
-            </div>
 
-            {/* Navigation */}
-            <nav className="px-2.5 py-3">
-                <SidebarSection label="Overview">
-                    <NavItem
-                        pathname={pathname}
-                        item={{
-                            label: "Dashboard",
-                            href: "/dashboard",
-                            icon: LayoutDashboard,
-                            exact: true,
-                        }}
-                    />
-
-                    {role === "owner" && (
+                {/* Navigation */}
+                <nav className="px-2.5 py-3" onClickCapture={() => setMobileMenuOpen(false)}>
+                    <SidebarSection label="Overview">
                         <NavItem
                             pathname={pathname}
                             item={{
-                                label: "Branches",
-                                href: "/branches",
-                                icon: GitBranch,
+                                label: "Dashboard",
+                                href: "/dashboard",
+                                icon: LayoutDashboard,
+                                exact: true,
                             }}
                         />
-                    )}
-                </SidebarSection>
 
-                {(canAccess("bookings") ||
-                    canAccess("inventory") ||
-                    canAccess("packages") ||
-                    canAccess("pos")) && (
-                    <SidebarSection label="Business">
-                        {canAccess("bookings") && (
-                            <NavItem
-                                pathname={
-                                    pathname
-                                }
-                                item={{
-                                    label:
-                                        "Bookings",
-                                    href:
-                                        "/bookings",
-                                    icon:
-                                    CalendarDays,
-                                }}
-                            />
-                        )}
-
-                        {canAccess("inventory") && (
-                            <NavItem
-                                pathname={
-                                    pathname
-                                }
-                                item={{
-                                    label:
-                                        "Inventory",
-                                    href:
-                                        "/inventory",
-                                    icon: Boxes,
-                                }}
-                            />
-                        )}
-
-                        {canAccess("packages") && (
-                            <NavItem
-                                pathname={
-                                    pathname
-                                }
-                                item={{
-                                    label:
-                                        "Packages",
-                                    href:
-                                        "/packages",
-                                    icon: Package,
-                                }}
-                            />
-                        )}
-
-                        {canAccess("pos") && (
-                            <NavItem
-                                pathname={
-                                    pathname
-                                }
-                                item={{
-                                    label:
-                                        "Sales / POS",
-                                    href: "/pos",
-                                    icon:
-                                    ShoppingCart,
-                                }}
-                            />
-                        )}
-                    </SidebarSection>
-                )}
-
-                {(canViewAnalytics ||
-                    canViewForecasting ||
-                    canAccess("reports")) && (
-                    <SidebarSection label="Insight">
-                        {canViewAnalytics && (
-                            <NavItem
-                                pathname={
-                                    pathname
-                                }
-                                item={{
-                                    label:
-                                        "Analytics",
-                                    href:
-                                        "/analytics",
-                                    icon:
-                                    BarChart3,
-                                    locked:
-                                    analyticsLocked,
-                                    lockTitle:
-                                        analyticsLocked
-                                            ? `${planFeatures.planName} plan does not include Analytics`
-                                            : undefined,
-                                }}
-                            />
-                        )}
-
-                        {canViewForecasting && (
-                            <NavItem
-                                pathname={
-                                    pathname
-                                }
-                                item={{
-                                    label:
-                                        "Forecasting",
-                                    href:
-                                        "/dashboard/forecasting",
-                                    icon:
-                                    LineChart,
-                                    locked:
-                                    forecastingLocked,
-                                    lockTitle:
-                                        forecastingLocked
-                                            ? `${planFeatures.planName} plan does not include Forecasting`
-                                            : undefined,
-                                }}
-                            />
-                        )}
-
-                        {canAccess("reports") && (
-                            <NavItem
-                                pathname={
-                                    pathname
-                                }
-                                item={{
-                                    label:
-                                        "Reports",
-                                    href:
-                                        "/reports",
-                                    icon:
-                                    FileText,
-                                }}
-                            />
-                        )}
-                    </SidebarSection>
-                )}
-
-                {(role === "owner" ||
-                    (role === "manager" &&
-                        canAccess(
-                            "staff_management",
-                        ))) && (
-                    <SidebarSection label="Team">
                         {role === "owner" && (
                             <NavItem
-                                pathname={
-                                    pathname
-                                }
+                                pathname={pathname}
                                 item={{
-                                    label:
-                                        "Branch Managers",
-                                    href:
-                                        "/branch-managers",
-                                    icon:
-                                    UsersRound,
+                                    label: "Branches",
+                                    href: "/branches",
+                                    icon: GitBranch,
                                 }}
                             />
                         )}
+                    </SidebarSection>
 
-                        {role === "manager" &&
-                            canAccess(
-                                "staff_management",
-                            ) && (
+                    {(canAccess("bookings") ||
+                        canAccess("inventory") ||
+                        canAccess("packages") ||
+                        canAccess("pos")) && (
+                        <SidebarSection label="Business">
+                            {canAccess("bookings") && (
                                 <NavItem
                                     pathname={
                                         pathname
                                     }
                                     item={{
                                         label:
-                                            "Staff",
+                                            "Bookings",
                                         href:
-                                            "/manager/staff-management",
+                                            "/bookings",
+                                        icon:
+                                        CalendarDays,
+                                    }}
+                                />
+                            )}
+
+                            {canAccess("inventory") && (
+                                <NavItem
+                                    pathname={
+                                        pathname
+                                    }
+                                    item={{
+                                        label:
+                                            "Inventory",
+                                        href:
+                                            "/inventory",
+                                        icon: Boxes,
+                                    }}
+                                />
+                            )}
+
+                            {canAccess("packages") && (
+                                <NavItem
+                                    pathname={
+                                        pathname
+                                    }
+                                    item={{
+                                        label:
+                                            "Packages",
+                                        href:
+                                            "/packages",
+                                        icon: Package,
+                                    }}
+                                />
+                            )}
+
+                            {canAccess("pos") && (
+                                <NavItem
+                                    pathname={
+                                        pathname
+                                    }
+                                    item={{
+                                        label:
+                                            "Sales / POS",
+                                        href: "/pos",
+                                        icon:
+                                        ShoppingCart,
+                                    }}
+                                />
+                            )}
+                        </SidebarSection>
+                    )}
+
+                    {(canViewAnalytics ||
+                        canViewForecasting ||
+                        canAccess("reports")) && (
+                        <SidebarSection label="Insight">
+                            {canViewAnalytics && (
+                                <NavItem
+                                    pathname={
+                                        pathname
+                                    }
+                                    item={{
+                                        label:
+                                            "Analytics",
+                                        href:
+                                            "/analytics",
+                                        icon:
+                                        BarChart3,
+                                        locked:
+                                        analyticsLocked,
+                                        lockTitle:
+                                            analyticsLocked
+                                                ? `${planFeatures.planName} plan does not include Analytics`
+                                                : undefined,
+                                    }}
+                                />
+                            )}
+
+                            {canViewForecasting && (
+                                <NavItem
+                                    pathname={
+                                        pathname
+                                    }
+                                    item={{
+                                        label:
+                                            "Forecasting",
+                                        href:
+                                            "/dashboard/forecasting",
+                                        icon:
+                                        LineChart,
+                                        locked:
+                                        forecastingLocked,
+                                        lockTitle:
+                                            forecastingLocked
+                                                ? `${planFeatures.planName} plan does not include Forecasting`
+                                                : undefined,
+                                    }}
+                                />
+                            )}
+
+                            {canAccess("reports") && (
+                                <NavItem
+                                    pathname={
+                                        pathname
+                                    }
+                                    item={{
+                                        label:
+                                            "Reports",
+                                        href:
+                                            "/reports",
+                                        icon:
+                                        FileText,
+                                    }}
+                                />
+                            )}
+                        </SidebarSection>
+                    )}
+
+                    {(role === "owner" ||
+                        (role === "manager" &&
+                            canAccess(
+                                "staff_management",
+                            ))) && (
+                        <SidebarSection label="Team">
+                            {role === "owner" && (
+                                <NavItem
+                                    pathname={
+                                        pathname
+                                    }
+                                    item={{
+                                        label:
+                                            "Branch Managers",
+                                        href:
+                                            "/branch-managers",
                                         icon:
                                         UsersRound,
                                     }}
                                 />
                             )}
-                    </SidebarSection>
-                )}
 
-                {/* Every role can view the store's current plan and usage.
+                            {role === "manager" &&
+                                canAccess(
+                                    "staff_management",
+                                ) && (
+                                    <NavItem
+                                        pathname={
+                                            pathname
+                                        }
+                                        item={{
+                                            label:
+                                                "Staff",
+                                            href:
+                                                "/manager/staff-management",
+                                            icon:
+                                            UsersRound,
+                                        }}
+                                    />
+                                )}
+                        </SidebarSection>
+                    )}
+
+                    {/* Every role can view the store's current plan and usage.
                  * Only the owner can manage billing, submit payment proof, or upgrade. */}
-                <SidebarSection label="System">
-                    <NavItem
-                        pathname={pathname}
-                        item={{
-                            label: role === "owner" ? "Subscription" : "Plan & Usage",
-                            href: "/subscription",
-                            icon: CreditCard,
-                        }}
-                    />
-
-                    {canViewSettings && (
+                    <SidebarSection label="System">
                         <NavItem
                             pathname={pathname}
                             item={{
-                                label: "Settings",
-                                href: "/settings",
-                                icon: Settings,
+                                label: role === "owner" ? "Subscription" : "Plan & Usage",
+                                href: "/subscription",
+                                icon: CreditCard,
                             }}
                         />
-                    )}
 
-                    <button
-                        type="button"
-                        onClick={handleLogout}
-                        className="group flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[11px] font-medium leading-none text-white/75 transition-colors hover:bg-white/[0.09] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8C15B]"
-                    >
-                        <LogOut
-                            size={14}
-                            strokeWidth={1.85}
-                            className="shrink-0 text-white/65 transition-colors group-hover:text-[#E8C15B]"
-                        />
+                        {canViewSettings && (
+                            <NavItem
+                                pathname={pathname}
+                                item={{
+                                    label: "Settings",
+                                    href: "/settings",
+                                    icon: Settings,
+                                }}
+                            />
+                        )}
 
-                        <span>Logout</span>
-                    </button>
-                </SidebarSection>
-            </nav>
-        </aside>
+                        <button
+                            type="button"
+                            onClick={handleLogout}
+                            className="group flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[11px] font-medium leading-none text-white/75 transition-colors hover:bg-white/[0.09] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8C15B]"
+                        >
+                            <LogOut
+                                size={14}
+                                strokeWidth={1.85}
+                                className="shrink-0 text-white/65 transition-colors group-hover:text-[#E8C15B]"
+                            />
+
+                            <span>Logout</span>
+                        </button>
+                    </SidebarSection>
+                </nav>
+            </aside>
+        </>
     );
 }

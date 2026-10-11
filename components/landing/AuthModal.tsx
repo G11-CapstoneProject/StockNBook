@@ -714,7 +714,7 @@ export default function AuthModal({
 
     return (
         <>
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-3 py-4 font-sans backdrop-blur-sm sm:px-4">
+            <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/45 px-2 py-3 font-sans backdrop-blur-sm sm:px-4 sm:py-4">
                 <div className="relative grid max-h-[94vh] w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-2xl md:grid-cols-2">
                     <button
                         type="button"
@@ -1651,7 +1651,7 @@ export default function AuthModal({
 
             {legalDocument && (
                 <div
-                    className="fixed inset-0 z-[70] flex items-center justify-center bg-[#160C27]/65 px-4 backdrop-blur-sm"
+                    className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-3 py-3 backdrop-blur-sm sm:px-4"
                     onMouseDown={() => setLegalDocument(null)}
                 >
                     <div
@@ -1995,7 +1995,7 @@ function SignupOtpDialog({
             role="dialog"
             aria-modal="true"
             aria-labelledby="signup-otp-title"
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-[#160C27]/65 px-4 py-6 backdrop-blur-md"
+            className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-3 py-3 backdrop-blur-md sm:px-4 sm:py-6"
         >
             <div className="relative w-full max-w-[430px] overflow-hidden rounded-[28px] border border-white/70 bg-white px-7 pb-7 pt-8 text-center shadow-[0_28px_80px_rgba(22,12,39,0.32)] sm:px-9">
                 <button

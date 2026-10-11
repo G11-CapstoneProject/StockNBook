@@ -78,6 +78,19 @@ function checkAccess(permission?: string, ownerOnly = false) {
     }
 
     const permissions = getSessionPermissions();
+
+    // Existing managers may have legacy permission records without these two
+    // fields. Treat missing fields as the original manager defaults, but never
+    // override an explicit denial. PlanFeatureGate and backend API guards
+    // still independently enforce the store's effective subscription tier.
+    if (
+        role === "manager" &&
+        (permission === "analytics" || permission === "forecasting") &&
+        !Object.prototype.hasOwnProperty.call(permissions, permission)
+    ) {
+        return true;
+    }
+
     const accessLevel = getAccessLevel(permissions, permission);
 
     return accessLevel !== "none";

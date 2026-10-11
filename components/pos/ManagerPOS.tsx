@@ -320,7 +320,7 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
     };
 
     const productGridClass =
-        "grid grid-cols-[minmax(0,1.45fr)_minmax(0,0.9fr)_minmax(70px,0.55fr)_minmax(90px,0.65fr)_minmax(145px,0.9fr)]";
+        "grid min-w-[760px] grid-cols-[minmax(0,1.45fr)_minmax(0,0.9fr)_minmax(70px,0.55fr)_minmax(90px,0.65fr)_minmax(145px,0.9fr)]";
 
     if (pos.displayProducts.length === 0) {
         return (
@@ -331,8 +331,8 @@ function POSProductTable({ pos }: { pos: UsePOSReturn }) {
     }
 
     return (
-        <div className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white">
-            <div className="w-full min-w-0">
+        <div className="max-w-full overflow-x-auto rounded-[14px] border border-[#E6DDF0] bg-white">
+            <div className="w-full min-w-[760px]">
                 <div
                     className={`${productGridClass} border-b border-[#E6DDF0] bg-white px-5 py-3 text-xs font-semibold text-[#806A8C]`}
                 >
@@ -1052,7 +1052,7 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
     );
 
     const orderGridClass =
-        "grid grid-cols-[minmax(0,1fr)_62px_76px_82px_24px]";
+        "grid min-w-[360px] grid-cols-[minmax(0,1fr)_62px_76px_82px_24px]";
 
     const [lastInvoice, setLastInvoice] = useState<Order | null>(null);
 
@@ -1195,7 +1195,7 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
                 </div>
 
                 <div className="border-t border-[#E6DDF0] pt-4">
-                    <div className="w-full">
+                    <div className="w-full overflow-x-auto">
                         <div
                             className={`${orderGridClass} gap-1 px-1 pb-3 text-[10px] font-semibold text-[#5F4E75]`}
                         >
@@ -1951,8 +1951,8 @@ function PendingCollections({ pos }: { pos: UsePOSReturn }) {
                         No pending credit collections.
                     </div>
                 ) : (
-                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-                        <table className="w-full table-fixed text-[11px]">
+                    <div className="min-h-0 flex-1 overflow-auto">
+                        <table className="w-full min-w-[650px] table-fixed text-[11px]">
                             <thead className="sticky top-0 z-10 bg-white">
                             <tr className="border-b border-[#EEE6F2] text-left text-[#806A8C]">
                                 <th className="w-[24%] px-3 py-3 font-semibold">Customer / Contact</th>

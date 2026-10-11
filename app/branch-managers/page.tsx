@@ -13,6 +13,7 @@ import {
 import { useRouter } from "next/navigation";
 import {
     Building2,
+    Copy,
     Filter,
     Mail,
     Plus,
@@ -56,6 +57,13 @@ type AvailableBranch = {
     managerName: string;
     managerEmail: string;
     status: "active" | "inactive";
+};
+
+type ManagerInviteDelivery = {
+    link: string;
+    email: string;
+    emailSent: boolean;
+    emailError: string;
 };
 
 const defaultManagerPermissions: ManagerPermissions = {
@@ -295,6 +303,10 @@ export default function BranchManagersPage() {
         });
     const [showPlanLimitDialog, setShowPlanLimitDialog] = useState(false);
     const [subscriptionPlan, setSubscriptionPlan] = useState<SubscriptionPlan>("starter");
+    const [latestManagerInvite, setLatestManagerInvite] =
+        useState<ManagerInviteDelivery | null>(null);
+    const [resendingManagerId, setResendingManagerId] =
+        useState<number | null>(null);
 
     const loadSubscriptionPlan = useCallback(async () => {
         const token =
@@ -652,6 +664,7 @@ export default function BranchManagersPage() {
                 email_sent?: boolean;
                 email_status?: string;
                 email_error?: string;
+                invite_link?: string;
             } = {};
 
             try {
@@ -697,16 +710,32 @@ export default function BranchManagersPage() {
                 )
             );
 
-            setShowAddManagerModal(false);
-            resetAddManagerForm();
-
             const emailWasSent =
                 data.email_sent === true ||
                 String(data.email_status || "")
                     .trim()
                     .toLowerCase() === "sent";
 
-            if (emailWasSent) {
+            const generatedInviteLink = String(data.invite_link || "").trim();
+            if (generatedInviteLink) {
+                setLatestManagerInvite({
+                    link: generatedInviteLink,
+                    email: managerEmail,
+                    emailSent: emailWasSent,
+                    emailError: String(data.email_error || ""),
+                });
+            }
+
+            setShowAddManagerModal(false);
+            resetAddManagerForm();
+
+            const emailWasSentForAlert =
+                data.email_sent === true ||
+                String(data.email_status || "")
+                    .trim()
+                    .toLowerCase() === "sent";
+
+            if (emailWasSentForAlert) {
                 window.alert(
                     "Manager added successfully. The account activation email was sent."
                 );
@@ -727,6 +756,72 @@ export default function BranchManagersPage() {
             );
         } finally {
             setAddingManager(false);
+        }
+    };
+
+    const resendManagerInvite = async (manager: BranchManager) => {
+        const token =
+            sessionStorage.getItem("token") || localStorage.getItem("token");
+
+        if (!token) {
+            router.push("/");
+            return;
+        }
+
+        setResendingManagerId(manager.id);
+
+        try {
+            const response = await fetch("/api/branch-managers", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    action: "resend_manager_invite",
+                    manager_id: manager.id,
+                    manager_email: manager.email,
+                }),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                window.alert(
+                    data.error ||
+                    data.message ||
+                    "Unable to resend the manager invitation."
+                );
+                return;
+            }
+
+            const inviteLink = String(data.invite_link || "").trim();
+            const emailWasSent =
+                data.email_sent === true ||
+                String(data.email_status || "").toLowerCase() === "sent";
+
+            if (inviteLink) {
+                setLatestManagerInvite({
+                    link: inviteLink,
+                    email: manager.email,
+                    emailSent: emailWasSent,
+                    emailError: String(data.email_error || ""),
+                });
+            }
+
+            window.alert(
+                emailWasSent
+                    ? `Invitation emailed to ${manager.email}.`
+                    : "The manager invitation link was refreshed, but the email could not be delivered. Copy the backup link shown on this page."
+            );
+        } catch (requestError) {
+            window.alert(
+                requestError instanceof Error
+                    ? requestError.message
+                    : "Unable to resend the manager invitation."
+            );
+        } finally {
+            setResendingManagerId(null);
         }
     };
 
@@ -972,6 +1067,70 @@ export default function BranchManagersPage() {
                             </div>
                         )}
 
+                        {latestManagerInvite && (
+                            <section className="rounded-[18px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                    <div className="flex items-start gap-3">
+                                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EEF4FF] text-[#3367D6]">
+                                            <Mail size={18} />
+                                        </span>
+                                        <div>
+                                            <h2 className="text-[16px] font-bold text-[#1A1220]">
+                                                Latest manager invitation
+                                            </h2>
+                                            <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                                {latestManagerInvite.emailSent
+                                                    ? `Invitation email sent to ${latestManagerInvite.email}.`
+                                                    : `Email could not be delivered to ${latestManagerInvite.email}. The invitation is still valid.`}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <span
+                                        className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
+                                            latestManagerInvite.emailSent
+                                                ? "bg-[#EDFBF1] text-[#138342]"
+                                                : "bg-[#FFF4E6] text-[#9A5A00]"
+                                        }`}
+                                    >
+                                        {latestManagerInvite.emailSent
+                                            ? "Email sent"
+                                            : "Email not sent"}
+                                    </span>
+                                </div>
+
+                                {!latestManagerInvite.emailSent &&
+                                    latestManagerInvite.emailError && (
+                                        <p className="mt-3 rounded-xl border border-[#F0D9B5] bg-[#FFF9EF] px-3 py-2 text-xs text-[#8A5A11]">
+                                            {latestManagerInvite.emailError}
+                                        </p>
+                                    )}
+
+                                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                                    <input
+                                        readOnly
+                                        value={latestManagerInvite.link}
+                                        className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#5F4E75] outline-none"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            void navigator.clipboard.writeText(
+                                                latestManagerInvite.link
+                                            );
+                                            window.alert(
+                                                "Manager invitation link copied!"
+                                            );
+                                        }}
+                                        className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                    >
+                                        <Copy size={15} />
+                                        Copy
+                                    </button>
+                                </div>
+                            </section>
+                        )}
+
                         <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
                             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-4">
                                 <div className="flex min-w-0 items-center gap-3">
@@ -1126,22 +1285,54 @@ export default function BranchManagersPage() {
                                                             </td>
 
                                                             <td className="px-5 py-4 text-right">
-                                                                <button
-                                                                    type="button"
-                                                                    disabled={
-                                                                        isDeleting
-                                                                    }
-                                                                    onClick={() =>
-                                                                        void deleteManager(
-                                                                            manager
-                                                                        )
-                                                                    }
-                                                                    className="inline-flex h-[38px] items-center justify-center rounded-xl bg-[#A33E20] px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
-                                                                >
-                                                                    {isDeleting
-                                                                        ? "Deleting..."
-                                                                        : "Delete"}
-                                                                </button>
+                                                                <div className="flex justify-end gap-2">
+                                                                    {manager.status === "pending" && (
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={
+                                                                                resendingManagerId ===
+                                                                                manager.id
+                                                                            }
+                                                                            onClick={() =>
+                                                                                void resendManagerInvite(
+                                                                                    manager
+                                                                                )
+                                                                            }
+                                                                            className="inline-flex h-[38px] items-center justify-center gap-1.5 rounded-xl border border-[#DCCFE8] bg-white px-3 text-xs font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F8F3FF] disabled:cursor-not-allowed disabled:opacity-60"
+                                                                        >
+                                                                            <RefreshCw
+                                                                                size={14}
+                                                                                className={
+                                                                                    resendingManagerId ===
+                                                                                    manager.id
+                                                                                        ? "animate-spin"
+                                                                                        : ""
+                                                                                }
+                                                                            />
+                                                                            {resendingManagerId ===
+                                                                            manager.id
+                                                                                ? "Resending..."
+                                                                                : "Resend Invite"}
+                                                                        </button>
+                                                                    )}
+
+                                                                    <button
+                                                                        type="button"
+                                                                        disabled={
+                                                                            isDeleting
+                                                                        }
+                                                                        onClick={() =>
+                                                                            void deleteManager(
+                                                                                manager
+                                                                            )
+                                                                        }
+                                                                        className="inline-flex h-[38px] items-center justify-center rounded-xl bg-[#A33E20] px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
+                                                                    >
+                                                                        {isDeleting
+                                                                            ? "Deleting..."
+                                                                            : "Delete"}
+                                                                    </button>
+                                                                </div>
                                                             </td>
                                                         </tr>
                                                     );

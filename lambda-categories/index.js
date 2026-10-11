@@ -228,6 +228,35 @@ async function ensureStoreExists(connection, storeId) {
     return rows.length > 0;
 }
 
+// Category changes are product-catalog administration, not staff restocking.
+async function canManageCategories(connection, decoded, role, storeId) {
+    if (role === "owner") return true;
+    if (role !== "manager") return false;
+
+    const managerId = Number(decoded?.manager_id);
+    const branchId = Number(decoded?.branch_id);
+    if (!Number.isInteger(managerId) || managerId <= 0 ||
+        !Number.isInteger(branchId) || branchId <= 0) return false;
+
+    const [rows] = await connection.execute(
+        `SELECT permissions FROM managers
+         WHERE id = ? AND store_id = ? AND branch_id = ? AND status = 'active'
+         LIMIT 1`,
+        [managerId, storeId, branchId]
+    );
+    if (!rows.length) return false;
+    let permissions = rows[0].permissions || {};
+    if (typeof permissions === "string") {
+        try { permissions = JSON.parse(permissions); } catch { permissions = {}; }
+    }
+    if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) {
+        permissions = {};
+    }
+    const access = permissions.inventory;
+    return access === undefined || access === true ||
+        access === "full" || access === "true";
+}
+
 exports.handler = async (event) => {
     const headers = {
         "Access-Control-Allow-Origin": "*",
@@ -343,6 +372,17 @@ exports.handler = async (event) => {
                 headers,
                 "Store account not found"
             );
+        }
+
+        // The inventory module's view permission does not authorize catalog edits.
+        if (["create_category", "update_category", "delete_category"].includes(action)) {
+            if (!(await canManageCategories(connection, decoded, tokenRole, storeId))) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({ error: "Only owners and authorized managers can manage categories." }),
+                };
+            }
         }
 
         // ── PROTECTED: create_category ───────────────────────────────────

@@ -530,6 +530,41 @@ function validatePackageInput(pkg) {
     return "";
 }
 
+// Fetch live package access for the signed-in branch account. A Manager's
+// unconfigured permission keeps its default full access; Staff must be
+// explicitly granted view/full. Never trust browser-stored permissions.
+async function getPackageAccess(connection, decoded, role, storeId) {
+    if (role === "owner") return "full";
+    if (role !== "manager" && role !== "staff") return "none";
+
+    const isManager = role === "manager";
+    const accountId = Number(isManager ? decoded?.manager_id : decoded?.staff_id);
+    const branchId = Number(decoded?.branch_id);
+    if (!Number.isInteger(accountId) || accountId <= 0 ||
+        !Number.isInteger(branchId) || branchId <= 0) return "none";
+
+    const table = isManager ? "managers" : "staff";
+    const [rows] = await connection.execute(
+        `SELECT permissions FROM ${table}
+         WHERE id = ? AND store_id = ? AND branch_id = ? AND status = 'active'
+         LIMIT 1`,
+        [accountId, storeId, branchId]
+    );
+    if (!rows.length) return "none";
+    let permissions = rows[0].permissions || {};
+    if (typeof permissions === "string") {
+        try { permissions = JSON.parse(permissions); } catch { permissions = {}; }
+    }
+    if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) {
+        permissions = {};
+    }
+    const value = permissions.packages;
+    if (isManager && value === undefined) return "full";
+    if (value === true || value === "full" || value === "true") return "full";
+    if (value === "view" || value === "view_only" || value === "viewOnly") return "view";
+    return "none";
+}
+
 exports.handler = async (event) => {
     const headers = {
         "Access-Control-Allow-Origin": "*",
@@ -789,6 +824,16 @@ exports.handler = async (event) => {
                 headers,
                 "Invalid branch for this store."
             );
+        }
+
+        if (["get_packages", "create_package", "update_package", "delete_package"].includes(action)) {
+            const access = await getPackageAccess(connection, decoded, tokenRole, storeId);
+            const canProceed = action === "get_packages" ? access !== "none" : access === "full";
+            if (!canProceed) {
+                return jsonResponse(403, headers, {
+                    error: "You do not have permission for this package operation."
+                });
+            }
         }
 
         if (action === "get_packages") {

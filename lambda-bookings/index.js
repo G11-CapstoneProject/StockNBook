@@ -505,7 +505,7 @@ async function consumeBookingV2Batches(connection, inventoryId, quantity) {
                   expiration_date ASC,
                   received_at ASC,
                   id ASC
-         FOR UPDATE`,
+             FOR UPDATE`,
         [inventoryId]
     );
 
@@ -1019,6 +1019,47 @@ function getAuthHeader(event) {
     return event.headers?.Authorization || event.headers?.authorization || "";
 }
 
+// Resolve operational access from the current database row, not a cached browser permission.
+// Keep legacy access keys compatible with existing Manager/Staff records.
+function normalizeOperationalAccess(permissions, moduleName, role) {
+    let values = permissions;
+    if (typeof values === "string") {
+        try { values = JSON.parse(values); } catch { values = {}; }
+    }
+    if (!values || typeof values !== "object" || Array.isArray(values)) values = {};
+
+    const keys = moduleName === "bookings"
+        ? ["bookings", "booking_access", "bookings_access"]
+        : ["pos", "pos_access", "sales_access"];
+    const selected = keys.find((key) => Object.prototype.hasOwnProperty.call(values, key));
+    if (!selected) return role === "manager" ? "full" : "none";
+    const access = values[selected];
+    // The legacy Staff Bookings screen treated boolean true as view-only.
+    if (moduleName === "bookings" && role === "staff" && access === true) return "view";
+    if (access === true || access === 1 || access === "1" || access === "true" || access === "full") return "full";
+    if (access === "view" || access === "view_only" || access === "viewOnly") return "view";
+    return "none";
+}
+
+async function getOperationalAccess(connection, decoded, moduleName) {
+    const role = String(decoded?.role || "").trim().toLowerCase();
+    if (role === "owner") return "full";
+    if (role !== "manager" && role !== "staff") return "none";
+
+    const storeId = Number(decoded?.store_id);
+    const branchId = Number(decoded?.branch_id);
+    const employeeId = Number(role === "manager" ? decoded?.manager_id : decoded?.staff_id);
+    if (![storeId, branchId, employeeId].every((id) => Number.isSafeInteger(id) && id > 0)) return "none";
+
+    const table = role === "manager" ? "managers" : "staff";
+    const [rows] = await connection.execute(
+        `SELECT permissions FROM ${table} WHERE id = ? AND store_id = ? AND branch_id = ? AND LOWER(status) = 'active' LIMIT 1`,
+        [employeeId, storeId, branchId]
+    );
+    if (!rows.length) return "none";
+    return normalizeOperationalAccess(rows[0].permissions, moduleName, role);
+}
+
 function verifyProtectedStore(event) {
     const authHeader = getAuthHeader(event);
 
@@ -1280,6 +1321,49 @@ function bookingPageSelectFields() {
     `;
 }
 
+
+// Limit enforcement when paid access ends; existing records remain accessible.
+// This duplicates the read-only eligibility rule from lambda-auth so a
+// direct Lambda request cannot bypass the owner dashboard's plan limits.
+async function effectiveSubscriptionLimit(connection, storeId, resourceColumn) {
+    const allowed = new Set(['max_inventory', 'max_bookings']);
+    if (!allowed.has(resourceColumn)) throw new Error('Unsupported plan limit');
+    const [subRows] = await connection.execute(
+        `SELECT p.max_inventory, p.max_bookings, p.price, sub.expires_at,
+                LOWER(sub.status) AS status,
+                CASE WHEN sub.expires_at IS NULL OR DATE(sub.expires_at) >= CURDATE()
+             THEN 1 ELSE 0 END AS not_expired
+         FROM subscriptions sub JOIN plans p ON p.id = sub.plan_id
+         WHERE sub.store_id = ? ORDER BY sub.id DESC LIMIT 1`, [storeId]);
+    const paid = subRows[0];
+    let eligible = !!paid && ['active', 'expiring'].includes(paid.status) &&
+        Number(paid.not_expired) === 1;
+    if (paid && !eligible && ['active', 'expiring'].includes(paid.status) && Number(paid.price) > 0) {
+        const [columns] = await connection.query('SHOW COLUMNS FROM payments');
+        const available = new Set(columns.map((c) => c.Field));
+        const dateColumn = ['created_at', 'submitted_at', 'payment_date'].find((name) => available.has(name));
+        if (dateColumn) {
+            const [graceRows] = await connection.execute(
+                `SELECT id FROM payments WHERE store_id = ? AND UPPER(status) = 'PENDING'
+                                           AND DATE(${dateColumn}) <= DATE(?)
+                                           AND CURDATE() <= DATE_ADD(DATE(?), INTERVAL 2 DAY)
+                    LIMIT 1`, [storeId, paid.expires_at, paid.expires_at]);
+            eligible = graceRows.length > 0;
+        }
+    }
+    let plan = eligible ? paid : null;
+    if (!plan) {
+        const [starter] = await connection.execute(
+            `SELECT max_inventory, max_bookings FROM plans
+             WHERE is_archived = 0 AND (LOWER(name) = 'starter' OR price = 0)
+             ORDER BY price ASC, id ASC LIMIT 1`);
+        plan = starter[0] || null;
+    }
+    if (!plan) throw new Error('No effective subscription plan is configured.');
+    const limit = Number(plan[resourceColumn] || 0);
+    return limit > 0 ? limit : null;
+}
+
 exports.handler = async (event) => {
     const method = event.httpMethod || event.requestContext?.http?.method;
 
@@ -1339,6 +1423,24 @@ exports.handler = async (event) => {
                 return response(400, {
                     error: "Missing required booking fields",
                 });
+            }
+
+            // Enforce monthly new-booking capacity without touching existing
+            // bookings, including those already promised to customers.
+            const bookingLimit = await effectiveSubscriptionLimit(connection, targetStoreId, 'max_bookings');
+            if (bookingLimit !== null) {
+                const [monthlyCount] = await connection.execute(
+                    `SELECT COUNT(*) AS total FROM bookings
+                     WHERE store_id = ? AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+                       AND created_at < DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')`,
+                    [targetStoreId]
+                );
+                if (Number(monthlyCount[0]?.total || 0) >= bookingLimit) {
+                    return response(409, {
+                        error: `This store has reached its ${bookingLimit} new bookings for this month. Existing reservations remain available.`,
+                        code: 'SUBSCRIPTION_BOOKING_LIMIT',
+                    });
+                }
             }
 
             const packageInput = getPackageInput(body);
@@ -1606,6 +1708,38 @@ exports.handler = async (event) => {
 
         if (!store_id) {
             return response(401, { error: "Invalid token store" });
+        }
+
+        // Owner sees the store; Managers and Staff are restricted to their active
+        // employee record and JWT-assigned branch regardless of client body.
+        if (!["owner", "manager", "staff"].includes(tokenRole)) {
+            return response(403, { error: "Business account role required." });
+        }
+        const bookingAccess = await getOperationalAccess(connection, decodedToken, "bookings");
+        if (bookingAccess === "none") {
+            return response(403, { error: "Bookings access is not permitted for this account." });
+        }
+        const bookingReadActions = new Set([
+            "get_booking_page_bookings", "get_dashboard_bookings", "get_bookings", "get_booking_items",
+        ]);
+        if (bookingAccess !== "full" && !bookingReadActions.has(action)) {
+            return response(403, { error: "Full Bookings access is required for this action." });
+        }
+        // Item cost data is an Owner financial KPI, not an operational Staff view.
+        if (action === "get_booking_costs" && tokenRole !== "owner") {
+            return response(403, { error: "Only the Owner can access booking cost details." });
+        }
+        if (tokenRole === "manager" || tokenRole === "staff") {
+            if (!Number.isSafeInteger(tokenBranchId) || tokenBranchId <= 0) {
+                return response(403, { error: "A valid assigned branch is required." });
+            }
+            const requestedBranch = body.branch_id ?? body.branchId;
+            if (requestedBranch !== undefined && requestedBranch !== null && requestedBranch !== "" &&
+                Number(requestedBranch) !== tokenBranchId) {
+                return response(403, { error: "You cannot access a different branch." });
+            }
+            body.branch_id = tokenBranchId;
+            body.branchId = tokenBranchId;
         }
 
         // ── PROTECTED: get_booking_page_bookings ────────────────────────────────
@@ -2218,6 +2352,10 @@ exports.handler = async (event) => {
             const paid = toNumber(amount_paid);
             const safeBalance =
                 balance !== undefined && balance !== null ? toNumber(balance) : null;
+            if (!Number.isFinite(Number(amount_paid)) || paid < 0 ||
+                (safeBalance !== null && (!Number.isFinite(Number(balance)) || safeBalance < 0))) {
+                return response(400, { error: "Payment amounts must be valid non-negative numbers." });
+            }
 
             let selectQuery = `
                 SELECT id, status, store_id, branch_id, booking_reference, name

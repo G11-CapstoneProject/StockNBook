@@ -946,7 +946,7 @@ function AcceptStaffInviteContent() {
 
             {legalDocument && (
                 <div
-                    className="fixed inset-0 z-[70] flex items-center justify-center bg-[#160C27]/65 px-4 backdrop-blur-sm"
+                    className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-3 py-3 backdrop-blur-sm sm:px-4"
                     onMouseDown={() => setLegalDocument(null)}
                 >
                     <div

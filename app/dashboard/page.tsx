@@ -58,7 +58,7 @@ export default function DashboardPage() {
             >
                 <RoleSidebar />
 
-                <div className="min-w-0 flex-1 overflow-x-hidden">
+                <div className="min-w-0 flex-1 overflow-x-hidden stocknbook-dashboard-content">
                     {user.role === "owner" && <OwnerDashboard />}
                     {user.role === "manager" && <ManagerDashboard />}
                     {user.role === "staff" && <StaffDashboard />}

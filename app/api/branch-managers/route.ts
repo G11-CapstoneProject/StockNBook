@@ -70,6 +70,7 @@ export async function POST(req: NextRequest) {
 
         const allowedActions = new Set([
             "add_manager_to_branch",
+            "resend_manager_invite",
             "deactivate_manager",
             "reactivate_manager",
         ]);

@@ -21,6 +21,7 @@ export type InventoryRole = "owner" | "manager" | "staff" | "";
 export type ProductVariant = {
     id: number;
     productId: number;
+    variantNumber?: string | null;
     variantValues: Record<string, string>;
     stock: number;
     alertLevel: number;
@@ -42,6 +43,7 @@ export type ProductVariantSave = {
 
 export type Product = {
     id: number;
+    productNumber?: string | null;
     storeId?: number | null;
     branchId?: number | null;
     branchName?: string | null;
@@ -241,6 +243,7 @@ export function normalizeProductVariant(raw: any): ProductVariant {
     return {
         id: Number(raw.id),
         productId: Number(raw.productId ?? raw.product_id),
+        variantNumber: raw.variantNumber ?? raw.variant_number ?? null,
         variantValues: parsedVariantValues,
         stock: Number(raw.stock ?? 0),
         alertLevel: Number(raw.alertLevel ?? raw.alert_level ?? 0),
@@ -259,6 +262,7 @@ export function normalizeProductVariant(raw: any): ProductVariant {
 export function normalizeProduct(raw: any): Product {
     return {
         id: Number(raw.id),
+        productNumber: raw.productNumber ?? raw.product_number ?? null,
         storeId: raw.storeId ?? raw.store_id ?? null,
         branchId: raw.branchId ?? raw.branch_id ?? null,
         branchName: raw.branchName ?? raw.branch_name ?? null,

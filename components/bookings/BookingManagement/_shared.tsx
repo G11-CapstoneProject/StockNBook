@@ -393,8 +393,6 @@ export function normalizeBooking(
 }
 
 export function getSavedBookingAccess(role: "staff" | "manager" = "staff"): BookingAccess {
-    if (role === "manager") return "full";
-
     try {
         const permissions = JSON.parse(
             sessionStorage.getItem("permissions") ||
@@ -402,16 +400,21 @@ export function getSavedBookingAccess(role: "staff" | "manager" = "staff"): Book
             "{}"
         ) as Record<string, unknown>;
 
-        const access =
-            permissions.booking_access ||
-            permissions.bookings_access ||
-            (permissions.bookings === true ? "view" : "none");
+        // Prefer the canonical key; old account invitations may use these aliases.
+        const access = permissions.bookings ??
+            permissions.booking_access ??
+            permissions.bookings_access;
 
-        if (access === "full") return "full";
-        if (access === "view") return "view";
+        if (access === undefined || access === null) {
+            return role === "manager" ? "full" : "none";
+        }
+        if (access === "full" || (role === "manager" && access === true)) return "full";
+        // Legacy Staff boolean permissions were view-only in this component.
+        if (access === "view" || access === "view_only" || access === "viewOnly" ||
+            (role === "staff" && access === true)) return "view";
         return "none";
     } catch {
-        return "none";
+        return role === "manager" ? "full" : "none";
     }
 }
 

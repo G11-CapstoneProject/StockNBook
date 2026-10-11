@@ -4,12 +4,15 @@ import { handler } from "../../../lambda-auth/index.js";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Only these two actions may be triggered by this route. Anything else in
-// body.action is ignored and falls back to submit_subscription_payment, so a
-// client can't use this proxy to invoke arbitrary lambda-auth actions.
+// Only these subscription-management actions may be triggered by this route.
+// Any other lambda-auth action is rejected so the browser cannot use this
+// proxy to invoke unrelated authentication or account-management actions.
 const ALLOWED_POST_ACTIONS = new Set([
+    "get_payment_settings",
     "send_payment_otp",
     "submit_subscription_payment",
+    "request_subscription_downgrade",
+    "cancel_subscription_downgrade",
 ]);
 
 function parseBody(body: string | undefined) {
@@ -58,9 +61,14 @@ export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
 
-        const requestedAction = ALLOWED_POST_ACTIONS.has(body?.action)
-            ? body.action
-            : "submit_subscription_payment";
+        if (!ALLOWED_POST_ACTIONS.has(body?.action)) {
+            return NextResponse.json(
+                { error: "Unsupported subscription action." },
+                { status: 400 },
+            );
+        }
+
+        const requestedAction = body.action;
 
         const response = await handler({
             headers: {
@@ -84,7 +92,7 @@ export async function POST(req: NextRequest) {
                 error:
                     error instanceof Error
                         ? error.message
-                        : "Unable to submit subscription payment.",
+                        : "Unable to update subscription.",
             },
             { status: 500 },
         );

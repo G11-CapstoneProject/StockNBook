@@ -25,3 +25,66 @@ body {
   color: var(--foreground);
   font-family: "DM Sans", Arial, Helvetica, sans-serif;
 }
+
+/* StockNBook responsive workspace. This only applies where the authenticated
+   business/admin sidebar is present; public booking/landing pages are untouched. */
+@media (max-width: 1023px) {
+  [data-stocknbook-sidebar] ~ :is(main, div),
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) {
+    min-width: 0;
+    padding-top: 3.5rem; /* fixed mobile navigation bar */
+  }
+
+  [data-stocknbook-sidebar] ~ :is(main, div) header.sticky,
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) header.sticky {
+    top: 3.5rem;
+  }
+}
+
+@media (max-width: 639px) {
+  /* Avoid content being squeezed by desktop-only spacing and column counts. */
+  [data-stocknbook-sidebar] ~ :is(main, div) .px-6,
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) .px-6 {
+    padding-right: 1rem;
+    padding-left: 1rem;
+  }
+
+  [data-stocknbook-sidebar] ~ :is(main, div) .grid.grid-cols-2,
+  [data-stocknbook-sidebar] ~ :is(main, div) .grid.grid-cols-3,
+  [data-stocknbook-sidebar] ~ :is(main, div) .grid.grid-cols-4,
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) .grid.grid-cols-2,
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) .grid.grid-cols-3,
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) .grid.grid-cols-4 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Scroll the immediate table wrapper, not the table itself, to preserve
+     native column sizing, sticky headings, and large minimum table widths. */
+  [data-stocknbook-sidebar] ~ :is(main, div) :is(div, section):has(> table),
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) :is(div, section):has(> table) {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  [data-stocknbook-sidebar] ~ :is(main, div) :is(input, textarea, select),
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) :is(input, textarea, select) {
+    max-width: 100%;
+  }
+}
+
+/* Responsive overlays and non-dashboard tables; no data/action code changes. */
+@media (max-width: 639px) {
+  [data-stocknbook-sidebar] ~ :is(main, div) .fixed.inset-0,
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) .fixed.inset-0 {
+    max-height: 100dvh;
+    overflow-y: auto;
+  }
+
+  [data-stocknbook-sidebar] ~ :is(main, div) .sticky.top-0,
+  [data-stocknbook-admin-sidebar] ~ :is(main, div) .sticky.top-0 {
+    scroll-margin-top: 3.5rem;
+  }
+}

@@ -22,6 +22,14 @@ type Subscription = {
     expires_at: string | null;
     history_count: number;
     store_status: string;
+    scheduled_change: {
+        id: number;
+        target_plan_id: number;
+        target_plan_name: string;
+        target_plan_price: number;
+        status: string;
+        effective_at: string | null;
+    } | null;
 };
 
 type HistoryItem = {
@@ -147,7 +155,7 @@ export default function SubscriptionsPage() {
                                         const days = daysUntil(s.expires_at);
                                         return <tr key={s.subscription_id} className="border-b border-[#F3EFE3] last:border-0 hover:bg-[#FAF8FF]">
                                             <td className="px-5 py-4"><p className="text-[13px] font-semibold text-[#30243A]">{s.store_name}</p><p className="text-[10px] text-[#806A8C]">{s.owner_name} · {s.owner_email}</p></td>
-                                            <td className="px-5 py-4"><PlanBadge plan={s.plan_name as "Starter" | "Business" | "Enterprise"} /><div className="mt-1 text-[10px] text-[#8A7D92]">₱{s.plan_price.toLocaleString("en-PH", { minimumFractionDigits: 2 })}/month</div></td>
+                                            <td className="px-5 py-4"><PlanBadge plan={s.plan_name as "Starter" | "Business" | "Enterprise"} /><div className="mt-1 text-[10px] text-[#8A7D92]">₱{s.plan_price.toLocaleString("en-PH", { minimumFractionDigits: 2 })}/month</div>{s.scheduled_change && <div className="mt-2 rounded-lg border border-[#E8D8A7] bg-[#FFF9E8] px-2.5 py-2 text-[9px] font-semibold leading-4 text-[#8B6B1B]"><div>{s.scheduled_change.status === "AWAITING_PAYMENT" ? "Awaiting downgrade payment" : "Scheduled downgrade"} → {s.scheduled_change.target_plan_name}</div><div className="font-medium text-[#9A7A25]">Effective {formatDate(s.scheduled_change.effective_at)}</div></div>}</td>
                                             <td className="px-5 py-4 text-[#4B3E55]">{formatDate(s.started_at)}</td>
                                             <td className="px-5 py-4"><div className="text-[#4B3E55]">{formatDate(s.expires_at)}</div>{days !== null && s.status !== "CANCELLED" && <div className={`text-[9px] font-semibold ${days <= 7 ? "text-[#C32F2F]" : "text-[#8A7D92]"}`}>{days >= 0 ? `${days}d left` : `${Math.abs(days)}d overdue`}</div>}</td>
                                             <td className="px-5 py-4"><span className={`inline-flex items-center gap-1.5 text-[11px] font-semibold ${s.auto_renew ? "text-[#16834A]" : "text-[#B0A2BE]"}`}>{s.auto_renew ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}{s.auto_renew ? "On" : "Off"}</span></td>

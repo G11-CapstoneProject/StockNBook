@@ -53,6 +53,45 @@ function serverError(headers, error) {
     });
 }
 
+// Resolve operational access from the current database row, not a cached browser permission.
+// Keep legacy access keys compatible with existing Manager/Staff records.
+function normalizeOperationalAccess(permissions, moduleName, role) {
+    let values = permissions;
+    if (typeof values === "string") {
+        try { values = JSON.parse(values); } catch { values = {}; }
+    }
+    if (!values || typeof values !== "object" || Array.isArray(values)) values = {};
+
+    const keys = moduleName === "bookings"
+        ? ["bookings", "booking_access", "bookings_access"]
+        : ["pos", "pos_access", "sales_access"];
+    const selected = keys.find((key) => Object.prototype.hasOwnProperty.call(values, key));
+    if (!selected) return role === "manager" ? "full" : "none";
+    const access = values[selected];
+    if (access === true || access === 1 || access === "1" || access === "true" || access === "full") return "full";
+    if (access === "view" || access === "view_only" || access === "viewOnly") return "view";
+    return "none";
+}
+
+async function getOperationalAccess(connection, decoded, moduleName) {
+    const role = String(decoded?.role || "").trim().toLowerCase();
+    if (role === "owner") return "full";
+    if (role !== "manager" && role !== "staff") return "none";
+
+    const storeId = Number(decoded?.store_id);
+    const branchId = Number(decoded?.branch_id);
+    const employeeId = Number(role === "manager" ? decoded?.manager_id : decoded?.staff_id);
+    if (![storeId, branchId, employeeId].every((id) => Number.isSafeInteger(id) && id > 0)) return "none";
+
+    const table = role === "manager" ? "managers" : "staff";
+    const [rows] = await connection.execute(
+        `SELECT permissions FROM ${table} WHERE id = ? AND store_id = ? AND branch_id = ? AND LOWER(status) = 'active' LIMIT 1`,
+        [employeeId, storeId, branchId]
+    );
+    if (!rows.length) return "none";
+    return normalizeOperationalAccess(rows[0].permissions, moduleName, role);
+}
+
 function toSafeString(value, max = 255) {
     return String(value ?? "").trim().slice(0, max);
 }
@@ -1863,6 +1902,23 @@ exports.handler = async (event) => {
         const isBranchUser =
             tokenRole === "manager" ||
             tokenRole === "staff";
+
+        // Full/Read-only POS access comes from the current active employee row.
+        // Manager defaults only apply to legacy records missing a POS permission;
+        // an explicit 'none' or 'view' always wins.
+        if (!["owner", "manager", "staff"].includes(tokenRole)) {
+            return jsonResponse(403, headers, { error: "Business account role required." });
+        }
+        const posAccess = await getOperationalAccess(connection, decodedToken, "pos");
+        if (posAccess === "none") {
+            return jsonResponse(403, headers, { error: "POS access is not permitted for this account." });
+        }
+        const posReadActions = new Set([
+            "get_orders", "get_collection_history", "get_owner_dashboard_summary",
+        ]);
+        if (posAccess !== "full" && !posReadActions.has(action)) {
+            return jsonResponse(403, headers, { error: "Full POS access is required for this action." });
+        }
 
         const requestedBranchId =
             toPositiveInteger(

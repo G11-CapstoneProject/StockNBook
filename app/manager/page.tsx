@@ -155,8 +155,8 @@ export default function ManagerPage() {
         <div className="flex min-h-screen bg-[#FDFAF4] text-[#1A1220]">
             <RoleSidebar />
 
-            <main className="flex-1 overflow-y-auto">
-                <section className="mx-auto max-w-6xl px-6 py-8 lg:px-8">
+            <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+                <section className="mx-auto max-w-6xl px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
                     <div className="overflow-hidden rounded-3xl bg-[#2D1B4E] shadow-sm">
                         <div className="grid gap-6 p-8 text-white md:grid-cols-[1fr_280px]">
                             <div>

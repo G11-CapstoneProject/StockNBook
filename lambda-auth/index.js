@@ -22,66 +22,81 @@ function normalizeLimit(value) {
     return Number.isFinite(parsed) ? parsed : null;
 }
 
+// Legacy stores.plan is a display cache, not the source of subscription entitlement.
+// Reconcile it only if it differs from the currently effective (paid/grace/free) plan.
+async function syncStorePlanLabel(connection, storeId, effectivePlanName) {
+    if (!effectivePlanName) return;
+    await connection.execute(
+        "UPDATE stores SET plan = ? WHERE id = ? AND (plan IS NULL OR plan <> ?)",
+        [effectivePlanName, Number(storeId), effectivePlanName]
+    );
+}
+
+// Paid subscriptions remain usable through their displayed expiration date.
+// A single eligible payment submitted before expiry can retain paid access for
+// up to 48 hours while the administrator reviews it. No records are deleted.
 async function getActivePlan(connection, storeId) {
+    await processDueSubscriptionPlanChange(connection, Number(storeId));
     const [rows] = await connection.execute(
-        `SELECT
-             p.id,
-             p.name,
-             p.max_inventory,
-             p.max_bookings,
-             p.max_staff,
-             p.max_branches
-         FROM subscriptions s
-                  INNER JOIN plans p ON p.id = s.plan_id
-         WHERE s.store_id = ?
-           AND LOWER(s.status) = 'active'
-           AND (s.expires_at IS NULL OR s.expires_at >= CURDATE())
-         ORDER BY s.id DESC
-             LIMIT 1`,
-        [Number(storeId)]
+        `SELECT p.id, p.name, p.price, p.max_inventory, p.max_bookings,
+                p.max_staff, p.max_branches, p.has_low_stock_alerts,
+                p.has_analytics, p.has_forecasting, p.has_multi_store,
+                s.expires_at, s.status,
+                CASE WHEN s.expires_at IS NOT NULL AND DATE(s.expires_at) < CURDATE()
+             THEN 1 ELSE 0 END AS is_past_expiry
+         FROM subscriptions s INNER JOIN plans p ON p.id = s.plan_id
+         WHERE s.store_id = ? AND LOWER(s.status) IN ('active','expiring')
+         ORDER BY s.id DESC LIMIT 1`, [Number(storeId)]
     );
-
-    if (rows.length > 0) {
-        const plan = rows[0];
-        return {
-            id: Number(plan.id),
-            name: String(plan.name || "Current plan"),
-            max_inventory: normalizeLimit(plan.max_inventory),
-            max_bookings: normalizeLimit(plan.max_bookings),
-            max_staff: normalizeLimit(plan.max_staff),
-            max_branches: normalizeLimit(plan.max_branches),
-        };
-    }
-
-    // New stores begin on Starter before a paid subscription record exists.
-    const [starterRows] = await connection.execute(
-        `SELECT
-             id,
-             name,
-             max_inventory,
-             max_bookings,
-             max_staff,
-             max_branches
-         FROM plans
-         WHERE is_archived = 0
-           AND (LOWER(name) = 'starter' OR price = 0)
-         ORDER BY price ASC, id ASC
-             LIMIT 1`
-    );
-
-    if (starterRows.length === 0) {
-        return null;
-    }
-
-    const plan = starterRows[0];
-    return {
-        id: Number(plan.id),
-        name: String(plan.name || "Starter"),
+    const paid = rows[0] || null;
+    const normalized = (plan, accessStatus) => ({
+        id: Number(plan.id), name: String(plan.name || 'Starter'),
+        price: Number(plan.price || 0),
         max_inventory: normalizeLimit(plan.max_inventory),
         max_bookings: normalizeLimit(plan.max_bookings),
         max_staff: normalizeLimit(plan.max_staff),
         max_branches: normalizeLimit(plan.max_branches),
-    };
+        has_low_stock_alerts: Boolean(plan.has_low_stock_alerts),
+        has_analytics: Boolean(plan.has_analytics),
+        has_forecasting: Boolean(plan.has_forecasting),
+        has_multi_store: Boolean(plan.has_multi_store),
+        access_status: accessStatus,
+    });
+    if (paid && !Number(paid.is_past_expiry)) {
+        await syncStorePlanLabel(connection, storeId, paid.name);
+        return normalized(paid, 'PAID');
+    }
+    if (paid && Number(paid.price) > 0) {
+        // Two calendar days after the expiration day, pending review only.
+        // A submission made after expiration cannot create a new grace period.
+        const paymentColumns = await getPlanColumnsForOwner(connection);
+        // Older payment schemas may call this column submitted_at or payment_date.
+        // Never grant grace without verifiable pre-expiry submission time.
+        if (paymentColumns.createdAt) {
+            const [eligible] = await connection.execute(
+                `SELECT p.id FROM payments p
+                 WHERE p.store_id = ? AND UPPER(p.status) = 'PENDING'
+                   AND DATE(p.${paymentColumns.createdAt}) <= DATE(?)
+                   AND CURDATE() <= DATE_ADD(DATE(?), INTERVAL 2 DAY)
+                 ORDER BY p.id ASC LIMIT 1`,
+                [Number(storeId), paid.expires_at, paid.expires_at]
+            );
+            if (eligible.length > 0) {
+                await syncStorePlanLabel(connection, storeId, paid.name);
+                return normalized(paid, 'GRACE');
+            }
+        }
+    }
+    const [starterRows] = await connection.execute(
+        `SELECT id, name, price, max_inventory, max_bookings, max_staff,
+                max_branches, has_low_stock_alerts, has_analytics,
+                has_forecasting, has_multi_store
+         FROM plans WHERE is_archived = 0 AND (LOWER(name) = 'starter' OR price = 0)
+         ORDER BY price ASC, id ASC LIMIT 1`
+    );
+    if (!starterRows.length) return null;
+    await syncStorePlanLabel(connection, storeId, starterRows[0].name);
+    return normalized(starterRows[0], 'STARTER_FALLBACK');
 }
 
 async function getStoreUsage(connection, storeId) {
@@ -94,7 +109,9 @@ async function getStoreUsage(connection, storeId) {
     );
 
     const [bookingRows] = await connection.execute(
-        "SELECT COUNT(*) AS total FROM bookings WHERE store_id = ?",
+        `SELECT COUNT(*) AS total FROM bookings
+         WHERE store_id = ? AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+           AND created_at < DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')`,
         [Number(storeId)]
     );
 
@@ -189,6 +206,66 @@ const OTP_EXPIRY_SECONDS = 90;
 const MANAGER_INVITE_OTP_EXPIRY_SECONDS = OTP_EXPIRY_SECONDS;
 const STAFF_INVITE_OTP_EXPIRY_SECONDS = OTP_EXPIRY_SECONDS;
 const PAYMENT_OTP_EXPIRY_SECONDS = 300;
+// Separate limits for accepted OTP emails and failed email-delivery attempts.
+const PAYMENT_OTP_MAX_SENT_PER_WINDOW = 5;
+const PAYMENT_OTP_MAX_FAILED_PER_WINDOW = 3;
+const PAYMENT_OTP_RATE_WINDOW_MINUTES = 10;
+
+// Local subscription-payment OTP terminal fallback is explicit opt-in only.
+// A normal `npm run dev` must not silently treat failed Gmail delivery as success.
+// For isolated local debugging, explicitly set PAYMENT_OTP_TERMINAL_DEBUG=true.
+// Never enable this flag in production: it prints private OTP codes to logs.
+const PAYMENT_OTP_TERMINAL_DEBUG =
+    String(process.env.PAYMENT_OTP_TERMINAL_DEBUG || "").toLowerCase() === "true" &&
+    String(process.env.NODE_ENV || "").toLowerCase() !== "production";
+
+// Local invitation testing / recovery.
+// Invitation links remain usable even when SMTP cannot deliver a demo email.
+// In development, failed Manager/Staff invitations are also printed to the
+// server terminal so activation can still be tested safely.
+const INVITATION_TERMINAL_DEBUG =
+    String(process.env.INVITATION_TERMINAL_DEBUG || "").toLowerCase() === "true" ||
+    String(process.env.NODE_ENV || "").toLowerCase() === "development";
+
+const SMTP_NETWORK_ERROR_CODES = new Set([
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+]);
+
+function isSmtpNetworkError(error) {
+    return SMTP_NETWORK_ERROR_CODES.has(String(error?.code || "").toUpperCase());
+}
+
+function logDevelopmentInvitationFallback({
+                                              role,
+                                              email,
+                                              name,
+                                              storeName,
+                                              branchName,
+                                              inviteLink,
+                                              errorMessage,
+                                          }) {
+    if (!INVITATION_TERMINAL_DEBUG) return;
+
+    console.warn(
+        `[StockNBook DEV INVITE] ${role} invitation email was not delivered. ` +
+        `Use the backup invitation link for local testing.`,
+        {
+            role,
+            name: name || "",
+            email: email || "",
+            store: storeName || "",
+            branch: branchName || "",
+            invite_link: inviteLink || "",
+            email_error: errorMessage || "",
+        }
+    );
+}
 
 const SMTP_USER = "noreplystocknbook@gmail.com";
 
@@ -264,6 +341,50 @@ async function ensurePaymentOtpsTable(connection) {
                                           )
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+}
+
+
+// Track SMTP failures separately so undelivered OTPs do not exhaust the
+// five-email allowance, while repeated failed attempts remain rate-limited.
+// Auto-created on first payment-OTP request; no changes to existing tables.
+async function ensurePaymentOtpEmailFailuresTable(connection) {
+    await connection.execute(`
+        CREATE TABLE IF NOT EXISTS payment_otp_email_failures (
+                                                                  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                                  store_id BIGINT NOT NULL,
+                                                                  smtp_error_code VARCHAR(50) NOT NULL,
+            attempted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_payment_otp_email_failures_store_time (store_id, attempted_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+}
+
+function paymentOtpRetrySeconds(value) {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : 60;
+}
+
+// Display the remaining wait in readable units instead of only minutes.
+function formatPaymentOtpWaitTime(seconds) {
+    const totalMinutes = Math.max(1, Math.ceil(Number(seconds) / 60));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (hours === 0) return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+    const hourText = `${hours} ${hours === 1 ? "hour" : "hours"}`;
+    if (minutes === 0) return hourText;
+    return `${hourText} and ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+}
+
+function paymentOtpCooldownResponse(headers, message, retryAfterSeconds, code) {
+    return {
+        statusCode: 429,
+        headers: { ...headers, "Retry-After": String(retryAfterSeconds) },
+        body: JSON.stringify({
+            error: message,
+            code,
+            retry_after_seconds: retryAfterSeconds,
+        }),
+    };
 }
 
 
@@ -1252,16 +1373,12 @@ async function sendGmailHtmlEmail(toEmail, rawMessage, logLabel) {
             throw authError;
         }
 
-        if (
-            error?.code === "ETIMEDOUT" ||
-            error?.code === "ECONNRESET" ||
-            error?.code === "EHOSTUNREACH" ||
-            error?.code === "ENETUNREACH"
-        ) {
+        if (isSmtpNetworkError(error)) {
             const networkError = new Error(
-                "Lambda could not connect to Gmail SMTP. Check the Lambda network configuration and try again."
+                "The invitation email service is temporarily unreachable. The invitation itself is still valid; use the backup invite link or try Resend later."
             );
             networkError.code = "GMAIL_NETWORK_FAILED";
+            networkError.cause = error;
             throw networkError;
         }
 
@@ -1314,6 +1431,81 @@ async function sendStaffInvitationEmail(invite) {
 }
 
 
+function getInvitationEmailFailureMessage(error) {
+    const code = String(error?.code || "").toUpperCase();
+
+    if (code === "GMAIL_NETWORK_FAILED" || isSmtpNetworkError(error)) {
+        return "The email service is temporarily unreachable. The invitation is still valid; use the backup invite link or try Resend later.";
+    }
+
+    if (code === "GMAIL_AUTH_FAILED") {
+        return "The email service could not authenticate. The invitation is still valid; use the backup invite link while the SMTP account is being fixed.";
+    }
+
+    if (code === "SMTP_NOT_CONFIGURED") {
+        return "Email delivery is not configured yet. The invitation is still valid; use the backup invite link.";
+    }
+
+    if (code === "INVALID_RECIPIENT") {
+        return "The invitation email address is invalid. Check the address or use the backup invite link.";
+    }
+
+    if (code === "GMAIL_SMTP_ERROR") {
+        return "Gmail did not accept the invitation email. The invitation is still valid; use the backup invite link or try Resend later.";
+    }
+
+    return "The invitation email could not be delivered. The invitation is still valid; use the backup invite link or try Resend later.";
+}
+
+async function deliverInvitationEmail({
+                                          role,
+                                          email,
+                                          name,
+                                          storeName,
+                                          branchName,
+                                          inviteLink,
+                                          send,
+                                      }) {
+    try {
+        await send();
+
+        return {
+            email_sent: true,
+            email_status: "sent",
+            email_error: "",
+        };
+    } catch (sendError) {
+        const emailError = getInvitationEmailFailureMessage(sendError);
+
+        console.error(
+            `[stocknbook-auth] ${role} invitation was created, but email delivery failed:`,
+            {
+                email,
+                branch: branchName || "",
+                code: sendError?.code || "EMAIL_SEND_FAILED",
+                error: emailError,
+            }
+        );
+
+        logDevelopmentInvitationFallback({
+            role,
+            email,
+            name,
+            storeName,
+            branchName,
+            inviteLink,
+            errorMessage: emailError,
+        });
+
+        return {
+            email_sent: false,
+            email_status: "failed",
+            email_error: emailError,
+        };
+    }
+}
+
+
 async function sendManagerInviteOtpEmail(toEmail, otp, managerName) {
     return sendGmailHtmlEmail(
         toEmail,
@@ -1339,6 +1531,59 @@ async function sendPaymentOtpEmail(toEmail, otp, planName) {
     );
 }
 
+
+// Sent only after the payment submission has been saved successfully.
+// Acknowledgment does NOT mean that GCash funds have been verified.
+function buildPaymentSubmissionAcknowledgmentEmail(toEmail, details) {
+    const storeName = escapeHtml(details.store_name || "your store");
+    const planName = escapeHtml(details.plan_name || "selected");
+    const amount = Number(details.amount || 0).toLocaleString("en-PH", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    });
+    const paymentId = escapeHtml(details.payment_submission_id);
+
+    const html = `
+        <div style="font-family:Arial,sans-serif;background:#FDFAF4;padding:24px;color:#3F354C;">
+          <div style="max-width:560px;margin:auto;background:#fff;border:1px solid #E7DCEB;border-radius:16px;padding:28px;">
+            <h2 style="color:#2D1B4E;margin:0;">StockNBook</h2>
+            <p>Thank you for choosing StockNBook, <strong>${storeName}</strong>!</p>
+            <p>We have <strong>received your GCash payment details and proof</strong> for the
+              <strong>${planName}</strong> plan. Your submission is now <strong>Pending Review</strong>.</p>
+            <div style="background:#F6F1FB;border-radius:12px;padding:16px;margin:20px 0;">
+              <p style="margin:6px 0;">Plan: <strong>${planName}</strong></p>
+              <p style="margin:6px 0;">Submitted amount: <strong>PHP ${amount}</strong></p>
+              <p style="margin:6px 0;">Submission ID: <strong>#${paymentId}</strong></p>
+              <p style="margin:6px 0;">Status: <strong>Pending Review</strong></p>
+            </div>
+            <p>Please allow <strong>up to 24 hours</strong> for the Platform Admin to review your payment.
+              Reviews may take longer if extra verification is necessary.</p>
+            <p><strong>Your plan is not yet activated by this email.</strong> We'll email you again if
+              the payment is approved and your subscription is activated.</p>
+            <p>If you did not submit this payment, contact StockNBook support.</p>
+            <p style="margin-top:24px;color:#2D1B4E;font-weight:bold;">— StockNBook Team</p>
+          </div>
+        </div>`;
+    return [
+        `From: ${EMAIL_FROM}`,
+        `To: ${sanitizeEmailHeader(toEmail)}`,
+        "Subject: StockNBook - We received your subscription payment proof",
+        `Date: ${new Date().toUTCString()}`,
+        "MIME-Version: 1.0",
+        'Content-Type: text/html; charset="UTF-8"',
+        "Content-Transfer-Encoding: 8bit",
+        "",
+        html,
+    ].join("\r\n").replace(/^\./gm, "..");
+}
+
+async function sendPaymentSubmissionAcknowledgmentEmail(toEmail, details) {
+    return sendGmailHtmlEmail(
+        toEmail,
+        buildPaymentSubmissionAcknowledgmentEmail(toEmail, details),
+        "subscription payment submission acknowledgment"
+    );
+}
 
 function generateSlug(storeName) {
     return storeName
@@ -1413,6 +1658,333 @@ function normalizePlanLimit(value) {
     return Number(value);
 }
 
+// These defaults mirror the Platform Admin dashboard. Database values always
+// win, so an admin edit is reflected in the owner's checkout immediately.
+const DEFAULT_PLATFORM_GCASH_SETTINGS = {
+    account_name: "StockNBook Admin",
+    gcash_number: "0917 123 4567",
+    instruction: "Include your store name",
+    qr_image: "",
+};
+
+async function getPlatformGcashPaymentSettings(connection) {
+    const [rows] = await connection.execute(
+        `SELECT \`key\`, value
+         FROM platform_settings
+         WHERE \`key\` IN ('gcash_account_name', 'gcash_number', 'gcash_instruction', 'gcash_qr_image')`
+    );
+
+    const values = {};
+    for (const row of rows) {
+        values[String(row.key)] = String(row.value ?? "");
+    }
+
+    const paymentSettings = {
+        account_name:
+            values.gcash_account_name?.trim() ||
+            DEFAULT_PLATFORM_GCASH_SETTINGS.account_name,
+        gcash_number:
+            values.gcash_number?.trim() ||
+            DEFAULT_PLATFORM_GCASH_SETTINGS.gcash_number,
+        instruction:
+            values.gcash_instruction?.trim() ||
+            DEFAULT_PLATFORM_GCASH_SETTINGS.instruction,
+        qr_image:
+            values.gcash_qr_image?.trim() ||
+            DEFAULT_PLATFORM_GCASH_SETTINGS.qr_image,
+    };
+
+    return {
+        ...paymentSettings,
+        configured: Boolean(paymentSettings.account_name && paymentSettings.gcash_number),
+    };
+}
+
+const BUILT_IN_SUBSCRIPTION_PLAN_TIER = {
+    starter: 1,
+    growth: 2,
+    scale: 3,
+};
+
+function getSubscriptionPlanTier(plan) {
+    if (!plan) return null;
+
+    const explicitTier = Number(plan.tier_order);
+    if (Number.isInteger(explicitTier) && explicitTier > 0) {
+        return explicitTier;
+    }
+
+    return (
+        BUILT_IN_SUBSCRIPTION_PLAN_TIER[
+            String(plan.name || "").trim().toLowerCase()
+            ] ?? null
+    );
+}
+
+function getSubscriptionPlanDirection(currentPlan, targetPlan) {
+    if (!currentPlan || !targetPlan) return null;
+    if (Number(currentPlan.id) === Number(targetPlan.id)) return "current";
+
+    const currentTier = getSubscriptionPlanTier(currentPlan);
+    const targetTier = getSubscriptionPlanTier(targetPlan);
+
+    if (currentTier !== null && targetTier !== null) {
+        return targetTier > currentTier ? "upgrade" : "downgrade";
+    }
+
+    // Compatibility fallback for any custom plan that has no explicit/built-in tier.
+    const currentPrice = Number(currentPlan.price || 0);
+    const targetPrice = Number(targetPlan.price || 0);
+    return targetPrice > currentPrice ? "upgrade" : "downgrade";
+}
+
+function dateOnlyUtc(value = new Date()) {
+    return new Date(value).toISOString().slice(0, 10);
+}
+
+function addUtcDays(dateOnly, days) {
+    const date = new Date(`${dateOnly}T00:00:00.000Z`);
+    date.setUTCDate(date.getUTCDate() + Number(days));
+    return date.toISOString().slice(0, 10);
+}
+
+async function ensureSubscriptionPlanChangesTable(connection) {
+    await connection.execute(`
+        CREATE TABLE IF NOT EXISTS subscription_plan_changes (
+                                                                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                                 subscription_id BIGINT NULL,
+                                                                 store_id BIGINT NOT NULL,
+                                                                 current_plan_id BIGINT NOT NULL,
+                                                                 target_plan_id BIGINT NOT NULL,
+                                                                 change_type VARCHAR(20) NOT NULL DEFAULT 'DOWNGRADE',
+            status VARCHAR(30) NOT NULL DEFAULT 'SCHEDULED',
+            requested_by_role VARCHAR(30) NOT NULL DEFAULT 'owner',
+            requested_by_email VARCHAR(255) NULL,
+            requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            effective_at DATE NOT NULL,
+            cancelled_at DATETIME NULL,
+            applied_at DATETIME NULL,
+            notes VARCHAR(500) NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_subscription_plan_changes_store_status (store_id, status),
+            INDEX idx_subscription_plan_changes_subscription_status (subscription_id, status),
+            INDEX idx_subscription_plan_changes_effective (status, effective_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+}
+
+async function getPendingSubscriptionPlanChange(connection, storeId) {
+    await ensureSubscriptionPlanChangesTable(connection);
+
+    const [rows] = await connection.execute(
+        `SELECT
+             spc.id,
+             spc.subscription_id,
+             spc.store_id,
+             spc.current_plan_id,
+             spc.target_plan_id,
+             spc.change_type,
+             spc.status,
+             spc.requested_by_role,
+             spc.requested_by_email,
+             spc.requested_at,
+             spc.effective_at,
+             spc.cancelled_at,
+             spc.applied_at,
+             spc.notes,
+             current_plan.name AS current_plan_name,
+             target_plan.name AS target_plan_name,
+             target_plan.price AS target_plan_price,
+             target_plan.max_inventory AS target_max_inventory,
+             target_plan.max_bookings AS target_max_bookings,
+             target_plan.max_staff AS target_max_staff,
+             target_plan.max_branches AS target_max_branches
+         FROM subscription_plan_changes spc
+                  LEFT JOIN plans current_plan ON current_plan.id = spc.current_plan_id
+                  LEFT JOIN plans target_plan ON target_plan.id = spc.target_plan_id
+         WHERE spc.store_id = ?
+           AND UPPER(spc.status) IN ('SCHEDULED', 'AWAITING_PAYMENT')
+         ORDER BY spc.id DESC
+             LIMIT 1`,
+        [storeId]
+    );
+
+    return rows[0] || null;
+}
+
+function serializeSubscriptionPlanChange(row) {
+    if (!row) return null;
+
+    return {
+        id: Number(row.id),
+        subscription_id:
+            row.subscription_id == null ? null : Number(row.subscription_id),
+        current_plan_id: Number(row.current_plan_id),
+        current_plan_name: row.current_plan_name || null,
+        target_plan_id: Number(row.target_plan_id),
+        target_plan_name: row.target_plan_name || null,
+        target_plan_price: Number(row.target_plan_price || 0),
+        change_type: String(row.change_type || "DOWNGRADE").toUpperCase(),
+        status: String(row.status || "SCHEDULED").toUpperCase(),
+        requested_at: row.requested_at || null,
+        effective_at: row.effective_at
+            ? dateOnlyUtc(row.effective_at)
+            : null,
+    };
+}
+
+async function processDueSubscriptionPlanChange(connection, storeId) {
+    const change = await getPendingSubscriptionPlanChange(connection, storeId);
+    if (!change) return null;
+
+    const status = String(change.status || "").toUpperCase();
+    if (status !== "SCHEDULED") return change;
+
+    const effectiveAt = change.effective_at
+        ? dateOnlyUtc(change.effective_at)
+        : null;
+
+    if (!effectiveAt || effectiveAt > dateOnlyUtc()) {
+        return change;
+    }
+
+    const [targetRows] = await connection.execute(
+        `SELECT * FROM plans WHERE id = ? LIMIT 1`,
+        [change.target_plan_id]
+    );
+    const targetPlan = targetRows[0] || null;
+
+    if (!targetPlan || Number(targetPlan.is_archived) === 1) {
+        await connection.execute(
+            `UPDATE subscription_plan_changes
+             SET status = 'CANCELLED',
+                 cancelled_at = NOW(),
+                 notes = ?
+             WHERE id = ? AND UPPER(status) = 'SCHEDULED'`,
+            ["Scheduled downgrade cancelled because the target plan is no longer available.", change.id]
+        );
+        return null;
+    }
+
+    // Paid lower-tier plans still require the owner's normal GCash payment and
+    // platform-admin verification. The scheduled record simply makes that lower
+    // plan eligible for payment after the current paid period ends.
+    if (Number(targetPlan.price || 0) > 0) {
+        await connection.execute(
+            `UPDATE subscription_plan_changes
+             SET status = 'AWAITING_PAYMENT'
+             WHERE id = ? AND UPPER(status) = 'SCHEDULED'`,
+            [change.id]
+        );
+        return getPendingSubscriptionPlanChange(connection, storeId);
+    }
+
+    // A free target plan (Starter) needs no GCash payment. Apply it automatically
+    // when the current paid period has fully ended.
+    await connection.beginTransaction();
+    try {
+        const [subscriptionRows] = await connection.execute(
+            `SELECT * FROM subscriptions
+             WHERE store_id = ?
+             ORDER BY id DESC
+                 LIMIT 1
+             FOR UPDATE`,
+            [storeId]
+        );
+        const subscription = subscriptionRows[0] || null;
+
+        if (!subscription) {
+            throw Object.assign(
+                new Error("The current subscription record could not be found."),
+                { statusCode: 409 }
+            );
+        }
+
+        await connection.execute(
+            `UPDATE subscriptions
+             SET plan_id = ?,
+                 status = 'active',
+                 started_at = ?,
+                 expires_at = NULL,
+                 auto_renew = 0
+             WHERE id = ?`,
+            [targetPlan.id, effectiveAt, subscription.id]
+        );
+
+        await syncStorePlanLabel(connection, storeId, targetPlan.name);
+
+        await connection.execute(
+            `UPDATE subscription_plan_changes
+             SET status = 'APPLIED',
+                 applied_at = NOW()
+             WHERE id = ? AND UPPER(status) = 'SCHEDULED'`,
+            [change.id]
+        );
+
+        // subscription_plan_changes is the authoritative downgrade audit record.
+        // Also write to the existing history table when its schema allows a
+        // system-generated (NULL admin) entry, but never fail the downgrade just
+        // because an older history table requires an administrator ID.
+        try {
+            await connection.execute(
+                `INSERT INTO subscription_history
+                 (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
+                 VALUES (?, ?, ?, ?, 'downgrade', NULL)`,
+                [
+                    subscription.id,
+                    storeId,
+                    subscription.plan_id,
+                    targetPlan.id,
+                ]
+            );
+        } catch (historyError) {
+            console.warn(
+                "Unable to add automatic downgrade to subscription_history:",
+                historyError.message
+            );
+        }
+
+        await connection.commit();
+        return null;
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    }
+}
+
+function getDowngradeUsageIssues(snapshot, targetPlan) {
+    const checks = [
+        {
+            key: "inventory",
+            label: "Inventory",
+            current: Number(snapshot.usage.inventory || 0),
+            limit: normalizePlanLimit(targetPlan.max_inventory),
+        },
+        {
+            key: "bookings",
+            label: "Bookings",
+            current: Number(snapshot.usage.bookings || 0),
+            limit: normalizePlanLimit(targetPlan.max_bookings),
+        },
+        {
+            key: "staff",
+            label: "Staff",
+            current: Number(snapshot.usage.staff || 0),
+            limit: normalizePlanLimit(targetPlan.max_staff),
+        },
+        {
+            key: "branches",
+            label: "Branches",
+            current: Number(snapshot.usage.branches || 0),
+            limit: normalizePlanLimit(targetPlan.max_branches),
+        },
+    ];
+
+    return checks.filter(
+        (item) => item.limit !== null && item.current > Number(item.limit)
+    );
+}
+
 async function getStoreSubscriptionSnapshot(connection, storeId) {
     const [subscriptionRows] = await connection.execute(
         `SELECT
@@ -1482,30 +2054,10 @@ async function getStoreSubscriptionSnapshot(connection, storeId) {
         throw error;
     }
 
-    const [inventoryRows] = await connection.execute(
-        "SELECT COUNT(*) AS total FROM products WHERE store_id = ?",
-        [storeId]
-    );
-    const [branchRows] = await connection.execute(
-        "SELECT COUNT(*) AS total FROM branches WHERE store_id = ?",
-        [storeId]
-    );
-    const [staffRows] = await connection.execute(
-        "SELECT COUNT(*) AS total FROM staff WHERE store_id = ? AND status = 'active'",
-        [storeId]
-    );
-
-    let bookingCount = 0;
-    try {
-        const [bookingRows] = await connection.execute(
-            "SELECT COUNT(*) AS total FROM bookings WHERE store_id = ?",
-            [storeId]
-        );
-        bookingCount = Number(bookingRows[0]?.total || 0);
-    } catch {
-        // Keep the subscription page usable if an older database has no bookings table.
-        bookingCount = 0;
-    }
+    // Use the same usage calculation as the plan-enforcement layer so a
+    // downgrade cannot be approved by the Subscription page while another
+    // module would still consider the store above the target plan limit.
+    const usage = await getStoreUsage(connection, storeId);
 
     const [pendingPaymentRows] = await connection.execute(
         `SELECT COUNT(*) AS total
@@ -1516,15 +2068,24 @@ async function getStoreSubscriptionSnapshot(connection, storeId) {
     );
 
     const expiresAt = subscription.expires_at
-        ? new Date(subscription.expires_at).toISOString().slice(0, 10)
+        ? dateOnlyUtc(subscription.expires_at)
         : null;
+
+    let displayStatus = String(subscription.status || "active").toUpperCase();
+    if (
+        displayStatus !== "CANCELLED" &&
+        expiresAt &&
+        expiresAt < dateOnlyUtc()
+    ) {
+        displayStatus = "EXPIRED";
+    }
 
     return {
         subscription_id:
             subscription.subscription_id == null
                 ? null
                 : Number(subscription.subscription_id),
-        status: String(subscription.status || "active").toUpperCase(),
+        status: displayStatus,
         started_at: subscription.started_at || null,
         expires_at: expiresAt,
         plan: {
@@ -1541,17 +2102,21 @@ async function getStoreSubscriptionSnapshot(connection, storeId) {
             has_multi_store: Boolean(subscription.has_multi_store),
         },
         usage: {
-            inventory: Number(inventoryRows[0]?.total || 0),
-            bookings: bookingCount,
-            staff: Number(staffRows[0]?.total || 0),
-            branches: Number(branchRows[0]?.total || 0),
+            inventory: Number(usage.inventory || 0),
+            bookings: Number(usage.bookings || 0),
+            staff: Number(usage.staff || 0),
+            branches: Number(usage.branches || 0),
         },
         pending_payment: Number(pendingPaymentRows[0]?.total || 0) > 0,
     };
 }
 
 async function getOwnerSubscription(connection, storeId) {
+    await ensureSubscriptionPlanChangesTable(connection);
+    await processDueSubscriptionPlanChange(connection, storeId);
+
     const snapshot = await getStoreSubscriptionSnapshot(connection, storeId);
+    const pendingChange = await getPendingSubscriptionPlanChange(connection, storeId);
 
     const [planRows] = await connection.execute(
         `SELECT
@@ -1568,11 +2133,34 @@ async function getOwnerSubscription(connection, storeId) {
              has_multi_store
          FROM plans
          WHERE is_archived = 0
-         ORDER BY price ASC, id ASC`
+         ORDER BY
+             CASE LOWER(name)
+                 WHEN 'starter' THEN 1
+                 WHEN 'growth' THEN 2
+                 WHEN 'scale' THEN 3
+                 ELSE 100
+                 END ASC,
+             price ASC,
+             id ASC`
     );
 
+    const effectivePlan = await getActivePlan(connection, storeId);
+    const expiryDay = snapshot.expires_at;
+    const dateToday = dateOnlyUtc();
+    const daysUntilExpiration = expiryDay
+        ? Math.round((Date.parse(`${expiryDay}T00:00:00Z`) - Date.parse(`${dateToday}T00:00:00Z`)) / 86400000)
+        : null;
+    const status = String(snapshot.status || '').toUpperCase();
+    const displayStatus = status === 'ACTIVE' && daysUntilExpiration !== null &&
+    daysUntilExpiration >= 0 && daysUntilExpiration <= 7 && Number(snapshot.plan.price) > 0
+        ? 'EXPIRING' : status;
     return {
         ...snapshot,
+        status: displayStatus,
+        effective_plan: effectivePlan,
+        access_status: effectivePlan?.access_status || 'STARTER_FALLBACK',
+        days_until_expiration: daysUntilExpiration,
+        scheduled_change: serializeSubscriptionPlanChange(pendingChange),
         available_plans: planRows.map((row) => ({
             id: Number(row.id),
             name: row.name,
@@ -1586,6 +2174,183 @@ async function getOwnerSubscription(connection, storeId) {
             has_forecasting: Boolean(row.has_forecasting),
             has_multi_store: Boolean(row.has_multi_store),
         })),
+    };
+}
+
+async function requestOwnerSubscriptionDowngrade(connection, decoded, body) {
+    if (decoded.role !== "owner" || !decoded.store_id) {
+        const error = new Error("Only the store owner can request a downgrade.");
+        error.statusCode = 403;
+        throw error;
+    }
+
+    const storeId = Number(decoded.store_id);
+    const targetPlanId = Number(body.plan_id);
+
+    if (!Number.isInteger(targetPlanId) || targetPlanId <= 0) {
+        const error = new Error("Select a valid downgrade plan.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    await ensureSubscriptionPlanChangesTable(connection);
+    await processDueSubscriptionPlanChange(connection, storeId);
+
+    const snapshot = await getStoreSubscriptionSnapshot(connection, storeId);
+    if (!snapshot.subscription_id) {
+        const error = new Error("The current plan does not have a lower subscription tier to schedule.");
+        error.statusCode = 409;
+        throw error;
+    }
+
+    if (snapshot.pending_payment) {
+        const error = new Error("Finish the payment request that is already awaiting review before scheduling another plan change.");
+        error.statusCode = 409;
+        throw error;
+    }
+
+    const [targetRows] = await connection.execute(
+        `SELECT * FROM plans WHERE id = ? AND is_archived = 0 LIMIT 1`,
+        [targetPlanId]
+    );
+    const targetPlan = targetRows[0] || null;
+
+    if (!targetPlan) {
+        const error = new Error("The selected downgrade plan is no longer available.");
+        error.statusCode = 404;
+        throw error;
+    }
+
+    const direction = getSubscriptionPlanDirection(snapshot.plan, {
+        id: Number(targetPlan.id),
+        name: targetPlan.name,
+        price: Number(targetPlan.price || 0),
+    });
+
+    if (direction !== "downgrade") {
+        const error = new Error("The selected plan is not a lower subscription tier.");
+        error.statusCode = 409;
+        throw error;
+    }
+
+    const issues = getDowngradeUsageIssues(snapshot, targetPlan);
+    if (issues.length) {
+        const details = issues
+            .map(
+                (item) =>
+                    `${item.label}: ${item.current} / ${item.limit}`
+            )
+            .join("; ");
+        const error = new Error(
+            `Your current usage exceeds the ${targetPlan.name} plan limits. ${details}`
+        );
+        error.statusCode = 409;
+        error.usage_issues = issues;
+        throw error;
+    }
+
+    const existingChange = await getPendingSubscriptionPlanChange(connection, storeId);
+    if (existingChange) {
+        const error = new Error(
+            `A ${String(existingChange.target_plan_name || "lower-tier")} downgrade is already ${String(existingChange.status || "scheduled").toLowerCase().replace(/_/g, " ")}. Cancel it before requesting another downgrade.`
+        );
+        error.statusCode = 409;
+        throw error;
+    }
+
+    const currentExpiry = snapshot.expires_at;
+    const effectiveAt = currentExpiry
+        ? addUtcDays(currentExpiry, 1)
+        : dateOnlyUtc();
+
+    const [result] = await connection.execute(
+        `INSERT INTO subscription_plan_changes
+         (subscription_id, store_id, current_plan_id, target_plan_id,
+          change_type, status, requested_by_role, requested_by_email,
+          effective_at, notes)
+         VALUES (?, ?, ?, ?, 'DOWNGRADE', 'SCHEDULED', 'owner', ?, ?, ?)`,
+        [
+            snapshot.subscription_id,
+            storeId,
+            snapshot.plan.id,
+            targetPlan.id,
+            String(decoded.email || "").trim() || null,
+            effectiveAt,
+            `Owner requested downgrade from ${snapshot.plan.name} to ${targetPlan.name}.`,
+        ]
+    );
+
+    // If the current period is already over, immediately advance the scheduled
+    // record to the correct next state (automatic Starter or awaiting paid plan).
+    await processDueSubscriptionPlanChange(connection, storeId);
+    const scheduled = await getPendingSubscriptionPlanChange(connection, storeId);
+
+    return {
+        message:
+            Number(targetPlan.price || 0) > 0
+                ? `Downgrade to ${targetPlan.name} scheduled. Your current plan remains active through its paid period; payment for ${targetPlan.name} will be requested when the downgrade becomes effective.`
+                : `Downgrade to ${targetPlan.name} scheduled. It will apply automatically after the current paid period ends.`,
+        change_id: Number(result.insertId),
+        scheduled_change: serializeSubscriptionPlanChange(scheduled),
+    };
+}
+
+async function cancelOwnerSubscriptionDowngrade(connection, decoded) {
+    if (decoded.role !== "owner" || !decoded.store_id) {
+        const error = new Error("Only the store owner can cancel a scheduled downgrade.");
+        error.statusCode = 403;
+        throw error;
+    }
+
+    const storeId = Number(decoded.store_id);
+    await ensureSubscriptionPlanChangesTable(connection);
+    await processDueSubscriptionPlanChange(connection, storeId);
+
+    const change = await getPendingSubscriptionPlanChange(connection, storeId);
+    if (!change) {
+        const error = new Error("There is no scheduled downgrade to cancel.");
+        error.statusCode = 404;
+        throw error;
+    }
+
+    const changeStatus = String(change.status || "").toUpperCase();
+    const effectiveAt = change.effective_at ? dateOnlyUtc(change.effective_at) : null;
+
+    if (changeStatus !== "SCHEDULED" || (effectiveAt && effectiveAt <= dateOnlyUtc())) {
+        const error = new Error(
+            "This downgrade has already reached its effective date and can no longer be cancelled from the owner screen."
+        );
+        error.statusCode = 409;
+        throw error;
+    }
+
+    const [pendingPaymentRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM payments
+         WHERE store_id = ?
+           AND UPPER(status) = 'PENDING'`,
+        [storeId]
+    );
+
+    if (Number(pendingPaymentRows[0]?.total || 0) > 0) {
+        const error = new Error("A subscription payment is already awaiting review. Resolve that payment before cancelling the downgrade.");
+        error.statusCode = 409;
+        throw error;
+    }
+
+    await connection.execute(
+        `UPDATE subscription_plan_changes
+         SET status = 'CANCELLED',
+             cancelled_at = NOW(),
+             notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE ' ' END, 'Cancelled by owner.')
+         WHERE id = ?
+           AND UPPER(status) = 'SCHEDULED'`,
+        [change.id]
+    );
+
+    return {
+        message: "Scheduled downgrade cancelled.",
+        cancelled_change_id: Number(change.id),
     };
 }
 
@@ -1613,6 +2378,9 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
         throw error;
     }
 
+    await ensureSubscriptionPlanChangesTable(connection);
+    await processDueSubscriptionPlanChange(connection, storeId);
+
     const [planRows] = await connection.execute(
         `SELECT * FROM plans WHERE id = ? AND is_archived = 0 LIMIT 1`,
         [planId]
@@ -1632,21 +2400,28 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
     }
 
     const snapshot = await getStoreSubscriptionSnapshot(connection, storeId);
-    const currentPrice = Number(snapshot.plan.price || 0);
-    const currentExpiry = snapshot.expires_at;
-    const currentIsActive =
-        String(snapshot.status || "").toUpperCase() === "ACTIVE" &&
-        (!currentExpiry || currentExpiry >= new Date().toISOString().slice(0, 10));
+    const direction = getSubscriptionPlanDirection(snapshot.plan, {
+        id: Number(targetPlan.id),
+        name: targetPlan.name,
+        price: Number(targetPlan.price || 0),
+    });
 
-    if (Number(targetPlan.price) < currentPrice) {
-        const error = new Error("Downgrades are not available from the subscription screen. Contact the account owner or platform administrator.");
-        error.statusCode = 409;
-        throw error;
-    }
+    // Once the previous paid term has expired, a new paid plan may be chosen
+    // freely; there is no remaining paid period to schedule a downgrade for.
+    if (direction === "downgrade" && snapshot.status !== "EXPIRED") {
+        const scheduled = await getPendingSubscriptionPlanChange(connection, storeId);
+        const validScheduledDowngrade =
+            scheduled &&
+            String(scheduled.status || "").toUpperCase() === "AWAITING_PAYMENT" &&
+            Number(scheduled.target_plan_id) === Number(targetPlan.id);
 
-    if (Number(targetPlan.price) === currentPrice && currentIsActive) {
-        // Same-plan renewal is allowed, but only if there is no unresolved payment.
-        // This keeps the owner from accidentally creating duplicate requests.
+        if (!validScheduledDowngrade) {
+            const error = new Error(
+                "Lower-tier paid plans must first be requested as a downgrade and become due at the end of the current paid period."
+            );
+            error.statusCode = 409;
+            throw error;
+        }
     }
 
     const columns = await getPlanColumnsForOwner(connection);
@@ -1681,10 +2456,6 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
         throw error;
     }
 
-    // Require a verification code sent to the owner's own email before the
-    // payment proof is recorded. This confirms the person submitting the GCash
-    // reference is really the account owner — it does not confirm the GCash
-    // transfer itself, which is still checked manually by a platform admin.
     await ensurePaymentOtpsTable(connection);
 
     const otp = String(body.otp || "").trim();
@@ -1841,6 +2612,37 @@ module.exports.handler = async (event) => {
             };
         }
 
+        if (action === "get_payment_settings") {
+            const token = getBearerTokenFromEvent(event);
+            if (!token) {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Missing token" }) };
+            }
+
+            let decoded;
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid token" }) };
+            }
+
+            if (String(decoded.role || "").toLowerCase() !== "owner" || !decoded.store_id) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Only the store owner can access subscription payment details.",
+                    }),
+                };
+            }
+
+            const paymentSettings = await getPlatformGcashPaymentSettings(connection);
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({ payment_settings: paymentSettings }),
+            };
+        }
+
         // SEND PAYMENT VERIFICATION OTP
         // Triggered when the owner opens the "Upgrade" payment-proof modal, before
         // they can submit a GCash reference number. Confirms it is really the
@@ -1889,25 +2691,50 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            // Rate limit: at most 5 codes per store every 10 minutes, so a stuck
-            // client (or someone poking the endpoint) can't run up the email bill
-            // or be used to brute-force guess a valid code by requesting fresh ones.
+            await ensurePaymentOtpEmailFailuresTable(connection);
+
+            // Count accepted or still-in-progress OTP requests. A failed SMTP
+            // request deletes its pending OTP and is counted separately below.
             const [recentRows] = await connection.execute(
-                `SELECT COUNT(*) AS total
+                `SELECT COUNT(*) AS total,
+                        TIMESTAMPDIFF(SECOND, NOW(),
+                                              DATE_ADD(MIN(created_at), INTERVAL ? MINUTE)) AS retry_after_seconds
                  FROM payment_otps
                  WHERE store_id = ?
-                   AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 10 MINUTE)`,
-                [storeId]
+                   AND created_at > DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
+                [PAYMENT_OTP_RATE_WINDOW_MINUTES, storeId, PAYMENT_OTP_RATE_WINDOW_MINUTES]
             );
 
-            if (Number(recentRows[0]?.total || 0) >= 5) {
-                return {
-                    statusCode: 429,
+            if (Number(recentRows[0]?.total || 0) >= PAYMENT_OTP_MAX_SENT_PER_WINDOW) {
+                const retrySeconds = paymentOtpRetrySeconds(recentRows[0]?.retry_after_seconds);
+                return paymentOtpCooldownResponse(
                     headers,
-                    body: JSON.stringify({
-                        error: "Too many codes requested. Please wait a few minutes and try again.",
-                    }),
-                };
+                    `Too many verification emails requested. Please try again in ${formatPaymentOtpWaitTime(retrySeconds)}.`,
+                    retrySeconds,
+                    "PAYMENT_OTP_RATE_LIMIT"
+                );
+            }
+
+            // A broken Gmail connection must not permit unlimited retries.
+            // Failed attempts have their own independent 10-minute allowance.
+            const [failureRows] = await connection.execute(
+                `SELECT COUNT(*) AS total,
+                        TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(),
+                                              DATE_ADD(MIN(attempted_at), INTERVAL ? MINUTE)) AS retry_after_seconds
+                 FROM payment_otp_email_failures
+                 WHERE store_id = ?
+                   AND attempted_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? MINUTE)`,
+                [PAYMENT_OTP_RATE_WINDOW_MINUTES, storeId, PAYMENT_OTP_RATE_WINDOW_MINUTES]
+            );
+
+            if (Number(failureRows[0]?.total || 0) >= PAYMENT_OTP_MAX_FAILED_PER_WINDOW) {
+                const retrySeconds = paymentOtpRetrySeconds(failureRows[0]?.retry_after_seconds);
+                return paymentOtpCooldownResponse(
+                    headers,
+                    `Email delivery has failed repeatedly. Please wait ${formatPaymentOtpWaitTime(retrySeconds)} before trying again. If the issue persists, check the Auth Lambda Gmail SMTP connection.`,
+                    retrySeconds,
+                    "PAYMENT_OTP_EMAIL_COOLDOWN"
+                );
             }
 
             let planName = null;
@@ -1922,31 +2749,99 @@ module.exports.handler = async (event) => {
             const otp = generateOtp();
             const otpHash = hashOtp(otp);
 
-            // Only one live code per store at a time — requesting a new one
-            // invalidates whatever was sent before.
-            await connection.execute(
-                `UPDATE payment_otps SET used = 1 WHERE store_id = ? AND used = 0`,
-                [storeId]
-            );
-
-            await connection.execute(
+            // Keep this OTP unusable until the SMTP server accepts the email.
+            // In particular, do not invalidate the owner's previous active code
+            // when delivery of this replacement code fails.
+            const [insertResult] = await connection.execute(
                 `INSERT INTO payment_otps (store_id, email, otp_hash, expires_at, used)
-                 VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
+                 VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 1)`,
                 [storeId, ownerEmail, otpHash, PAYMENT_OTP_EXPIRY_SECONDS]
             );
+            const newOtpId = Number(insertResult.insertId);
 
             try {
                 await sendPaymentOtpEmail(ownerEmail, otp, planName);
             } catch (emailError) {
-                await connection.execute(
-                    `UPDATE payment_otps
-                     SET used = 1
-                     WHERE store_id = ?
-                       AND otp_hash = ?
-                       AND used = 0`,
-                    [storeId, otpHash]
+                // Remove the code that was never delivered. It will not count
+                // toward the five accepted-email OTP requests.
+                try {
+                    await connection.execute(
+                        "DELETE FROM payment_otps WHERE id = ? AND store_id = ? AND used = 1",
+                        [newOtpId, storeId]
+                    );
+                } catch (cleanupError) {
+                    console.error("[stocknbook-auth] Unable to clean up undelivered OTP:", {
+                        store_id: storeId,
+                        message: cleanupError?.message,
+                    });
+                }
+
+                const smtpErrorCode = String(emailError?.code || "SMTP_DELIVERY_FAILED")
+                    .replace(/[^A-Za-z0-9_]/g, "_").slice(0, 50);
+                try {
+                    await connection.execute(
+                        `INSERT INTO payment_otp_email_failures
+                             (store_id, smtp_error_code, attempted_at)
+                         VALUES (?, ?, UTC_TIMESTAMP())`,
+                        [storeId, smtpErrorCode]
+                    );
+                } catch (trackingError) {
+                    console.error("[stocknbook-auth] Unable to track OTP email failure:", {
+                        store_id: storeId,
+                        message: trackingError?.message,
+                    });
+                }
+
+                console.error("[stocknbook-auth] Subscription OTP was not delivered:", {
+                    store_id: storeId,
+                    code: smtpErrorCode,
+                    message: emailError?.message || "Unknown SMTP failure",
+                });
+
+                const deliveryError = new Error(
+                    smtpErrorCode === "GMAIL_AUTH_FAILED" || smtpErrorCode === "SMTP_NOT_CONFIGURED"
+                        ? "StockNBook could not authenticate its email sender. Ask the administrator to check the Auth Lambda Gmail App Password before retrying."
+                        : "StockNBook could not send the verification email. No new code was activated. Please try again shortly or check the Auth Lambda email-service logs."
                 );
-                throw emailError;
+                deliveryError.statusCode = 503;
+                deliveryError.code = "PAYMENT_OTP_EMAIL_FAILED";
+                throw deliveryError;
+            }
+
+            // Gmail accepted the message: now activate the new code atomically
+            // and invalidate only the previously active code(s).
+            await connection.beginTransaction();
+            try {
+                await connection.execute(
+                    "UPDATE payment_otps SET used = 1 WHERE store_id = ? AND used = 0",
+                    [storeId]
+                );
+                const [activation] = await connection.execute(
+                    `UPDATE payment_otps
+                     SET used = 0, expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND)
+                     WHERE id = ? AND store_id = ? AND used = 1`,
+                    [PAYMENT_OTP_EXPIRY_SECONDS, newOtpId, storeId]
+                );
+                if (Number(activation.affectedRows || 0) !== 1) {
+                    throw new Error("The emailed OTP could not be activated in the database.");
+                }
+                await connection.commit();
+            } catch (activationError) {
+                await connection.rollback();
+                throw activationError;
+            }
+
+            // Explicit local debug remains optional, but a failed email never
+            // silently turns into a successful terminal-only OTP.
+            if (PAYMENT_OTP_TERMINAL_DEBUG) {
+                console.log(
+                    `[StockNBook DEV OTP] Subscription payment verification | ` +
+                    `Store ID: ${storeId} | ` +
+                    `Plan: ${planName || "Selected plan"} | ` +
+                    `Email: ${ownerEmail} | ` +
+                    `OTP: ${otp} | ` +
+                    `Expires in: ${PAYMENT_OTP_EXPIRY_SECONDS}s`
+                );
             }
 
             return {
@@ -1954,6 +2849,7 @@ module.exports.handler = async (event) => {
                 headers,
                 body: JSON.stringify({
                     message: "Verification code sent to your email.",
+                    delivery: "email",
                     expires_in: PAYMENT_OTP_EXPIRY_SECONDS,
                     email_hint: ownerEmail.replace(/^(.{2}).+(@.+)$/, "$1***$2"),
                 }),
@@ -1974,7 +2870,81 @@ module.exports.handler = async (event) => {
             }
 
             const result = await submitOwnerPlanPayment(connection, decoded, body);
+
+            // The payment INSERT succeeded. Email delivery is best-effort so an
+            // SMTP outage never causes the owner to re-submit an existing payment.
+            let confirmationEmailStatus = "failed";
+            try {
+                const [storeRows] = await connection.execute(
+                    "SELECT store_name, email FROM stores WHERE id = ? LIMIT 1",
+                    [Number(decoded.store_id)]
+                );
+                const store = storeRows[0];
+                const ownerEmail = String(store?.email || "").trim().toLowerCase();
+                if (ownerEmail) {
+                    await sendPaymentSubmissionAcknowledgmentEmail(ownerEmail, {
+                        ...result,
+                        store_name: store.store_name,
+                    });
+                    confirmationEmailStatus = "sent";
+                } else {
+                    confirmationEmailStatus = "no_email_on_file";
+                }
+            } catch (notificationError) {
+                console.error("[stocknbook-auth] Payment saved, but acknowledgment email failed:", {
+                    payment_submission_id: result.payment_submission_id,
+                    message: notificationError?.message || "Unknown email error",
+                });
+            }
+            return {
+                statusCode: 201,
+                headers,
+                body: JSON.stringify({
+                    ...result,
+                    confirmation_email_status: confirmationEmailStatus,
+                }),
+            };
+        }
+
+        if (action === "request_subscription_downgrade") {
+            const token = getBearerTokenFromEvent(event);
+            if (!token) {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Missing token" }) };
+            }
+
+            let decoded;
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid token" }) };
+            }
+
+            const result = await requestOwnerSubscriptionDowngrade(
+                connection,
+                decoded,
+                body
+            );
             return { statusCode: 201, headers, body: JSON.stringify(result) };
+        }
+
+        if (action === "cancel_subscription_downgrade") {
+            const token = getBearerTokenFromEvent(event);
+            if (!token) {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Missing token" }) };
+            }
+
+            let decoded;
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid token" }) };
+            }
+
+            const result = await cancelOwnerSubscriptionDowngrade(
+                connection,
+                decoded
+            );
+            return { statusCode: 200, headers, body: JSON.stringify(result) };
         }
 
         // SEND SIGNUP OTP
@@ -2680,19 +3650,23 @@ module.exports.handler = async (event) => {
 
             if (shouldSendInvitationEmails) {
                 for (const invite of inviteLinks) {
-                    try {
-                        await sendManagerInvitationEmail(invite);
+                    const delivery = await deliverInvitationEmail({
+                        role: "Manager",
+                        email: invite.manager_email,
+                        name: invite.manager_name,
+                        storeName: invite.store_name,
+                        branchName: invite.branch_name,
+                        inviteLink: invite.invite_link,
+                        send: () => sendManagerInvitationEmail(invite),
+                    });
 
-                        invite.email_sent = true;
-                        invite.email_status = "sent";
-                        invite.email_error = "";
+                    invite.email_sent = delivery.email_sent;
+                    invite.email_status = delivery.email_status;
+                    invite.email_error = delivery.email_error;
+
+                    if (delivery.email_sent) {
                         invitationEmailsSent += 1;
-                    } catch (emailError) {
-                        invite.email_sent = false;
-                        invite.email_status = "failed";
-                        invite.email_error =
-                            emailError?.message ||
-                            "Unable to send the manager invitation email.";
+                    } else {
                         invitationEmailsFailed += 1;
                     }
                 }
@@ -2788,6 +3762,17 @@ module.exports.handler = async (event) => {
                     ]
                 );
 
+                if (INVITATION_TERMINAL_DEBUG) {
+                    console.log(
+                        `[StockNBook DEV OTP] Manager invitation verification | ` +
+                        `Email: ${manager.manager_email} | ` +
+                        `OTP: ${otp} | ` +
+                        `Expires in: ${MANAGER_INVITE_OTP_EXPIRY_SECONDS}s`
+                    );
+                }
+
+                let managerOtpDelivery = "email";
+
                 try {
                     await sendManagerInviteOtpEmail(
                         manager.manager_email,
@@ -2795,23 +3780,38 @@ module.exports.handler = async (event) => {
                         manager.manager_name
                     );
                 } catch (emailError) {
-                    await connection.execute(
-                        `UPDATE manager_invite_otps
-                         SET used = 1
-                         WHERE invite_token_hash = ?
-                           AND email = ?
-                           AND otp_hash = ?
-                           AND used = 0`,
-                        [inviteTokenHash, manager.manager_email, otpHash]
-                    );
-                    throw emailError;
+                    if (INVITATION_TERMINAL_DEBUG) {
+                        managerOtpDelivery = "terminal";
+                        console.warn(
+                            "[StockNBook DEV OTP] Manager invitation OTP email could not be delivered. " +
+                            "The OTP remains active for local testing and is shown in the IDE terminal.",
+                            {
+                                email: manager.manager_email,
+                                error: emailError?.message || "Email delivery failed",
+                            }
+                        );
+                    } else {
+                        await connection.execute(
+                            `UPDATE manager_invite_otps
+                             SET used = 1
+                             WHERE invite_token_hash = ?
+                               AND email = ?
+                               AND otp_hash = ?
+                               AND used = 0`,
+                            [inviteTokenHash, manager.manager_email, otpHash]
+                        );
+                        throw emailError;
+                    }
                 }
 
                 return {
                     statusCode: 200,
                     headers,
                     body: JSON.stringify({
-                        message: "Verification code sent successfully.",
+                        message:
+                            managerOtpDelivery === "terminal"
+                                ? "Verification code generated for local testing. Check the IDE terminal."
+                                : "Verification code sent successfully.",
                         expires_in: MANAGER_INVITE_OTP_EXPIRY_SECONDS,
                     }),
                 };
@@ -3309,39 +4309,29 @@ module.exports.handler = async (event) => {
                 permissions,
             };
 
-            let emailSent = false;
-            let emailError = "";
-
-            try {
-                await sendStaffInvitationEmail(invitation);
-                emailSent = true;
-            } catch (sendError) {
-                emailError =
-                    sendError?.message ||
-                    "Unable to send the staff invitation email.";
-
-                console.error(
-                    "[stocknbook-auth] Staff invitation was saved but email delivery failed:",
-                    {
-                        to: staffEmail,
-                        error: emailError,
-                    }
-                );
-            }
+            const delivery = await deliverInvitationEmail({
+                role: "Staff",
+                email: staffEmail,
+                name: staffName,
+                storeName: manager.store_name || "StockNBook Store",
+                branchName: manager.branch_name || "Assigned Branch",
+                inviteLink,
+                send: () => sendStaffInvitationEmail(invitation),
+            });
 
             return {
                 statusCode: 201,
                 headers,
                 body: JSON.stringify({
-                    message: emailSent
+                    message: delivery.email_sent
                         ? "Staff invitation created and emailed successfully."
-                        : "Staff invitation was created, but the email could not be sent. Use Resend after checking the SMTP configuration.",
+                        : "Staff invitation created successfully, but the email could not be delivered. Copy the backup invite link or use Resend later.",
                     invite_link: inviteLink,
                     staff_email: staffEmail,
                     staff_name: staffName,
-                    email_sent: emailSent,
-                    email_status: emailSent ? "sent" : "failed",
-                    email_error: emailError,
+                    email_sent: delivery.email_sent,
+                    email_status: delivery.email_status,
+                    email_error: delivery.email_error,
                 }),
             };
         }
@@ -3775,6 +4765,17 @@ module.exports.handler = async (event) => {
                     ]
                 );
 
+                if (INVITATION_TERMINAL_DEBUG) {
+                    console.log(
+                        `[StockNBook DEV OTP] Staff invitation verification | ` +
+                        `Email: ${staff.staff_email} | ` +
+                        `OTP: ${otp} | ` +
+                        `Expires in: ${STAFF_INVITE_OTP_EXPIRY_SECONDS}s`
+                    );
+                }
+
+                let staffOtpDelivery = "email";
+
                 try {
                     await sendStaffInviteOtpEmail(
                         staff.staff_email,
@@ -3782,23 +4783,38 @@ module.exports.handler = async (event) => {
                         staff.staff_name
                     );
                 } catch (emailError) {
-                    await connection.execute(
-                        `UPDATE staff_invite_otps
-                         SET used = 1
-                         WHERE invite_token_hash = ?
-                           AND email = ?
-                           AND otp_hash = ?
-                           AND used = 0`,
-                        [inviteTokenHash, staff.staff_email, otpHash]
-                    );
-                    throw emailError;
+                    if (INVITATION_TERMINAL_DEBUG) {
+                        staffOtpDelivery = "terminal";
+                        console.warn(
+                            "[StockNBook DEV OTP] Staff invitation OTP email could not be delivered. " +
+                            "The OTP remains active for local testing and is shown in the IDE terminal.",
+                            {
+                                email: staff.staff_email,
+                                error: emailError?.message || "Email delivery failed",
+                            }
+                        );
+                    } else {
+                        await connection.execute(
+                            `UPDATE staff_invite_otps
+                             SET used = 1
+                             WHERE invite_token_hash = ?
+                               AND email = ?
+                               AND otp_hash = ?
+                               AND used = 0`,
+                            [inviteTokenHash, staff.staff_email, otpHash]
+                        );
+                        throw emailError;
+                    }
                 }
 
                 return {
                     statusCode: 200,
                     headers,
                     body: JSON.stringify({
-                        message: "Verification code sent successfully.",
+                        message:
+                            staffOtpDelivery === "terminal"
+                                ? "Verification code generated for local testing. Check the IDE terminal."
+                                : "Verification code sent successfully.",
                         expires_in: STAFF_INVITE_OTP_EXPIRY_SECONDS,
                     }),
                 };
@@ -4008,11 +5024,18 @@ module.exports.handler = async (event) => {
                 );
 
                 try {
+                    // The pending invitation already occupies one staff slot.
+                    // Activating it changes the existing row from pending -> active,
+                    // so it must NOT consume a second plan slot.
+                    //
+                    // We still validate with increment 0 so a downgrade or other
+                    // plan change that leaves current usage above the limit can
+                    // correctly block activation.
                     await assertPlanLimit(
                         connection,
                         Number(staff.store_id),
                         "staff",
-                        1,
+                        0,
                         "staff"
                     );
                 } catch (limitError) {
@@ -4757,49 +5780,39 @@ module.exports.handler = async (event) => {
                     ? JSON.parse(staff.permissions || "{}")
                     : staff.permissions || {};
 
-            try {
-                await sendStaffInvitationEmail({
-                    staff_email: staff.staff_email,
-                    staff_name: staff.staff_name,
-                    manager_name: manager.manager_name || "Branch Manager",
-                    store_name: manager.store_name || "StockNBook Store",
-                    branch_name: manager.branch_name || "Assigned Branch",
-                    invite_link: inviteLink,
-                    permissions: staffPermissions,
-                });
-            } catch (sendError) {
-                const emailError =
-                    sendError?.message ||
-                    "Unable to resend the staff invitation email.";
+            const resendInvitation = {
+                staff_email: staff.staff_email,
+                staff_name: staff.staff_name,
+                manager_name: manager.manager_name || "Branch Manager",
+                store_name: manager.store_name || "StockNBook Store",
+                branch_name: manager.branch_name || "Assigned Branch",
+                invite_link: inviteLink,
+                permissions: staffPermissions,
+            };
 
-                return {
-                    statusCode: 502,
-                    headers,
-                    body: JSON.stringify({
-                        error: emailError,
-                        message:
-                            "The invitation link was refreshed, but Gmail did not accept the email.",
-                        invite_link: inviteLink,
-                        staff_email: staff.staff_email,
-                        staff_name: staff.staff_name,
-                        email_sent: false,
-                        email_status: "failed",
-                        email_error: emailError,
-                    }),
-                };
-            }
+            const delivery = await deliverInvitationEmail({
+                role: "Staff",
+                email: staff.staff_email,
+                name: staff.staff_name,
+                storeName: manager.store_name || "StockNBook Store",
+                branchName: manager.branch_name || "Assigned Branch",
+                inviteLink,
+                send: () => sendStaffInvitationEmail(resendInvitation),
+            });
 
             return {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
-                    message: "Staff invitation emailed successfully.",
+                    message: delivery.email_sent
+                        ? "Staff invitation emailed successfully."
+                        : "The staff invitation link was refreshed, but the email could not be delivered. Copy the backup link or try Resend later.",
                     invite_link: inviteLink,
                     staff_email: staff.staff_email,
                     staff_name: staff.staff_name,
-                    email_sent: true,
-                    email_status: "sent",
-                    email_error: "",
+                    email_sent: delivery.email_sent,
+                    email_status: delivery.email_status,
+                    email_error: delivery.email_error,
                 }),
             };
         }
@@ -5023,66 +6036,23 @@ module.exports.handler = async (event) => {
                 permissions,
             };
 
-            try {
-                await sendManagerInvitationEmail(invitation);
-            } catch (sendError) {
-                const emailError =
-                    sendError?.message ||
-                    "Unable to send the manager invitation email.";
-
-                // Do not leave a branch occupied by a pending manager when
-                // the activation email was not delivered. This allows the
-                // owner to correct the SMTP configuration and try again.
-                await connection.execute(
-                    `DELETE FROM managers
-                     WHERE id = ?
-                       AND store_id = ?
-                       AND branch_id = ?
-                       AND manager_email = ?
-                       AND status = 'pending'`,
-                    [
-                        managerResult.insertId,
-                        storeId,
-                        branchId,
-                        managerEmail,
-                    ]
-                );
-
-                console.error(
-                    "[stocknbook-auth] Manager invitation email failed. Pending manager record was removed:",
-                    {
-                        manager_id: managerResult.insertId,
-                        branch_id: branchId,
-                        manager_email: managerEmail,
-                        code: sendError?.code || "EMAIL_SEND_FAILED",
-                        error: emailError,
-                    }
-                );
-
-                return {
-                    statusCode: 502,
-                    headers,
-                    body: JSON.stringify({
-                        error: emailError,
-                        code:
-                            sendError?.code ||
-                            "EMAIL_SEND_FAILED",
-                        message:
-                            "The manager was not added because the activation email could not be sent. Fix the email configuration and try again.",
-                        manager_created: false,
-                        email_sent: false,
-                        email_status: "failed",
-                        email_error: emailError,
-                    }),
-                };
-            }
+            const delivery = await deliverInvitationEmail({
+                role: "Manager",
+                email: managerEmail,
+                name: managerName,
+                storeName: branch.store_name || "StockNBook Store",
+                branchName: branch.branch_name || "Assigned Branch",
+                inviteLink,
+                send: () => sendManagerInvitationEmail(invitation),
+            });
 
             return {
                 statusCode: 201,
                 headers,
                 body: JSON.stringify({
-                    message:
-                        "Manager added and invitation email sent successfully.",
+                    message: delivery.email_sent
+                        ? "Manager added and invitation email sent successfully."
+                        : "Manager added successfully, but the invitation email could not be delivered. Copy the backup invite link or use Resend later.",
                     manager: {
                         id: managerResult.insertId,
                         name: managerName,
@@ -5094,9 +6064,177 @@ module.exports.handler = async (event) => {
                         permissions,
                     },
                     invite_link: inviteLink,
-                    email_sent: true,
-                    email_status: "sent",
-                    email_error: "",
+                    email_sent: delivery.email_sent,
+                    email_status: delivery.email_status,
+                    email_error: delivery.email_error,
+                }),
+            };
+        }
+
+        // RESEND MANAGER INVITATION
+        if (action === "resend_manager_invite") {
+            const token = getBearerTokenFromEvent(event);
+
+            if (!token) {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({ error: "Missing token" }),
+                };
+            }
+
+            let decoded;
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({ error: "Invalid token" }),
+                };
+            }
+
+            if (decoded.role !== "owner" || !decoded.store_id) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Only the store owner can resend a manager invitation.",
+                    }),
+                };
+            }
+
+            const storeId = Number(decoded.store_id);
+            const managerId = Number(body.manager_id);
+            const managerEmail = String(body.manager_email || "")
+                .trim()
+                .toLowerCase();
+
+            if ((!Number.isInteger(managerId) || managerId <= 0) && !managerEmail) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Select a pending manager invitation to resend.",
+                    }),
+                };
+            }
+
+            const whereClause =
+                Number.isInteger(managerId) && managerId > 0
+                    ? "managers.id = ?"
+                    : "LOWER(managers.manager_email) = ?";
+
+            const lookupValue =
+                Number.isInteger(managerId) && managerId > 0
+                    ? managerId
+                    : managerEmail;
+
+            const [managerRows] = await connection.execute(
+                `SELECT
+                     managers.id,
+                     managers.manager_name,
+                     managers.manager_email,
+                     managers.permissions,
+                     managers.status,
+                     managers.branch_id,
+                     branches.branch_name,
+                     stores.store_name
+                 FROM managers
+                          JOIN branches
+                               ON branches.id = managers.branch_id
+                                   AND branches.store_id = managers.store_id
+                          JOIN stores
+                               ON stores.id = managers.store_id
+                 WHERE managers.store_id = ?
+                   AND ${whereClause}
+                     LIMIT 1`,
+                [storeId, lookupValue]
+            );
+
+            if (managerRows.length === 0) {
+                return {
+                    statusCode: 404,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Pending manager invitation not found.",
+                    }),
+                };
+            }
+
+            const manager = managerRows[0];
+
+            if (String(manager.status || "").toLowerCase() !== "pending") {
+                return {
+                    statusCode: 409,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Only pending manager invitations can be resent.",
+                    }),
+                };
+            }
+
+            const inviteToken = jwt.sign(
+                {
+                    store_id: storeId,
+                    branch_id: manager.branch_id,
+                    email: manager.manager_email,
+                    type: "manager_invite",
+                },
+                JWT_SECRET,
+                { expiresIn: "7d" }
+            );
+
+            const inviteLink =
+                `${APP_BASE_URL}/accept-invite?token=${encodeURIComponent(inviteToken)}`;
+
+            await connection.execute(
+                `UPDATE managers
+                 SET invite_token = ?
+                 WHERE id = ?
+                   AND store_id = ?
+                   AND status = 'pending'`,
+                [inviteToken, manager.id, storeId]
+            );
+
+            const permissions =
+                typeof manager.permissions === "string"
+                    ? JSON.parse(manager.permissions || "{}")
+                    : manager.permissions || {};
+
+            const invitation = {
+                manager_email: manager.manager_email,
+                manager_name: manager.manager_name,
+                store_name: manager.store_name || "StockNBook Store",
+                branch_name: manager.branch_name || "Assigned Branch",
+                invite_link: inviteLink,
+                permissions,
+            };
+
+            const delivery = await deliverInvitationEmail({
+                role: "Manager",
+                email: manager.manager_email,
+                name: manager.manager_name,
+                storeName: manager.store_name || "StockNBook Store",
+                branchName: manager.branch_name || "Assigned Branch",
+                inviteLink,
+                send: () => sendManagerInvitationEmail(invitation),
+            });
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    message: delivery.email_sent
+                        ? "Manager invitation emailed successfully."
+                        : "The manager invitation link was refreshed, but the email could not be delivered. Copy the backup link or try Resend later.",
+                    manager_id: Number(manager.id),
+                    manager_email: manager.manager_email,
+                    manager_name: manager.manager_name,
+                    invite_link: inviteLink,
+                    email_sent: delivery.email_sent,
+                    email_status: delivery.email_status,
+                    email_error: delivery.email_error,
                 }),
             };
         }
@@ -5311,11 +6449,12 @@ module.exports.handler = async (event) => {
 
             const storeId = decoded.store_id;
 
-            if (!storeId) {
+            // Only the store owner may change branch details or manager permissions.
+            if (decoded.role !== "owner" || !storeId) {
                 return {
                     statusCode: 403,
                     headers,
-                    body: JSON.stringify({ error: "Missing store access" }),
+                    body: JSON.stringify({ error: "Only the store owner can update branches." }),
                 };
             }
 
@@ -5489,7 +6628,16 @@ module.exports.handler = async (event) => {
             const storeId = decoded.store_id;
             const { branch_id } = body;
 
-            if (!storeId || !branch_id) {
+            // Branch deletion also removes assigned employees: owner approval is required.
+            if (decoded.role !== "owner" || !storeId) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({ error: "Only the store owner can delete branches." }),
+                };
+            }
+
+            if (!branch_id) {
                 return {
                     statusCode: 400,
                     headers,
@@ -5944,7 +7092,7 @@ module.exports.handler = async (event) => {
         });
 
         return {
-            statusCode: 500,
+            statusCode: Number(err?.statusCode) || 500,
             headers,
             body: JSON.stringify({
                 error: err?.message || "Internal server error",

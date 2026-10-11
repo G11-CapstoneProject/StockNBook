@@ -37,6 +37,7 @@ type StaffPermissions = {
     bookings_access: AccessMode;
     inventory: boolean;
     inventory_access: AccessMode;
+    inventory_stock_receive: boolean;
     packages: boolean;
     package_access: AccessMode;
     reports: boolean;
@@ -54,6 +55,12 @@ type PendingInvite = {
     expiresAt: string;
     status: "Pending";
     permissions: StaffPermissions;
+};
+
+type StaffInviteDelivery = {
+    email: string;
+    emailSent: boolean;
+    emailError: string;
 };
 
 type StaffMember = {
@@ -88,6 +95,7 @@ const defaultPermissions: StaffPermissions = {
     bookings_access: "none",
     inventory: false,
     inventory_access: "none",
+    inventory_stock_receive: false,
     packages: false,
     package_access: "none",
     reports: false,
@@ -142,6 +150,8 @@ export default function ManagerStaffManagementPage() {
     const [statusFilter, setStatusFilter] = useState<StaffStatusFilter>("all");
 
     const [inviteLink, setInviteLink] = useState("");
+    const [inviteDelivery, setInviteDelivery] =
+        useState<StaffInviteDelivery | null>(null);
     const [showAddDialog, setShowAddDialog] = useState(false);
 
     const [editingStaff, setEditingStaff] = useState<StaffMember | null>(null);
@@ -229,7 +239,21 @@ export default function ManagerStaffManagementPage() {
             const rawStaff = data.staff || data.staff_list || [];
             const rawPending = data.pending_invites || data.pendingInvites || data.invites || [];
 
-            setStaffList(rawStaff.map(normalizeStaffMember));
+            // Independent server-owned grant avoids relying on a JWT/session flag.
+            let grants: Record<string, boolean> = {};
+            try {
+                const grantResponse = await fetch("/api/products", {method:"POST", cache:"no-store",
+                    headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
+                    body:JSON.stringify({action:"get_staff_receiving_permissions"})});
+                const grantData = await grantResponse.json().catch(()=>({}));
+                if (grantResponse.ok && Array.isArray(grantData.grants)) {
+                    grants = Object.fromEntries(grantData.grants.map((g:{staffId:number;allowed:boolean})=>[String(g.staffId), g.allowed === true]));
+                }
+            } catch { /* Keep grants fail-closed if the endpoint is unavailable. */ }
+            setStaffList(rawStaff.map((item:unknown)=>{
+                const staff=normalizeStaffMember(item);
+                return {...staff, permissions:{...staff.permissions, inventory_stock_receive:grants[String(staff.id)]===true}};
+            }));
             setPendingInvites(rawPending.map(normalizePendingInvite));
         } catch {
             alert("Something went wrong while loading staff.");
@@ -391,11 +415,26 @@ export default function ManagerStaffManagementPage() {
             }
 
             const generatedLink = data.invite_link || data.inviteLink || "";
+            const emailWasSent =
+                data.email_sent === true ||
+                String(data.email_status || "").toLowerCase() === "sent";
+
             setInviteLink(generatedLink);
+            setInviteDelivery({
+                email: staffEmail.trim().toLowerCase(),
+                emailSent: emailWasSent,
+                emailError: String(data.email_error || ""),
+            });
+
             clearForm();
             setShowAddDialog(false);
             await loadStaff();
-            alert("Staff invite link created!");
+
+            alert(
+                emailWasSent
+                    ? "Staff invitation created and emailed successfully."
+                    : "Staff invitation created successfully, but the email could not be delivered. Copy the backup invite link shown on this page or use Resend later."
+            );
         } catch {
             alert("Something went wrong while creating staff invite.");
         } finally {
@@ -440,6 +479,18 @@ export default function ManagerStaffManagementPage() {
                 return;
             }
 
+            // The auth Lambda handles module permissions; the products Lambda
+            // persists the narrowly scoped receiving grant after that update.
+            const grantResponse = await fetch("/api/products", {method:"POST",cache:"no-store",
+                headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
+                body:JSON.stringify({action:"set_staff_receiving_permission", staffId:editingStaff.id,
+                    allowed:editPermissions.inventory_stock_receive && editPermissions.inventory_access === "full"})});
+            const grantResult = await grantResponse.json().catch(()=>({}));
+            if (!grantResponse.ok || !grantResult.success) {
+                alert(`General permissions were saved, but stock receiving permission was not updated: ${grantResult.error || "server error"}. Please retry.`);
+                await loadStaff();
+                return;
+            }
             window.dispatchEvent(new Event("stocknbook-permissions-updated"));
             setEditingStaff(null);
             await loadStaff();
@@ -526,13 +577,42 @@ export default function ManagerStaffManagementPage() {
             });
 
             const data = await res.json();
+
+            const refreshedLink = String(
+                data.invite_link || data.inviteLink || ""
+            ).trim();
+
+            if (refreshedLink) {
+                setInviteLink(refreshedLink);
+            }
+
+            const emailWasSent =
+                data.email_sent === true ||
+                String(data.email_status || "").toLowerCase() === "sent";
+
+            if (refreshedLink) {
+                setInviteDelivery({
+                    email,
+                    emailSent: emailWasSent,
+                    emailError: String(data.email_error || ""),
+                });
+            }
+
             if (!res.ok) {
-                alert(data.error || JSON.stringify(data));
+                alert(
+                    data.error ||
+                    data.message ||
+                    "Unable to resend the staff invitation."
+                );
                 return;
             }
 
             await loadStaff();
-            alert(`Invite resent to ${email}`);
+            alert(
+                emailWasSent
+                    ? `Invitation emailed to ${email}.`
+                    : "The staff invitation link was refreshed, but the email could not be delivered. Copy the backup link shown on this page."
+            );
         } catch {
             alert("Something went wrong while resending invite.");
         }
@@ -689,15 +769,42 @@ export default function ManagerStaffManagementPage() {
                                 <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EEF4FF] text-[#3367D6]">
                                     <Mail size={18} />
                                 </span>
-                                    <div>
-                                        <h2 className="text-[16px] font-bold text-[#1A1220]">
-                                            Latest invite link
-                                        </h2>
+                                    <div className="min-w-0 flex-1">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <h2 className="text-[16px] font-bold text-[#1A1220]">
+                                                Latest staff invitation
+                                            </h2>
+                                            {inviteDelivery && (
+                                                <span
+                                                    className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                                                        inviteDelivery.emailSent
+                                                            ? "bg-[#EDFBF1] text-[#138342]"
+                                                            : "bg-[#FFF4E6] text-[#9A5A00]"
+                                                    }`}
+                                                >
+                                                    {inviteDelivery.emailSent
+                                                        ? "Email sent"
+                                                        : "Email not sent"}
+                                                </span>
+                                            )}
+                                        </div>
                                         <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                            Copy this link and use it to activate the staff account.
+                                            {inviteDelivery
+                                                ? inviteDelivery.emailSent
+                                                    ? `Invitation email sent to ${inviteDelivery.email}. The backup link is also available below.`
+                                                    : `Email could not be delivered to ${inviteDelivery.email}. The invitation link is still valid.`
+                                                : "Copy this link and use it to activate the staff account."}
                                         </p>
                                     </div>
                                 </div>
+
+                                {inviteDelivery &&
+                                    !inviteDelivery.emailSent &&
+                                    inviteDelivery.emailError && (
+                                        <p className="mt-3 rounded-xl border border-[#F0D9B5] bg-[#FFF9EF] px-3 py-2 text-xs text-[#8A5A11]">
+                                            {inviteDelivery.emailError}
+                                        </p>
+                                    )}
 
                                 <div className="mt-4 flex flex-col gap-2 sm:flex-row">
                                     <input
@@ -1169,6 +1276,14 @@ export default function ManagerStaffManagementPage() {
                                     value={editPermissions.inventory_access}
                                     onChange={(value) => updateEditFeatureAccess("inventory", value as AccessMode)}
                                 />
+                                <label className="flex items-start gap-3 rounded-xl border border-[#E6DDF0] bg-[#F9F6FF] px-4 py-3 text-sm">
+                                    <input type="checkbox" className="mt-1 accent-[#2B174C]"
+                                           checked={editPermissions.inventory_stock_receive && editPermissions.inventory_access === "full"}
+                                           disabled={editPermissions.inventory_access !== "full"}
+                                           onChange={event=>setEditPermissions(prev=>({...prev, inventory_stock_receive:event.target.checked}))}/>
+                                    <span><strong>Authorized Stock Receiver</strong>
+                                        <span className="mt-1 block text-xs text-[#806A8C]">Can confirm Manager-authorized stock deliveries. Requires full Inventory access; cannot buy products or change prices.</span></span>
+                                </label>
                                 <AccessModeRow
                                     label="Packages"
                                     value={editPermissions.package_access}
@@ -1282,6 +1397,7 @@ function normalizePermissions(raw: any): StaffPermissions {
         bookings_access: bookingsAccess,
         inventory: inventoryAccess !== "none",
         inventory_access: inventoryAccess,
+        inventory_stock_receive: parsed.inventory_stock_receive === true,
         packages: packageAccess !== "none",
         package_access: packageAccess,
         reports: reportsAccess !== "none",
@@ -1525,6 +1641,7 @@ function formatPermissions(permissions: StaffPermissions) {
     if (permissions.pos_access !== "none") list.push(`POS / Sales: ${formatAccess(permissions.pos_access)}`);
     if (permissions.bookings_access !== "none") list.push(`Bookings: ${formatAccess(permissions.bookings_access)}`);
     if (permissions.inventory_access !== "none") list.push(`Inventory: ${formatAccess(permissions.inventory_access)}`);
+    if (permissions.inventory_stock_receive) list.push("Authorized Stock Receiver");
     if (permissions.package_access !== "none") list.push(`Packages: ${formatAccess(permissions.package_access)}`);
     if (permissions.reports_access !== "none") list.push(`Reports: ${formatAccess(permissions.reports_access)}`);
     if (permissions.analytics_access !== "none") list.push(`Analytics: ${formatAccess(permissions.analytics_access)}`);

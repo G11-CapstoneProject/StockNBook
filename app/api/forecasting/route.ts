@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handler } from "../../../lambda-forecasting/index.js";
+import { requireEffectivePlanFeature } from "../_helpers/require-effective-plan-feature";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -50,6 +51,9 @@ export async function POST(request: NextRequest) {
             );
         }
 
+
+        const subscriptionGate = await requireEffectivePlanFeature(authHeader, "has_forecasting");
+        if (subscriptionGate) return subscriptionGate;
 
         const event = {
 

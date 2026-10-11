@@ -337,7 +337,7 @@ function CancellationConfirmModal({
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[200] flex items-center justify-center overflow-y-auto bg-black/45 px-3 py-3 backdrop-blur-sm sm:px-4 sm:py-6">
             <div className="w-full max-w-md rounded-[18px] border border-[#E6DDF0] bg-white p-5 shadow-2xl">
                 <div className="flex items-start gap-3">
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF0F0] text-[#C32F2F]">
@@ -2363,7 +2363,7 @@ export default function CustomerBookingPage() {
             {/* ── Package Details Modal ── */}
             {detailsPackage && (
                 <div
-                    className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm"
+                    className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/45 px-3 py-3 backdrop-blur-sm sm:px-4 sm:py-6"
                     role="dialog"
                     aria-modal="true"
                     aria-label={`${detailsPackage.name} package details`}
@@ -2597,7 +2597,7 @@ export default function CustomerBookingPage() {
 
             {detailsPackage && showExpandedPackageImage && (
                 <div
-                    className="fixed inset-0 z-[120] flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
+                    className="fixed inset-0 z-[120] flex items-center justify-center overflow-y-auto bg-black/85 p-2 backdrop-blur-sm sm:p-4"
                     role="dialog"
                     aria-modal="true"
                     aria-label={`${detailsPackage.name} enlarged cover image`}

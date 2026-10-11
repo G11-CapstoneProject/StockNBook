@@ -1,4 +1,5 @@
 const mysql = require("mysql2/promise");
+const tls = require("node:tls");
 
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -162,10 +163,66 @@ function lowerStatus(status) {
     return normalizeStatus(status).toLowerCase();
 }
 
-function changeTypeForPlanChange(oldPlanId, newPlanId) {
-    if (!oldPlanId) return "upgrade";
-    if (Number(newPlanId) === Number(oldPlanId)) return "renewal";
-    return Number(newPlanId) > Number(oldPlanId) ? "upgrade" : "downgrade";
+const BUILT_IN_SUBSCRIPTION_PLAN_TIER = {
+    starter: 1,
+    growth: 2,
+    scale: 3,
+};
+
+function getSubscriptionPlanTier(plan) {
+    if (!plan) return null;
+
+    const explicitTier = Number(plan.tier_order);
+    if (Number.isInteger(explicitTier) && explicitTier > 0) {
+        return explicitTier;
+    }
+
+    return (
+        BUILT_IN_SUBSCRIPTION_PLAN_TIER[
+            String(plan.name || "").trim().toLowerCase()
+            ] ?? null
+    );
+}
+
+function changeTypeForPlanChange(oldPlan, newPlan) {
+    if (!oldPlan) return "upgrade";
+    if (Number(newPlan?.id) === Number(oldPlan?.id)) return "renewal";
+
+    const oldTier = getSubscriptionPlanTier(oldPlan);
+    const newTier = getSubscriptionPlanTier(newPlan);
+
+    if (oldTier !== null && newTier !== null) {
+        return newTier > oldTier ? "upgrade" : "downgrade";
+    }
+
+    return Number(newPlan?.price || 0) > Number(oldPlan?.price || 0)
+        ? "upgrade"
+        : "downgrade";
+}
+
+async function ensureSubscriptionPlanChangesTable(connection) {
+    await connection.execute(`
+        CREATE TABLE IF NOT EXISTS subscription_plan_changes (
+                                                                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                                 subscription_id BIGINT NULL,
+                                                                 store_id BIGINT NOT NULL,
+                                                                 current_plan_id BIGINT NOT NULL,
+                                                                 target_plan_id BIGINT NOT NULL,
+                                                                 change_type VARCHAR(20) NOT NULL DEFAULT 'DOWNGRADE',
+            status VARCHAR(30) NOT NULL DEFAULT 'SCHEDULED',
+            requested_by_role VARCHAR(30) NOT NULL DEFAULT 'owner',
+            requested_by_email VARCHAR(255) NULL,
+            requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            effective_at DATE NOT NULL,
+            cancelled_at DATETIME NULL,
+            applied_at DATETIME NULL,
+            notes VARCHAR(500) NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_subscription_plan_changes_store_status (store_id, status),
+            INDEX idx_subscription_plan_changes_subscription_status (subscription_id, status),
+            INDEX idx_subscription_plan_changes_effective (status, effective_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
 }
 
 function getBearerToken(headers = {}) {
@@ -478,6 +535,8 @@ async function listBusinesses(connection, search) {
 }
 
 async function listSubscriptions(connection, search, statusFilter) {
+    await ensureSubscriptionPlanChangesTable(connection);
+
     const values = [];
     const filters = [];
     const cleanSearch = text(search, 120);
@@ -517,10 +576,26 @@ async function listSubscriptions(connection, search, statusFilter) {
              s.email AS owner_email,
              pl.name AS plan_name,
              pl.price AS plan_price,
+             spc.id AS plan_change_id,
+             spc.status AS plan_change_status,
+             spc.effective_at AS plan_change_effective_at,
+             spc.target_plan_id AS plan_change_target_plan_id,
+             target_plan.name AS plan_change_target_plan_name,
+             target_plan.price AS plan_change_target_plan_price,
              (SELECT COUNT(*) FROM subscription_history sh WHERE sh.subscription_id = sub.id) AS history_count
          FROM subscriptions sub
                   INNER JOIN stores s ON s.id = sub.store_id
                   INNER JOIN plans pl ON pl.id = sub.plan_id
+                  LEFT JOIN subscription_plan_changes spc
+                            ON spc.id = (
+                                SELECT spc2.id
+                                FROM subscription_plan_changes spc2
+                                WHERE spc2.store_id = sub.store_id
+                                  AND UPPER(spc2.status) IN ('SCHEDULED', 'AWAITING_PAYMENT')
+                                ORDER BY spc2.id DESC
+             LIMIT 1
+             )
+             LEFT JOIN plans target_plan ON target_plan.id = spc.target_plan_id
              ${where}
          ORDER BY sub.expires_at ASC, s.store_name ASC`,
         values
@@ -543,6 +618,16 @@ async function listSubscriptions(connection, search, statusFilter) {
         created_at: row.created_at,
         history_count: Number(row.history_count || 0),
         store_status: String(row.store_status || "").toUpperCase(),
+        scheduled_change: row.plan_change_id
+            ? {
+                id: Number(row.plan_change_id),
+                target_plan_id: Number(row.plan_change_target_plan_id),
+                target_plan_name: row.plan_change_target_plan_name,
+                target_plan_price: Number(row.plan_change_target_plan_price || 0),
+                status: normalizeStatus(row.plan_change_status),
+                effective_at: row.plan_change_effective_at,
+            }
+            : null,
     }));
 }
 
@@ -784,13 +869,346 @@ async function setPlanArchived(connection, planId, archived) {
     return { message: archived ? "Plan archived." : "Plan restored.", plan_id: planId };
 }
 
+// Subscription decision notification emails; database/payment handling remains unchanged.
+// Configure SMTP_USER and SMTP_PASS in the lambda-subscription-admin environment.
+function escapePaymentEmailHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+async function sendSubscriptionDecisionEmail(toEmail, details) {
+    const smtpUser = "noreplystocknbook@gmail.com";
+    const smtpPass = "xokj flbi mavr shyt"
+        .replace(/\s/g, "");
+
+    if (!smtpUser || !smtpPass) {
+        const error = new Error("SMTP_USER and SMTP_PASS are required in lambda-subscription-admin environment.");
+        error.code = "SMTP_NOT_CONFIGURED";
+        throw error;
+    }
+    if (![smtpUser, toEmail].every((value) => /^[^\s@\r\n]+@[^\s@\r\n]+\.[^\s@\r\n]+$/.test(String(value)))) {
+        throw new Error("Invalid email address for subscription decision notification.");
+    }
+
+    const storeName = escapePaymentEmailHtml(details.store_name || "your business");
+    const planName = escapePaymentEmailHtml(details.plan_name || "selected");
+    const isRejected = details.status === "REJECTED";
+    const isExpiring = details.status === "EXPIRING";
+    const isExpired = details.status === "EXPIRED";
+    const startDate = escapePaymentEmailHtml(details.start_date || "");
+    const expirationDate = escapePaymentEmailHtml(details.expiration_date || "");
+    const rejectionReason = escapePaymentEmailHtml(details.rejection_reason || "Payment could not be verified");
+    const rejectionExplanation = escapePaymentEmailHtml(details.rejection_explanation || "").replace(/\r?\n/g, "<br />");
+    const subject = isExpiring
+        ? "StockNBook - Your subscription expires soon"
+        : isExpired
+            ? "StockNBook - Your subscription has expired"
+            : isRejected
+                ? "StockNBook - Your subscription payment was rejected"
+                : "StockNBook - Your subscription is now active";
+    const content = isExpiring ? `
+          <h3 style="color:#8B6B1B;">Your ${planName} subscription is expiring soon</h3>
+          <p>Hello <strong>${storeName}</strong>,</p>
+          <p>Your paid StockNBook subscription is scheduled to expire on <strong>${expirationDate}</strong>
+             (within the next seven days). You can continue using your paid features until then.</p>
+          <p>Please sign in to StockNBook and select <strong>Renew ${planName}</strong> from Subscription
+             to avoid an interruption in paid features. Renewal requires GCash verification and admin approval.</p>
+          <p>Your business data will be preserved if the plan expires. Access will be reduced to
+             the Starter plan limits until you renew.</p>
+          <p>If you already submitted payment proof, no additional payment is necessary while
+             the existing submission awaits review.</p>`
+        : isExpired ? `
+          <h3 style="color:#9C3D24;">Your ${planName} subscription has expired</h3>
+          <p>Hello <strong>${storeName}</strong>,</p>
+          <p>Your paid subscription expired on <strong>${expirationDate}</strong>.</p>
+          <p>Your account remains available and your business records are preserved.
+             Your store now uses Starter-level access, unless an eligible payment is temporarily
+             under review within the permitted 48-hour grace period.</p>
+          <p>To regain ${planName} features, visit StockNBook &gt; Subscription and choose
+             <strong>Renew ${planName}</strong>. Follow the GCash checkout instructions.
+             The paid plan activates after Platform Admin approval.</p>
+          <p>If you have already submitted a payment and it is pending review,
+             please wait for the admin's email; do not pay twice.</p>`
+            : isRejected
+                ? `
+          <h3 style="color:#9C3D24;">Your payment could not be verified</h3>
+          <p>Hello <strong>${storeName}</strong>,</p>
+          <p>Thank you for choosing StockNBook. The Platform Admin has reviewed the payment proof for your
+             <strong>${planName}</strong> subscription, but the submission was <strong>rejected</strong>.</p>
+          <div style="background:#FFF5F0;border:1px solid #F0D4C8;border-radius:12px;padding:16px;margin:20px 0;">
+            <p style="margin:6px 0;">Requested plan: <strong>${planName}</strong></p>
+            <p style="margin:6px 0;">Review status: <strong>Rejected</strong></p>
+            <p style="margin:6px 0;">Reason: <strong>${rejectionReason}</strong></p>
+            ${rejectionExplanation ? `<p style="margin:6px 0;">Additional details: ${rejectionExplanation}</p>` : ""}
+          </div>
+          <p><strong>What should you do next?</strong> Review the reason above and check the GCash reference
+             number, payment amount and receipt. If you believe you completed the payment, contact the
+             StockNBook Platform Admin through your usual support channel and provide your reference number
+             before sending any additional payment.</p>
+          <p>The requested plan has <strong>not</strong> been activated by this submission. Any existing
+             subscription is not automatically cancelled by this rejection.</p>
+          <p>If you did not submit this payment proof, contact StockNBook support.</p>`
+                : `
+          <h3 style="color:#17643D;">Your payment has been approved!</h3>
+          <p>Hello <strong>${storeName}</strong>,</p>
+          <p>Good news! The StockNBook Platform Admin has verified your subscription payment.
+             Your <strong>${planName}</strong> plan is now <strong>Active</strong>.</p>
+          <div style="background:#F4FBF7;border-radius:12px;padding:16px;margin:20px 0;">
+            <p style="margin:6px 0;">Subscription: <strong>${planName}</strong></p>
+            <p style="margin:6px 0;">Start date: <strong>${startDate}</strong></p>
+            <p style="margin:6px 0;">Expiry date: <strong>${expirationDate}</strong></p>
+            <p style="margin:6px 0;">Status: <strong>Active</strong></p>
+          </div>
+          <p>You can now sign in to StockNBook and use your subscription features.
+             Thank you for trusting StockNBook with your business!</p>
+          <p>If you did not request this subscription, contact StockNBook support.</p>`;
+    const html = `
+      <div style="font-family:Arial,sans-serif;background:#FDFAF4;padding:24px;color:#3F354C;">
+        <div style="max-width:560px;margin:auto;background:#fff;border:1px solid #E7DCEB;border-radius:16px;padding:28px;">
+          <h2 style="margin:0;color:#2D1B4E;">StockNBook</h2>
+          ${content}
+          <p style="margin-top:24px;color:#2D1B4E;font-weight:bold;">— StockNBook Team</p>
+        </div>
+      </div>`;
+
+    // Base64 encoding avoids SMTP line/Unicode issues in HTML templates.
+    const htmlBase64 = (Buffer.from(html, "utf8").toString("base64").match(/.{1,76}/g) || []).join("\r\n");
+    const message = [
+        `From: "StockNBook" <${smtpUser}>`,
+        `To: ${toEmail}`,
+        `Subject: ${subject}`,
+        `Date: ${new Date().toUTCString()}`,
+        "MIME-Version: 1.0",
+        'Content-Type: text/html; charset="UTF-8"',
+        "Content-Transfer-Encoding: base64",
+        "",
+        htmlBase64,
+    ].join("\r\n");
+
+    // Built-in Node TLS transport: no new npm dependency or unrelated changes.
+    const socket = tls.connect({ host: "smtp.gmail.com", port: 465, servername: "smtp.gmail.com", rejectUnauthorized: true });
+    socket.setTimeout(15000, () => socket.destroy(new Error("SMTP connection timed out.")));
+    let pendingText = "";
+    const waiters = [];
+    function drainResponses() {
+        while (waiters.length) {
+            const parts = pendingText.split("\r\n");
+            let completeAt = -1;
+            for (let i = 0; i < parts.length - 1; i += 1) {
+                if (/^\d{3} /.test(parts[i])) { completeAt = i; break; }
+            }
+            if (completeAt < 0) return;
+            const responseLines = parts.slice(0, completeAt + 1);
+            pendingText = parts.slice(completeAt + 1).join("\r\n");
+            const code = Number(responseLines[responseLines.length - 1].slice(0, 3));
+            waiters.shift().resolve(code);
+        }
+    }
+    socket.on("data", (data) => { pendingText += data.toString("utf8"); drainResponses(); });
+    const failPending = (error) => {
+        while (waiters.length) waiters.shift().reject(error);
+    };
+    socket.on("error", failPending);
+    socket.on("close", () => failPending(new Error("SMTP connection closed before email was accepted.")));
+    function read(expected) {
+        return new Promise((resolve, reject) => {
+            waiters.push({
+                resolve: (code) => code === expected || (Array.isArray(expected) && expected.includes(code))
+                    ? resolve(code) : reject(new Error(`SMTP rejected command (${code}).`)),
+                reject,
+            });
+            drainResponses();
+        });
+    }
+    async function cmd(command, expected) {
+        socket.write(command + "\r\n");
+        return read(expected);
+    }
+    try {
+        if (!socket.authorized && socket.authorizationError) {
+            // The TLS handshake will be verified before sending credentials.
+        }
+        await new Promise((resolve, reject) => {
+            if (socket.encrypted && socket.authorized) return resolve();
+            socket.once("secureConnect", resolve);
+            socket.once("error", reject);
+        });
+        await read(220);
+        await cmd("EHLO stocknbook.local", 250);
+        await cmd("AUTH LOGIN", 334);
+        await cmd(Buffer.from(smtpUser).toString("base64"), 334);
+        await cmd(Buffer.from(smtpPass).toString("base64"), 235);
+        await cmd(`MAIL FROM:<${smtpUser}>`, 250);
+        await cmd(`RCPT TO:<${toEmail}>`, [250, 251]);
+        await cmd("DATA", 354);
+        // This message uses base64 body so dot-stuffing is not needed.
+        await cmd(message + "\r\n.", 250);
+        socket.write("QUIT\r\n");
+    } finally {
+        socket.end();
+    }
+}
+
+
+// Local/deployed scheduler entry point. Run once daily (for example with Windows
+// Task Scheduler). Do NOT invoke this from each dashboard render; an email must
+// be generated even when the owner is not logged in.
+async function ensureExpiryNotificationTable(connection) {
+    await connection.query(`CREATE TABLE IF NOT EXISTS subscription_expiry_notices (
+                                                                                       id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                                                                                       subscription_id BIGINT NOT NULL,
+                                                                                       expires_on DATE NOT NULL,
+                                                                                       notice_type VARCHAR(24) NOT NULL,
+        delivery_status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+        attempts INT NOT NULL DEFAULT 0,
+        last_attempt_at DATETIME NULL,
+        sent_at DATETIME NULL,
+        last_error VARCHAR(500) NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_expiry_notice (subscription_id, expires_on, notice_type)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+}
+
+async function runExpiryNotificationJob() {
+    const connection = await pool.getConnection();
+    const results = { candidates: 0, sent: 0, failed: 0, skipped: 0 };
+    try {
+        await ensureExpiryNotificationTable(connection);
+        await reconcileAllStorePlanLabels(connection);
+        // Only non-cancelled paid plans. The seven-day email is sent at most
+        // once per subscription/expiration date; missed job days are recovered.
+        const [subscriptions] = await connection.execute(`
+            SELECT sub.id AS subscription_id, sub.expires_at,
+                   s.store_name, s.email AS owner_email, p.name AS plan_name,
+                   DATEDIFF(DATE(sub.expires_at), CURDATE()) AS days_remaining
+            FROM subscriptions sub
+                     INNER JOIN stores s ON s.id = sub.store_id
+                     INNER JOIN plans p ON p.id = sub.plan_id
+            WHERE LOWER(sub.status) IN ('active', 'expiring', 'expired')
+              AND p.price > 0 AND sub.expires_at IS NOT NULL
+              AND DATE(sub.expires_at) BETWEEN DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+              AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+            ORDER BY sub.id ASC`);
+        for (const sub of subscriptions) {
+            const days = Number(sub.days_remaining);
+            // A grace period never postpones the historical expiration notice.
+            const type = days < 0 ? 'EXPIRED' : days <= 7 ? 'EXPIRING_7_DAYS' : null;
+            if (!type) continue;
+            results.candidates++;
+            const expiry = normalizeDate(sub.expires_at);
+            await connection.execute(`
+                        INSERT IGNORE INTO subscription_expiry_notices
+                  (subscription_id, expires_on, notice_type, delivery_status)
+                VALUES (?, ?, ?, 'PENDING')`,
+                [sub.subscription_id, expiry, type]);
+            // Atomic claim prevents two simultaneous jobs from duplicating email.
+            // An SMTP error can be retried after five minutes.
+            const [claim] = await connection.execute(`
+                        UPDATE subscription_expiry_notices
+                        SET delivery_status = 'SENDING', attempts = attempts + 1,
+                            last_attempt_at = NOW(), last_error = NULL
+                        WHERE subscription_id = ? AND expires_on = ? AND notice_type = ?
+                          AND (delivery_status = 'PENDING' OR
+                               (delivery_status = 'FAILED' AND
+                                last_attempt_at < DATE_SUB(NOW(), INTERVAL 5 MINUTE)) OR
+                               (delivery_status = 'SENDING' AND
+                                last_attempt_at < DATE_SUB(NOW(), INTERVAL 30 MINUTE)))`,
+                [sub.subscription_id, expiry, type]);
+            if (!claim.affectedRows) { results.skipped++; continue; }
+            try {
+                const email = String(sub.owner_email || '').trim().toLowerCase();
+                if (!email) throw new Error('Store owner email is missing.');
+                await sendSubscriptionDecisionEmail(email, {
+                    status: type === 'EXPIRED' ? 'EXPIRED' : 'EXPIRING',
+                    store_name: sub.store_name, plan_name: sub.plan_name,
+                    expiration_date: expiry,
+                });
+                await connection.execute(`
+                            UPDATE subscription_expiry_notices
+                            SET delivery_status = 'SENT', sent_at = NOW(), last_error = NULL
+                            WHERE subscription_id = ? AND expires_on = ? AND notice_type = ?`,
+                    [sub.subscription_id, expiry, type]);
+                results.sent++;
+            } catch (error) {
+                console.error('[stocknbook-expiry] Email failed:', {
+                    subscription_id: sub.subscription_id, notice_type: type,
+                    message: error?.message || 'unknown error',
+                });
+                await connection.execute(`
+                            UPDATE subscription_expiry_notices
+                            SET delivery_status = 'FAILED', last_error = ?
+                            WHERE subscription_id = ? AND expires_on = ? AND notice_type = ?`,
+                    [String(error?.message || 'SMTP failure').slice(0, 500), sub.subscription_id, expiry, type]);
+                results.failed++;
+            }
+        }
+        return results;
+    } finally {
+        connection.release();
+    }
+}
+
+// The paid subscription is the authority; stores.plan is kept in sync for
+// legacy views and the store directory. Writes only when a label differs.
+async function syncStorePlanLabel(connection, storeId, effectivePlanName) {
+    if (!effectivePlanName) return;
+    await connection.execute(
+        "UPDATE stores SET plan = ? WHERE id = ? AND (plan IS NULL OR plan <> ?)",
+        [effectivePlanName, Number(storeId), effectivePlanName]
+    );
+}
+
+// Called by the existing daily expiration notification job so legacy plan
+// labels change even when a business owner is not signed in. Reuses the
+// existing paid-access and 48-hour pre-expiry payment grace rules.
+async function reconcileAllStorePlanLabels(connection) {
+    const c = await getPaymentColumns(connection);
+    const pendingGrace = c.createdAt
+        ? `EXISTS (
+              SELECT 1 FROM payments pm
+              WHERE pm.${c.storeId} = s.id
+                AND UPPER(pm.${c.status}) = 'PENDING'
+                AND DATE(pm.${c.createdAt}) <= DATE(sub.expires_at)
+                AND CURDATE() <= DATE_ADD(DATE(sub.expires_at), INTERVAL 2 DAY)
+          )`
+        : '0';
+    const [rows] = await connection.execute(`
+        SELECT s.id AS store_id, p.name AS paid_plan_name,
+            CASE WHEN LOWER(sub.status) IN ('active', 'expiring')
+                     AND (sub.expires_at IS NULL OR DATE(sub.expires_at) >= CURDATE())
+                 THEN 1 ELSE 0 END AS has_paid_access,
+            CASE WHEN LOWER(sub.status) IN ('active', 'expiring')
+                     AND p.price > 0 AND sub.expires_at IS NOT NULL
+                     AND DATE(sub.expires_at) < CURDATE()
+                     AND ${pendingGrace}
+                 THEN 1 ELSE 0 END AS has_review_grace
+        FROM stores s
+        LEFT JOIN subscriptions sub ON sub.id = (
+            SELECT s2.id FROM subscriptions s2
+            WHERE s2.store_id = s.id ORDER BY s2.id DESC LIMIT 1
+        )
+        LEFT JOIN plans p ON p.id = sub.plan_id
+    `);
+    for (const row of rows) {
+        const effectiveName =
+            (Number(row.has_paid_access) === 1 || Number(row.has_review_grace) === 1)
+                ? (row.paid_plan_name || 'Starter') : 'Starter';
+        await syncStorePlanLabel(connection, row.store_id, effectiveName);
+    }
+}
+
 async function approvePayment(connection, paymentId, admin) {
     const c = await getPaymentColumns(connection);
+    await ensureSubscriptionPlanChangesTable(connection);
     await connection.beginTransaction();
 
     try {
         const [paymentRows] = await connection.execute(
-            `SELECT p.*, pl.name AS plan_name, pl.price AS plan_price, s.store_name
+            `SELECT p.*, pl.name AS plan_name, pl.price AS plan_price, s.store_name, s.email AS owner_email
              FROM payments p
                       INNER JOIN plans pl ON pl.id = p.${c.planId}
                       INNER JOIN stores s ON s.id = p.${c.storeId}
@@ -829,11 +1247,17 @@ async function approvePayment(connection, paymentId, admin) {
         let subscriptionId;
         let previousStatus = "FREE";
         let oldPlanId = null;
+        let oldPlan = null;
         let changeType = "upgrade";
 
         if (existing) {
             previousStatus = normalizeStatus(existing.status);
             oldPlanId = Number(existing.plan_id);
+            const [oldPlanRows] = await connection.execute(
+                "SELECT * FROM plans WHERE id = ? LIMIT 1",
+                [oldPlanId]
+            );
+            oldPlan = oldPlanRows[0] || null;
             const samePlan = oldPlanId === Number(payment[c.planId]);
             const existingExpiry = existing.expires_at ? normalizeDate(existing.expires_at) : null;
             const usableCurrentPeriod = samePlan && normalizeStatus(existing.status) !== "CANCELLED" && existingExpiry && existingExpiry >= approvalDate;
@@ -845,7 +1269,7 @@ async function approvePayment(connection, paymentId, admin) {
             } else {
                 startDate = approvalDate;
                 expiresAt = addMonths(approvalDate, 1);
-                changeType = changeTypeForPlanChange(oldPlanId, payment[c.planId]);
+                changeType = changeTypeForPlanChange(oldPlan, plan);
             }
 
             await connection.execute(
@@ -862,6 +1286,38 @@ async function approvePayment(connection, paymentId, admin) {
                 [payment[c.storeId], payment[c.planId], startDate, expiresAt]
             );
             subscriptionId = Number(result.insertId);
+        }
+
+        const [activePlanChangeRows] = await connection.execute(
+            `SELECT id, target_plan_id, status
+             FROM subscription_plan_changes
+             WHERE store_id = ?
+               AND UPPER(status) IN ('SCHEDULED', 'AWAITING_PAYMENT')
+             ORDER BY id DESC
+                 LIMIT 1
+             FOR UPDATE`,
+            [payment[c.storeId]]
+        );
+
+        const activePlanChange = activePlanChangeRows[0] || null;
+        if (activePlanChange) {
+            if (Number(activePlanChange.target_plan_id) === Number(payment[c.planId])) {
+                await connection.execute(
+                    `UPDATE subscription_plan_changes
+                     SET status = 'APPLIED', applied_at = NOW()
+                     WHERE id = ?`,
+                    [activePlanChange.id]
+                );
+            } else {
+                await connection.execute(
+                    `UPDATE subscription_plan_changes
+                     SET status = 'CANCELLED',
+                         cancelled_at = NOW(),
+                         notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE ' ' END, 'Cancelled because another paid plan was approved.')
+                     WHERE id = ?`,
+                    [activePlanChange.id]
+                );
+            }
         }
 
         await connection.execute(
@@ -894,13 +1350,42 @@ async function approvePayment(connection, paymentId, admin) {
             ]
         );
 
+        // Approval also updates the store-level label atomically with the
+        // paid subscription. The payment and audit records remain unchanged.
+        await syncStorePlanLabel(connection, payment[c.storeId], plan.name);
         await connection.commit();
+
+        // Once committed, an email outage must not undo a genuine approval.
+        let approvalEmailStatus = "failed";
+        try {
+            const ownerEmail = String(payment.owner_email || "").trim().toLowerCase();
+            if (ownerEmail) {
+                await sendSubscriptionDecisionEmail(ownerEmail, {
+                    status: "APPROVED",
+                    store_name: payment.store_name,
+                    plan_name: payment.plan_name,
+                    start_date: startDate,
+                    expiration_date: expiresAt,
+                });
+                approvalEmailStatus = "sent";
+            } else {
+                approvalEmailStatus = "no_email_on_file";
+            }
+        } catch (notificationError) {
+            approvalEmailStatus = notificationError?.code === "SMTP_NOT_CONFIGURED"
+                ? "not_configured" : "failed";
+            console.error("[stocknbook-subscription-admin] Payment approved but notification email failed:", {
+                payment_id: paymentId,
+                message: notificationError?.message || "Unknown email error",
+            });
+        }
         return {
             message: "Payment Approved",
             store_name: payment.store_name,
             plan_name: payment.plan_name,
             start_date: startDate,
             expiration_date: expiresAt,
+            approval_email_status: approvalEmailStatus,
         };
     } catch (error) {
         await connection.rollback();
@@ -915,7 +1400,7 @@ async function rejectPayment(connection, paymentId, admin, rejectionReason, expl
 
     try {
         const [rows] = await connection.execute(
-            `SELECT p.*, s.store_name, pl.name AS plan_name
+            `SELECT p.*, s.store_name, s.email AS owner_email, pl.name AS plan_name
              FROM payments p
                       INNER JOIN stores s ON s.id = p.${c.storeId}
                       LEFT JOIN plans pl ON pl.id = p.${c.planId}
@@ -945,7 +1430,38 @@ async function rejectPayment(connection, paymentId, admin, rejectionReason, expl
         );
 
         await connection.commit();
-        return { message: "Payment Verification Rejected", store_name: payment.store_name, reason: rejectionReason };
+
+        // The rejection is final in the database before any email is attempted.
+        // A temporary SMTP outage must never undo the rejection or cause duplicate decisions.
+        let rejectionEmailStatus = "failed";
+        try {
+            const ownerEmail = String(payment.owner_email || "").trim().toLowerCase();
+            if (ownerEmail) {
+                await sendSubscriptionDecisionEmail(ownerEmail, {
+                    status: "REJECTED",
+                    store_name: payment.store_name,
+                    plan_name: payment.plan_name,
+                    rejection_reason: rejectionReason,
+                    rejection_explanation: text(explanation, 500),
+                });
+                rejectionEmailStatus = "sent";
+            } else {
+                rejectionEmailStatus = "no_email_on_file";
+            }
+        } catch (notificationError) {
+            rejectionEmailStatus = notificationError?.code === "SMTP_NOT_CONFIGURED"
+                ? "not_configured" : "failed";
+            console.error("[stocknbook-subscription-admin] Payment rejected but notification email failed:", {
+                payment_id: paymentId,
+                message: notificationError?.message || "Unknown email error",
+            });
+        }
+        return {
+            message: "Payment Verification Rejected",
+            store_name: payment.store_name,
+            reason: rejectionReason,
+            rejection_email_status: rejectionEmailStatus,
+        };
     } catch (error) {
         await connection.rollback();
         throw error;
@@ -973,6 +1489,14 @@ async function changeSubscriptionStatus(connection, subscriptionId, admin, nextS
 
         const previousStatus = normalizeStatus(sub.status);
         await connection.execute("UPDATE subscriptions SET status = ? WHERE id = ?", [lowerStatus(nextStatus), subscriptionId]);
+        if (nextStatus === 'ACTIVE' || nextStatus === 'EXPIRING') {
+            const [planRows] = await connection.execute(
+                "SELECT name FROM plans WHERE id = ? LIMIT 1", [sub.plan_id]
+            );
+            if (planRows[0]) await syncStorePlanLabel(connection, sub.store_id, planRows[0].name);
+        } else {
+            await syncStorePlanLabel(connection, sub.store_id, 'Starter');
+        }
 
         await connection.execute(
             `INSERT INTO subscription_history
@@ -1014,6 +1538,10 @@ async function extendSubscription(connection, subscriptionId, admin, extensionDa
 
         await connection.execute("UPDATE subscriptions SET expires_at = ?, status = 'active' WHERE id = ?", [expiresAt, subscriptionId]);
         await connection.execute("UPDATE stores SET status = 'active' WHERE id = ?", [sub.store_id]);
+        const [planRows] = await connection.execute(
+            "SELECT name FROM plans WHERE id = ? LIMIT 1", [sub.plan_id]
+        );
+        if (planRows[0]) await syncStorePlanLabel(connection, sub.store_id, planRows[0].name);
 
         await connection.execute(
             `INSERT INTO subscription_history
@@ -1046,22 +1574,38 @@ async function getPlatformSettings(connection) {
 
 async function updatePlatformSettings(connection, values) {
     if (!values || typeof values !== "object") throw httpError(400, "settings must be an object.");
+    let currentSettingKey = "";
     await connection.beginTransaction();
     try {
         for (const [key, value] of Object.entries(values)) {
             const cleanKey = text(key, 100);
             if (!cleanKey) continue;
-            await connection.execute(
+            currentSettingKey = cleanKey;
+            const settingValue = String(value ?? "");
+
+            // Guard the QR upload size. The database column must also be MEDIUMTEXT
+            // (see GCash_QR_Database_Migration.sql). This is NOT a substitute for migration.
+            if (cleanKey === "gcash_qr_image" && Buffer.byteLength(settingValue, "utf8") > 2 * 1024 * 1024) {
+                throw httpError(413, "GCash QR image is too large. Choose a smaller QR image (maximum 2 MB after processing).");
+            }
+
+            // Keep the text protocol: mysql2's prepared-statement binary packet
+            // caused COM_STMT_EXECUTE serialization errors with larger QR values.
+            await connection.query(
                 "INSERT INTO platform_settings (`key`, value, updated_at) " +
                 "VALUES (?, ?, NOW()) " +
                 "ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = NOW()",
-                [cleanKey, String(value ?? "")]
+                [cleanKey, settingValue]
             );
         }
         await connection.commit();
         return { message: "Platform settings updated." };
     } catch (error) {
         await connection.rollback();
+        if (currentSettingKey === "gcash_qr_image" &&
+            (error.code === "ER_DATA_TOO_LONG" || error.errno === 1406)) {
+            throw httpError(400, "The platform_settings.value database column is too small for a GCash QR image. Run the supplied MEDIUMTEXT SQL migration, then save again.");
+        }
         throw error;
     }
 }
@@ -1309,6 +1853,11 @@ exports.handler = async (event) => {
         const admin = await requirePlatformAdmin(event, connection);
 
         switch (action) {
+            case "run_expiry_notification_job":
+                // Only the authenticated Platform Administrator can run this
+                // manually; regular delivery is performed by the local scheduler.
+                return response(event, 200, await runExpiryNotificationJob());
+
             case "get_subscription_summary":
                 return response(event, 200, { summary: await getSubscriptionSummary(connection) });
 
@@ -1502,3 +2051,6 @@ module.exports = {
     tryPlatformAdminLogin,
     getPublicPlans,
 };
+// Used by the local task scheduler; email credentials stay in the existing SMTP sender.
+module.exports.runExpiryNotificationJob = runExpiryNotificationJob;
+module.exports.closeExpiryNotificationPool = () => pool.end();

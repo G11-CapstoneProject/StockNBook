@@ -281,8 +281,8 @@ async function mutate(db,scope,body) {
             const estimate=isoDate(body.estimatedCompletionDate,"Estimated completion date",true);
             if(estimate && estimate<todayPh())fail(400,"Estimated completion date cannot be in the past.");
             const [r]=await db.execute(`INSERT INTO rental_maintenance_records
-        (store_id,branch_id,equipment_id,quantity_started,quantity_remaining,start_reason,
-         condition_status,estimated_completion_date) VALUES(?,?,?,?,?,?,?,?)`,
+                                        (store_id,branch_id,equipment_id,quantity_started,quantity_remaining,start_reason,
+                                         condition_status,estimated_completion_date) VALUES(?,?,?,?,?,?,?,?)`,
                 [scope.storeId,scope.branchId,current.id,qty,qty,reason,conditionStatus,estimate]);
             await db.execute("UPDATE rental_equipment SET maintenance_units=maintenance_units+? WHERE id=?",[qty,current.id]);
             const ref=`MNT-${String(r.insertId).padStart(6,"0")}`;

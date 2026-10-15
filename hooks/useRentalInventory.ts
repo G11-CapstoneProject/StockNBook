@@ -268,6 +268,10 @@ async function requestRental(action: Record<string, unknown>, signal?: AbortSign
 
 export function useRentalInventory(branchId?: number) {
     const validBranchId = Number.isSafeInteger(branchId) && Number(branchId) > 0 ? Number(branchId) : null;
+    // A manager may omit branchId because the backend resolves their assigned branch.
+    // If a caller explicitly supplies an invalid branch, fail instead of silently
+    // dropping it and accidentally falling back to another branch.
+    const invalidExplicitBranch = branchId !== undefined && validBranchId === null;
     const [equipment, setEquipment] = React.useState<RentalEquipment[]>([]);
     const [recentActivity, setRecentActivity] = React.useState<RentalActivity[]>([]);
     const [maintenanceRecords, setMaintenanceRecords] = React.useState<RentalMaintenanceRecord[]>([]);
@@ -285,6 +289,17 @@ export function useRentalInventory(branchId?: number) {
     const refresh = React.useCallback(async (force = false) => {
         // Manager branch is resolved securely from the JWT on the backend.
         // Passing the branch ID is optional for managers (owners must select one).
+        if (invalidExplicitBranch) {
+            inFlight.current?.abort();
+            inFlight.current = null;
+            loaded.current = false;
+            setError("The selected rental branch is invalid. Choose a valid branch.");
+            setLoading(false); setRefreshing(false);
+            setConnected(false); setBookingSyncConnected(false);
+            setEquipment([]); setRecentActivity([]); setMaintenanceRecords([]);
+            setMaintenanceDataReady(false); setSavedCategories([]);
+            return;
+        }
         if (inFlight.current) {
             if (!force) return;
             inFlight.current.abort();
@@ -331,7 +346,7 @@ export function useRentalInventory(branchId?: number) {
             if (inFlight.current === controller) inFlight.current = null;
             if (!controller.signal.aborted) { setLoading(false); setRefreshing(false); }
         }
-    }, [validBranchId]);
+    }, [validBranchId, invalidExplicitBranch]);
 
     React.useEffect(() => {
         loaded.current = false;
@@ -351,6 +366,7 @@ export function useRentalInventory(branchId?: number) {
     }, [refresh]);
 
     const mutate = React.useCallback(async (mutation: RentalMutation) => {
+        if (invalidExplicitBranch) throw new Error("The selected rental branch is invalid.");
         setSaving(true);
         try {
             const result = await requestRental({...mutation, ...(validBranchId ? {branch_id: validBranchId} : {}), requestKey: crypto.randomUUID()});
@@ -358,9 +374,10 @@ export function useRentalInventory(branchId?: number) {
             await refresh(true);
             return result.referenceNumber || "";
         } finally { setSaving(false); }
-    }, [validBranchId, refresh]);
+    }, [validBranchId, invalidExplicitBranch, refresh]);
 
     const checkAvailability = React.useCallback(async (startDate: string, endDate: string): Promise<RentalAvailability[]> => {
+        if (invalidExplicitBranch) throw new Error("The selected rental branch is invalid.");
         if (!startDate || !endDate || endDate < startDate) throw new Error("Select a valid rental date range.");
         // Backend handles overlapping confirmed bookings AND checked-out units exactly once.
         // Date-range availability must not be derived from today's available units.
@@ -371,7 +388,7 @@ export function useRentalInventory(branchId?: number) {
             .filter((v: unknown): v is {equipmentId: number; availableUnits: number} => Boolean(v && typeof v === "object"))
             .map((v) => ({equipmentId: Number(v.equipmentId), availableUnits: nonnegativeInteger(v.availableUnits)}))
             .filter(v => Number.isSafeInteger(v.equipmentId) && v.equipmentId > 0);
-    }, [validBranchId]);
+    }, [validBranchId, invalidExplicitBranch]);
 
     const summary = React.useMemo(() => connected ? calculateRentalSummary(equipment) : emptySummary, [connected, equipment]);
     const actions = React.useMemo(() => getRentalIssues(equipment), [equipment]);

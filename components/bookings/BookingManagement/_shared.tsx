@@ -12,6 +12,7 @@ import {
     PhilippinePeso,
     StickyNote,
 } from "lucide-react";
+import BookingFinancialPanel from "./BookingFinancialPanel";
 
 export type BookingAccess = "none" | "view" | "full";
 
@@ -300,12 +301,8 @@ export function getTotalPrice(booking: Booking) {
         return toNumber(booking.agreed_price ?? booking.agreedPrice);
     }
 
-    return toNumber(
-        booking.package_price ??
-        booking.packagePrice ??
-        booking.agreed_price ??
-        booking.agreedPrice
-    );
+    const agreed=toNumber(booking.agreed_price ?? booking.agreedPrice);
+    return agreed>0 ? agreed : toNumber(booking.package_price ?? booking.packagePrice);
 }
 
 export function getRequiredDownPayment(booking: Booking) {
@@ -1115,6 +1112,8 @@ export function BookingRow({
                                             />
                                         </div>
                                     </div>
+
+                                    <BookingFinancialPanel bookingId={b.id} branchId={Number(b.branchId||b.branch_id||0)} ownerView={ownerView} editable={canManage}/>
 
                                     {customNeedsTerms && (
                                         <p className="mt-3 rounded-xl bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700">

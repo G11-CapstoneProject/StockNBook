@@ -8,6 +8,7 @@ import {
     RefreshCw,
 } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
+import BookingFeePolicySettings from "./BookingFeePolicySettings";
 import {
     Booking,
     BookingRow,
@@ -47,6 +48,17 @@ export default function OwnerBookings() {
     const [openBranch, setOpenBranch] = useState("");
     const [openInsight, setOpenInsight] = useState<InsightPanel>("");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
+
+    const branchOptions=useMemo(()=>[...new Map(bookings.filter(b=>b.branchId||b.branch_id)
+        .map(b=>[Number(b.branchId||b.branch_id),{id:Number(b.branchId||b.branch_id),name:b.branchName||b.branch_name||'Branch'}])).values()], [bookings]);
+
+    const [financeSummary,setFinanceSummary]=useState<null|{deliveryFees:number;setupFees:number;refundableDepositsHeld:number;approvedClaims:number;cashRecovered:number;depositsApplied:number;outstandingClaims:number}>(null);
+    useEffect(()=>{let cancelled=false;void (async()=>{try{
+        const token=sessionStorage.getItem('token');if(!token)return;
+        const r=await fetch('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},
+            body:JSON.stringify({action:'get_owner_booking_financial_overview'})});
+        const data=await r.json();if(r.ok&&!cancelled)setFinanceSummary(data.overview);
+    }catch{/* Financial summary remains unavailable until migration and first booking. */}})();return()=>{cancelled=true;};},[bookings.length]);
 
     async function loadBookings() {
         setLoading(true);
@@ -407,6 +419,15 @@ export default function OwnerBookings() {
                     </p>
                 </div>
 
+                {financeSummary&&<div className="mb-3 rounded-xl border border-[#E6DDF0] bg-white p-4 text-xs text-[#2B174C]">
+                    <p className="mb-2 text-sm font-bold">Booking services, deposits & equipment claims · Store-wide</p>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        {[['Delivery fees',financeSummary.deliveryFees],['Setup fees',financeSummary.setupFees],
+                            ['Refundable deposits held',financeSummary.refundableDepositsHeld],['Loss/damage claims outstanding',financeSummary.outstandingClaims],
+                            ['Claims recovered in cash',financeSummary.cashRecovered],['Deposits applied to claims',financeSummary.depositsApplied]].map(([label,val])=><div key={String(label)}><p className="text-[#806A8C]">{label}</p><strong>{peso(Number(val))}</strong></div>)}
+                    </div><p className="mt-2 text-[#806A8C]">Customer deposits held are liabilities, not revenue. Approved claims are tracked separately from rental income.</p>
+                </div>}
+                <BookingFeePolicySettings branches={branchOptions}/>
                 {loading && bookings.length === 0 ? (
                     <ModuleSkeleton variant="bookings" />
                 ) : bookings.length === 0 ? (

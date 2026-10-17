@@ -2826,9 +2826,6 @@ export default function ManagerInventory() {
                             />
                         </div>
 
-                        {/* Scoped supervisor authorization; staff receiving does not edit supplier payments. */}
-                        <ManagerStaffReceiving products={managerProducts} />
-
                         <div className="grid gap-4 xl:grid-cols-[1.15fr_1fr]">
                             <StockActionCenter
                                 rows={actionRows}
@@ -4137,6 +4134,124 @@ type SupplierPurchaseItem = {
     variantNumber:string|null; variantValues:Record<string,string>|string|null;
     quantity:number; unitCost:number; lineTotal:number;
 };
+function SupplierPurchaseEditDialog({purchase,onClose,onSave}:{
+    purchase:SupplierPayable;
+    onClose:()=>void;
+    onSave:(details:InitialPurchaseInput,expected:SupplierPayable)=>Promise<void>;
+}) {
+    const [draft,setDraft]=React.useState<PurchaseDraft>(()=>({
+        supplier:purchase.supplier || "",
+        supplierInvoiceNumber:purchase.supplierInvoiceNumber || "",
+        purchaseDate:purchase.purchaseDate || "",
+        paymentMethod:purchase.paymentMethod,
+        amountPaid:String(purchase.amountPaid),
+        paymentDueDate:purchase.paymentDueDate || "",
+    }));
+    const [error,setError]=React.useState("");
+    const [saving,setSaving]=React.useState(false);
+    const [confirm,setConfirm]=React.useState(false);
+    const saveInFlight=React.useRef(false);
+    const purchaseTotal=Number(purchase.purchaseTotal);
+    const amountPaid=draft.paymentMethod === "cash" ? purchaseTotal : Number(draft.amountPaid || 0);
+    const outstandingBalance=Math.max(0,Math.round((purchaseTotal-amountPaid)*100)/100);
+    const updatePurchase=(patch:Partial<PurchaseDraft>)=>{
+        setDraft(previous=>({...previous,...patch}));setError("");
+    };
+    const prepareSave=(event:React.SyntheticEvent)=>{
+        event.preventDefault();if(saving)return;
+        if(!draft.supplier.trim() || !draft.purchaseDate){setError("Supplier and Purchase Date are required.");return;}
+        if(!Number.isFinite(amountPaid) || amountPaid<0 || amountPaid>purchaseTotal ||
+            Math.abs(amountPaid*100-Math.round(amountPaid*100))>0.00001){
+            setError("Total Amount Paid must be between zero and the original purchase total, with at most two decimal places.");return;
+        }
+        if(draft.paymentMethod === "credit" && outstandingBalance>0 && !draft.paymentDueDate){
+            setError("Payment Due Date is required for an outstanding credit purchase.");return;
+        }
+        if(draft.paymentMethod === "credit" && draft.paymentDueDate && draft.paymentDueDate<draft.purchaseDate){
+            setError("Payment Due Date cannot be before Purchase Date.");return;
+        }
+        setError("");setConfirm(true);
+    };
+    const save=async()=>{
+        if(saveInFlight.current)return;
+        saveInFlight.current=true;setSaving(true);setError("");
+        try{
+            await onSave({
+                supplier:draft.supplier.trim(),supplierInvoiceNumber:draft.supplierInvoiceNumber.trim() || null,
+                purchaseDate:draft.purchaseDate,paymentMethod:draft.paymentMethod,amountPaid,
+                paymentDueDate:draft.paymentMethod === "credit" ? draft.paymentDueDate || null : null,
+                expectedAmountPaid:Number(purchase.amountPaid),
+            },purchase);
+            onClose();
+        }catch(e){setError(e instanceof Error?e.message:"Unable to save purchase details.");setConfirm(false);}
+        finally{saveInFlight.current=false;setSaving(false);}
+    };
+    return <div role="dialog" aria-modal="true" aria-labelledby="supplier-purchase-edit-title"
+                className="fixed inset-0 z-[155] flex items-center justify-center bg-black/50 p-4"
+                onKeyDown={event=>{if(event.key === "Escape" && !saving){event.stopPropagation();if(confirm)setConfirm(false);else onClose();}}}>
+        <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl" inert={confirm || undefined}>
+            <div className="flex items-center justify-between border-b border-[#E3D8EA] px-6 py-4">
+                <div><h2 id="supplier-purchase-edit-title" className="text-lg font-bold text-[#2B174C]">Initial Purchase Details</h2>
+                    <p className="mt-1 text-xs text-[#806A8C]">{purchase.purchaseNumber}</p></div>
+                <button type="button" disabled={saving} onClick={onClose} className="text-sm text-[#806A8C] disabled:opacity-50">Close</button>
+            </div>
+            <form onSubmit={prepareSave} className="space-y-4 overflow-y-auto p-6">
+                <p className="text-xs text-[#806A8C]">You may correct saved purchase details. The original purchase total and stock receiving history stay unchanged; corrections are recorded in the audit history.</p>
+                <p role="note" className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">Supplier and payment corrections apply to this entire purchase, including all linked products and variants.</p>
+                <fieldset disabled={saving} className="space-y-3">
+                    <div className="space-y-1"><label htmlFor="purchase-edit-supplier" className={labelClass}>Supplier</label>
+                        <input id="purchase-edit-supplier" autoFocus required maxLength={150} value={draft.supplier} onChange={e=>updatePurchase({supplier:e.target.value})}
+                               placeholder="Enter supplier name" className={fieldClass}/></div>
+                    <div className="space-y-1"><label htmlFor="purchase-edit-invoice" className={labelClass}>Supplier Invoice Number (Optional)</label>
+                        <input id="purchase-edit-invoice" maxLength={80} value={draft.supplierInvoiceNumber} onChange={e=>updatePurchase({supplierInvoiceNumber:e.target.value})}
+                               placeholder="Enter invoice or receipt number" className={fieldClass}/></div>
+                    <div className="space-y-1"><label htmlFor="purchase-edit-date" className={labelClass}>Purchase Date</label>
+                        <input id="purchase-edit-date" required type="date" value={draft.purchaseDate} onChange={e=>updatePurchase({purchaseDate:e.target.value})} className={fieldClass}/></div>
+                    <div className="space-y-1"><p className={labelClass}>Payment Method</p>
+                        <div role="group" aria-label="Payment Method" className="grid grid-cols-2 gap-2">
+                            {(["cash","credit"] as const).map(method=><button key={method} type="button" aria-pressed={draft.paymentMethod === method}
+                                                                              onClick={()=>updatePurchase({paymentMethod:method})}
+                                                                              className={`rounded-xl border px-3 py-2.5 text-sm font-semibold ${draft.paymentMethod === method
+                                                                                  ? "border-[#2B174C] bg-[#2B174C] text-white" : "border-[#E6DDF0] bg-white text-[#2B174C]"}`}>
+                                {method === "cash" ? "Cash" : "Credit (Utang)"}</button>)}
+                        </div></div>
+                    <p className="text-xs text-[#806A8C]">Original Purchase Total: <strong>{money(purchaseTotal)}</strong></p>
+                    {draft.paymentMethod === "credit" && <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-1"><label htmlFor="purchase-edit-paid" className={labelClass}>Total Amount Paid (₱)</label>
+                            <input id="purchase-edit-paid" type="number" min="0" max={purchaseTotal} step="0.01" required className={fieldClass}
+                                   value={draft.amountPaid} onChange={e=>updatePurchase({amountPaid:e.target.value})}/></div>
+                        <div className="space-y-1"><label htmlFor="purchase-edit-due" className={labelClass}>Payment Due Date</label>
+                            <input id="purchase-edit-due" type="date" min={draft.purchaseDate || undefined} required={outstandingBalance>0} className={fieldClass}
+                                   value={draft.paymentDueDate} onChange={e=>updatePurchase({paymentDueDate:e.target.value})}/></div>
+                        <div className="rounded-xl bg-[#F7F1FF] px-4 py-3 sm:col-span-2">
+                            <p className="text-xs text-[#806A8C]">Outstanding Balance</p>
+                            <p className="text-lg font-bold text-[#2B174C]">{money(outstandingBalance)}</p>
+                            <p className="text-[11px] text-[#806A8C]">This balance is saved and recalculated by the server when you confirm.</p>
+                        </div>
+                    </div>}
+                </fieldset>
+                {error && <p role="alert" className="rounded-lg bg-red-50 p-2 text-xs text-red-600">{error}</p>}
+                <div className="flex justify-end gap-2 border-t border-[#E3D8EA] pt-4">
+                    <button type="button" disabled={saving} onClick={onClose} className="rounded-xl border border-[#E6DDF0] px-4 py-2.5 text-sm disabled:opacity-50">Cancel</button>
+                    <button type="submit" disabled={saving} className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50">Save Purchase Details</button>
+                </div>
+            </form>
+        </div>
+        {confirm && <div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/50 p-4">
+            <div role="alertdialog" aria-modal="true" aria-labelledby="supplier-purchase-confirm-title" className="w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-xl">
+                <h3 id="supplier-purchase-confirm-title" className="font-bold text-[#2B174C]">Confirm Purchase Changes</h3>
+                <p className="text-sm">Save the corrected details for <strong>{purchase.purchaseNumber}</strong>? Changes apply to all its linked products and variants.</p>
+                <p className="text-xs text-[#806A8C]">Total amount paid: {money(amountPaid)}. Outstanding balance: {money(outstandingBalance)}. The original purchase total and stock receiving history stay unchanged. Use Record Payment for a new supplier payment.</p>
+                <div className="flex justify-end gap-2">
+                    <button type="button" disabled={saving} onClick={()=>setConfirm(false)} className="rounded-lg border px-4 py-2 text-sm disabled:opacity-50">Back</button>
+                    <button type="button" autoFocus disabled={saving} onClick={()=>void save()} className="rounded-lg bg-[#2B174C] px-4 py-2 text-sm text-white disabled:opacity-50">{saving?"Saving...":"Confirm Changes"}</button>
+                </div>
+            </div>
+        </div>}
+    </div>;
+}
+
+
 function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
     const [rows,setRows]=React.useState<SupplierPayable[]>([]);
     const [loading,setLoading]=React.useState(true);
@@ -4152,6 +4267,12 @@ function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
     const [paymentAmount,setPaymentAmount]=React.useState("");
     const [paymentDate,setPaymentDate]=React.useState(()=>new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"}));
     const [confirmPayment,setConfirmPayment]=React.useState<{id:number; number:string; amount:number;date:string}|null>(null);
+    const [editPurchase,setEditPurchase]=React.useState<SupplierPayable|null>(null);
+    const editTriggerRef=React.useRef<HTMLButtonElement|null>(null);
+    const closePurchaseEditor=()=>{
+        setEditPurchase(null);
+        window.setTimeout(()=>editTriggerRef.current?.focus(),0);
+    };
     const paymentRequestKey=React.useRef(crypto.randomUUID());
     const request=React.useCallback(async (body:Record<string,unknown>)=>{
         const token=sessionStorage.getItem("token");if(!token)throw new Error("Session expired.");
@@ -4234,15 +4355,23 @@ function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
         }catch(e){setError(e instanceof Error?e.message:"Unable to record payment.");}
         finally{setSaving(false);}
     };
+    const savePurchaseDetails=async(details:InitialPurchaseInput,expected:SupplierPayable)=>{
+        await request({action:"update_supplier_purchase",purchaseId:expected.purchaseId,details,expected});
+        setNotice(`Purchase details updated for ${expected.purchaseNumber}.`);
+        if(selectedId===String(expected.purchaseId)){setSelectedId("");setPaymentAmount("");}
+        try{await reload();}
+        catch(e){setError(e instanceof Error?`Changes saved, but the list could not refresh: ${e.message}`:"Changes saved. Reopen Supplier Payables to refresh the list.");}
+        window.dispatchEvent(new Event("stocknbook:purchase-updated"));
+    };
     return <div role="dialog" aria-modal="true" aria-label="Supplier Payables"
                 className="fixed inset-0 z-[140] flex items-center justify-center bg-black/50 p-4">
-        <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-2xl">
+        <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-2xl" inert={editPurchase ? true : undefined}>
             <div className="flex items-center justify-between border-b border-[#E3D8EA] px-6 py-4">
                 <h2 className="text-lg font-bold text-[#2B174C]">Supplier Payables</h2>
                 <button type="button" onClick={onClose} className="text-sm text-[#806A8C]">Close</button>
             </div>
             <div className="space-y-4 overflow-y-auto p-6">
-                <p className="text-xs text-[#806A8C]">Balances belong to the purchase, not each product. Corrections from Edit Product are saved to the same ledger.</p>
+                <p className="text-xs text-[#806A8C]">Balances belong to the purchase, not each product. Use Edit on a purchase row to correct its supplier and payment details.</p>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-label="Supplier payment totals for all purchases">
                     <div className="rounded-xl border border-[#E3D8EA] bg-[#FBF8FF] p-4">
                         <p className="text-xs font-medium text-[#806A8C]">Need to Pay</p>
@@ -4270,12 +4399,16 @@ function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
                     <div className="overflow-x-auto"><table className="w-full text-left text-xs">
                         <thead><tr className="border-b border-[#E3D8EA] text-[#806A8C]">
                             <th className="p-2">Purchase</th><th className="p-2">Supplier</th><th className="p-2">Method</th><th className="p-2">Total</th>
-                            <th className="p-2">Paid</th><th className="p-2">Outstanding</th><th className="p-2">Status</th></tr></thead>
+                            <th className="p-2">Paid</th><th className="p-2">Outstanding</th><th className="p-2">Status</th><th className="p-2">Action</th></tr></thead>
                         <tbody>{filtered.map(row=><tr key={row.purchaseId} className="border-b border-[#F0EAF4]">
                             <td className="p-2"><button type="button" className="font-semibold text-[#5734B3] underline underline-offset-2" onClick={()=>void openPurchase(row)}>{row.purchaseNumber}</button></td>
                             <td className="p-2">{row.supplier}</td><td className="p-2">{row.paymentMethod === "cash" ? "Cash" : "Credit (Utang)"}</td>
                             <td className="p-2">{money(row.purchaseTotal)}</td><td className="p-2">{money(row.amountPaid)}</td>
                             <td className="p-2">{money(row.outstandingBalance)}</td><td className="p-2">{row.paymentStatus}</td>
+                            <td className="p-2"><button type="button" disabled={saving} aria-label={`Edit purchase ${row.purchaseNumber}`}
+                                                        onClick={event=>{editTriggerRef.current=event.currentTarget;setEditPurchase(row);setError("");setNotice("");}}
+                                                        className="inline-flex items-center gap-1.5 rounded-lg border border-[#E3D8EA] px-3 py-1.5 font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50">
+                                <Pencil size={13}/> Edit</button></td>
                         </tr>)}</tbody></table></div>}
                 {viewPurchase && <section className="space-y-2 rounded-xl border border-[#E3D8EA] bg-[#FCF9FF] p-3">
                     <div className="flex items-center justify-between"><h3 className="text-sm font-bold text-[#2B174C]">{viewPurchase.purchaseNumber} — Linked Products</h3>
@@ -4308,6 +4441,8 @@ function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
                 </form>
             </div>
         </div>
+        {editPurchase && <SupplierPurchaseEditDialog key={editPurchase.purchaseId} purchase={editPurchase}
+                                                     onClose={closePurchaseEditor} onSave={savePurchaseDetails}/>}
         {confirmPayment && <div className="fixed inset-0 z-[155] flex items-center justify-center bg-black/50 p-4">
             <div role="alertdialog" aria-modal="true" className="w-full max-w-sm space-y-3 rounded-2xl bg-white p-5 shadow-xl">
                 <h3 className="font-bold text-[#2B174C]">Confirm Supplier Payment</h3>
@@ -6895,7 +7030,7 @@ function ProductForm({
 
             {inv.editingId && <EditProductStockCorrection inv={inv} />}
 
-            <section className="space-y-3 border-t border-[#E6DDF0] pt-5">
+            {!inv.editingId && <section className="space-y-3 border-t border-[#E6DDF0] pt-5">
                 <h3 className="text-sm font-bold text-[#1A1220]">Initial Purchase Details</h3>
                 {inv.editingId && hasSavedPurchase && <p className="text-xs text-[#806A8C]">You may correct saved purchase details. The original purchase total and stock receiving history stay unchanged; corrections are recorded in the audit history.</p>}
                 {inv.editingId && inv.hasVariants && hasSavedPurchase && <p role="note" className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">This product has variants. Supplier and payment corrections apply to its entire purchase, including all variants{purchaseSharedCount > 1 ? ` and ${purchaseSharedCount - 1} other linked product(s)` : ""}.</p>}
@@ -6958,7 +7093,7 @@ function ProductForm({
                         </div>
                     )}
                 </fieldset>
-            </section>
+            </section>}
 
             {inv.editingId && onDeleteProduct ? (
                 <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-2">

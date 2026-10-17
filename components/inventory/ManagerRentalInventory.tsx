@@ -2,22 +2,29 @@
 
 import * as React from "react";
 import * as XLSX from "xlsx";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
     Boxes, CalendarClock, CheckCircle2,
-    PackagePlus, Pencil, Plus, Search, Settings2, Wrench, X,
+    PackagePlus, Pencil, Plus, Search, Settings2, Wrench, X, Trash2,
     Download, Upload, ChevronDown, Wallet, ArrowRight,
 } from "lucide-react";
 import {
     useRentalInventory, availableNow, hasRentalStockDiscrepancy,
     type RentalEquipment, type RentalActivity, type RentalMaintenanceRecord,
     type RentalMutation, type RentalSummary, type RentalImportRow, type RentalPurchaseDetails,
-    type RentalBulkPurchase,
+    type RentalBulkPurchase, type RentalPricingMethod,
+    calculateCostBasedRentalRate,
 } from "@/hooks/useRentalInventory";
 
 // The manager manages physical equipment and maintenance, not checkout/return
 // transactions. Staff's booking workflow is the authority for rentals/returns.
 export default function ManagerRentalInventory({ branchId }: { branchId?: number }) {
     const rental = useRentalInventory(branchId);
+    const {user}=useCurrentUser();
+    const inventoryPermission=user?.permissions?.inventory_access ?? user?.permissions?.inventory;
+    // Legacy Managers default to Full unless explicitly denied; the Lambda is authoritative.
+    const canManage=user?.role==="manager" && (inventoryPermission==null || inventoryPermission===true ||
+        inventoryPermission==="true" || inventoryPermission==="full");
     const [search, setSearch] = React.useState("");
     const [category, setCategory] = React.useState("All Categories");
     const [status, setStatus] = React.useState("All Status");
@@ -26,6 +33,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         item: RentalEquipment | null;
     } | null>(null);
     const [chooseFor, setChooseFor] = React.useState<"receive" | "maintenance" | null>(null);
+    const [retireItem,setRetireItem] = React.useState<RentalEquipment|null>(null);
     const [maintenanceAllOpen, setMaintenanceAllOpen] = React.useState(false);
     const [notice, setNotice] = React.useState("");
     const [importOpen, setImportOpen] = React.useState(false);
@@ -43,6 +51,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
 
     const categories = rental.categories;
     const filtered = React.useMemo(() => rental.equipment.filter(item => {
+        // Retired equipment stays in history but not the default active catalog.
+        if(!item.active && status!=="Archived")return false;
         const query = search.trim().toLowerCase();
         const found = !query || [item.name, item.category, item.equipmentNumber, item.lastSupplier || ""]
             .some(value => value.toLowerCase().includes(query));
@@ -72,9 +82,12 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         } finally { setDatesLoading(false); }
     };
     const onSaved = async (mutation:RentalMutation) => {
+        if(!canManage)throw new Error("Full Inventory access is required to change equipment or purchase records.");
         const reference = await rental.mutate(mutation);
         resetDates();
-        setNotice(`Rental inventory saved${reference ? ` · ${reference}` : ""}.`);
+        setNotice(["receive_equipment","import_equipment"].includes(mutation.action) || (mutation.action==="create_equipment" && Boolean(mutation.initialPurchase))
+            ? `Purchase recorded${reference ? ` · ${reference}` : ""}. Staff must confirm physical receipt before stock increases.`
+            : `Rental inventory saved${reference ? ` · ${reference}` : ""}.`);
     };
     const downloadExport = (format:"xlsx"|"pdf") => {
         setExportOpen(false);
@@ -85,6 +98,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
 
     return (
         <div className="space-y-4" aria-label="Rental inventory">
+            {!canManage&&<p role="status" className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3 text-xs text-[#5330B6]">View-only Inventory access: product details and maintenance reports remain visible, but catalog changes, repair approvals and purchases require Full access.</p>}
             {rental.error && (
                 <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E8CAD2] bg-[#FFF5F7] px-4 py-3 text-sm text-[#A92741]">
                     <span>{rental.error}{rental.connected ? " Showing the last loaded data." : ""}</span>
@@ -100,8 +114,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                               description="Ready for rental at this moment" tone="green" icon={<CheckCircle2 size={20}/>} loading={rental.loading}/>
                 <RentalMetric label="Out on Rental" value={rental.summary.rentedOutUnits}
                               description="Units physically with customers" tone="blue" icon={<CalendarClock size={20}/>} loading={rental.loading}/>
-                <RentalMetric label="Under Maintenance" value={rental.summary.maintenanceUnits}
-                              description="Units unavailable for repairs" tone="amber" icon={<Wrench size={20}/>} loading={rental.loading}/>
+                <RentalMetric label="On Hold" value={rental.summary.maintenanceUnits}
+                              description="Pending inspection, cleaning, or repair" tone="amber" icon={<Wrench size={20}/>} loading={rental.loading}/>
             </div>
 
             <div className="grid gap-4 xl:grid-cols-[1.15fr_1fr]">
@@ -113,7 +127,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><Wrench size={19}/></span>
                             <div>
                                 <h2 className="text-[15px] font-bold text-[#21132E]">Maintenance &amp; Condition</h2>
-                                <p className="mt-0.5 text-[11px] text-[#86778F]">Units currently under maintenance or inspection.</p>
+                                <p className="mt-0.5 text-[11px] text-[#86778F]">Reported damage, repairs, and Manager approvals. Routine return holds are managed by Staff.</p>
                             </div>
                         </div>
                         <button type="button" onClick={()=>setMaintenanceAllOpen(true)}
@@ -126,7 +140,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                         !rental.maintenanceDataReady ?
                             <EmptyPanel label="The rental backend needs the maintenance records response. Apply the accompanying Lambda and SQL update."/> :
                             rental.maintenanceRecords.length === 0 ?
-                                <EmptyPanel label="No equipment is currently under maintenance or inspection."/> :
+                                <EmptyPanel label="No open repair or damage cases. Routine return inspections and cleaning are managed by Staff."/> :
                                 <MaintenanceRecordsTable records={rental.maintenanceRecords.slice(0,4)} compact/>}
                 </section>
 
@@ -153,6 +167,16 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                         )}
                 </section>
             </div>
+
+            {rental.missingReports.length>0&&<section className="rounded-xl border border-[#E7DFEC] bg-white p-4 shadow-sm">
+                <h3 className="mb-3 text-sm font-bold text-[#21132E]">Missing Equipment Reports — Manager Review</h3>
+                <div className="space-y-2">{rental.missingReports.map(report=><MissingReviewRow key={report.id} report={report}
+                                                                                                saving={rental.saving} canManage={canManage} onSave={onSaved}/>)}</div>
+            </section>}
+            {rental.pendingReceipts.length>0&&<section className="rounded-xl border border-[#D9CDF0] bg-[#F7F1FF] p-4 text-xs text-[#5330B6]">
+                <strong>{rental.pendingReceipts.length} pending supplier receipt(s)</strong> · Purchases are recorded.
+                Staff will confirm delivered quantities before they become available for rentals.
+            </section>}
 
             {/* Rental supplier payments are separate from equipment stock actions. */}
             <section aria-label="Rental supplier payments" className="rounded-2xl border border-[#E7DFEC] bg-white px-4 py-3.5 shadow-sm">
@@ -189,7 +213,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                         </select>
                         <select value={status} onChange={e=>setStatus(e.target.value)} aria-label="Filter rental equipment status"
                                 className="h-10 min-w-[145px] rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C]">
-                            {["All Status","Active","Low Availability","Unavailable","Under Maintenance","Missing Units","Stock Discrepancy","Archived"].map(value=><option key={value}>{value}</option>)}
+                            {["All Status","Active","Low Availability","Unavailable","Out on Rental","On Hold","Missing Units","Stock Discrepancy","Archived"].map(value=><option key={value}>{value}</option>)}
                         </select>
                         <button type="button" aria-expanded={dateFiltersOpen} onClick={()=>setDateFiltersOpen(v=>!v)}
                                 className="flex h-10 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
@@ -232,14 +256,18 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                placeholder="Search equipment no., rental products, or categories..." aria-label="Search rental equipment"
                                className="h-11 w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-3 text-sm text-[#2B174C] outline-none placeholder:text-[#9B8AAA] focus:border-[#5A35A5]"/>
                     </label>
-                    <button type="button" onClick={()=>setImportOpen(true)} className="flex h-11 items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-4 text-sm font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">
+                    <button type="button" disabled={!canManage} onClick={()=>setImportOpen(true)} className="flex h-11 items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-4 text-sm font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">
                         <Upload size={16}/> Upload File
                     </button>
-                    <button type="button" onClick={()=>setCategoriesOpen(true)} className="flex h-11 items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-4 text-sm font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">
+                    <button type="button" disabled={!canManage} onClick={()=>setCategoriesOpen(true)} className="flex h-11 items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-4 text-sm font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">
                         <Settings2 size={16}/> Manage Categories
                     </button>
-                    <button type="button" onClick={()=>setDialog({mode:"add",item:null})} className="flex h-11 items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-4 text-sm font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">
+                    <button type="button" disabled={!canManage} onClick={()=>setDialog({mode:"add",item:null})} className="flex h-11 items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-4 text-sm font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">
                         <Plus size={16}/> Add Equipment
+                    </button>
+                    <button type="button" disabled={!canManage} onClick={()=>setChooseFor("receive")}
+                            className="flex h-11 items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-white px-4 text-sm font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">
+                        <PackagePlus size={16}/> Record Purchase
                     </button>
                 </div>
                 {appliedDates && <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-xs font-medium text-[#5330B6]">
@@ -255,7 +283,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                             <th className="px-2 py-3 text-center font-semibold">Total Units</th>
                             <th className="px-2 py-3 text-center font-semibold">Available</th>
                             <th className="px-2 py-3 text-center font-semibold">Rented Out</th>
-                            <th className="px-2 py-3 text-center font-semibold">Maintenance</th>
+                            <th className="px-2 py-3 text-center font-semibold">On Hold</th>
                             <th className="px-2 py-3 text-center font-semibold">Status</th>
                             <th className="px-3 py-3 text-center font-semibold">Action</th>
                         </tr>
@@ -275,8 +303,12 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                             <td className="px-2 py-3 text-center">{item.maintenanceUnits}</td>
                                             <td className="px-2 py-3 text-center"><IssueBadge issue={equipmentStatus(item)}/></td>
                                             <td className="px-3 py-3 text-center">
-                                                <button type="button" onClick={() => setDialog({mode:"review",item})}
-                                                        className="rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-4 py-1.5 font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">Manage</button>
+                                                <div className="flex items-center justify-center gap-2">
+                                                    <button type="button" onClick={()=>setDialog({mode:"edit",item})} disabled={!canManage||!item.active}
+                                                            className="inline-flex items-center gap-1 rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#5330B6] hover:bg-[#EAE0FF]"><Pencil size={13}/> Edit</button>
+                                                    <button type="button" onClick={()=>setRetireItem(item)} disabled={!canManage||!item.active}
+                                                            className="inline-flex items-center gap-1 rounded-lg bg-[#FFF0F0] px-3 py-1.5 font-semibold text-[#C52C45] hover:bg-[#FFE2E6]"><Trash2 size={13}/> Delete</button>
+                                                </div>
                                             </td>
                                         </tr>
                                     ))}
@@ -286,8 +318,9 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             </section>
 
             {maintenanceAllOpen && <MaintenanceAllDialog
-                records={rental.maintenanceRecords} ready={rental.maintenanceDataReady}
-                close={()=>setMaintenanceAllOpen(false)}/>}
+                records={rental.maintenanceRecords} ready={rental.maintenanceDataReady} canManage={canManage}
+                close={()=>setMaintenanceAllOpen(false)} saving={rental.saving}
+                onSave={onSaved}/>}
             {notice && <div role="status" className="flex items-center justify-between rounded-xl border border-[#E2DCF2] bg-[#F5F0FF] px-4 py-3 text-xs font-semibold text-[#5330B6]">
                 {notice}<button type="button" onClick={() => setNotice("")} aria-label="Dismiss message"><X size={16}/></button>
             </div>}
@@ -297,12 +330,14 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                         categories={categories}
                                         onSave={async (mutation) => { await onSaved(mutation); setDialog(null); }}/>
             }
+            {retireItem&&<RetireEquipmentDialog item={retireItem} saving={rental.saving}
+                                                close={()=>setRetireItem(null)} onSave={async (mutation)=>{await onSaved(mutation);setRetireItem(null);}}/>}
             {chooseFor && <EquipmentPicker mode={chooseFor} equipment={rental.equipment}
                                            close={() => setChooseFor(null)} select={item => {setDialog({mode:chooseFor,item});setChooseFor(null);}}/>}
             {importOpen && <RentalImportDialog close={()=>setImportOpen(false)} onSave={async (rows,purchase)=>{
                 await onSaved({action:"import_equipment",importMode:"single_purchase",rows,purchase}); setImportOpen(false);
             }} saving={rental.saving} existingEquipment={rental.equipment}/>}
-            {supplierPaymentsOpen && <RentalSupplierPayablesDialog branchId={branchId} onClose={()=>setSupplierPaymentsOpen(false)}/>}
+            {supplierPaymentsOpen && <RentalSupplierPayablesDialog branchId={branchId} canManage={canManage} onClose={()=>setSupplierPaymentsOpen(false)}/>}
             {categoriesOpen && <RentalCategoriesDialog categories={categories} equipment={rental.equipment}
                                                        saving={rental.saving} close={()=>setCategoriesOpen(false)} onSave={onSaved}/>}
         </div>
@@ -313,8 +348,10 @@ function equipmentStatus(item: RentalEquipment): string {
     if (!item.active) return "Archived";
     if (hasRentalStockDiscrepancy(item)) return "Stock Discrepancy";
     if (item.missingUnits > 0) return "Missing Units";
+    // Status is derived from physical counters, never manually selected.
+    if (item.maintenanceUnits > 0) return "On Hold";
+    if (item.rentedOutUnits > 0) return "Out on Rental";
     if (availableNow(item) === 0) return "Unavailable";
-    if (item.maintenanceUnits > 0) return "Under Maintenance";
     if (item.alertLevel > 0 && availableNow(item) <= item.alertLevel) return "Low Availability";
     return "Active";
 }
@@ -335,7 +372,8 @@ function MaintenanceDate({value}:{value:string|null}) {
 }
 function MaintenanceConditionBadge({status}:{status:RentalMaintenanceRecord["status"]}) {
     return <span className={`inline-flex min-w-[96px] justify-center rounded-md px-2.5 py-1 text-[10px] font-semibold ${
-        status==="In Repair"?"bg-[#FFE5E9] text-[#D42E45]":"bg-[#FFF2D7] text-[#C47C00]"}`}>
+        status==="In Repair"?"bg-[#FFE5E9] text-[#D42E45]":
+            status==="Routine"?"bg-[#E5F8EC] text-[#23834A]":"bg-[#FFF2D7] text-[#C47C00]"}`}>
         {status}
     </span>;
 }
@@ -366,11 +404,20 @@ function MaintenanceRecordsTable({records,compact=false}:{
         </table>
     </div>;
 }
-function MaintenanceAllDialog({records,ready,close}:{
-    records:RentalMaintenanceRecord[];ready:boolean;close:()=>void;
+function MaintenanceAllDialog({records,ready,close,saving,canManage,onSave}:{
+    records:RentalMaintenanceRecord[];ready:boolean;close:()=>void;saving:boolean;canManage:boolean;
+    onSave:(mutation:RentalMutation)=>Promise<void>;
 }) {
     const [query,setQuery]=React.useState("");
-    const [filter,setFilter]=React.useState<"All"|"In Repair"|"For Inspection">("All");
+    const [filter,setFilter]=React.useState<"All"|"In Repair"|"For Inspection"|"Routine">("All");
+    const [approvalError,setApprovalError]=React.useState("");
+    const approve=async(mutation:RentalMutation,question:string)=>{
+        if(!canManage){setApprovalError("Full Inventory access is required to authorize repairs.");return;}
+        if(!window.confirm(question))return;
+        setApprovalError("");
+        try{await onSave(mutation);}
+        catch(error){setApprovalError(error instanceof Error?error.message:"Approval failed.");}
+    };
     const filtered=React.useMemo(()=>records.filter(item=>(filter==="All"||item.status===filter)&&
             `${item.equipmentName} ${item.reason} ${item.status}`.toLowerCase().includes(query.trim().toLowerCase())),
         [records,query,filter]);
@@ -388,14 +435,95 @@ function MaintenanceAllDialog({records,ready,close}:{
                            className="h-10 min-w-0 flex-1 rounded-xl border border-[#E3D8EA] px-3 text-sm text-[#2B174C] outline-none focus:border-[#5A35A5]"/>
                     <select value={filter} onChange={e=>setFilter(e.target.value as typeof filter)} aria-label="Filter maintenance condition"
                             className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#2B174C]">
-                        <option value="All">All Conditions</option><option value="In Repair">In Repair</option><option value="For Inspection">For Inspection</option>
+                        <option value="All">All Conditions</option><option value="In Repair">In Repair</option>
+                        <option value="For Inspection">For Inspection</option><option value="Routine">Routine Care</option>
                     </select>
                 </div>
+                {approvalError&&<p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">{approvalError}</p>}
                 {!ready ? <EmptyPanel label="Maintenance records require the accompanying backend update."/> :
                     filtered.length===0 ? <EmptyPanel label={records.length ? "No maintenance records match your filters." : "No equipment currently needs maintenance or inspection."}/> :
-                        <MaintenanceRecordsTable records={filtered}/>}
+                        <div className="space-y-3">
+                            <MaintenanceRecordsTable records={filtered}/>
+                            {filtered.map(record=><div key={record.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E9E1EE] p-3 text-xs">
+                                <div><strong>{record.equipmentName} · {record.units} units</strong>
+                                    <p className="mt-1 text-[#86778F]">{record.status==="Routine"?"Routine care — Staff completes without approval":
+                                        record.repairApproved?"Repair approved by Manager":"Waiting for Manager repair approval"}
+                                        {record.pendingCompletionId ? ` · Staff submitted ${record.pendingCompletionUnits} completed unit(s) for approval` : ""}</p></div>
+                                {record.status==="Routine" ? <span className="text-[#86778F]">Staff handles routine care</span> :
+                                    !record.repairApproved ? <button type="button" disabled={saving||!canManage} className="rounded-lg bg-[#2B174C] px-3 py-2 font-semibold text-white disabled:opacity-40"
+                                                                     onClick={()=>void approve({action:"approve_maintenance_repair",maintenanceId:record.id},`Authorize repair for ${record.equipmentName}?`)}>Approve Repair</button> :
+                                        record.pendingCompletionId ? <button type="button" disabled={saving||!canManage} className="rounded-lg bg-[#2B174C] px-3 py-2 font-semibold text-white disabled:opacity-40"
+                                                                             onClick={()=>void approve({action:"approve_repair_completion",requestId:record.pendingCompletionId!},`Approve release of ${record.pendingCompletionUnits} repaired ${record.equipmentName} units back into available stock?`)}>Approve Stock Release</button> :
+                                            <span className="text-[#86778F]">Waiting for Staff repair completion</span>}
+                            </div>)}
+                        </div>}
             </div>
         </div>
+    </div>;
+}
+
+function MissingReviewRow({report,saving,canManage,onSave}:{
+    report:import("@/hooks/useRentalInventory").RentalMissingReport;saving:boolean;canManage:boolean;
+    onSave:(mutation:RentalMutation)=>Promise<void>;
+}) {
+    const [error,setError]=React.useState("");
+    const resolve=async(resolution:"found"|"writeoff")=>{
+        if(!canManage){setError("Full Inventory access is required to resolve missing equipment.");return;}
+        const notes=window.prompt(resolution==="found"?
+            `Confirm ${report.quantity} recovered units of ${report.equipmentName}. Provide notes (10+ characters):`:
+            `Approve permanent write-off of ${report.quantity} missing ${report.equipmentName} units? Explain reason (10+ characters):`);
+        if(notes===null)return;
+        if(notes.trim().length<10){setError("Please provide at least 10 characters of notes.");return;}
+        if(!window.confirm(`Confirm ${resolution==="found"?"units found":"stock write-off"} for ${report.equipmentName}?`))return;
+        setError("");
+        try{await onSave({action:"resolve_missing_equipment",reportId:report.id,resolution,notes:notes.trim()});}
+        catch(cause){setError(cause instanceof Error?cause.message:"Unable to resolve missing report.");}
+    };
+    return <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E9E1EE] p-3 text-xs">
+        <div><strong className="text-[#2B174C]">{report.equipmentName} · {report.quantity} missing unit(s)</strong>
+            <p className="mt-1 text-[#86778F]">{report.reason}</p>{error&&<p role="alert" className="mt-1 text-red-700">{error}</p>}</div>
+        <div className="flex gap-2"><button type="button" disabled={saving||!canManage} onClick={()=>void resolve("found")}
+                                            className="rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-3 py-2 font-semibold text-[#5330B6] disabled:opacity-40">Mark Recovered</button>
+            <button type="button" disabled={saving||!canManage} onClick={()=>void resolve("writeoff")}
+                    className="rounded-lg bg-[#2B174C] px-3 py-2 font-semibold text-white disabled:opacity-40">Approve Write-Off</button></div>
+    </div>;
+}
+
+function RetireEquipmentDialog({item,saving,close,onSave}:{
+    item:RentalEquipment;saving:boolean;close:()=>void;onSave:(mutation:RentalMutation)=>Promise<void>;
+}) {
+    const [confirmName,setConfirmName]=React.useState("");
+    const [reason,setReason]=React.useState("");
+    const [error,setError]=React.useState("");
+    const [submitting,setSubmitting]=React.useState(false);
+    const blocked=item.rentedOutUnits>0||item.maintenanceUnits>0||item.missingUnits>0;
+    const submit=async(event:React.FormEvent)=>{
+        event.preventDefault();setError("");
+        if(blocked){setError("Resolve rented-out, held or missing equipment first.");return;}
+        if(confirmName.trim()!==item.name||reason.trim().length<10){setError("Type the exact equipment name and explain the retirement (10+ characters).");return;}
+        setSubmitting(true);
+        try{await onSave({action:"archive_equipment",equipmentId:item.id,confirmName,reason:reason.trim()});}
+        catch(cause){setError(cause instanceof Error?cause.message:"Unable to archive equipment.");}
+        finally{setSubmitting(false);}
+    };
+    return <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/50 p-4" role="presentation">
+        <form role="dialog" aria-modal="true" aria-label="Archive rental equipment" onSubmit={submit}
+              className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-[#21132E]">Delete / Archive Equipment</h3>
+            <p className="text-sm text-[#5A476A]">Retire <strong>{item.name}</strong> from the active rental catalog.
+                Existing supplier payments, purchases, bookings, and audit history are kept.</p>
+            {item.totalUnits>0&&<p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900">
+                {item.totalUnits} remaining units will be explicitly retired with an audited stock adjustment.
+                Use this only if the equipment has truly been removed from service.</p>}
+            {blocked&&<p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">Cannot archive equipment with rentals, holds or missing units.</p>}
+            <label className="block space-y-1 text-xs font-semibold text-[#5A476A]">Reason for retirement
+                <textarea required rows={3} maxLength={400} value={reason} onChange={e=>setReason(e.target.value)} className={rentalFieldClass} placeholder="Example: Equipment permanently retired after physical disposal"/></label>
+            <label className="block space-y-1 text-xs font-semibold text-[#5A476A]">Type equipment name to confirm: {item.name}
+                <input required value={confirmName} onChange={e=>setConfirmName(e.target.value)} className={rentalFieldClass}/></label>
+            {error&&<p role="alert" className="text-xs text-red-700">{error}</p>}
+            <div className="flex justify-end gap-2"><button type="button" onClick={close} disabled={submitting} className="rounded-lg border px-4 py-2 text-sm">Cancel</button>
+                <button disabled={saving||submitting||blocked} className="rounded-lg bg-[#B62C42] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{submitting?"Archiving...":"Confirm Archive"}</button></div>
+        </form>
     </div>;
 }
 
@@ -499,7 +627,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
     const purchasePaid=paymentMethod==="cash"?purchaseTotal:Number(amountPaid||0);
     const balance=Math.round((purchaseTotal-purchasePaid)*100)/100;
     const title=mode==="add"?"Add Rental Product":mode==="edit"?"Edit Rental Product":
-        mode==="receive"?"Receive Equipment":mode==="maintenance"?"Manage Maintenance":"Equipment Stock Review";
+        mode==="receive"?"Record Supplier Purchase":mode==="maintenance"?"Manage Maintenance":"Equipment Stock Review";
 
     const purchaseDetails=():RentalPurchaseDetails|null=>{
         if(!Number.isSafeInteger(qty)||qty<1||qty>2147483647||!supplier.trim()||
@@ -537,11 +665,11 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                 const purchase=qty>0?purchaseDetails():undefined;
                 if(qty>0&&!purchase)return;
                 mutation={action:"create_equipment",name:name.trim(),category:category.trim(),
-                    alertLevel:0,rentalRatePerDay:Number(rentalRate),
+                    alertLevel:0,rentalRatePerDay:Number(rentalRate), pricingMethod:"manual",
                     ...(purchase?{initialPurchase:purchase}:{})};
             }else{
                 mutation={action:"update_equipment",equipmentId:item!.id,name:name.trim(),category:category.trim(),
-                    alertLevel:item!.alertLevel,rentalRatePerDay:Number(rentalRate)};
+                    alertLevel:item!.alertLevel,rentalRatePerDay:Number(rentalRate), pricingMethod:"manual"};
             }
         }else if(mode==="receive"&&item){
             const purchase=purchaseDetails();if(!purchase)return;
@@ -586,6 +714,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                             ["Average Unit Cost",peso(item.averageUnitCost)],["Last Supplier",item.lastSupplier||"—"]].map(([label,value])=><div key={label}>
                             <p className="text-xs text-[#86778F]">{label}</p><strong className="text-sm text-[#2B174C]">{value}</strong></div>)}
                     </div>
+                    <p className="mb-3 text-xs text-[#86778F]">Pricing: {item.pricingMethod==="cost_based"?"Suggested Cost-Based Rate":"Manual Rental Rate"}. Daily rates are reviewed by the manager; equipment age does not automatically reduce customer charges.</p>
                     {hasRentalStockDiscrepancy(item)&&<p role="alert" className="rounded-xl bg-red-50 p-3 text-xs text-red-700">Assigned units exceed physical stock. Review booking, repair and missing records before correcting.</p>}
                     <p className="text-xs text-[#86778F]">Staff handle rental check-outs and returns through the booking workflow. The manager maintains equipment, pricing and repairs.</p>
                     <div className="flex flex-wrap gap-2">
@@ -608,22 +737,24 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                     <div className="grid gap-3 sm:grid-cols-2">
                         <div className="space-y-1"><label className={rentalLabelClass}>Stock (Units)</label>
                             <input type="number" min="0" step="1" required readOnly={mode==="edit"} value={mode==="edit"?item?.totalUnits??0:quantity}
-                                   title={mode==="edit"?"Use Receive Equipment to add physical stock":undefined}
+                                   title={mode==="edit"?"Record a supplier purchase and have Staff confirm its physical receipt":undefined}
                                    onChange={e=>setQuantity(e.target.value)} className={rentalFieldClass}/>
-                            {mode==="edit"&&<p className="text-xs text-[#9B8AAA]">Stock is read-only here. Use Receive Equipment or the appropriate stock activity workflow.</p>}
+                            {mode==="edit"&&<p className="text-xs text-[#9B8AAA]">Stock is read-only here. Stock is updated only when Staff confirms the physical receipt.</p>}
                         </div>
                         {mode==="add"&&<div className="space-y-1"><label className={rentalLabelClass}>Cost Price (₱ / unit)</label>
                             <input type="number" min="0" step="0.01" required={qty>0} disabled={qty===0} value={unitCost} onChange={e=>setUnitCost(e.target.value)} className={rentalFieldClass} placeholder="0.00"/>
                             <p className="text-xs text-[#9B8AAA]">Purchase cost, not the rental charge.</p></div>}
                         {mode==="edit"&&<div className="space-y-1"><label className={rentalLabelClass}>Average Unit Cost</label>
                             <input readOnly className={`${rentalFieldClass} bg-[#F7F1FF]`} value={peso(item?.averageUnitCost)}/></div>}
-                        <div className="space-y-1 sm:col-span-2"><label className={rentalLabelClass}>Rental Rate (₱ / unit / day)</label>
-                            <input type="number" min="0" max="100000000" step="0.01" required value={rentalRate} onChange={e=>setRentalRate(e.target.value)} className={rentalFieldClass} placeholder="Enter daily rental rate"/>
-                            <p className="text-xs text-[#9B8AAA]">Unlike Sales, this is a daily rental fee, not a selling price. Rental equipment has no product variants or reorder point.</p>
+                        <div className="space-y-1 sm:col-span-2"><label className={rentalLabelClass}>Final Daily Rental Rate (₱ for one item)</label>
+                            <input type="number" min="0" max="100000000" step="0.01" required value={rentalRate}
+                                   onChange={e=>setRentalRate(e.target.value)}
+                                   className={rentalFieldClass} placeholder="Enter daily rental rate"/>
+                            <p className="text-xs text-[#9B8AAA]">Charge for ONE item for ONE day. For example, 10 tables × this daily price × 2 days. Set your business's daily rental price; confirmed past bookings aren't repriced.</p>
                         </div>
                     </div>
-                    {mode==="edit"&&<p className="text-xs text-[#86778F]">Supplier purchasing history is not edited here. Record new physical purchases in Receive Equipment.</p>}
-                    {mode==="add"&&qty===0&&<p className="rounded-xl bg-[#FFFCF7] p-3 text-xs text-[#86778F]">Zero opening stock: this creates the rental catalog item only. You can receive purchased units later.</p>}
+                    {mode==="edit"&&<p className="text-xs text-[#86778F]">Supplier purchasing history is not edited here. Use Record Purchase to place new supply orders; Staff records actual received units.</p>}
+                    {mode==="add"&&qty===0&&<p className="rounded-xl bg-[#FFFCF7] p-3 text-xs text-[#86778F]">Zero opening stock: you can create a catalog item without a purchase cost and receive equipment later.</p>}
                 </>}
                 {mode==="maintenance"&&item&&<>
                     <h3 className="text-sm font-bold text-[#1A1220]">Equipment Inspection &amp; Repair</h3>
@@ -675,14 +806,14 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                 <div className="flex justify-end gap-2 border-t border-[#E6DDF0] pt-4">
                     <button type="button" disabled={submitting} onClick={close} className="rounded-xl border border-[#E6DDF0] px-5 py-3 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]">{mode==="review"?"Close":"Cancel"}</button>
                     {mode!=="review"&&<button type="submit" disabled={saving||submitting||(mode==="maintenance"&&limited===0)} className={btn}>
-                        {mode==="add"?"Save Product":mode==="edit"?"Update Product":mode==="receive"?"Receive Equipment":"Save Maintenance"}</button>}
+                        {mode==="add"?"Save Product":mode==="edit"?"Update Product":mode==="receive"?"Record Supplier Purchase":"Save Maintenance"}</button>}
                 </div>
             </form>
         </div>
         {pending&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/50 p-4" role="presentation">
             <div role="alertdialog" aria-modal="true" aria-label="Confirm rental inventory changes" className="w-full max-w-md space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
                 <h3 className="text-lg font-bold text-[#1A1220]">{mode==="add"?"Confirm Add Product":mode==="edit"?"Confirm Update":mode==="receive"?"Confirm Stock Receipt":"Confirm Maintenance"}</h3>
-                <p className="text-sm text-[#6A5D6F]">{mode==="add"?`Add ${name.trim()} to rental inventory?`:mode==="edit"?`Save the changes to ${name.trim()}?`:mode==="receive"?`Record ${qty} received unit(s) of ${item?.name}?`:`Record this maintenance action for ${item?.name}?`}</p>
+                <p className="text-sm text-[#6A5D6F]">{mode==="add"?`Add ${name.trim()} to rental inventory?`:mode==="edit"?`Save the changes to ${name.trim()}?`:mode==="receive"?`Record an order for ${qty} unit(s) of ${item?.name}? Staff will confirm physical receipt later.`:`Record this maintenance action for ${item?.name}?`}</p>
                 <p className="text-xs text-[#806A8C]">Physical stock and supplier transactions will be confirmed by the Rental backend, not generated by the interface.</p>
                 <div className="flex justify-end gap-2"><button type="button" disabled={submitting} onClick={()=>setPending(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm">Back</button>
                     <button type="button" disabled={saving||submitting} onClick={()=>void confirm()} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{submitting?"Saving...":"Confirm"}</button></div>
@@ -698,9 +829,9 @@ function EquipmentPicker({mode,equipment,close,select}:{mode:"receive"|"maintena
         `${item.name} ${item.equipmentNumber}`.toLowerCase().includes(query.toLowerCase()));
     return <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/50 p-3" role="presentation">
         <div role="dialog" aria-modal="true" aria-label="Select rental equipment" className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-xl">
-            <div className="flex items-center justify-between"><h2 className="text-lg font-bold text-[#21132E]">{mode === "receive" ? "Receive Equipment" : "Manage Maintenance"}</h2>
+            <div className="flex items-center justify-between"><h2 className="text-lg font-bold text-[#21132E]">{mode === "receive" ? "Record Supplier Purchase" : "Manage Maintenance"}</h2>
                 <button type="button" onClick={close} aria-label="Close"><X size={20}/></button></div>
-            <p className="my-3 text-xs text-[#86778F]">Select the equipment to {mode === "receive" ? "receive new units for" : "inspect or repair"}.</p>
+            <p className="my-3 text-xs text-[#86778F]">Select the equipment to {mode === "receive" ? "record a supplier purchase for" : "inspect or repair"}.</p>
             <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search equipment..." aria-label="Find rental equipment"
                    className="mb-3 h-10 w-full rounded-xl border border-[#E3D8EA] px-3 text-sm outline-none focus:border-[#5A35A5]"/>
             <div className="max-h-[320px] overflow-y-auto rounded-lg border border-[#E9E1EE]">
@@ -864,13 +995,16 @@ function exportRentalPdf(items:RentalEquipment[],filters:RentalExportFilters,ava
 /* SAME SALES WORKFLOW: select XLSX → preview → confirm. One purchase per
  * workbook, not one purchase per equipment row. No variants / reorder point. */
 const RENTAL_EQUIPMENT_HEADERS = ["Equipment Name","Category","Stock","Unit Purchase Cost (₱)","Rental Rate Per Day (₱)"];
+const RENTAL_PRICING_HEADERS = ["Pricing Method","Target Paid Rental Days to Recover Cost","Residual Value (₱)","Operating Cost / Paid Day (₱)","Target Margin (%)"];
+const LEGACY_PRICING_HEADERS = ["Pricing Method","Useful Life (Years)","Paid Rental Days / Year","Residual Value (₱)","Operating Cost / Paid Day (₱)","Target Margin (%)"];
 const RENTAL_PURCHASE_HEADERS = ["Supplier","Supplier Invoice Number (Optional)","Purchase Date","Payment Method","Amount Paid (₱)","Payment Due Date"];
 type ParsedRentalImport = {rows:RentalImportRow[];purchase:RentalBulkPurchase;purchaseTotal:number;outstandingBalance:number};
 function downloadRentalTemplate() {
     const workbook=XLSX.utils.book_new();
-    const lines=XLSX.utils.aoa_to_sheet([RENTAL_EQUIPMENT_HEADERS,
-        ["Folding Chair","Chairs",50,300,25],["Round Table","Tables",10,1800,150]]);
-    lines["!cols"]=[{wch:35},{wch:24},{wch:17},{wch:28},{wch:29}];
+    const lines=XLSX.utils.aoa_to_sheet([[...RENTAL_EQUIPMENT_HEADERS,...RENTAL_PRICING_HEADERS],
+        ["Folding Chair","Chairs",50,300,"","Cost-Based",30,0,4,30],
+        ["Round Table","Tables",10,1800,"","Cost-Based",45,200,12,30]]);
+    lines["!cols"]=[{wch:35},{wch:24},{wch:17},{wch:28},{wch:29},...RENTAL_PRICING_HEADERS.map(()=>({wch:25}))];
     XLSX.utils.book_append_sheet(workbook,lines,"RENTAL EQUIPMENT");
     const purchase=XLSX.utils.aoa_to_sheet([RENTAL_PURCHASE_HEADERS,
         ["Example Supplier","INV-001",rentalToday(),"Cash","",""]]);
@@ -888,6 +1022,12 @@ function downloadRentalTemplate() {
         ["8. Dates: YYYY-MM-DD. Do not add variants or Reorder Point fields."],
         ["9. Replace the sample rows with your own data; do not keep the examples."],
         ["10. Use Add Rental Product for zero-stock catalogue entries."],
+        ["11. New rental equipment defaults to Cost-Based pricing. Manual remains available."],
+        ["11a. Legacy five-column XLSX files still use Manual pricing to preserve the prices entered in those files."],
+        ["11b. In this updated format, leave Pricing Method and Rental Rate blank to select Cost-Based pricing, but fill the recovery target and other required inputs."],
+        ["12. Manual requires Rental Rate Per Day. Cost-Based calculates that value automatically; leave rate blank."],
+        ["13. Cost-Based requires Target Paid Rental Days to Recover Cost (per item), Residual Value, Operating Cost/Day, and Target Margin %."],
+        ["14. The calculated rate is rounded UP to a whole peso; it is a cost-recovery suggestion only."],
     ]);
     instructions["!cols"]=[{wch:110}];
     XLSX.utils.book_append_sheet(workbook,instructions,"INSTRUCTIONS");
@@ -924,6 +1064,21 @@ function parseRentalImport(buffer:ArrayBuffer,existingEquipment:RentalEquipment[
     if(productCells.length<1||productCells.length>500)throw new Error("Enter between 1 and 500 rental equipment rows.");
     const existing=new Set(existingEquipment.filter(item=>item.active).map(item=>item.name.toLowerCase().trim().replace(/\s+/g," ")));
     const seen=new Set<string>();
+    // Optional extra columns are detected by header name. Legacy five-column XLSX files still work.
+    const rawEquip=XLSX.utils.sheet_to_json<unknown[]>(equipSheet,{header:1,raw:true,defval:""});
+    const headerKey=(v:unknown)=>String(v??"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    const headerRow=rawEquip.findIndex(row=>RENTAL_EQUIPMENT_HEADERS.every(h=>row.some(v=>headerKey(v)===headerKey(h))));
+    const headerIndexes=new Map<string,number>();
+    rawEquip[headerRow].forEach((value,index)=>headerIndexes.set(headerKey(value),index));
+    const extra=(rowNumber:number,label:string)=>{
+        const index=headerIndexes.get(headerKey(label));
+        return index===undefined ? "" : rawEquip[rowNumber-1]?.[index]??"";
+    };
+    // Updated templates support cost-based pricing; older five-column workbooks
+    // retain their manually entered rates. Old extended templates still parse
+    // explicitly supplied years × annual days as a recovery target.
+    const hasCostBasedColumns=RENTAL_PRICING_HEADERS.every(label=>headerIndexes.has(headerKey(label)));
+    const hasLegacyPricingColumns=LEGACY_PRICING_HEADERS.every(label=>headerIndexes.has(headerKey(label)));
     const rows:RentalImportRow[]=productCells.map(({values,rowNumber})=>{
         const location=`RENTAL EQUIPMENT · row ${rowNumber}`;
         const name=String(values[0]??"").trim(),category=String(values[1]??"").trim();
@@ -936,8 +1091,40 @@ function parseRentalImport(buffer:ArrayBuffer,existingEquipment:RentalEquipment[
             throw new Error(`${location}: Stock must be a positive whole number. Add zero-stock products through Add Product.`);
         }
         const unitCost=rentalWorkbookMoney(values[3],"Unit Purchase Cost",location);
-        const rate=rentalWorkbookMoney(values[4],"Rental Rate Per Day",location);
-        return {name,category,openingUnits:Number(stockText),unitCost,rentalRatePerDay:rate};
+        const selectedMethod=String(extra(rowNumber,"Pricing Method")??"").trim().toLowerCase();
+        const rawMethod=selectedMethod||((hasCostBasedColumns||hasLegacyPricingColumns)&&String(values[4]??"").trim()===""?"cost-based":"manual");
+        const method:RentalPricingMethod=rawMethod==="cost-based"||rawMethod==="cost_based"?"cost_based":"manual";
+        if(!["cost-based","cost_based","manual"].includes(rawMethod)) throw new Error(`${location}: Pricing Method must be Manual or Cost-Based.`);
+        if(method==="manual") return {name,category,openingUnits:Number(stockText),unitCost,
+            rentalRatePerDay:rentalWorkbookMoney(values[4],"Rental Rate Per Day",location),pricingMethod:"manual"};
+        const cleanMoney=(label:string)=>rentalWorkbookMoney(extra(rowNumber,label),label,location);
+        const targetText=String(extra(rowNumber,"Target Paid Rental Days to Recover Cost")??"").trim();
+        let recoveryDays:number;
+        if(targetText){
+            if(!/^\d+$/.test(targetText)||Number(targetText)<1||Number(targetText)>10980)
+                throw new Error(`${location}: Target Paid Rental Days to Recover Cost must be 1–10,980.`);
+            recoveryDays=Number(targetText);
+        }else if(hasLegacyPricingColumns){
+            // Compatibility for files that EXPLICITLY specify the old two inputs.
+            const oldYears=String(extra(rowNumber,"Useful Life (Years)")??"").trim();
+            const oldDays=String(extra(rowNumber,"Paid Rental Days / Year")??"").trim();
+            if(!/^\d+$/.test(oldYears)||!/^\d+$/.test(oldDays)||Number(oldYears)<1||Number(oldYears)>30||Number(oldDays)<1||Number(oldDays)>366)
+                throw new Error(`${location}: Enter a recovery target, or explicitly provide both legacy Years and Paid Rental Days / Year.`);
+            recoveryDays=Number(oldYears)*Number(oldDays);
+        }else{
+            throw new Error(`${location}: Enter Target Paid Rental Days to Recover Cost for automatic pricing.`);
+        }
+        const residual=cleanMoney("Residual Value (₱)");
+        const operating=cleanMoney("Operating Cost / Paid Day (₱)");
+        const target=String(extra(rowNumber,"Target Margin (%)")??"").trim();
+        if(!/^\d+(?:\.\d{1,2})?$/.test(target)||Number(target)>80) throw new Error(`${location}: Target Margin must be 0–80%.`);
+        const rate=calculateCostBasedRentalRate(unitCost,residual,recoveryDays,operating,Number(target));
+        if(rate===null)throw new Error(`${location}: Cost-based pricing inputs are invalid. Check recovery target, residual value and costs.`);
+        if(values[4]!==""&&rentalWorkbookMoney(values[4],"Rental Rate Per Day",location)!==rate)
+            throw new Error(`${location}: Suggested Rate does not match formula. Leave the rental rate blank for Cost-Based pricing.`);
+        return {name,category,openingUnits:Number(stockText),unitCost,rentalRatePerDay:rate,
+            pricingMethod:"cost_based",pricingRecoveryDays:recoveryDays,
+            pricingResidualValue:residual,pricingOperatingCostPerDay:operating,pricingMarginPercent:Number(target)};
     });
     const purchaseCells=rentalWorkbookTable(purchaseSheet,"PURCHASE DETAILS",RENTAL_PURCHASE_HEADERS);
     if(purchaseCells.length!==1)throw new Error(`PURCHASE DETAILS: Enter exactly ONE supplier purchase row, not ${purchaseCells.length}.`);
@@ -1030,7 +1217,7 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
                             <tbody>{(preview?.rows||[]).map((row,i)=><tr key={`${row.name}-${i}`} className="border-t border-[#EFE7F4]">
                                 <td className="px-3 py-3 font-semibold text-[#2B174C]">{row.name}</td><td className="px-3 py-3">{row.category}</td>
                                 <td className="px-3 py-3">{row.openingUnits}</td><td className="px-3 py-3">{peso(row.unitCost)}</td>
-                                <td className="px-3 py-3">{peso(row.rentalRatePerDay)}</td><td className="px-3 py-3">{peso(row.openingUnits*row.unitCost)}</td>
+                                <td className="px-3 py-3">{peso(row.rentalRatePerDay)}<div className="text-[10px] text-[#806A8C]">{row.pricingMethod==="cost_based"?"Cost-Based":"Manual"}</div></td><td className="px-3 py-3">{peso(row.openingUnits*row.unitCost)}</td>
                                 <td className="px-3 py-3 font-semibold text-[#23834A]">Valid</td>
                             </tr>)}</tbody></table></div>
                     </section>
@@ -1255,8 +1442,8 @@ const secondaryButton = "rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-3 py
 const primaryButton = "rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-50";
 
 function RentalSupplierPayablesDialog({
-                                          branchId, onClose,
-                                      }: { branchId?: number; onClose: () => void }) {
+                                          branchId, canManage, onClose,
+                                      }: { branchId?: number; canManage: boolean; onClose: () => void }) {
     const [payables, setPayables] = React.useState<RentalSupplierPayable[]>([]);
     const [loading, setLoading] = React.useState(true);
     const [saving, setSaving] = React.useState(false);
@@ -1359,6 +1546,7 @@ function RentalSupplierPayablesDialog({
 
     const preparePayment = (event: React.FormEvent) => {
         event.preventDefault();
+        if(!canManage){setError("Full Inventory access is required to record payments.");return;}
         if (saving || !chosenPayment) return;
         const amountCents = cents(paymentAmount);
         if (amountCents === null || amountCents > Math.round(chosenPayment.outstandingBalance * 100)) {
@@ -1376,6 +1564,7 @@ function RentalSupplierPayablesDialog({
     };
 
     const confirmPayment = async () => {
+        if(!canManage){setError("Full Inventory access is required to record payments.");return;}
         if (!confirmation || saving || pendingRef.current) return;
         pendingRef.current = true;
         setSaving(true);
@@ -1461,7 +1650,7 @@ function RentalSupplierPayablesDialog({
                         </table></div>}
                 </section>}
 
-                <form onSubmit={preparePayment} className="space-y-3 border-t border-[#E3D8EA] pt-4">
+                {canManage&&<form onSubmit={preparePayment} className="space-y-3 border-t border-[#E3D8EA] pt-4">
                     <h3 className="text-sm font-bold text-[#2B174C]">Record Payment for a Specific Purchase</h3>
                     <select aria-label="Select rental purchase with an outstanding balance" value={paymentPurchaseId}
                             onChange={(event: React.ChangeEvent<HTMLSelectElement>)=>{setPaymentPurchaseId(event.target.value);setPaymentAmount("");setError("");paymentKeyRef.current=crypto.randomUUID();}} className={inputClass}>
@@ -1478,7 +1667,7 @@ function RentalSupplierPayablesDialog({
                             <input type="date" max={rentalToday()} required value={paymentDate} onChange={(event: React.ChangeEvent<HTMLInputElement>)=>setPaymentDate(event.target.value)} className={inputClass}/></label>
                     </div>
                     <div className="flex justify-end"><button type="submit" disabled={!chosenPayment||saving} className={primaryButton}>{saving?"Recording...":"Record Payment"}</button></div>
-                </form>
+                </form>}
             </div>
         </div>
         {confirmation && <div role="presentation" className="fixed inset-0 z-[160] flex items-center justify-center bg-black/60 p-4">

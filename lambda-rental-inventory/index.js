@@ -69,12 +69,44 @@ function purchaseData(input) {
     return { supplier, purchaseDate, quantity, unitCents, totalCents, paidCents, paymentMethod, due,
         invoice: trim(input.supplierInvoiceNumber, 80) || null };
 }
-function equipmentInput(input) {
-    const name = requiredText(input.name, 150, "Equipment name");
-    const category = requiredText(input.category, 100, "Category");
-    const alertLevel = whole(input.alertLevel, "Low availability alert");
-    const rateCents = cents(input.rentalRatePerDay, "Rental rate per unit per day");
-    return { name, category, alertLevel, rateCents };
+// Suggested rental pricing is a cost-recovery estimate, not an automatic age discount.
+// Always verify it on the server; never rely on a browser-calculated price.
+function rentalPricing(input, purchaseUnitCost, fallbackRate = null) {
+    const method = String(input.pricingMethod ?? "manual");
+    if (!['manual', 'cost_based'].includes(method)) fail(400, 'Invalid rental pricing method.');
+    if (method === 'manual') {
+        const rate = input.rentalRatePerDay == null ? fallbackRate : intMoney(cents(input.rentalRatePerDay, 'Rental rate per unit per day'));
+        if (rate == null) fail(400, 'Manual rental rate is required.');
+        return { method, rate, recoveryDays:null, residual:null, operating:null, margin:null, basis:null };
+    }
+    if (purchaseUnitCost === null || purchaseUnitCost === undefined)
+        fail(400, 'Cost-based pricing requires an actual equipment purchase cost. Receive equipment first or choose Manual Rental Rate.');
+    const unitCost = intMoney(cents(purchaseUnitCost, 'Equipment unit cost'));
+    const recoveryDays = whole(input.pricingRecoveryDays, 'Target paid rental days to recover cost', true);
+    if (recoveryDays > 10980) fail(400, 'Cost-recovery target must be 1–10,980 paid rental days per item.');
+    const residual = intMoney(cents(input.pricingResidualValue, 'Residual value'));
+    const operating = intMoney(cents(input.pricingOperatingCostPerDay, 'Operating cost per paid rental day'));
+    const margin = Number(input.pricingMarginPercent);
+    if (input.pricingMarginPercent === '' || input.pricingMarginPercent == null ||
+        !Number.isFinite(margin) || margin < 0 || margin > 80 ||
+        !/^\d+(?:\.\d{1,2})?$/.test(String(input.pricingMarginPercent).trim()))
+        fail(400, 'Target margin must be 0–80% with up to two decimal places.');
+    if (residual > unitCost) fail(400, 'Residual value cannot exceed the equipment unit cost.');
+    const estimate = ((unitCost - residual) / recoveryDays + operating) / (1 - margin / 100);
+    const rate = Math.ceil(estimate - 1e-9);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 100000000)
+        fail(400, 'The calculated daily rental rate is invalid or too large.');
+    if (input.rentalRatePerDay !== null && input.rentalRatePerDay !== undefined &&
+        cents(input.rentalRatePerDay, 'Rental rate') !== Math.round(rate * 100))
+        fail(400, 'The submitted rental rate does not match the cost-based calculation. Please refresh pricing.');
+    return { method, rate, recoveryDays, residual, operating, margin, basis:unitCost };
+}
+function equipmentInput(input, unitCost = null) {
+    const name = requiredText(input.name, 150, 'Equipment name');
+    const category = requiredText(input.category, 100, 'Category');
+    const alertLevel = whole(input.alertLevel, 'Low availability alert');
+    return { name, category, alertLevel,
+        pricing: rentalPricing(input, unitCost) };
 }
 async function categoryId(db, scope, name) {
     const catKey = key(name);
@@ -125,35 +157,29 @@ async function receivePurchase(db, scope, equipmentRow, data, source) {
     await db.execute("UPDATE rental_purchase_transactions SET purchase_number=? WHERE id=?", [purchaseNumber,purchaseId]);
     const [item] = await db.execute(`INSERT INTO rental_purchase_items (purchase_id,equipment_id,quantity_ordered,unit_purchase_cost)
                                      VALUES (?,?,?,?)`, [purchaseId,equipmentRow.id,purchase.quantity,intMoney(purchase.unitCents)]);
-    const [receipt] = await db.execute(`INSERT INTO rental_stock_receipts
-                                        (store_id,branch_id,purchase_item_id,equipment_id,quantity_received,unit_purchase_cost,received_date,received_by)
-                                        VALUES(?,?,?,?,?,?,?,?)`, [scope.storeId,scope.branchId,item.insertId,equipmentRow.id,purchase.quantity,
-        intMoney(purchase.unitCents),purchase.purchaseDate,scope.actor]);
-    const receivingNumber = `${prefix}-RRCV-${String(receipt.insertId).padStart(6, "0")}`;
-    await db.execute("UPDATE rental_stock_receipts SET receiving_number=? WHERE id=?", [receivingNumber,receipt.insertId]);
+    // The Manager records the supplier purchase. Only Staff can physically receive it.
+    await db.execute(`INSERT INTO rental_receiving_tasks
+                      (store_id,branch_id,purchase_id,purchase_item_id,equipment_id,quantity_expected,unit_cost)
+                      VALUES(?,?,?,?,?,?,?)`,
+        [scope.storeId,scope.branchId,purchaseId,item.insertId,equipmentRow.id,purchase.quantity,intMoney(purchase.unitCents)]);
     if (purchase.paidCents > 0) {
         await db.execute(`INSERT INTO rental_supplier_payments (purchase_id,amount,payment_date,request_key) VALUES(?,?,?,?)`,
             [purchaseId,intMoney(purchase.paidCents),purchase.purchaseDate,`INITIAL-${purchaseId}`]);
     }
-    const oldQty = Number(equipmentRow.total_units);
-    const nextQty = oldQty + purchase.quantity;
-    if (!Number.isSafeInteger(nextQty) || nextQty > 2147483647) fail(400,"Equipment total would exceed allowed limits.");
-    const oldCostCents = Math.round(Number(equipmentRow.average_unit_cost || 0) * 100);
-    const nextAverageCents = Math.round((oldQty * oldCostCents + purchase.quantity * purchase.unitCents) / nextQty);
-    await db.execute(`UPDATE rental_equipment SET total_units=?,average_unit_cost=?,last_supplier=? WHERE id=?`,
-        [nextQty,intMoney(nextAverageCents),purchase.supplier,equipmentRow.id]);
-    equipmentRow.total_units = nextQty;
-    equipmentRow.average_unit_cost = intMoney(nextAverageCents);
-    await appendMovement(db,scope,equipmentRow.id,"received",purchase.quantity,purchaseNumber,`Supplier: ${purchase.supplier}, Receipt: ${receivingNumber}`);
-    return { purchaseId,purchaseNumber,receivingNumber,amountPaid:intMoney(purchase.paidCents),
-        outstandingBalance:intMoney(purchase.totalCents-purchase.paidCents) };
+    // Stock, average unit cost, and stock movements are updated only after Staff confirms receipt.
+    return {purchaseId,purchaseNumber,receivingNumber:null,amountPaid:intMoney(purchase.paidCents),
+        outstandingBalance:intMoney(purchase.totalCents-purchase.paidCents),awaitingReceipt:true};
 }
-async function createEquipment(db,scope,raw,source) {
-    const e = equipmentInput(raw);
+async function createEquipment(db,scope,raw,source, importedUnitCost = null) {
+    const e = equipmentInput(raw, raw.initialPurchase?.unitCost ?? importedUnitCost);
     const cid = await categoryId(db,scope,e.category);
     const [created] = await db.execute(`INSERT INTO rental_equipment
-                                        (store_id,branch_id,category_id,name,name_key,alert_level,rental_rate_per_day)
-                                        VALUES(?,?,?,?,?,?,?)`, [scope.storeId,scope.branchId,cid,e.name,key(e.name),e.alertLevel,intMoney(e.rateCents)]);
+                                        (store_id,branch_id,category_id,name,name_key,alert_level,rental_rate_per_day,
+                                         pricing_method,pricing_recovery_days,
+                                         pricing_residual_value,pricing_operating_cost_per_day,pricing_margin_percent,pricing_unit_cost_basis)
+                                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [scope.storeId,scope.branchId,cid,e.name,key(e.name),e.alertLevel,e.pricing.rate,
+            e.pricing.method,e.pricing.recoveryDays,e.pricing.residual,e.pricing.operating,e.pricing.margin,e.pricing.basis]);
     const equipmentId = Number(created.insertId);
     const prefix = await branchCodes(db,scope);
     const equipmentNumber = `${prefix}-EQ-${String(equipmentId).padStart(6,"0")}`;
@@ -185,14 +211,14 @@ async function mutate(db,scope,body) {
                 const category = requiredText(line.category, 100, "Category");
                 const quantity = whole(line.openingUnits, "Stock units", true);
                 const unitCents = cents(line.unitCost, "Unit purchase cost");
-                const rentalRateCents = cents(line.rentalRatePerDay, "Rental rate per day");
+                const pricing = rentalPricing(line, line.unitCost);
                 if (uniqueNames.has(key(name))) fail(400, `Duplicate rental equipment in workbook: ${name}`);
                 uniqueNames.add(key(name));
                 const lineCents = quantity * unitCents;
                 totalCents += lineCents;
                 if (!Number.isSafeInteger(totalCents) || totalCents > 99999999999999)
                     fail(400, "Combined supplier purchase total is too large.");
-                normalizedRows.push({ name, category, quantity, unitCents, rentalRateCents });
+                normalizedRows.push({ name, category, quantity, unitCents, pricing });
             }
             const supplier = requiredText(p.supplier, 150, "Supplier");
             const invoice = trim(p.supplierInvoiceNumber, 80) || null;
@@ -213,8 +239,16 @@ async function mutate(db,scope,body) {
             for (const line of normalizedRows) {
                 const newEquipment = await createEquipment(db, scope, {
                     name: line.name, category: line.category, alertLevel: 0,
-                    rentalRatePerDay: intMoney(line.rentalRateCents)
-                }, "import");
+                    rentalRatePerDay: line.pricing.rate,
+                    pricingMethod: line.pricing.method,
+                    pricingRecoveryDays: line.pricing.recoveryDays,
+                    pricingResidualValue: line.pricing.residual,
+                    pricingOperatingCostPerDay: line.pricing.operating,
+                    pricingMarginPercent: line.pricing.margin,
+                    // Creation happens before the single purchase is recorded.
+                    // Supply unit cost ONLY for cost-based formula validation.
+                    initialPurchase: undefined
+                }, "import", line.unitCents / 100);
                 createdRows.push({ ...line, equipmentId: newEquipment.equipmentId,
                     equipmentNumber: newEquipment.equipmentNumber });
             }
@@ -233,17 +267,10 @@ async function mutate(db,scope,body) {
                 const [item] = await db.execute(`INSERT INTO rental_purchase_items
                                                      (purchase_id,equipment_id,quantity_ordered,unit_purchase_cost) VALUES(?,?,?,?)`,
                     [purchaseId,line.equipmentId,line.quantity,intMoney(line.unitCents)]);
-                const [receipt] = await db.execute(`INSERT INTO rental_stock_receipts
-                                                    (store_id,branch_id,purchase_item_id,equipment_id,quantity_received,unit_purchase_cost,received_date,received_by)
-                                                    VALUES(?,?,?,?,?,?,?,?)`, [scope.storeId,scope.branchId,item.insertId,line.equipmentId,
-                    line.quantity,intMoney(line.unitCents),purchaseDate,scope.actor]);
-                const receivingNumber = `${prefix}-RRCV-${String(receipt.insertId).padStart(6, "0")}`;
-                await db.execute("UPDATE rental_stock_receipts SET receiving_number=? WHERE id=?", [receivingNumber,receipt.insertId]);
-                await db.execute(`UPDATE rental_equipment SET total_units=?,average_unit_cost=?,last_supplier=?
-                                  WHERE id=? AND store_id=? AND branch_id=?`,
-                    [line.quantity,intMoney(line.unitCents),supplier,line.equipmentId,scope.storeId,scope.branchId]);
-                await appendMovement(db,scope,line.equipmentId,"received",line.quantity,purchaseNumber,
-                    `Supplier: ${supplier}, Receipt: ${receivingNumber}`);
+                await db.execute(`INSERT INTO rental_receiving_tasks
+                                  (store_id,branch_id,purchase_id,purchase_item_id,equipment_id,quantity_expected,unit_cost)
+                                  VALUES(?,?,?,?,?,?,?)`,
+                    [scope.storeId,scope.branchId,purchaseId,item.insertId,line.equipmentId,line.quantity,intMoney(line.unitCents)]);
             }
             return { imported: createdRows.length, equipment: createdRows.map(line=>({
                     equipmentId:line.equipmentId,equipmentNumber:line.equipmentNumber,name:line.name
@@ -256,15 +283,24 @@ async function mutate(db,scope,body) {
             const name = requiredText(body.name,150,"Equipment name");
             const category = requiredText(body.category,100,"Category");
             const alert = whole(body.alertLevel,"Low availability alert");
-            const rate = body.rentalRatePerDay == null ? Number(current.rental_rate_per_day) : intMoney(cents(body.rentalRatePerDay,"Rental rate"));
+            // Keep the saved cost basis stable across later supplier receipts.
+            // Refreshing it requires an explicit manager action.
+            const basis = Number(current.total_units) > 0
+                ? (body.pricingRefreshBasis === true || current.pricing_unit_cost_basis == null
+                    ? current.average_unit_cost : current.pricing_unit_cost_basis)
+                : null;
+            const pricing = rentalPricing(body, basis, Number(current.rental_rate_per_day));
             const cat = await categoryId(db,scope,category);
-            await db.execute(`UPDATE rental_equipment SET name=?,name_key=?,category_id=?,alert_level=?,rental_rate_per_day=? WHERE id=?`,
-                [name,key(name),cat,alert,rate,current.id]);
+            await db.execute(`UPDATE rental_equipment SET name=?,name_key=?,category_id=?,alert_level=?,rental_rate_per_day=?,
+                                                          pricing_method=?,pricing_recovery_days=?,
+                                                          pricing_residual_value=?,pricing_operating_cost_per_day=?,pricing_margin_percent=?,pricing_unit_cost_basis=? WHERE id=?`,
+                [name,key(name),cat,alert,pricing.rate,pricing.method,pricing.recoveryDays,
+                    pricing.residual,pricing.operating,pricing.margin,pricing.basis,current.id]);
             return { equipmentId:current.id,referenceNumber:current.equipment_number };
         }
         case "receive_equipment": {
             const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
-            const purchase=await receivePurchase(db,scope,current,body,"receive");
+            const purchase=await receivePurchase(db,scope,current,body,"purchase");
             return {equipmentId:current.id,...purchase,referenceNumber:purchase.purchaseNumber};
         }
         case "start_maintenance": {
@@ -289,31 +325,95 @@ async function mutate(db,scope,body) {
             await appendMovement(db,scope,current.id,"maintenance_started",qty,ref,reason);
             return {referenceNumber:ref};
         }
-        case "complete_maintenance": {
-            const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
-            const qty=whole(body.quantity,"Completed maintenance quantity",true);
-            if (qty>Number(current.maintenance_units)) fail(409,"Cannot complete more maintenance units than are currently under repair.");
-            const reason=requiredText(body.reason,500,"Repair completion notes");
-            if(reason.length<5)fail(400,"Repair completion notes must have at least 5 characters.");
-            const [open] = await db.execute(`SELECT id,quantity_remaining FROM rental_maintenance_records
-                                             WHERE equipment_id=? AND store_id=? AND branch_id=? AND quantity_remaining>0 ORDER BY id ASC FOR UPDATE`,
-                [current.id,scope.storeId,scope.branchId]);
-            let remaining=qty, firstId=null;
-            for(const row of open) {
-                if (remaining===0) break;
-                if (firstId===null) firstId=Number(row.id);
-                const used=Math.min(remaining,Number(row.quantity_remaining));
-                const fullyCompleted = used === Number(row.quantity_remaining);
-                await db.execute(`UPDATE rental_maintenance_records SET quantity_remaining=quantity_remaining-?,
-                                                                        completion_notes=?,completed_at=CASE WHEN ?=1 THEN NOW() ELSE completed_at END WHERE id=?`,
-                    [used,reason,fullyCompleted ? 1 : 0,row.id]);
-                remaining-=used;
-            }
-            if (remaining>0) fail(409,"Maintenance log does not match equipment stock. Reconcile records first.");
-            await db.execute("UPDATE rental_equipment SET maintenance_units=maintenance_units-? WHERE id=?",[qty,current.id]);
-            const ref=`MNT-${String(firstId).padStart(6,"0")}`;
-            await appendMovement(db,scope,current.id,"maintenance_completed",qty,ref,reason);
+        case "approve_maintenance_repair": {
+            const maintenanceId=id(body.maintenanceId,"Maintenance record");
+            // Lock equipment before the maintenance record to match stock lock ordering.
+            const [identity]=await db.execute(`SELECT equipment_id FROM rental_maintenance_records
+                                               WHERE id=? AND store_id=? AND branch_id=?`,[maintenanceId,scope.storeId,scope.branchId]);
+            if(!identity.length)fail(404,"Maintenance record not found.");
+            const equipment=await lockEquipment(db,scope,Number(identity[0].equipment_id));
+            const [records]=await db.execute(`SELECT id,quantity_remaining,repair_approved_at,condition_status FROM rental_maintenance_records
+                                              WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[maintenanceId,scope.storeId,scope.branchId]);
+            if(!records.length || Number(records[0].quantity_remaining)<=0)fail(409,"Maintenance is already completed.");
+            if(records[0].condition_status === "Routine")
+                fail(409,"Routine care is completed by Staff and does not require Manager approval.");
+            if(records[0].repair_approved_at)fail(409,"This repair was already approved.");
+            await db.execute(`UPDATE rental_maintenance_records SET repair_approved_at=NOW(),repair_approved_by=? WHERE id=?`,[scope.actor,maintenanceId]);
+            return {referenceNumber:`MNT-${String(maintenanceId).padStart(6,"0")}`,equipmentId:equipment.id};
+        }
+        case "approve_repair_completion": {
+            const requestId=id(body.requestId,"Repair completion request");
+            const [identity]=await db.execute(`SELECT equipment_id FROM rental_maintenance_completion_requests
+                                               WHERE id=? AND store_id=? AND branch_id=?`,[requestId,scope.storeId,scope.branchId]);
+            if(!identity.length)fail(404,"Completion request not found.");
+            const equipment=await lockEquipment(db,scope,Number(identity[0].equipment_id));
+            const [requests]=await db.execute(`SELECT * FROM rental_maintenance_completion_requests
+                                               WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[requestId,scope.storeId,scope.branchId]);
+            const request=requests[0];
+            if(request.status!=="pending")fail(409,"This request has already been reviewed.");
+            const [records]=await db.execute(`SELECT quantity_remaining,repair_approved_at,condition_status FROM rental_maintenance_records
+                                              WHERE id=? AND equipment_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                [request.maintenance_record_id,equipment.id,scope.storeId,scope.branchId]);
+            const quantity=Number(request.quantity);
+            if(!records.length || records[0].condition_status === "Routine" ||
+                !records[0].repair_approved_at || Number(records[0].quantity_remaining)<quantity ||
+                Number(equipment.maintenance_units)<quantity)fail(409,"Repair quantities or approval no longer match. Please refresh.");
+            await db.execute(`UPDATE rental_maintenance_records SET quantity_remaining=quantity_remaining-?,completion_notes=?,
+                                                                    completed_at=CASE WHEN quantity_remaining=? THEN NOW() ELSE completed_at END WHERE id=?`,
+                [quantity,request.notes,quantity,request.maintenance_record_id]);
+            await db.execute(`UPDATE rental_equipment SET maintenance_units=maintenance_units-? WHERE id=?`,[quantity,equipment.id]);
+            await db.execute(`UPDATE rental_maintenance_completion_requests SET status='approved',reviewed_by=?,reviewed_at=NOW()
+                              WHERE id=?`,[scope.actor,requestId]);
+            const ref=`MNT-${String(request.maintenance_record_id).padStart(6,"0")}`;
+            await appendMovement(db,scope,equipment.id,"maintenance_completed",quantity,ref,`Manager approved release: ${request.notes}`);
             return {referenceNumber:ref};
+        }
+        case "resolve_missing_equipment": {
+            const reportId=id(body.reportId,"Missing equipment report");
+            const resolution=String(body.resolution||"");
+            if(!["found","writeoff"].includes(resolution))fail(400,"Choose Found or Approve Write-Off.");
+            const [identity]=await db.execute(`SELECT equipment_id FROM rental_missing_unit_reports
+                                               WHERE id=? AND store_id=? AND branch_id=?`,[reportId,scope.storeId,scope.branchId]);
+            if(!identity.length)fail(404,"Missing-unit report not found.");
+            const equipment=await lockEquipment(db,scope,Number(identity[0].equipment_id));
+            const [reports]=await db.execute(`SELECT * FROM rental_missing_unit_reports WHERE id=?
+                                                                                          AND store_id=? AND branch_id=? FOR UPDATE`,[reportId,scope.storeId,scope.branchId]);
+            const report=reports[0],qty=Number(report.quantity);
+            if(report.status!=="pending")fail(409,"This missing-unit report has already been reviewed.");
+            if(qty>Number(equipment.missing_units))fail(409,"Missing unit counts need reconciliation.");
+            const notes=requiredText(body.notes,500,"Resolution notes");
+            if(notes.length<10)fail(400,"Explain the disposition of missing equipment (10+ characters).");
+            if(resolution==="writeoff" && qty>Number(equipment.total_units)-Number(equipment.rented_out_units)-Number(equipment.maintenance_units))
+                fail(409,"Cannot write off units committed to other equipment operations.");
+            await db.execute(`UPDATE rental_equipment SET missing_units=missing_units-?,
+                                                          total_units=total_units-? WHERE id=?`,[qty,resolution==="writeoff"?qty:0,equipment.id]);
+            await db.execute(`UPDATE rental_missing_unit_reports SET status=?,resolved_by=?,resolved_at=NOW(),resolution_notes=?
+                              WHERE id=?`,[resolution,scope.actor,notes,reportId]);
+            await appendMovement(db,scope,equipment.id,resolution==="found"?"missing_resolved":"adjustment",qty,
+                `MISS-${String(reportId).padStart(6,"0")}`,`${resolution==="found"?"Missing units recovered":"Manager-approved stock write-off"}: ${notes}`);
+            return {referenceNumber:`MISS-${String(reportId).padStart(6,"0")}`};
+        }
+        case "archive_equipment": {
+            const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
+            const reason=requiredText(body.reason,400,"Retirement reason");
+            if(reason.length<10)fail(400,"Explain why equipment is being retired (at least 10 characters).");
+            if(String(body.confirmName||"").trim()!==current.name)fail(400,"Type the equipment name exactly to confirm retirement.");
+            if(Number(current.rented_out_units)||Number(current.maintenance_units)||Number(current.missing_units))
+                fail(409,"Resolve rented-out, held, and missing units before retiring this equipment.");
+            const [allocated]=await db.execute(`SELECT id FROM rental_booking_allocations
+                                                WHERE store_id=? AND branch_id=? AND equipment_id=? AND status IN ('reserved','checked_out') LIMIT 1`,
+                [scope.storeId,scope.branchId,current.id]);
+            if(allocated.length)fail(409,"Cannot retire equipment with an active or future rental allocation.");
+            const [pending]=await db.execute(`SELECT id FROM rental_receiving_tasks WHERE equipment_id=?
+                                                                                      AND store_id=? AND branch_id=? AND quantity_received<quantity_expected LIMIT 1`,
+                [current.id,scope.storeId,scope.branchId]);
+            if(pending.length)fail(409,"Confirm or resolve all pending supplier receipts before retiring equipment.");
+            const units=Number(current.total_units);
+            // An intentional full-stock retirement is audited rather than deleting purchases.
+            await db.execute(`UPDATE rental_equipment SET total_units=0,archived_at=NOW() WHERE id=?`,[current.id]);
+            if(units>0)await appendMovement(db,scope,current.id,"adjustment",units,current.equipment_number,
+                `Equipment retired: ${reason}`);
+            return {referenceNumber:current.equipment_number,retiredUnits:units};
         }
         case "create_rental_category": {
             const name=requiredText(body.name,100,"Category name");
@@ -362,7 +462,13 @@ async function getInventory(db,scope) {
                                                c.name AS category,e.total_units AS totalUnits,e.rented_out_units AS rentedOutUnits,
                                                e.maintenance_units AS maintenanceUnits,e.missing_units AS missingUnits,e.alert_level AS alertLevel,
                                                IF(e.archived_at IS NULL,1,0) AS active,e.rental_rate_per_day AS rentalRatePerDay,
-                                               e.average_unit_cost AS averageUnitCost,e.last_supplier AS lastSupplier
+                                               e.average_unit_cost AS averageUnitCost,e.last_supplier AS lastSupplier,
+                                               e.pricing_method AS pricingMethod,
+                                               e.pricing_recovery_days AS pricingRecoveryDays,
+                                               e.pricing_residual_value AS pricingResidualValue,
+                                               e.pricing_operating_cost_per_day AS pricingOperatingCostPerDay,
+                                               e.pricing_margin_percent AS pricingMarginPercent,
+                                               e.pricing_unit_cost_basis AS pricingUnitCostBasis
                                         FROM rental_equipment e JOIN rental_categories c ON c.id=e.category_id
                                         WHERE e.store_id=? AND e.branch_id=? ORDER BY e.created_at DESC,e.id DESC`, [scope.storeId,scope.branchId]);
     const [activity]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,
@@ -380,24 +486,50 @@ async function getInventory(db,scope) {
                                                         m.start_reason AS reason,
                                                         DATE_FORMAT(m.opened_at,'%Y-%m-%d') AS dateReported,
                                                         DATE_FORMAT(m.estimated_completion_date,'%Y-%m-%d') AS estimatedCompletion,
-                                                        m.condition_status AS status
+                                                        m.condition_status AS status,
+                                                        IF(m.repair_approved_at IS NULL,0,1) AS repairApproved,
+                                                        q.id AS pendingCompletionId,q.quantity AS pendingCompletionUnits,
+                                                        q.notes AS pendingCompletionNotes
                                                  FROM rental_maintenance_records m
+                                                          LEFT JOIN rental_maintenance_completion_requests q ON q.maintenance_record_id=m.id AND q.status='pending'
                                                           LEFT JOIN rental_equipment e ON e.id=m.equipment_id
                                                      AND e.store_id=m.store_id AND e.branch_id=m.branch_id
                                                  WHERE m.store_id=? AND m.branch_id=? AND m.quantity_remaining>0
                                                  ORDER BY m.opened_at DESC,m.id DESC LIMIT 1000`,
         [scope.storeId,scope.branchId]);
+    const [pendingReceipts]=await db.execute(`SELECT t.id,t.equipment_id AS equipmentId,
+                                                     e.name AS equipmentName,p.purchase_number AS purchaseNumber,t.quantity_expected AS quantityExpected,
+                                                     t.quantity_received AS quantityReceived
+                                              FROM rental_receiving_tasks t JOIN rental_equipment e ON e.id=t.equipment_id
+                                                                            JOIN rental_purchase_transactions p ON p.id=t.purchase_id
+                                              WHERE t.store_id=? AND t.branch_id=? AND t.quantity_received<t.quantity_expected
+                                              ORDER BY t.id DESC LIMIT 100`,[scope.storeId,scope.branchId]);
+    const [missingReports]=await db.execute(`SELECT r.id,r.equipment_id AS equipmentId,e.name AS equipmentName,
+                                                    r.quantity,r.reason,DATE_FORMAT(r.created_at,'%Y-%m-%d') AS reportedAt,r.reported_by AS reportedBy
+                                             FROM rental_missing_unit_reports r JOIN rental_equipment e ON e.id=r.equipment_id
+                                             WHERE r.store_id=? AND r.branch_id=? AND r.status='pending' ORDER BY r.created_at DESC,r.id DESC
+                                                 LIMIT 200`,[scope.storeId,scope.branchId]);
     const [categories]=await db.execute(`SELECT name FROM rental_categories WHERE store_id=? AND branch_id=? AND archived_at IS NULL ORDER BY name`,
         [scope.storeId,scope.branchId]);
     return {success:true, storeId:scope.storeId, branchId:scope.branchId, storeName:scope.storeName, branchName:scope.branchName, bookingSyncConnected: process.env.RENTAL_BOOKING_SYNC_ENABLED === "true", equipment:equipment.map(row=>({ ...row,id:Number(row.id),totalUnits:Number(row.totalUnits),
             rentedOutUnits:Number(row.rentedOutUnits),maintenanceUnits:Number(row.maintenanceUnits),missingUnits:Number(row.missingUnits),
             alertLevel:Number(row.alertLevel),active:Boolean(row.active),rentalRatePerDay:Number(row.rentalRatePerDay),
-            averageUnitCost:row.averageUnitCost===null?null:Number(row.averageUnitCost)})),
+            averageUnitCost:row.averageUnitCost===null?null:Number(row.averageUnitCost),
+            pricingRecoveryDays:row.pricingRecoveryDays===null?null:Number(row.pricingRecoveryDays),
+            pricingResidualValue:row.pricingResidualValue===null?null:Number(row.pricingResidualValue),
+            pricingOperatingCostPerDay:row.pricingOperatingCostPerDay===null?null:Number(row.pricingOperatingCostPerDay),
+            pricingMarginPercent:row.pricingMarginPercent===null?null:Number(row.pricingMarginPercent),
+            pricingUnitCostBasis:row.pricingUnitCostBasis===null?null:Number(row.pricingUnitCostBasis)})),
         activity,
         maintenanceRecords:maintenanceRecords.map(row=>({
             ...row,id:Number(row.id),equipmentId:Number(row.equipmentId),
-            quantityStarted:Number(row.quantityStarted),units:Number(row.units)
+            quantityStarted:Number(row.quantityStarted),units:Number(row.units),
+            repairApproved:Boolean(row.repairApproved),pendingCompletionId:row.pendingCompletionId==null?null:Number(row.pendingCompletionId),
+            pendingCompletionUnits:row.pendingCompletionUnits==null?null:Number(row.pendingCompletionUnits)
         })),
+        pendingReceipts:pendingReceipts.map(r=>({...r,id:Number(r.id),equipmentId:Number(r.equipmentId),
+            quantityExpected:Number(r.quantityExpected),quantityReceived:Number(r.quantityReceived)})),
+        missingReports:missingReports.map(r=>({...r,id:Number(r.id),equipmentId:Number(r.equipmentId),quantity:Number(r.quantity)})),
         categories:categories.map(c=>c.name) };
 }
 async function getPayables(db,scope) {
@@ -458,6 +590,57 @@ async function checkAvailability(db,scope,body) {
 }
 
 
+// Read-only branch schedule for Staff. Do not use today's physical availability as
+// date-specific availability: confirmed future reservations may overlap.
+async function staffEquipmentSchedule(db,scope,body) {
+    const equipmentId=id(body.equipmentId,'Equipment');
+    const date=isoDate(body.date,'Schedule date');
+    const [rows]=await db.execute(`SELECT id,equipment_number AS equipmentNumber,name,total_units AS totalUnits,
+                                          rented_out_units AS rentedOutUnits,maintenance_units AS maintenanceUnits,
+                                          missing_units AS missingUnits
+                                   FROM rental_equipment
+                                   WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL LIMIT 1`,
+        [equipmentId,scope.storeId,scope.branchId]);
+    if(!rows.length)fail(404,'Equipment not found in this branch.');
+    const item=rows[0];
+    const today=todayPh();
+    if(date<today)fail(400,'Use today or a future date to plan rental availability. Past rentals are in activity history.');
+    const [bookings]=await db.execute(`SELECT a.id AS allocationId,a.booking_reference AS bookingReference,
+                                              a.quantity,DATE_FORMAT(a.start_date,'%Y-%m-%d') AS startDate,
+                                              DATE_FORMAT(a.end_date,'%Y-%m-%d') AS endDate,a.status
+                                       FROM rental_booking_allocations a
+                                                JOIN bookings b ON b.booking_reference=a.booking_reference COLLATE utf8mb4_unicode_ci
+                                           AND b.store_id=a.store_id AND b.branch_id=a.branch_id
+                                           AND LOWER(b.status) IN ('confirmed','preparing','approved','completed')
+                                       WHERE a.store_id=? AND a.branch_id=? AND a.equipment_id=?
+                                         AND a.status IN ('reserved','checked_out') AND a.start_date<=?
+                                         AND (a.end_date>=? OR (a.status='checked_out' AND a.end_date<?))
+                                       ORDER BY a.start_date,a.id LIMIT 300`,
+        [scope.storeId,scope.branchId,equipmentId,date,date,today]);
+    // The total must NOT be limited by the 300-row schedule preview. Always
+    // aggregate all matching confirmed allocations for the selected date.
+    const [summaryRows]=await db.execute(`SELECT COALESCE(SUM(a.quantity),0) AS bookedUnits,COUNT(*) AS allocationCount
+                                          FROM rental_booking_allocations a
+                                                   JOIN bookings b ON b.booking_reference=a.booking_reference COLLATE utf8mb4_unicode_ci
+                                              AND b.store_id=a.store_id AND b.branch_id=a.branch_id
+                                              AND LOWER(b.status) IN ('confirmed','preparing','approved','completed')
+                                          WHERE a.store_id=? AND a.branch_id=? AND a.equipment_id=?
+                                            AND a.status IN ('reserved','checked_out') AND a.start_date<=?
+                                            AND (a.end_date>=? OR (a.status='checked_out' AND a.end_date<?))`,
+        [scope.storeId,scope.branchId,equipmentId,date,date,today]);
+    // The booked quantity on a date is NOT the same as physically rented-out
+    // quantity right now. Never add the latter again (double-counting).
+    const bookedUnits=Number(summaryRows[0].bookedUnits);
+    const allocationCount=Number(summaryRows[0].allocationCount);
+    const totalUnits=Number(item.totalUnits),maintenanceUnits=Number(item.maintenanceUnits),
+        missingUnits=Number(item.missingUnits),rentedOutUnits=Number(item.rentedOutUnits);
+    return {success:true,schedule:{equipmentId,date,totalUnits,maintenanceUnits,missingUnits,
+            rentedOutUnits,physicallyAvailableNow:Math.max(0,totalUnits-rentedOutUnits-maintenanceUnits-missingUnits),
+            bookedUnits,allocationCount,availableOnDate:Math.max(0,totalUnits-maintenanceUnits-missingUnits-bookedUnits),
+            bookings:bookings.map(b=>({allocationId:Number(b.allocationId),bookingReference:b.bookingReference,
+                quantity:Number(b.quantity),startDate:b.startDate,endDate:b.endDate,status:b.status}))}};
+}
+
 // Staff operations consume existing booking allocations; there is no equipment/catalog write access.
 // Bookings must already be confirmed by the existing booking workflow.
 async function staffRentalWorkspace(db, scope) {
@@ -472,12 +655,16 @@ async function staffRentalWorkspace(db, scope) {
                                                    a.quantity,DATE_FORMAT(a.start_date,'%Y-%m-%d') AS startDate,
                                                    DATE_FORMAT(a.end_date,'%Y-%m-%d') AS endDate,a.status,
                                                    w.prepared_at AS preparedAt,w.returned_at AS returnedAt,
-                                                   CASE WHEN m.id IS NOT NULL AND m.quantity_remaining=0 THEN 'cleared' ELSE w.inspection_status END AS inspectionStatus,
+                                                   COALESCE(w.returned_received_units,a.quantity) AS returnedReceivedUnits,
+                                                   COALESCE(w.inspection_cleaning_units,IF(w.inspection_status='cleaning',a.quantity,0)) AS cleaningUnits,
+                                                   COALESCE(w.inspection_damaged_units,IF(w.inspection_status='damaged',a.quantity,0)) AS damagedUnits,
+                                                   CASE WHEN w.inspection_status='damaged' AND m.id IS NOT NULL AND m.quantity_remaining=0
+                                                            THEN 'cleared' ELSE w.inspection_status END AS inspectionStatus,
                                                    w.inspection_notes AS inspectionNotes
                                             FROM rental_booking_allocations a
                                                      JOIN rental_equipment e ON e.id=a.equipment_id AND e.store_id=a.store_id AND e.branch_id=a.branch_id AND e.archived_at IS NULL
                                                      JOIN bookings b ON b.booking_reference=a.booking_reference COLLATE utf8mb4_unicode_ci AND b.store_id=a.store_id AND b.branch_id=a.branch_id
-                                                AND LOWER(b.status) IN ('confirmed','approved','completed')
+                                                AND LOWER(b.status) IN ('confirmed','preparing','approved','completed')
                                                      LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id
                                                      LEFT JOIN rental_maintenance_records m ON m.id=w.maintenance_record_id
                                             WHERE a.store_id=? AND a.branch_id=? AND (a.status IN ('reserved','checked_out')
@@ -489,11 +676,32 @@ async function staffRentalWorkspace(db, scope) {
                                                 COALESCE(m.reference_number,'') AS referenceNumber
                                          FROM rental_stock_movements m LEFT JOIN rental_equipment e ON e.id=m.equipment_id
                                          WHERE m.store_id=? AND m.branch_id=? ORDER BY m.occurred_at DESC,m.id DESC LIMIT 30`,[scope.storeId,scope.branchId]);
+    const [pendingReceipts]=await db.execute(`SELECT t.id,t.equipment_id AS equipmentId,e.name AS equipmentName,
+                                                     e.equipment_number AS equipmentNumber,p.purchase_number AS purchaseNumber,
+                                                     t.quantity_expected AS quantityExpected,t.quantity_received AS quantityReceived
+                                              FROM rental_receiving_tasks t JOIN rental_equipment e ON e.id=t.equipment_id
+                                                                            JOIN rental_purchase_transactions p ON p.id=t.purchase_id
+                                              WHERE t.store_id=? AND t.branch_id=? AND e.archived_at IS NULL AND t.quantity_received<t.quantity_expected
+                                              ORDER BY t.id ASC LIMIT 200`,[scope.storeId,scope.branchId]);
+    const [maintenanceTasks]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,e.name AS equipmentName,
+                                                      m.quantity_remaining AS units,m.start_reason AS reason,
+                                                      m.condition_status AS conditionStatus,
+                                                      IF(m.repair_approved_at IS NULL,0,1) AS repairApproved,
+                                                      (SELECT COALESCE(SUM(q.quantity),0) FROM rental_maintenance_completion_requests q
+                                                       WHERE q.maintenance_record_id=m.id AND q.status='pending') AS pendingUnits
+                                               FROM rental_maintenance_records m JOIN rental_equipment e ON e.id=m.equipment_id
+                                               WHERE m.store_id=? AND m.branch_id=? AND e.archived_at IS NULL AND m.quantity_remaining>0
+                                               ORDER BY m.opened_at DESC LIMIT 200`,[scope.storeId,scope.branchId]);
     return {success:true,equipment:equipment.map(x=>({...x,id:Number(x.id),totalUnits:Number(x.totalUnits),
             rentedOutUnits:Number(x.rentedOutUnits),maintenanceUnits:Number(x.maintenanceUnits),
             missingUnits:Number(x.missingUnits),alertLevel:Number(x.alertLevel)})),
-        allocations:allocations.map(x=>({...x,allocationId:Number(x.allocationId),equipmentId:Number(x.equipmentId),quantity:Number(x.quantity)})),
-        activity};
+        allocations:allocations.map(x=>({...x,allocationId:Number(x.allocationId),equipmentId:Number(x.equipmentId),quantity:Number(x.quantity),
+            returnedReceivedUnits:Number(x.returnedReceivedUnits),cleaningUnits:Number(x.cleaningUnits),damagedUnits:Number(x.damagedUnits)})),
+        activity,
+        pendingReceipts:pendingReceipts.map(x=>({...x,id:Number(x.id),equipmentId:Number(x.equipmentId),
+            quantityExpected:Number(x.quantityExpected),quantityReceived:Number(x.quantityReceived)})),
+        maintenanceTasks:maintenanceTasks.map(x=>({...x,id:Number(x.id),equipmentId:Number(x.equipmentId),
+            units:Number(x.units),repairApproved:Boolean(x.repairApproved),pendingUnits:Number(x.pendingUnits)}))};
 }
 async function staffRentalMutation(db,scope,body) {
     const action=String(body.action||'');
@@ -503,11 +711,14 @@ async function staffRentalMutation(db,scope,body) {
         [allocationId,scope.storeId,scope.branchId]);
     if(!identity.length)fail(404,'Rental allocation does not belong to this branch.');
     const equipment=await lockEquipment(db,scope,Number(identity[0].equipment_id));
-    const [allocations]=await db.execute(`SELECT a.*, w.prepared_at AS preparedAt, w.inspection_status AS inspectionStatus
+    const [allocations]=await db.execute(`SELECT a.*, w.prepared_at AS preparedAt, w.inspection_status AS inspectionStatus,
+                                                 w.returned_received_units AS returnedReceivedUnits,
+                                                 w.inspection_cleaning_units AS cleaningUnits,
+                                                 w.inspection_damaged_units AS damagedUnits
                                           FROM rental_booking_allocations a
                                                    LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id
                                                    JOIN bookings b ON b.booking_reference=a.booking_reference COLLATE utf8mb4_unicode_ci AND b.store_id=a.store_id AND b.branch_id=a.branch_id
-                                              AND LOWER(b.status) IN ('confirmed','approved','completed')
+                                              AND LOWER(b.status) IN ('confirmed','preparing','approved','completed')
                                           WHERE a.id=? AND a.store_id=? AND a.branch_id=? FOR UPDATE`,[allocationId,scope.storeId,scope.branchId]);
     if(!allocations.length)fail(409,'Only a confirmed, branch-owned booking allocation can be processed.');
     const a=allocations[0], qty=Number(a.quantity);
@@ -515,7 +726,7 @@ async function staffRentalMutation(db,scope,body) {
     const ref=requiredText(a.booking_reference,100,'Booking reference');
     if(['prepare_rental_allocation','release_rental_allocation'].includes(action)) {
         const [eligible]=await db.execute(`SELECT id FROM bookings WHERE booking_reference=? AND store_id=? AND branch_id=?
-                                                                     AND LOWER(status) IN ('confirmed','approved') LIMIT 1`,[ref,scope.storeId,scope.branchId]);
+                                                                     AND LOWER(status) IN ('confirmed','preparing','approved') LIMIT 1`,[ref,scope.storeId,scope.branchId]);
         if(!eligible.length)fail(409,'Only currently confirmed bookings can be prepared or released.');
     }
     const note=trim(body.notes,400);
@@ -524,6 +735,9 @@ async function staffRentalMutation(db,scope,body) {
     const total=Number(equipment.total_units),out=Number(equipment.rented_out_units),hold=Number(equipment.maintenance_units),missing=Number(equipment.missing_units);
     if(action==='prepare_rental_allocation') {
         if(a.status!=='reserved'||a.preparedAt)fail(409,'This booking is already prepared or cannot be prepared.');
+        // Preparation means physically gathered and usable equipment, not a free-form status flag.
+        // Staff-reported damage/holds may reduce stock after the booking was confirmed.
+        if(qty>total-out-hold-missing)fail(409,'Not enough physically usable units to prepare this booking. Resolve damaged or missing stock first.');
         await db.execute('UPDATE rental_staff_allocation_workflow SET prepared_at=NOW(),prepared_by=? WHERE allocation_id=?',[scope.actor,allocationId]);
         await appendMovement(db,scope,equipment.id,'prepared',qty,ref,'Equipment prepared for scheduled release');
     } else if(action==='release_rental_allocation') {
@@ -536,45 +750,244 @@ async function staffRentalMutation(db,scope,body) {
         await appendMovement(db,scope,equipment.id,'rented_out',qty,ref,'Physical handover confirmed');
     } else if(action==='return_rental_allocation') {
         if(a.status!=='checked_out'||out<qty)fail(409,'Booking is not checked out or stock needs reconciliation.');
+        // Reconcile every issued unit: received units are held for inspection;
+        // missing units immediately become unavailable pending Manager resolution.
+        const missingCount=whole(body.missingUnits ?? 0,'Missing units on return');
+        if(missingCount>qty)fail(400,'Missing units cannot exceed the booking quantity.');
+        if(missingCount>0&&note.length<5)fail(400,'Explain missing units in at least five characters.');
+        const receivedCount=qty-missingCount;
         await db.execute(`UPDATE rental_booking_allocations SET status='returned' WHERE id=?`,[allocationId]);
-        // All returned units go on inspection hold; staff may not release unchecked equipment.
-        await db.execute('UPDATE rental_equipment SET rented_out_units=rented_out_units-?,maintenance_units=maintenance_units+? WHERE id=?',[qty,qty,equipment.id]);
-        await db.execute(`UPDATE rental_staff_allocation_workflow SET returned_at=NOW(),returned_by=?,inspection_status='pending' WHERE allocation_id=?`,[scope.actor,allocationId]);
-        await appendMovement(db,scope,equipment.id,'returned',qty,ref,'Returned - held for inspection');
+        await db.execute(`UPDATE rental_equipment SET rented_out_units=rented_out_units-?,
+                                                      maintenance_units=maintenance_units+?,missing_units=missing_units+? WHERE id=?`,
+            [qty,receivedCount,missingCount,equipment.id]);
+        await db.execute(`UPDATE rental_staff_allocation_workflow SET returned_at=NOW(),returned_by=?,
+                                                                      returned_received_units=?,inspection_status=? WHERE allocation_id=?`,
+            [scope.actor,receivedCount,receivedCount>0?'pending':'cleared',allocationId]);
+        if(receivedCount>0)await appendMovement(db,scope,equipment.id,'returned',receivedCount,ref,'Physically returned - held for inspection');
+        if(missingCount>0){
+            const [report]=await db.execute(`INSERT INTO rental_missing_unit_reports
+                                             (store_id,branch_id,equipment_id,quantity,reason,reported_by,booking_reference)
+                                             VALUES(?,?,?,?,?,?,?)`,[scope.storeId,scope.branchId,equipment.id,missingCount,
+                `Booking ${ref}: ${note}`,scope.actor,ref]);
+            await appendMovement(db,scope,equipment.id,'missing_reported',missingCount,
+                `MISS-${String(report.insertId).padStart(6,'0')}`,`Missing on rental return ${ref}: ${note}`);
+        }
     } else if(action==='inspect_rental_allocation') {
         if(a.status!=='returned'||a.inspectionStatus!=='pending')fail(409,'Only returned equipment awaiting inspection can be inspected.');
-        if(hold<qty)fail(409,'Inspection hold does not match equipment totals.');
-        const result=String(body.condition||'');
-        if(!['good','cleaning','damaged'].includes(result))fail(400,'Select good condition, needs cleaning, or damaged.');
-        if(result==='damaged'&&note.length<5)fail(400,'Describe the damage (at least 5 characters).');
-        if(result==='good')await db.execute('UPDATE rental_equipment SET maintenance_units=maintenance_units-? WHERE id=?',[qty,equipment.id]);
-        if(result==='damaged'){
+        const receivedCount=a.returnedReceivedUnits==null?qty:Number(a.returnedReceivedUnits);
+        if(!Number.isSafeInteger(receivedCount)||receivedCount<1||hold<receivedCount)
+            fail(409,'Inspection quantity does not match the returned equipment on hold.');
+        // Existing callers sending a single condition are still supported.
+        // New Staff UI explicitly splits the received quantity by condition.
+        let goodCount,cleaningCount,damagedCount;
+        if(body.goodUnits !== undefined || body.cleaningUnits !== undefined || body.damagedUnits !== undefined){
+            goodCount=whole(body.goodUnits,'Good-condition units');
+            cleaningCount=whole(body.cleaningUnits,'Cleaning units');
+            damagedCount=whole(body.damagedUnits,'Damaged units');
+        } else {
+            const result=String(body.condition||'');
+            if(!['good','cleaning','damaged'].includes(result))fail(400,'Select good condition, cleaning, or damaged.');
+            goodCount=result==='good'?receivedCount:0;
+            cleaningCount=result==='cleaning'?receivedCount:0;
+            damagedCount=result==='damaged'?receivedCount:0;
+        }
+        if(goodCount+cleaningCount+damagedCount!==receivedCount)
+            fail(400,`Condition quantities must total ${receivedCount} physically returned units.`);
+        if(damagedCount>0&&note.length<5)fail(400,'Describe the damaged equipment (at least five characters).');
+        if(goodCount>0)await db.execute('UPDATE rental_equipment SET maintenance_units=maintenance_units-? WHERE id=?',[goodCount,equipment.id]);
+        if(damagedCount>0){
             const [record]=await db.execute(`INSERT INTO rental_maintenance_records
-                                             (store_id,branch_id,equipment_id,quantity_started,quantity_remaining,start_reason)
-                                             VALUES (?,?,?,?,?,?)`,[scope.storeId,scope.branchId,equipment.id,qty,qty,`Rental damage ${ref}: ${note}`]);
+                                             (store_id,branch_id,equipment_id,quantity_started,quantity_remaining,start_reason,booking_reference)
+                                             VALUES (?,?,?,?,?,?,?)`,[scope.storeId,scope.branchId,equipment.id,damagedCount,damagedCount,`Rental damage ${ref}: ${note}`,ref]);
             await db.execute(`UPDATE rental_staff_allocation_workflow SET maintenance_record_id=? WHERE allocation_id=?`,
                 [record.insertId,allocationId]);
         }
+        const nextStatus=cleaningCount>0?'cleaning':damagedCount>0?'damaged':'cleared';
         await db.execute(`UPDATE rental_staff_allocation_workflow SET inspected_at=NOW(),inspected_by=?,
-                                                                      inspection_status=?,inspection_notes=? WHERE allocation_id=?`,
-            [scope.actor,result==='good'?'cleared':result,note||null,allocationId]);
-        await appendMovement(db,scope,equipment.id,result==='damaged'?'damage_reported':'inspected',qty,ref,
-            result==='good'?'Inspection passed':result==='cleaning'?'Cleaning needed':`Damage reported: ${note}`);
+                                                                      inspection_status=?,inspection_notes=?,inspection_cleaning_units=?,inspection_damaged_units=? WHERE allocation_id=?`,
+            [scope.actor,nextStatus,note||null,cleaningCount,damagedCount,allocationId]);
+        await appendMovement(db,scope,equipment.id,'inspected',receivedCount,ref,
+            `Inspection: ${goodCount} good, ${cleaningCount} cleaning, ${damagedCount} damaged${note?` - ${note}`:''}`);
+        if(damagedCount>0)await appendMovement(db,scope,equipment.id,'damage_reported',damagedCount,ref,
+            `Damage held for Manager approval: ${note}`);
     } else if(action==='clean_rental_allocation') {
-        if(a.status!=='returned'||a.inspectionStatus!=='cleaning'||hold<qty)fail(409,'No cleaning task is pending for this booking.');
-        await db.execute('UPDATE rental_equipment SET maintenance_units=maintenance_units-? WHERE id=?',[qty,equipment.id]);
-        await db.execute(`UPDATE rental_staff_allocation_workflow SET inspection_status='cleared',cleaned_at=NOW(),cleaned_by=? WHERE allocation_id=?`,[scope.actor,allocationId]);
-        await appendMovement(db,scope,equipment.id,'cleaned',qty,ref,note||'Cleaning completed');
+        if(a.status!=='returned'||a.inspectionStatus!=='cleaning')fail(409,'No cleaning task is pending for this booking.');
+        // NULL means an older whole-allocation cleaning record (before split inspections).
+        const cleaningCount=a.cleaningUnits==null?qty:Number(a.cleaningUnits);
+        const damagedCount=a.damagedUnits==null?0:Number(a.damagedUnits);
+        if(!Number.isSafeInteger(cleaningCount)||cleaningCount<1||hold<cleaningCount)
+            fail(409,'Cleaning hold quantity needs reconciliation.');
+        await db.execute('UPDATE rental_equipment SET maintenance_units=maintenance_units-? WHERE id=?',[cleaningCount,equipment.id]);
+        await db.execute(`UPDATE rental_staff_allocation_workflow SET inspection_status=?,inspection_cleaning_units=0,
+                                                                      cleaned_at=NOW(),cleaned_by=? WHERE allocation_id=?`,
+            [damagedCount>0?'damaged':'cleared',scope.actor,allocationId]);
+        await appendMovement(db,scope,equipment.id,'cleaned',cleaningCount,ref,note||'Cleaning completed');
     } else fail(400,'Unsupported staff rental action.');
     return {referenceNumber:ref,allocationId};
 }
 
+async function staffRentalStockMutation(db,scope,body) {
+    const action=String(body.action||"");
+    if(action==="staff_receive_rental_purchase") {
+        const taskId=id(body.taskId,"Purchase receiving task");
+        const [identity]=await db.execute(`SELECT equipment_id FROM rental_receiving_tasks WHERE id=? AND store_id=? AND branch_id=?`,
+            [taskId,scope.storeId,scope.branchId]);
+        if(!identity.length)fail(404,"Receiving task not found.");
+        const equipment=await lockEquipment(db,scope,Number(identity[0].equipment_id));
+        const [tasks]=await db.execute(`SELECT t.*,p.purchase_number AS purchaseNumber,p.purchase_date AS purchaseDate
+                                        FROM rental_receiving_tasks t JOIN rental_purchase_transactions p ON p.id=t.purchase_id
+                                        WHERE t.id=? AND t.store_id=? AND t.branch_id=? FOR UPDATE`,[taskId,scope.storeId,scope.branchId]);
+        const task=tasks[0];
+        const quantity=whole(body.quantity,"Quantity received",true);
+        const remaining=Number(task.quantity_expected)-Number(task.quantity_received);
+        if(quantity>remaining)fail(409,`Only ${remaining} units remain to be received for this purchase.`);
+        const newTotal=Number(equipment.total_units)+quantity;
+        if(newTotal>2147483647)fail(409,"Stock quantity exceeds the equipment limit.");
+        const newCostCents=Math.round((Number(equipment.total_units)*Math.round(Number(equipment.average_unit_cost)*100)+
+            quantity*Math.round(Number(task.unit_cost)*100))/newTotal);
+        // Some existing installations enforce one stock_receipts row per purchase item.
+        // Accumulate partial deliveries in that existing receipt, and audit EACH delivery
+        // in rental_stock_movements. Never insert a second row with the same purchase_item_id.
+        const [existingReceipts]=await db.execute(`SELECT id,receiving_number FROM rental_stock_receipts
+                                                   WHERE purchase_item_id=? AND equipment_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+            [task.purchase_item_id,equipment.id,scope.storeId,scope.branchId]);
+        let receiptId;
+        if(existingReceipts.length) {
+            if(existingReceipts.length!==1)fail(409,"Purchase receipt records need reconciliation.");
+            receiptId=Number(existingReceipts[0].id);
+            await db.execute(`UPDATE rental_stock_receipts SET quantity_received=quantity_received+?,
+                                                               received_date=?,received_by=? WHERE id=?`,[quantity,todayPh(),scope.actor,receiptId]);
+        } else {
+            const [receipt]=await db.execute(`INSERT INTO rental_stock_receipts
+                                              (store_id,branch_id,purchase_item_id,equipment_id,quantity_received,unit_purchase_cost,received_date,received_by)
+                                              VALUES(?,?,?,?,?,?,?,?)`,[scope.storeId,scope.branchId,task.purchase_item_id,equipment.id,quantity,
+                Number(task.unit_cost),todayPh(),scope.actor]);
+            receiptId=Number(receipt.insertId);
+        }
+        const prefix=await branchCodes(db,scope);
+        const receiptNumber=`${prefix}-RRCV-${String(receiptId).padStart(6,"0")}`;
+        if(!existingReceipts.length)await db.execute("UPDATE rental_stock_receipts SET receiving_number=? WHERE id=?",[receiptNumber,receiptId]);
+        await db.execute(`UPDATE rental_equipment SET total_units=?,average_unit_cost=?,
+                                                      last_supplier=(SELECT supplier FROM rental_purchase_transactions WHERE id=?) WHERE id=?`,
+            [newTotal,intMoney(newCostCents),task.purchase_id,equipment.id]);
+        await db.execute(`UPDATE rental_receiving_tasks SET quantity_received=quantity_received+?,
+                                                            received_by=?,last_received_at=NOW() WHERE id=?`,[quantity,scope.actor,taskId]);
+        await appendMovement(db,scope,equipment.id,"received",quantity,task.purchaseNumber,
+            `Staff physically received: ${receiptNumber}`);
+        return {referenceNumber:receiptNumber,taskId};
+    }
+    if(action==="staff_report_equipment_issue") {
+        const equipment=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
+        const quantity=whole(body.quantity,"Affected units",true);
+        const free=Number(equipment.total_units)-Number(equipment.rented_out_units)-
+            Number(equipment.maintenance_units)-Number(equipment.missing_units);
+        if(quantity>free)fail(409,`Only ${Math.max(0,free)} units can be held for inspection.`);
+        const reason=requiredText(body.reason,500,"Issue description");
+        if(reason.length<5)fail(400,"Describe the issue in at least 5 characters.");
+        const issueType=String(body.issueType||"damage");
+        if(!["routine","damage","missing"].includes(issueType))
+            fail(400,"Choose routine care, damaged, or missing equipment.");
+        if(issueType==="missing"){
+            const [r]=await db.execute(`INSERT INTO rental_missing_unit_reports
+                                            (store_id,branch_id,equipment_id,quantity,reason,reported_by)
+                                        VALUES(?,?,?,?,?,?)`,[scope.storeId,scope.branchId,equipment.id,quantity,reason,scope.actor]);
+            await db.execute(`UPDATE rental_equipment SET missing_units=missing_units+? WHERE id=?`,[quantity,equipment.id]);
+            const ref=`MISS-${String(r.insertId).padStart(6,"0")}`;
+            await appendMovement(db,scope,equipment.id,"missing_reported",quantity,ref,`Staff reported missing units: ${reason}`);
+            return {referenceNumber:ref};
+        }
+        const [r]=await db.execute(`INSERT INTO rental_maintenance_records
+                                    (store_id,branch_id,equipment_id,quantity_started,quantity_remaining,start_reason,condition_status)
+                                    VALUES(?,?,?,?,?,?,?)`,[scope.storeId,scope.branchId,equipment.id,quantity,quantity,reason,
+            issueType === "routine" ? "Routine" : "For Inspection"]);
+        await db.execute("UPDATE rental_equipment SET maintenance_units=maintenance_units+? WHERE id=?",[quantity,equipment.id]);
+        const ref=`MNT-${String(r.insertId).padStart(6,"0")}`;
+        await appendMovement(db,scope,equipment.id,"maintenance_started",quantity,ref,
+            `${issueType === "routine" ? "Staff routine care" : "Staff reported damage"}: ${reason}`);
+        return {referenceNumber:ref};
+    }
+    if(action==="staff_complete_routine_maintenance") {
+        const maintenanceId=id(body.maintenanceId,"Routine maintenance record");
+        const [identity]=await db.execute(`SELECT equipment_id FROM rental_maintenance_records
+                                           WHERE id=? AND store_id=? AND branch_id=?`,[maintenanceId,scope.storeId,scope.branchId]);
+        if(!identity.length)fail(404,"Routine maintenance task not found.");
+        const equipment=await lockEquipment(db,scope,Number(identity[0].equipment_id));
+        const [records]=await db.execute(`SELECT quantity_remaining,condition_status,repair_approved_at
+                                          FROM rental_maintenance_records WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+            [maintenanceId,scope.storeId,scope.branchId]);
+        const record=records[0];
+        if(!record || record.condition_status!=="Routine" || record.repair_approved_at)
+            fail(403,"Only routine cleaning and non-safety upkeep can be completed without Manager approval.");
+        const qty=whole(body.quantity,"Completed routine-care units",true);
+        if(qty>Number(record.quantity_remaining)||qty>Number(equipment.maintenance_units))
+            fail(409,"The routine-care quantity is no longer available. Refresh this task.");
+        const notes=requiredText(body.notes,500,"Routine-care completion notes");
+        if(notes.length<5)fail(400,"Describe the completed work in at least 5 characters.");
+        const [pending]=await db.execute(`SELECT COUNT(*) AS count FROM rental_maintenance_completion_requests
+                                          WHERE maintenance_record_id=? AND status='pending'`,[maintenanceId]);
+        if(Number(pending[0].count)>0)fail(409,"This maintenance record has a pending approval request.");
+        await db.execute(`UPDATE rental_maintenance_records SET quantity_remaining=quantity_remaining-?,
+                                                                completion_notes=?,completed_at=CASE WHEN quantity_remaining=? THEN NOW() ELSE completed_at END
+                          WHERE id=?`,[qty,notes,qty,maintenanceId]);
+        await db.execute(`UPDATE rental_equipment SET maintenance_units=maintenance_units-? WHERE id=?`,[qty,equipment.id]);
+        const referenceNumber=`MNT-${String(maintenanceId).padStart(6,"0")}`;
+        await appendMovement(db,scope,equipment.id,"maintenance_completed",qty,referenceNumber,
+            `Staff completed routine cleaning/upkeep: ${notes}`);
+        return {referenceNumber};
+    }
+    if(action==="staff_submit_repair_completion") {
+        const maintenanceId=id(body.maintenanceId,"Maintenance record");
+        const [identity]=await db.execute(`SELECT equipment_id FROM rental_maintenance_records
+                                           WHERE id=? AND store_id=? AND branch_id=?`,[maintenanceId,scope.storeId,scope.branchId]);
+        if(!identity.length)fail(404,"Maintenance record not found.");
+        const equipment=await lockEquipment(db,scope,Number(identity[0].equipment_id));
+        const [records]=await db.execute(`SELECT quantity_remaining,repair_approved_at,condition_status FROM rental_maintenance_records
+                                          WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[maintenanceId,scope.storeId,scope.branchId]);
+        if(records[0]?.condition_status === "Routine")
+            fail(409,"Use the routine-care completion action for this task.");
+        if(!records[0]?.repair_approved_at)fail(409,"Manager repair approval is required before completion.");
+        const quantity=whole(body.quantity,"Completed units",true);
+        const [pending]=await db.execute(`SELECT COALESCE(SUM(quantity),0) AS total FROM rental_maintenance_completion_requests
+                                          WHERE maintenance_record_id=? AND status='pending'`,[maintenanceId]);
+        if(Number(pending[0].total)>0)fail(409,"A repair completion request is already awaiting Manager review.");
+        if(quantity>Number(records[0].quantity_remaining))
+            fail(409,"Completed quantity exceeds the remaining maintenance units.");
+        const notes=requiredText(body.notes,500,"Repair completion notes");
+        if(notes.length<5)fail(400,"Enter at least five characters describing the completed work.");
+        const [r]=await db.execute(`INSERT INTO rental_maintenance_completion_requests
+                                    (store_id,branch_id,equipment_id,maintenance_record_id,quantity,notes,requested_by)
+                                    VALUES(?,?,?,?,?,?,?)`,[scope.storeId,scope.branchId,equipment.id,maintenanceId,quantity,notes,scope.actor]);
+        return {referenceNumber:`MNT-${String(maintenanceId).padStart(6,"0")}`,requestId:r.insertId};
+    }
+    fail(400,"Unsupported staff stock action.");
+}
+
+// The current database permission is authoritative. A valid JWT alone cannot
+// restore access after an employee is deactivated or made view-only.
+function rentalInventoryPermission(permissions, role) {
+    let selected = permissions;
+    if (typeof selected === "string") {
+        try { selected = JSON.parse(selected); } catch { selected = {}; }
+    }
+    if (!selected || typeof selected !== "object" || Array.isArray(selected)) selected = {};
+    const value = selected.inventory_access !== undefined ? selected.inventory_access : selected.inventory;
+    // Older Manager records without an Inventory key retain their original
+    // full-access default; an explicit denial always takes priority.
+    if (value === undefined || value === null) return role === "manager" ? "full" : "none";
+    if (value === true || value === 1 || value === "true" || value === "full") return "full";
+    if (["view", "view_only", "viewOnly"].includes(value)) return "view";
+    return "none";
+}
+
 const READ_ACTIONS = new Set(["get_manager_inventory","check_availability","get_rental_supplier_payables","get_rental_purchase_items"]);
-const STAFF_READ_ACTIONS = new Set(["get_staff_rental_workspace"]);
+const STAFF_READ_ACTIONS = new Set(["get_staff_rental_workspace","get_staff_equipment_schedule"]);
 const STAFF_WRITE_ACTIONS = new Set(["prepare_rental_allocation","release_rental_allocation",
-    "return_rental_allocation","inspect_rental_allocation","clean_rental_allocation"]);
+    "return_rental_allocation","inspect_rental_allocation","clean_rental_allocation",
+    "staff_receive_rental_purchase","staff_report_equipment_issue","staff_submit_repair_completion",
+    "staff_complete_routine_maintenance"]);
 const WRITE_ACTIONS = new Set(["create_equipment","import_equipment","update_equipment","receive_equipment",
-    "start_maintenance","complete_maintenance","create_rental_category","rename_rental_category",
+    "approve_maintenance_repair","approve_repair_completion","resolve_missing_equipment","archive_equipment",
+    "create_rental_category","rename_rental_category",
     "archive_rental_category","pay_rental_supplier_purchase"]);
 
 exports.handler = async (event) => {
@@ -598,6 +1011,11 @@ exports.handler = async (event) => {
         const action=String(body.action||"");
         if(!READ_ACTIONS.has(action)&&!WRITE_ACTIONS.has(action)&&!STAFF_READ_ACTIONS.has(action)&&!STAFF_WRITE_ACTIONS.has(action))fail(400,"Unknown rental inventory action.");
         if(role==="staff"&&!STAFF_READ_ACTIONS.has(action)&&!STAFF_WRITE_ACTIONS.has(action))fail(403,"Staff cannot access rental catalog, supplier, or purchasing operations.");
+        if(role!=="staff"&&(STAFF_READ_ACTIONS.has(action)||STAFF_WRITE_ACTIONS.has(action)))
+            fail(403,"Only Staff can perform daily rental operations.");
+        // Owners retain financial oversight. Catalog changes and physical repair approvals belong to managers.
+        if(role==="owner" && !READ_ACTIONS.has(action) && !["pay_rental_supplier_purchase"].includes(action))
+            fail(403,"Owner cannot perform branch equipment operations.");
         // Resolve the manager's assigned branch from the verified manager record,
         // not from the browser's branch_id. Owner must select a store-owned branch.
         let branchId = role==="owner" ? id(body.branch_id||body.branchId,"Branch ID") : null;
@@ -609,27 +1027,31 @@ exports.handler = async (event) => {
             connectTimeout: 10000,
         });
         if(role==="manager") {
-            if (session.manager_id) {
-                const [managers]=await db.execute(`SELECT branch_id AS branchId, manager_name AS managerName
-                                                   FROM managers WHERE id=? AND store_id=? LIMIT 1`,[id(session.manager_id,"Manager ID"),storeId]);
-                if(!managers.length) fail(403,"Manager account not found in this store.");
-                branchId=id(managers[0].branchId,"Assigned branch");
-                actor=trim(managers[0].managerName,150)||actor;
-            } else {
-                // Compatibility for old session tokens: a manager still needs an
-                // explicitly assigned branch in the verified token.
-                branchId=id(session.branch_id,"Assigned branch");
-            }
+            const managerId=id(session.manager_id,"Manager ID");
+            const [managers]=await db.execute(`SELECT branch_id AS branchId,manager_name AS managerName,status,permissions
+                                               FROM managers WHERE id=? AND store_id=? LIMIT 1`,[managerId,storeId]);
+            if(!managers.length || !['active','accepted'].includes(String(managers[0].status).toLowerCase()))
+                fail(403,"An active Manager account is required.");
+            branchId=id(managers[0].branchId,"Assigned branch");
+            // A moved employee must sign in again; never authorize using a stale branch claim.
+            if(Number(session.branch_id)!==branchId)fail(403,"Branch assignment changed. Please sign in again.");
+            const access=rentalInventoryPermission(managers[0].permissions,"manager");
+            if(access==="none")fail(403,"Inventory access is not assigned to this Manager.");
+            if(WRITE_ACTIONS.has(action) && access!=="full")fail(403,"Full Inventory access is required to change equipment or supplier records.");
+            actor=trim(managers[0].managerName,150)||actor;
         }
         if(role==="staff") {
             const staffId=id(session.staff_id,"Staff ID");
             const [staff]=await db.execute(`SELECT branch_id,staff_name,status,permissions FROM staff
                                             WHERE id=? AND store_id=? LIMIT 1`,[staffId,storeId]);
-            if(!staff.length||!['active','accepted'].includes(String(staff[0].status).toLowerCase()))fail(403,"Active staff account required.");
-            let permissions={};
-            try {permissions=typeof staff[0].permissions==='string'?JSON.parse(staff[0].permissions):staff[0].permissions||{};}catch{}
-            if(permissions.inventory!==true&&!['view','full'].includes(permissions.inventory_access))fail(403,"Inventory access is not assigned.");
+            if(!staff.length||!['active','accepted'].includes(String(staff[0].status).toLowerCase()))
+                fail(403,"Active staff account required.");
             branchId=id(staff[0].branch_id,"Assigned branch");
+            if(Number(session.branch_id)!==branchId)fail(403,"Branch assignment changed. Please sign in again.");
+            const access=rentalInventoryPermission(staff[0].permissions,"staff");
+            if(access==="none")fail(403,"Inventory access is not assigned to this Staff account.");
+            if(STAFF_WRITE_ACTIONS.has(action) && access!=="full")
+                fail(403,"Full Inventory access is required for rental receiving, releases, returns and condition tasks.");
             actor=trim(staff[0].staff_name,150)||actor;
         }
         const scope={storeId,branchId,actor,role,requestKey:""};
@@ -641,6 +1063,7 @@ exports.handler = async (event) => {
         scope.storeName=branches[0].storeName;
         scope.branchName=branches[0].branchName;
         if(action==="get_staff_rental_workspace")return reply(200,await staffRentalWorkspace(db,scope));
+        if(action==="get_staff_equipment_schedule")return reply(200,await staffEquipmentSchedule(db,scope,body));
         if(action==="get_manager_inventory")return reply(200,await getInventory(db,scope));
         if(action==="check_availability")return reply(200,await checkAvailability(db,scope,body));
         if(action==="get_rental_supplier_payables")return reply(200,await getPayables(db,scope));
@@ -660,7 +1083,11 @@ exports.handler = async (event) => {
             await db.commit();
             return reply(200,JSON.parse(existing[0].response_json));
         }
-        const result=STAFF_WRITE_ACTIONS.has(action) ? await staffRentalMutation(db,scope,body) : await mutate(db,scope,body);
+        const result=STAFF_WRITE_ACTIONS.has(action)
+            ? (["staff_receive_rental_purchase","staff_report_equipment_issue","staff_submit_repair_completion",
+                "staff_complete_routine_maintenance"].includes(action)
+                ? await staffRentalStockMutation(db,scope,body) : await staffRentalMutation(db,scope,body))
+            : await mutate(db,scope,body);
         const output={success:true,...result};
         await db.execute(`UPDATE rental_api_requests SET response_json=? WHERE store_id=? AND branch_id=? AND request_key=?`,
             [JSON.stringify(output),storeId,branchId,requestKey]);

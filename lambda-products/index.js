@@ -729,6 +729,87 @@ function exactMoney(value, label) {
     }
     return Math.round(raw * 100);
 }
+// Correct one selected purchase without updating products, stock, or receipt history.
+async function updateSupplierPurchaseDetails(connection, {purchaseId, storeId, activeBranchId, details, expected, decoded, tokenRole}) {
+    const invalid = (message, status = 400) => {
+        const error = new Error(message);
+        error.purchaseEditStatus = status;
+        return error;
+    };
+    const snapshotFields = ["supplier", "supplierInvoiceNumber", "purchaseDate", "paymentMethod", "paymentDueDate", "purchaseTotal", "amountPaid"];
+    if (!Number.isSafeInteger(purchaseId) || purchaseId <= 0 ||
+        !details || typeof details !== "object" || Array.isArray(details) ||
+        !expected || typeof expected !== "object" || Array.isArray(expected) ||
+        snapshotFields.some(key => !Object.prototype.hasOwnProperty.call(expected, key))) {
+        throw invalid("Valid purchase details and the originally loaded purchase are required.");
+    }
+    const branchSql = activeBranchId ? " AND branch_id=?" : "";
+    const branchParams = activeBranchId ? [activeBranchId] : [];
+    await connection.beginTransaction();
+    try {
+        const [purchases] = await connection.execute(
+            `SELECT id,branch_id AS branchId,purchase_number AS purchaseNumber,
+                    supplier,supplier_invoice_number AS supplierInvoiceNumber,
+                    DATE_FORMAT(purchase_date,'%Y-%m-%d') AS purchaseDate,
+                    payment_method AS paymentMethod,purchase_total AS purchaseTotal,
+                    DATE_FORMAT(payment_due_date,'%Y-%m-%d') AS paymentDueDate
+             FROM inventory_purchase_transactions
+             WHERE id=? AND store_id=?${branchSql} FOR UPDATE`,
+            [purchaseId,storeId,...branchParams]);
+        if (!purchases.length) throw invalid("Purchase not found in this store/branch.", 404);
+        const current = purchases[0];
+        const [payments] = await connection.execute(
+            "SELECT id,amount FROM inventory_supplier_payments WHERE purchase_id=? ORDER BY id FOR UPDATE",
+            [purchaseId]);
+        const currentPaidCents = payments.reduce((sum,payment) => sum + Math.round(Number(payment.amount)*100), 0);
+        let totalCents, expectedPaidCents, expectedTotalCents, revised;
+        try {
+            totalCents = exactMoney(current.purchaseTotal, "Original Purchase Total");
+            expectedPaidCents = exactMoney(expected.amountPaid, "Previously Recorded Amount Paid");
+            expectedTotalCents = exactMoney(expected.purchaseTotal, "Previously Recorded Purchase Total");
+            exactMoney(details.amountPaid ?? 0, "Total Amount Paid");
+            revised = getInitialPurchaseInput({initialPurchase:details}, 0, 0, [], totalCents/100);
+        } catch (error) {
+            throw invalid(error.message);
+        }
+        const headerChanged = snapshotFields.slice(0,5).some(key =>
+            String(current[key] ?? "") !== String(expected[key] ?? ""));
+        if (headerChanged || currentPaidCents !== expectedPaidCents || totalCents !== expectedTotalCents) {
+            throw invalid("This purchase or its payments changed after you opened the editor. Close it and reopen Edit to load the latest details.", 409);
+        }
+        const targetPaidCents = exactMoney(revised.amountPaid, "Total Amount Paid");
+        const delta = targetPaidCents-currentPaidCents;
+        if (delta !== 0) {
+            // Retain every historical payment; a signed entry records only the correction.
+            await connection.execute(
+                `INSERT INTO inventory_supplier_payments(purchase_id,amount,payment_date,request_key)
+                 VALUES(?,?,?,?)`,
+                [purchaseId,delta/100,revised.purchaseDate,
+                    `PURCHASE-EDIT-${purchaseId}-${require("crypto").randomUUID()}`]);
+        }
+        await connection.execute(
+            `UPDATE inventory_purchase_transactions
+             SET supplier=?,supplier_invoice_number=?,purchase_date=?,payment_method=?,payment_due_date=?
+             WHERE id=? AND store_id=? AND branch_id=?`,
+            [revised.supplier,revised.supplierInvoiceNumber,revised.purchaseDate,
+                revised.paymentMethod,revised.paymentDueDate,purchaseId,storeId,Number(current.branchId)]);
+        const employee = await getActingEmployee(connection,decoded,tokenRole,storeId);
+        await logEmployeeAction(connection, {
+            storeId,branchId:Number(current.branchId),employee,module:"Inventory",
+            referenceNumber:current.purchaseNumber || String(purchaseId),
+            action:"Corrected supplier purchase",referenceId:String(purchaseId),
+            details:`Corrected ${current.purchaseNumber || purchaseId} supplier/payment details (paid: ${currentPaidCents/100} -> ${targetPaidCents/100}); original total and stock receiving history preserved`,
+        });
+        await connection.commit();
+        return {success:true,purchaseId,purchaseTotal:totalCents/100,
+            amountPaid:targetPaidCents/100,outstandingBalance:(totalCents-targetPaidCents)/100};
+    } catch (error) {
+        await safeRollback(connection);
+        throw error;
+    }
+}
+
+
 function validatePurchaseHeader(input, lines) {
     const supplier = toSafeString(input.supplier, 150);
     const purchaseDate = normalizeOptionalDate(input.purchaseDate ?? input.receivedDate);
@@ -2370,6 +2451,376 @@ async function permanentlyDeleteProduct(
     return Number(result.affectedRows || 0);
 }
 
+/* OWNER STOCK CONDITION: live Sales + Rental item types, counted ONCE per branch.
+ * Important: no demo quantities, no purchase-cost-based revenue, no stock writes.
+ * Priority: equipment on hold -> expiring/expired -> low availability -> slow -> healthy.
+ */
+async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}) {
+    const cutoff = new Date(`${asOfDate}T00:00:00Z`);
+    cutoff.setUTCDate(cutoff.getUTCDate() - 90);
+    const slowStart = cutoff.toISOString().slice(0, 10);
+    const expires = new Date(`${asOfDate}T00:00:00Z`);
+    expires.setUTCDate(expires.getUTCDate() + 30);
+    const expiryLimit = expires.toISOString().slice(0, 10);
+    const counts = {healthy:0, expiring:0, low:0, slow:0, maintenance:0};
+    const conditions = new Set();
+    const present = async table => (await tableExists(connection,table));
+    const status = ({maintenance=false,expiring=false,low=false,slow=false}) =>
+        maintenance ? 'maintenance' : expiring ? 'expiring' : low ? 'low' : slow ? 'slow' : 'healthy';
+    const date = v => String(v ?? '').slice(0, 10);
+    const args = [storeId, ...(branchId ? [branchId] : [])];
+    let productHistory = false, rentalHistory = false;
+
+    if (await present('products')) {
+        const hasVariants = await present('product_variants');
+        const [rows] = await connection.execute(`SELECT p.id,p.branch_id AS branchId,p.stock,
+                                                        p.alert_level AS alertLevel,DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS expiresAt,p.has_variants AS hasVariants,
+                                                        DATE_FORMAT(p.created_at,'%Y-%m-%d') AS createdDate,
+                                                        ${hasVariants ? "v.id AS variantId,v.stock AS variantStock,v.alert_level AS variantAlert,DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS variantExpiry" :
+            'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
+                                                 FROM products p ${hasVariants ? 'LEFT JOIN product_variants v ON v.product_id=p.id AND v.deleted_at IS NULL' : ''}
+                                                 WHERE p.store_id=? AND p.deleted_at IS NULL ${branchId ? 'AND p.branch_id=?' : ''}
+                                                 ORDER BY p.id`, args);
+        const products = new Map();
+        for (const row of rows) {
+            const id = Number(row.id);
+            if (!products.has(id)) products.set(id,{...row,variants:[]});
+            if (row.variantId != null) products.get(id).variants.push(row);
+        }
+        const recentlySold = new Set();
+        if (await present('orders') && await present('order_items') &&
+            await tableHasColumn(connection,'order_items','product_id')) {
+            productHistory = true;
+            const [sales] = await connection.execute(`SELECT DISTINCT oi.product_id AS productId
+                                                      FROM orders o JOIN order_items oi ON oi.order_id=o.order_id AND oi.store_id=o.store_id
+                                                      WHERE o.store_id=? ${branchId ? 'AND o.branch_id=?' : ''} AND o.order_date>=?
+                AND LOWER(TRIM(COALESCE(o.status,''))) NOT IN
+                ('pending','pending payment','unpaid','cancelled','canceled','refunded','void','voided','draft','failed')`,
+                [...args,slowStart]);
+            sales.forEach(row=>recentlySold.add(Number(row.productId)));
+        }
+        for (const product of products.values()) {
+            const variants = product.variants;
+            const useVariants = Boolean(Number(product.hasVariants)) || variants.length > 0;
+            const quantity = useVariants
+                ? variants.reduce((sum,row)=>sum+Number(row.variantStock||0),0)
+                : Number(product.stock||0);
+            const low = quantity <= 0 || (useVariants
+                ? variants.some(row=>Number(row.variantStock)<=Number(row.variantAlert||0))
+                : Number(product.alertLevel)>0 && quantity<=Number(product.alertLevel));
+            const expiring = useVariants
+                ? variants.some(row=>Number(row.variantStock)>0 && date(row.variantExpiry) && date(row.variantExpiry)<=expiryLimit)
+                : quantity>0 && Boolean(date(product.expiresAt)) && date(product.expiresAt)<=expiryLimit;
+            const slow = productHistory && quantity>0 && date(product.createdDate) &&
+                date(product.createdDate)<=slowStart && !recentlySold.has(Number(product.id));
+            conditions.add(`sale:${Number(product.branchId)}:${Number(product.id)}`);
+            counts[status({expiring,low,slow})]++;
+        }
+    }
+    if (await present('rental_equipment')) {
+        const recentlyRented = new Set();
+        if (await present('rental_stock_movements')) {
+            rentalHistory = true;
+            const [moves] = await connection.execute(`SELECT DISTINCT equipment_id AS equipmentId
+                                                      FROM rental_stock_movements WHERE store_id=? ${branchId ? 'AND branch_id=?' : ''}
+                AND type='rented_out' AND occurred_at>=?`, [...args,slowStart]);
+            moves.forEach(row=>recentlyRented.add(Number(row.equipmentId)));
+        }
+        const [rows] = await connection.execute(`SELECT id,branch_id AS branchId,total_units AS totalUnits,
+                                                        rented_out_units AS rentedOut,maintenance_units AS maintenanceUnits,
+                                                        missing_units AS missingUnits,alert_level AS alertLevel,
+                                                        DATE_FORMAT(created_at,'%Y-%m-%d') AS createdDate
+                                                 FROM rental_equipment WHERE store_id=? ${branchId ? 'AND branch_id=?' : ''}
+            AND archived_at IS NULL`, args);
+        for(const row of rows) {
+            const available = Math.max(0, Number(row.totalUnits||0)-Number(row.rentedOut||0)-
+                Number(row.maintenanceUnits||0)-Number(row.missingUnits||0));
+            const maintenance = Number(row.maintenanceUnits)>0 || Number(row.missingUnits)>0;
+            const low = available===0 || (Number(row.alertLevel)>0 && available<=Number(row.alertLevel));
+            const slow = rentalHistory && Number(row.totalUnits)>0 && date(row.createdDate) &&
+                date(row.createdDate)<=slowStart && !recentlyRented.has(Number(row.id));
+            conditions.add(`rental:${Number(row.branchId)}:${Number(row.id)}`);
+            counts[status({maintenance,low,slow})]++;
+        }
+    }
+    return {counts,total:conditions.size,asOfDate};
+}
+
+/* Only posted/recorded rental-item charges are revenue. The live rental rate,
+ * supplier purchases and physical releases are NOT revenue evidence.
+ * Supports an explicit booking allocation charge snapshot or an itemized ledger.
+ */
+async function loadOwnerRecordedRentalRevenue(connection,{storeId,branchId,dateFrom,dateTo}) {
+    const schemaTables = ['rental_revenue_entries','rental_booking_allocations','rental_staff_allocation_workflow'];
+    const [schema] = await connection.execute(`SELECT TABLE_NAME AS tableName,COLUMN_NAME AS columnName
+                                               FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE()
+                                                                                 AND TABLE_NAME IN ('rental_revenue_entries','rental_booking_allocations','rental_staff_allocation_workflow')`);
+    const columnSet = new Set(schema.map(r=>`${r.tableName}.${r.columnName}`));
+    const has = (t,c) => columnSet.has(`${t}.${c}`);
+    const branchSql = branchId ? ' AND r.branch_id=?' : '';
+    const args = [storeId,...(branchId?[branchId]:[]),dateFrom,dateTo];
+    let rows = [], available = false, method = null;
+    if (['store_id','branch_id','equipment_id','amount','revenue_date'].every(c=>has('rental_revenue_entries',c))) {
+        available=true; method='ledger';
+        [rows] = await connection.execute(`SELECT r.branch_id AS branchId,r.equipment_id AS equipmentId,
+                                                  COALESCE(e.name,'Archived rental equipment') AS equipmentName,
+                                                  DATE_FORMAT(r.revenue_date,'%Y-%m-%d') AS revenueDate,r.amount AS revenueAmount
+                                           FROM rental_revenue_entries r LEFT JOIN rental_equipment e ON e.id=r.equipment_id
+                                               AND e.store_id=r.store_id AND e.branch_id=r.branch_id
+                                           WHERE r.store_id=? ${branchSql} AND r.revenue_date>=? AND r.revenue_date<=?`,args);
+    } else if (['store_id','branch_id','equipment_id','status','end_date'].every(c=>has('rental_booking_allocations',c))) {
+        // Accept only a SAVED charge, never multiply today's catalog rate by an old rental.
+        const savedCharge = ['rental_charge_total','charged_total','line_total']
+            .find(c=>has('rental_booking_allocations',c));
+        if(savedCharge && await tableExists(connection,'rental_equipment')) {
+            const workflow = has('rental_staff_allocation_workflow','returned_at') &&
+                has('rental_staff_allocation_workflow','allocation_id');
+            available=true;method='allocation';
+            const dateExpression = workflow ? 'DATE(COALESCE(w.returned_at,a.end_date))' : 'DATE(a.end_date)';
+            [rows] = await connection.execute(`SELECT a.branch_id AS branchId,a.equipment_id AS equipmentId,
+                                                      COALESCE(e.name,'Archived rental equipment') AS equipmentName,
+                                                      DATE_FORMAT(${dateExpression},'%Y-%m-%d') AS revenueDate,
+                                                      a.${savedCharge} AS revenueAmount
+                                               FROM rental_booking_allocations a
+                                                        LEFT JOIN rental_equipment e ON e.id=a.equipment_id AND e.store_id=a.store_id AND e.branch_id=a.branch_id
+                                                   ${workflow ? 'LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id' : ''}
+                                               WHERE a.store_id=? ${branchId ? 'AND a.branch_id=?' : ''}
+                                                 AND a.status='returned' AND ${dateExpression}>=? AND ${dateExpression}<=?`,args);
+        }
+    }
+    if (!available) return {available:false,rows:[],warnings:[
+            'Rental-item charges are not stored in the supplied booking/inventory schema. Record an agreed rental charge per booking item (or post entries to a rental revenue ledger) to enable this report.'
+        ]};
+    const normalized=[];
+    for (const row of rows) {
+        const amount=Number(row.revenueAmount);
+        if(row.revenueAmount===null || row.revenueAmount==='' || !Number.isFinite(amount) ||
+            !Number.isSafeInteger(Math.round(amount*100))) return {available:false,rows:[],warnings:[
+                'Some recorded rental charges are invalid or missing; revenue is unavailable until those records are corrected.'
+            ]};
+        normalized.push({...row,branchId:Number(row.branchId),equipmentId:Number(row.equipmentId),
+            revenueAmount:Math.round(amount*100)/100});
+    }
+    return {available:true,rows:normalized,warnings:[],method};
+}
+
+/* OWNER INVENTORY: read-only recorded sales, separate from stock valuation. */
+function ownerInventoryReportDate(value) {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+    const timestamp = Date.parse(`${value}T00:00:00Z`);
+    if (!Number.isFinite(timestamp)) return null;
+    return new Date(timestamp).toISOString().slice(0, 10) === value ? value : null;
+}
+
+function ownerInventoryMoneyCents(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const amount = Number(value);
+    if (!Number.isFinite(amount) || amount < 0 || !Number.isSafeInteger(Math.round(amount * 100))) return null;
+    return Math.round(amount * 100);
+}
+
+// Pure aggregation is intentionally independent of live inventory prices. A
+// missing historical cost stays unknown rather than becoming an estimated profit.
+function buildOwnerInventoryPerformance({dateFrom, dateTo, asOfDate, storeName, branches,
+                                            rows, selectedBranchId = null, posAvailable = true,
+                                            rentalReport = {available:false,rows:[],warnings:[]}}) {
+    const warnings = [...rentalReport.warnings];
+    const orders = new Map();
+    const consumables = new Map();
+    const branchTotals = new Map();
+    const trendTotals = new Map();
+    const dates = [];
+    let totalCents = 0;
+    let totalProfitCents = 0;
+    let missingCost = false;
+    let invalidTotal = false;
+    let hasAdjustments = false;
+
+    for (let timestamp = Date.parse(`${dateFrom}T00:00:00Z`);
+         timestamp <= Date.parse(`${dateTo}T00:00:00Z`); timestamp += 86400000) {
+        const date = new Date(timestamp).toISOString().slice(0, 10);
+        dates.push(date);
+        trendTotals.set(date, {cents: 0, invalid: false});
+    }
+    const normalizedBranches = branches.map(branch => ({
+        id: Number(branch.id), branchName: String(branch.branchName || `Branch ${branch.id}`),
+    }));
+    normalizedBranches.forEach(branch => {
+        if (!selectedBranchId || branch.id === selectedBranchId) {
+            branchTotals.set(branch.id, {branchId: branch.id, branchName: branch.branchName, cents: 0, invalid: false});
+        }
+    });
+
+    rows.forEach(row => {
+        const key = `${row.branchId ?? "unassigned"}:${row.orderId}`;
+        if (!orders.has(key)) orders.set(key, {row, items: []});
+        if (row.itemId !== null && row.itemId !== undefined) orders.get(key).items.push(row);
+    });
+
+    orders.forEach(({row, items}) => {
+        const branchId = row.branchId === null || row.branchId === undefined ? null : Number(row.branchId);
+        const branch = branchTotals.get(branchId) || {
+            branchId, branchName: String(row.branchName || "Unassigned branch"), cents: 0, invalid: false,
+        };
+        branchTotals.set(branchId, branch);
+        const daily = trendTotals.get(String(row.orderDate));
+        const orderCents = ownerInventoryMoneyCents(row.orderTotal);
+        if (orderCents === null) {
+            invalidTotal = true;
+            branch.invalid = true;
+            if (daily) daily.invalid = true;
+        } else {
+            totalCents += orderCents;
+            branch.cents += orderCents;
+            if (daily) daily.cents += orderCents;
+        }
+        let itemSalesCents = 0;
+        let orderProfitCents = 0;
+        let orderCostKnown = items.length > 0;
+
+        items.forEach(item => {
+            const name = String(item.productName || "Unnamed recorded item");
+            const key = item.productId === null || item.productId === undefined
+                ? `recorded:${name}` : `product:${item.productId}`;
+            const product = consumables.get(key) || {key, name, unitsSold: 0, cents: 0, profitCents: 0, costKnown: true};
+            consumables.set(key, product);
+            const quantity = item.quantity === null || item.quantity === undefined || item.quantity === ""
+                ? NaN : Number(item.quantity);
+            const validQuantity = Number.isFinite(quantity) && quantity > 0;
+            const salesCents = ownerInventoryMoneyCents(item.lineTotal);
+            const unitCostCents = ownerInventoryMoneyCents(item.costPriceAtSale);
+            if (validQuantity) product.unitsSold += quantity;
+            if (salesCents !== null) {
+                product.cents += salesCents;
+                itemSalesCents += salesCents;
+            }
+            if (!validQuantity || salesCents === null || unitCostCents === null) {
+                product.costKnown = false;
+                orderCostKnown = false;
+                missingCost = true;
+            } else {
+                const profitCents = salesCents - Math.round(Number(item.costPriceAtSale) * quantity * 100);
+                product.profitCents += profitCents;
+                orderProfitCents += profitCents;
+            }
+        });
+
+        // Legacy totals can include a discount, surcharge, or sales without item
+        // rows. Keep their recorded difference visible; never invent allocations.
+        const difference = orderCents === null ? null : orderCents - itemSalesCents;
+        if (difference !== null && difference !== 0) {
+            const key = "unallocated-sales";
+            const unallocated = consumables.get(key) || {
+                key, name: "Order adjustments / unallocated sales", unitsSold: 0, cents: 0, profitCents: 0, costKnown: false,
+            };
+            unallocated.cents += difference;
+            consumables.set(key, unallocated);
+            hasAdjustments = true;
+            orderCostKnown = false;
+        }
+        if (!orderCostKnown || orderCents === null) missingCost = true;
+        else totalProfitCents += orderProfitCents;
+    });
+
+    // Each rental line must have its own saved, charged amount. Never infer revenue
+    // from a catalog price, inventory movement, future reservation, or supplier bill.
+    const rentalItems = new Map();
+    let rentalCents = 0;
+    if (rentalReport.available) {
+        for (const row of rentalReport.rows) {
+            const cents = Math.round(Number(row.revenueAmount) * 100);
+            rentalCents += cents;
+            const branch = branchTotals.get(row.branchId) || {
+                branchId:row.branchId,
+                branchName:normalizedBranches.find(b=>b.id===row.branchId)?.branchName || `Branch ${row.branchId}`,
+                cents:0,invalid:false};
+            branch.rentalCents = (branch.rentalCents || 0) + cents;
+            branchTotals.set(row.branchId,branch);
+            const trend = trendTotals.get(row.revenueDate);
+            if (trend) trend.rentalCents = (trend.rentalCents || 0) + cents;
+            const key = `equipment:${row.equipmentId}`;
+            const item = rentalItems.get(key) || {key,name:String(row.equipmentName),cents:0};
+            item.cents += cents;
+            rentalItems.set(key,item);
+        }
+    }
+    if (!posAvailable) warnings.push("Recorded POS sales are unavailable because the required sales tables or fields are missing.");
+    if (missingCost) warnings.push("Gross profit is unavailable where historical item costs or complete sales details were not recorded.");
+    if (hasAdjustments) warnings.push("Differences between recorded order totals and item sales appear as order adjustments / unallocated sales.");
+    if (invalidTotal) warnings.push("Some recorded order totals are invalid; affected revenue totals are unavailable.");
+
+    return {
+        dateRange: {startDate: dateFrom, endDate: dateTo}, asOfDate, storeName,
+        branches: normalizedBranches,
+        totals: {
+            consumableSales: posAvailable && !invalidTotal ? totalCents / 100 : null,
+            consumableGrossProfit: posAvailable && !invalidTotal && !missingCost ? totalProfitCents / 100 : null,
+            rentalRevenue: rentalReport.available ? rentalCents/100 : null,
+            totalRevenue: posAvailable && !invalidTotal && rentalReport.available ? (totalCents+rentalCents)/100 : null,
+        },
+        trend: dates.map(date => ({date,
+            consumableSales: posAvailable && !trendTotals.get(date).invalid ? trendTotals.get(date).cents / 100 : null,
+            rentalRevenue: rentalReport.available ? (trendTotals.get(date).rentalCents || 0)/100 : null,
+        })),
+        branchRevenue: [...branchTotals.values()].map(branch => ({
+            branchId: branch.branchId, branchName: branch.branchName,
+            consumableSales: posAvailable && !branch.invalid ? branch.cents / 100 : null,
+            rentalRevenue: rentalReport.available ? (branch.rentalCents || 0)/100 : null,
+        })).sort((left, right) => (right.consumableSales || 0) - (left.consumableSales || 0)),
+        consumables: [...consumables.values()].map(product => ({
+            key: product.key, name: product.name, unitsSold: product.unitsSold,
+            sales: product.cents / 100, grossProfit: product.costKnown ? product.profitCents / 100 : null,
+        })).sort((left, right) => right.sales - left.sales || left.name.localeCompare(right.name)),
+        rentals: [...rentalItems.values()].map(item=>({key:item.key,name:item.name,
+            revenue:item.cents/100,share:rentalCents>0?Math.round(item.cents/rentalCents*10000)/100:0}))
+            .sort((a,b)=>b.revenue-a.revenue||a.name.localeCompare(b.name)), warnings,
+    };
+}
+
+async function loadOwnerInventoryPerformance(connection, {storeId, branchId, dateFrom, dateTo, asOfDate}) {
+    const [storeRows] = await connection.execute("SELECT store_name AS storeName FROM stores WHERE id=? LIMIT 1", [storeId]);
+    const [branches] = await connection.execute(
+        "SELECT id,branch_name AS branchName FROM branches WHERE store_id=? ORDER BY branch_name,id", [storeId]);
+    const [schemaRows] = await connection.execute(
+        `SELECT TABLE_NAME AS tableName,COLUMN_NAME AS columnName
+         FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('orders','order_items')`, []);
+    const columns = new Set(schemaRows.map(row => `${row.tableName}.${row.columnName}`));
+    const hasColumns = (table, names) => names.every(name => columns.has(`${table}.${name}`));
+    const posAvailable = hasColumns("orders", ["order_id", "store_id", "branch_id", "order_date", "total", "status"]);
+    const itemsAvailable = hasColumns("order_items", ["id", "order_id", "store_id", "quantity", "line_total"]);
+    let rows = [];
+    if (posAvailable) {
+        const optionalItem = (column, alias) => itemsAvailable && columns.has(`order_items.${column}`)
+            ? `oi.${column} AS ${alias}` : `NULL AS ${alias}`;
+        const [salesRows] = await connection.execute(
+            `SELECT o.order_id AS orderId,o.branch_id AS branchId,b.branch_name AS branchName,
+                    DATE_FORMAT(o.order_date,'%Y-%m-%d') AS orderDate,o.total AS orderTotal,
+                    ${optionalItem("id", "itemId")},${optionalItem("product_id", "productId")},
+                    ${optionalItem("product_name", "productName")},${optionalItem("quantity", "quantity")},
+                    ${optionalItem("line_total", "lineTotal")},${optionalItem("cost_price_at_sale", "costPriceAtSale")}
+             FROM orders o LEFT JOIN branches b ON b.id=o.branch_id AND b.store_id=o.store_id
+                 ${itemsAvailable ? "LEFT JOIN order_items oi ON oi.order_id=o.order_id AND oi.store_id=o.store_id" : ""}
+             WHERE o.store_id=? AND o.order_date>=? AND o.order_date<=?${branchId ? " AND o.branch_id=?" : ""}
+               AND LOWER(TRIM(COALESCE(o.status,''))) NOT IN
+                 ('pending','pending payment','unpaid','cancelled','canceled','refunded','void','voided','draft','failed')
+             ORDER BY o.order_date,o.order_id${itemsAvailable ? ",oi.id" : ""} LIMIT 100001`,
+            [storeId, dateFrom, dateTo, ...(branchId ? [branchId] : [])]);
+        if (salesRows.length > 100000) {
+            const error = new Error("This report contains too many sales items. Choose a shorter date range or one branch.");
+            error.ownerInventoryStatus = 400;
+            throw error;
+        }
+        rows = salesRows;
+    }
+    const rentalReport = await loadOwnerRecordedRentalRevenue(connection,
+        {storeId,branchId,dateFrom,dateTo});
+    return buildOwnerInventoryPerformance({
+        dateFrom, dateTo, asOfDate, storeName: String(storeRows[0]?.storeName || ""),
+        branches, rows, selectedBranchId: branchId, posAvailable, rentalReport,
+    });
+}
+
+
 exports.handler = async (event) => {
     const headers = {
         "Access-Control-Allow-Origin": "*",
@@ -2435,6 +2886,54 @@ exports.handler = async (event) => {
             return badRequest(headers, "Store account not found");
         }
 
+        if (!["owner", "manager", "staff"].includes(tokenRole)) {
+            return jsonResponse(403, headers, {error: "A business account role is required."});
+        }
+
+        // Recheck current employee status, branch and Inventory permission on
+        // EVERY request. Session-storage permissions are UI hints, not security.
+        const inventoryReadActions = new Set([
+            "get_products", "get_recent_purchased_stock_in", "get_last_stock_in",
+            "get_stock_suppliers", "get_supplier_payables", "get_supplier_purchase_items",
+            "get_product_editor_details", "get_product_initial_purchase",
+            "get_product_removal_impact", "get_variant_removal_impact",
+            "get_staff_receiving_permissions", "get_staff_inventory_workspace", "get_staff_inventory_activity",
+        ]);
+        const ownerFinancialActions = new Set([
+            "get_owner_stock_condition", "get_owner_inventory_performance", "get_products",
+            "get_supplier_payables", "get_supplier_purchase_items", "get_stock_suppliers",
+            "get_recent_purchased_stock_in", "get_last_stock_in", "get_product_initial_purchase",
+            "pay_supplier_purchase",
+        ]);
+        if (tokenRole === "owner" && !ownerFinancialActions.has(action)) {
+            return jsonResponse(403, headers, {error: "Owner Inventory access is limited to financial oversight and supplier payments."});
+        }
+        if (tokenRole === "manager") {
+            const managerId = Number(decoded.manager_id);
+            if (!Number.isSafeInteger(managerId) || managerId < 1) {
+                return jsonResponse(403, headers, {error: "Manager account is invalid."});
+            }
+            const [managerRows] = await connection.execute(
+                `SELECT branch_id,status,permissions FROM managers WHERE id=? AND store_id=? LIMIT 1`,
+                [managerId,storeId]);
+            const manager = managerRows[0];
+            if (!manager || !["active","accepted"].includes(String(manager.status).toLowerCase())) {
+                return jsonResponse(403, headers, {error: "An active Manager account is required."});
+            }
+            if (Number(manager.branch_id) !== tokenBranchId) {
+                return jsonResponse(403, headers, {error: "Branch assignment changed. Please sign in again."});
+            }
+            let permissions = {};
+            try { permissions = typeof manager.permissions === "string" ? JSON.parse(manager.permissions) : manager.permissions || {}; }
+            catch { permissions = {}; }
+            const value = permissions.inventory_access !== undefined ? permissions.inventory_access : permissions.inventory;
+            const access = value === undefined || value === null || value === true || value === "true" || value === "full"
+                ? "full" : ["view","view_only","viewOnly"].includes(value) ? "view" : "none";
+            if (access === "none" || (access !== "full" && !inventoryReadActions.has(action))) {
+                return jsonResponse(403, headers, {error: "Insufficient Manager Inventory permission."});
+            }
+        }
+
         const isBranchUser = tokenRole === "manager" || tokenRole === "staff";
 
         const rawRequestedBranchId = firstDefined(body.branch_id, body.branchId);
@@ -2466,9 +2965,51 @@ exports.handler = async (event) => {
             }
         }
 
-        // Keep Product No. as a real, unique database field. This also
-        // backfills products created before the product_number column existed.
-        await ensureProductNumberSchema(connection);
+        // The owner stock chart is computed from active, branch-scoped Sales
+        // products and rental equipment; it never needs or changes stock values.
+        if (action === "get_owner_stock_condition") {
+            if (tokenRole !== "owner") {
+                return jsonResponse(403, headers, {error:"Only owners can view store-wide stock conditions."});
+            }
+            if (rawRequestedBranchId !== undefined && rawRequestedBranchId !== null && rawRequestedBranchId !== "" &&
+                (!Number.isSafeInteger(requestedBranchId) || requestedBranchId <= 0)) {
+                return badRequest(headers,"Choose a valid branch.");
+            }
+            const asOfDate = new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"});
+            return jsonResponse(200,headers,{success:true,stockCondition:await loadOwnerStockCondition(connection,
+                    {storeId,branchId:activeBranchId,asOfDate})});
+        }
+
+        // Owner-only reporting never changes products, stock, or supplier ledgers.
+        if (action === "get_owner_inventory_performance") {
+            if (tokenRole !== "owner") {
+                return jsonResponse(403, headers, {error: "Only the owner can view inventory financial performance."});
+            }
+            if (rawRequestedBranchId !== undefined && rawRequestedBranchId !== null && rawRequestedBranchId !== "" &&
+                (!Number.isSafeInteger(requestedBranchId) || requestedBranchId <= 0)) {
+                return badRequest(headers, "Choose a valid branch.");
+            }
+            const asOfDate = new Date().toLocaleDateString("sv-SE", {timeZone: "Asia/Manila"});
+            const dateFrom = ownerInventoryReportDate(body.date_from ?? body.dateFrom ?? `${asOfDate.slice(0, 7)}-01`);
+            const dateTo = ownerInventoryReportDate(body.date_to ?? body.dateTo ?? asOfDate);
+            if (!dateFrom || !dateTo || dateFrom > dateTo) {
+                return badRequest(headers, "Choose valid start and end dates in YYYY-MM-DD order.");
+            }
+            // At most 366 calendar days, inclusive, per interactive report.
+            if ((Date.parse(`${dateTo}T00:00:00Z`) - Date.parse(`${dateFrom}T00:00:00Z`)) / 86400000 > 365) {
+                return badRequest(headers, "Choose a date range of 366 days or fewer.");
+            }
+            try {
+                const performance = await loadOwnerInventoryPerformance(connection, {
+                    storeId, branchId: activeBranchId, dateFrom, dateTo, asOfDate,
+                });
+                return jsonResponse(200, headers, {success: true, performance});
+            } catch (error) {
+                if (error.ownerInventoryStatus) return jsonResponse(error.ownerInventoryStatus, headers, {error: error.message});
+                throw error;
+            }
+        }
+
 
         // Revalidate active staff/branch/module membership on EVERY staff inventory request.
         // JWT branch claims and browser-visible controls are not a substitute for current DB grants.
@@ -2486,19 +3027,33 @@ exports.handler = async (event) => {
             }
             let access = {};
             try { access = typeof currentStaff[0].permissions === "string" ? JSON.parse(currentStaff[0].permissions) : (currentStaff[0].permissions || {}); } catch {}
-            if (access.inventory !== true && !["view", "full"].includes(access.inventory_access)) {
+            const inventoryLevel = access.inventory_access !== undefined ? access.inventory_access : access.inventory;
+            if (![true, "true", "full", "view", "view_only", "viewOnly"].includes(inventoryLevel)) {
                 return unauthorized(headers,"Inventory permission is not assigned to this staff member.");
             }
         }
 
-        // Critical RBAC: staff are read-only on the product catalog. A specific
-        // receiving permission does NOT authorize any catalog, cost, supplier,
-        // import, payment, or adjustment endpoints, even when called directly.
+        // Staff inventory access includes the Receive Stock dialog and its
+        // transaction, but not unrelated catalog, import, supplier settlement,
+        // stock adjustment, or product deletion operations.
         if (tokenRole === "staff" && !new Set([
             "get_products", "get_staff_inventory_workspace", "get_staff_inventory_activity",
             "complete_staff_stock_receipt", "report_staff_stock_shortage",
+            "get_product_editor_details", "get_stock_suppliers", "receive_stock",
         ]).has(action)) {
             return unauthorized(headers, "This product operation is not permitted for staff.");
+        }
+        if (tokenRole === "staff" && ["complete_staff_stock_receipt", "report_staff_stock_shortage"].includes(action)) {
+            const [rows] = await connection.execute(
+                `SELECT permissions FROM staff WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,
+                [Number(decoded.staff_id),storeId,activeBranchId]);
+            let permissions = {};
+            try { permissions = typeof rows[0]?.permissions === "string" ? JSON.parse(rows[0].permissions) : rows[0]?.permissions || {}; }
+            catch { permissions = {}; }
+            const level = permissions.inventory_access !== undefined ? permissions.inventory_access : permissions.inventory;
+            if (![true, "true", "full"].includes(level)) {
+                return jsonResponse(403, headers, {error: "Full Inventory permission is required for physical stock operations."});
+            }
         }
 
         // Keep Product No. as a real, unique database field. This also
@@ -2548,7 +3103,9 @@ exports.handler = async (event) => {
                 }
                 try { staffPermissions = typeof staffRow.permissions === "string" ? JSON.parse(staffRow.permissions) : (staffRow.permissions || {}); }
                 catch { staffPermissions = {}; }
-                if (staffPermissions.inventory !== true && !["view", "full"].includes(staffPermissions.inventory_access)) {
+                const staffAccess = staffPermissions.inventory_access !== undefined
+                    ? staffPermissions.inventory_access : staffPermissions.inventory;
+                if (![true, "true", "full", "view", "view_only", "viewOnly"].includes(staffAccess)) {
                     return unauthorized(headers, "Inventory access is not assigned to this staff account.");
                 }
             }
@@ -2596,9 +3153,9 @@ exports.handler = async (event) => {
                             m.quantity_delta AS quantity, m.reference_id AS reference,
                             m.actor_name AS actorName
                      FROM inventory_movements m
-                     JOIN branch_inventory bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
-                     JOIN products p ON p.id=bi.product_id AND p.store_id=bi.store_id AND p.branch_id=bi.branch_id
-                     LEFT JOIN product_variants pv ON pv.id=bi.variant_id AND pv.product_id=p.id
+                         JOIN branch_inventory bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
+                         JOIN products p ON p.id=bi.product_id AND p.store_id=bi.store_id AND p.branch_id=bi.branch_id
+                         LEFT JOIN product_variants pv ON pv.id=bi.variant_id AND pv.product_id=p.id
                      WHERE ${where.join(' AND ')}
                      ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?`,
                     [...params, limit+1, (page-1)*limit]);
@@ -2941,8 +3498,8 @@ exports.handler = async (event) => {
 
 
         if (action === "get_stock_suppliers") {
-            if (tokenRole !== "owner" && tokenRole !== "manager") {
-                return unauthorized(headers, "Only owners and managers may view suppliers.");
+            if (!["owner", "manager", "staff"].includes(tokenRole)) {
+                return unauthorized(headers, "Inventory access required to view suppliers.");
             }
             if (!activeBranchId) return badRequest(headers, "A branch is required.");
             const suppliers = new Set();
@@ -2963,8 +3520,10 @@ exports.handler = async (event) => {
            applying the manager's chosen selling price within the same transaction.
            Earlier supplier purchase amounts and variant definitions are untouched. */
         if (action === "receive_stock") {
-            if (tokenRole !== "owner" && tokenRole !== "manager") {
-                return unauthorized(headers, "Only owners and managers may receive supplier stock.");
+            // Staff inventory access is rechecked against staff.permissions above.
+            // Branch scope is always derived from the signed-in staff JWT.
+            if (!["owner", "manager", "staff"].includes(tokenRole)) {
+                return unauthorized(headers, "Inventory access required to receive stock.");
             }
             const productId = Number(body.product_id ?? body.productId);
             if (!activeBranchId || !Number.isInteger(productId) || productId <= 0) {
@@ -3283,6 +3842,19 @@ exports.handler = async (event) => {
                 paymentStatus:Number(row.amountPaid)>=Number(row.purchaseTotal)?"Paid":Number(row.amountPaid)>0?"Partially Paid":"Unpaid"}));
             return jsonResponse(200,headers,{success:true,payables});
         }
+        if (action === "update_supplier_purchase") {
+            if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers,"Not permitted.");
+            try {
+                const result = await updateSupplierPurchaseDetails(connection, {
+                    purchaseId:Number(body.purchaseId),storeId,activeBranchId,
+                    details:body.details,expected:body.expected,decoded,tokenRole,
+                });
+                return jsonResponse(200,headers,result);
+            } catch (error) {
+                if (error.purchaseEditStatus) return jsonResponse(error.purchaseEditStatus,headers,{error:error.message});
+                throw error;
+            }
+        }
         if (action === "get_supplier_purchase_items") {
             if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers,"Not permitted.");
             const purchaseId=Number(body.purchaseId);
@@ -3400,10 +3972,11 @@ exports.handler = async (event) => {
             return jsonResponse(200,headers,{success:true,productId,variantId,previousStock:current,newStock:target,totalStock:aggregateStock});
         }
         if (action === "get_product_editor_details") {
-            // Managers may enter cost and supplier information in Edit Product,
-            // but those confidential fields remain hidden in overview lists.
-            if (tokenRole !== "owner" && tokenRole !== "manager") {
-                return unauthorized(headers, "Only owners and managers may edit supplier purchase details.");
+            // Receive Stock requires current variant costs and saved pricing;
+            // staff with Inventory access can read these details without being
+            // granted update_product or supplier-payment privileges.
+            if (!["owner", "manager", "staff"].includes(tokenRole)) {
+                return unauthorized(headers, "Inventory access required to load receiving details.");
             }
             const productId = Number(body.id);
             if (!Number.isInteger(productId) || productId <= 0) {

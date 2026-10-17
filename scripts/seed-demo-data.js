@@ -185,7 +185,7 @@ const CONFIG = Object.freeze({
     defaultPassword: process.env.SEED_DEFAULT_PASSWORD || "Demo12345",
 
     createIndexes: envBool("SEED_CREATE_INDEXES", true),
-    resetExistingRun: envBool("SEED_RESET_EXISTING_RUN", true),
+    resetExistingRun: false, // Destructive resets require the separate preview-first destroyer
     dryRun: envBool("SEED_DRY_RUN", false) || process.argv.includes("--dry-run"),
 
     // By default sales use the rolling demo window from the specification:
@@ -1072,10 +1072,10 @@ async function deleteChildByParent(db, relation) {
         const [result] = await db.query(
             `DELETE child
              FROM ${quoteIdentifier(childTable)} AS child
-             INNER JOIN ${quoteIdentifier(parentTable)} AS parent
-                ON child.${quoteIdentifier(childColumn)} =
-                   parent.${quoteIdentifier(parentColumn)}
-             WHERE parent.store_id = ?`,
+            INNER JOIN ${quoteIdentifier(parentTable)} AS parent
+            ON child.${quoteIdentifier(childColumn)} =
+            parent.${quoteIdentifier(parentColumn)}
+            WHERE parent.store_id = ?`,
             [storeId]
         );
         totalDeleted += Number(
@@ -1185,6 +1185,9 @@ async function removeExistingSeedRun(db) {
             ["subscription_audit_logs", "subscription_id", "subscriptions", "id"],
             ["subscription_notifications", "subscription_id", "subscriptions", "id"],
             ["payment_submissions", "subscription_id", "subscriptions", "id"],
+            // These rental children have no store_id. Clean them BEFORE purchases.
+            ["rental_supplier_payments", "purchase_id", "rental_purchase_transactions", "id"],
+            ["rental_purchase_items", "purchase_id", "rental_purchase_transactions", "id"],
         ].map(([childTable, childColumn, parentTable, parentColumn]) => ({
             childTable,
             childColumn,
@@ -1785,18 +1788,18 @@ async function seedV2InventoryForStore(db, storeId) {
     // 1) Simple/non-variant products: one V2 inventory row for the same branch.
     await db.execute(
         `INSERT INTO branch_inventory (
-             store_id,
-             branch_id,
-             product_id,
-             variant_id,
-             quantity_on_hand,
-             reorder_level,
-             cost_price,
-             sales_price,
-             status,
-             created_at,
-             updated_at
-         )
+            store_id,
+            branch_id,
+            product_id,
+            variant_id,
+            quantity_on_hand,
+            reorder_level,
+            cost_price,
+            sales_price,
+            status,
+            created_at,
+            updated_at
+        )
          SELECT
              p.store_id,
              p.branch_id,
@@ -1812,20 +1815,20 @@ async function seedV2InventoryForStore(db, storeId) {
          FROM products AS p
          WHERE p.store_id = ?
            AND (
-                COALESCE(p.has_variants, 0) = 0
-                OR NOT EXISTS (
-                    SELECT 1
-                    FROM product_variants AS existing_variant
-                    WHERE existing_variant.product_id = p.id
-                )
-           )
-         ON DUPLICATE KEY UPDATE
-             quantity_on_hand = VALUES(quantity_on_hand),
-             reorder_level = VALUES(reorder_level),
-             cost_price = VALUES(cost_price),
-             sales_price = VALUES(sales_price),
-             status = 'active',
-             updated_at = CURRENT_TIMESTAMP`,
+             COALESCE(p.has_variants, 0) = 0
+                 OR NOT EXISTS (
+                 SELECT 1
+                 FROM product_variants AS existing_variant
+                 WHERE existing_variant.product_id = p.id
+             )
+             )
+             ON DUPLICATE KEY UPDATE
+                                  quantity_on_hand = VALUES(quantity_on_hand),
+                                  reorder_level = VALUES(reorder_level),
+                                  cost_price = VALUES(cost_price),
+                                  sales_price = VALUES(sales_price),
+                                  status = 'active',
+                                  updated_at = CURRENT_TIMESTAMP`,
         [storeId]
     );
 
@@ -1833,18 +1836,18 @@ async function seedV2InventoryForStore(db, storeId) {
     // parent row because products.stock is already the aggregate of the variants.
     await db.execute(
         `INSERT INTO branch_inventory (
-             store_id,
-             branch_id,
-             product_id,
-             variant_id,
-             quantity_on_hand,
-             reorder_level,
-             cost_price,
-             sales_price,
-             status,
-             created_at,
-             updated_at
-         )
+            store_id,
+            branch_id,
+            product_id,
+            variant_id,
+            quantity_on_hand,
+            reorder_level,
+            cost_price,
+            sales_price,
+            status,
+            created_at,
+            updated_at
+        )
          SELECT
              p.store_id,
              p.branch_id,
@@ -1858,17 +1861,17 @@ async function seedV2InventoryForStore(db, storeId) {
              COALESCE(pv.created_at, p.created_at, CURRENT_TIMESTAMP),
              CURRENT_TIMESTAMP
          FROM products AS p
-         INNER JOIN product_variants AS pv
-             ON pv.product_id = p.id
+                  INNER JOIN product_variants AS pv
+                             ON pv.product_id = p.id
          WHERE p.store_id = ?
            AND COALESCE(p.has_variants, 0) = 1
-         ON DUPLICATE KEY UPDATE
-             quantity_on_hand = VALUES(quantity_on_hand),
-             reorder_level = VALUES(reorder_level),
-             cost_price = VALUES(cost_price),
-             sales_price = VALUES(sales_price),
-             status = 'active',
-             updated_at = CURRENT_TIMESTAMP`,
+             ON DUPLICATE KEY UPDATE
+                                  quantity_on_hand = VALUES(quantity_on_hand),
+                                  reorder_level = VALUES(reorder_level),
+                                  cost_price = VALUES(cost_price),
+                                  sales_price = VALUES(sales_price),
+                                  status = 'active',
+                                  updated_at = CURRENT_TIMESTAMP`,
         [storeId]
     );
 
@@ -1882,17 +1885,17 @@ async function seedV2InventoryForStore(db, storeId) {
     // fixtures remain expired in V2; non-expiring rows simply have NULL expiry.
     await db.execute(
         `INSERT INTO inventory_batches (
-             store_id,
-             branch_id,
-             branch_inventory_id,
-             batch_code,
-             received_quantity,
-             remaining_quantity,
-             unit_cost,
-             received_at,
-             expiration_date,
-             status
-         )
+            store_id,
+            branch_id,
+            branch_inventory_id,
+            batch_code,
+            received_quantity,
+            remaining_quantity,
+            unit_cost,
+            received_at,
+            expiration_date,
+            status
+        )
          SELECT
              bi.store_id,
              bi.branch_id,
@@ -1901,7 +1904,7 @@ async function seedV2InventoryForStore(db, storeId) {
                  WHEN bi.variant_id IS NULL
                      THEN CONCAT(?, 'P', bi.product_id)
                  ELSE CONCAT(?, 'P', bi.product_id, '-V', bi.variant_id)
-             END,
+                 END,
              bi.quantity_on_hand,
              bi.quantity_on_hand,
              bi.cost_price,
@@ -1909,28 +1912,28 @@ async function seedV2InventoryForStore(db, storeId) {
              ${expiryExpression},
              CASE
                  WHEN ${expiryExpression} IS NOT NULL
-                  AND ${expiryExpression} < ?
+                     AND ${expiryExpression} < ?
                      THEN 'expired'
                  ELSE 'active'
-             END
+                 END
          FROM branch_inventory AS bi
-         INNER JOIN products AS p
-             ON p.id = bi.product_id
-         LEFT JOIN product_variants AS pv
-             ON pv.id = bi.variant_id
+                  INNER JOIN products AS p
+                             ON p.id = bi.product_id
+                  LEFT JOIN product_variants AS pv
+                            ON pv.id = bi.variant_id
          WHERE bi.store_id = ?
            AND bi.status = 'active'
            AND bi.quantity_on_hand > 0
            AND NOT EXISTS (
-               SELECT 1
-               FROM inventory_batches AS existing_batch
-               WHERE existing_batch.branch_inventory_id = bi.id
-                 AND existing_batch.batch_code = CASE
-                     WHEN bi.variant_id IS NULL
-                         THEN CONCAT(?, 'P', bi.product_id)
-                     ELSE CONCAT(?, 'P', bi.product_id, '-V', bi.variant_id)
+             SELECT 1
+             FROM inventory_batches AS existing_batch
+             WHERE existing_batch.branch_inventory_id = bi.id
+               AND existing_batch.batch_code = CASE
+                                                   WHEN bi.variant_id IS NULL
+                                                       THEN CONCAT(?, 'P', bi.product_id)
+                                                   ELSE CONCAT(?, 'P', bi.product_id, '-V', bi.variant_id)
                  END
-           )`,
+         )`,
         [
             batchPrefix,
             batchPrefix,
@@ -1946,21 +1949,21 @@ async function seedV2InventoryForStore(db, storeId) {
     const movementReferencePrefix = `seed:${CONFIG.runTag}:branch_inventory:`;
     await db.execute(
         `INSERT INTO inventory_movements (
-             store_id,
-             branch_id,
-             branch_inventory_id,
-             movement_type,
-             quantity_delta,
-             quantity_before,
-             quantity_after,
-             reference_type,
-             reference_id,
-             actor_id,
-             actor_role,
-             actor_name,
-             notes,
-             created_at
-         )
+            store_id,
+            branch_id,
+            branch_inventory_id,
+            movement_type,
+            quantity_delta,
+            quantity_before,
+            quantity_after,
+            reference_type,
+            reference_id,
+            actor_id,
+            actor_role,
+            actor_name,
+            notes,
+            created_at
+        )
          SELECT
              bi.store_id,
              bi.branch_id,
@@ -1981,21 +1984,21 @@ async function seedV2InventoryForStore(db, storeId) {
            AND bi.status = 'active'
            AND bi.quantity_on_hand <> 0
            AND NOT EXISTS (
-               SELECT 1
-               FROM inventory_movements AS existing_movement
-               WHERE existing_movement.branch_inventory_id = bi.id
-                 AND existing_movement.movement_type = 'OPENING_BALANCE'
-                 AND existing_movement.reference_type = 'DEMO_SEED'
-                 AND existing_movement.reference_id = CONCAT(?, bi.id)
-           )`,
+             SELECT 1
+             FROM inventory_movements AS existing_movement
+             WHERE existing_movement.branch_inventory_id = bi.id
+               AND existing_movement.movement_type = 'OPENING_BALANCE'
+               AND existing_movement.reference_type = 'DEMO_SEED'
+               AND existing_movement.reference_id = CONCAT(?, bi.id)
+         )`,
         [movementReferencePrefix, storeId, movementReferencePrefix]
     );
 
     const [[counts]] = await db.execute(
         `SELECT
-             (SELECT COUNT(*) FROM branch_inventory WHERE store_id = ?) AS inventory_rows,
-             (SELECT COUNT(*) FROM inventory_batches WHERE store_id = ?) AS batch_rows,
-             (SELECT COUNT(*) FROM inventory_movements WHERE store_id = ?) AS movement_rows`,
+                 (SELECT COUNT(*) FROM branch_inventory WHERE store_id = ?) AS inventory_rows,
+                 (SELECT COUNT(*) FROM inventory_batches WHERE store_id = ?) AS batch_rows,
+                 (SELECT COUNT(*) FROM inventory_movements WHERE store_id = ?) AS movement_rows`,
         [storeId, storeId, storeId]
     );
 
@@ -2035,7 +2038,7 @@ async function seedV2PackageItems(db, storeId, packages) {
     const [[result]] = await db.execute(
         `SELECT COUNT(*) AS package_item_rows
          FROM package_items AS pi
-         INNER JOIN packages AS p ON p.id = pi.package_id
+                  INNER JOIN packages AS p ON p.id = pi.package_id
          WHERE p.store_id = ?`,
         [storeId]
     );
@@ -2049,48 +2052,48 @@ async function verifyV2SeedStore(db, storeId, expectedPackageItems) {
     const [[inventoryCheck]] = await db.execute(
         `SELECT COUNT(*) AS mismatch_count
          FROM (
-             SELECT
-                 p.store_id,
-                 p.branch_id,
-                 p.id AS product_id,
-                 NULL AS variant_id,
-                 GREATEST(COALESCE(p.stock, 0), 0) AS quantity_on_hand,
-                 GREATEST(COALESCE(p.alert_level, 0), 0) AS reorder_level,
-                 COALESCE(p.original_price, 0.00) AS cost_price,
-                 COALESCE(p.sales_price, 0.00) AS sales_price
-             FROM products AS p
-             WHERE p.store_id = ?
-               AND (
-                    COALESCE(p.has_variants, 0) = 0
-                    OR NOT EXISTS (
-                        SELECT 1
-                        FROM product_variants AS pv0
-                        WHERE pv0.product_id = p.id
-                    )
-               )
+                  SELECT
+                      p.store_id,
+                      p.branch_id,
+                      p.id AS product_id,
+                      NULL AS variant_id,
+                      GREATEST(COALESCE(p.stock, 0), 0) AS quantity_on_hand,
+                      GREATEST(COALESCE(p.alert_level, 0), 0) AS reorder_level,
+                      COALESCE(p.original_price, 0.00) AS cost_price,
+                      COALESCE(p.sales_price, 0.00) AS sales_price
+                  FROM products AS p
+                  WHERE p.store_id = ?
+                    AND (
+                      COALESCE(p.has_variants, 0) = 0
+                          OR NOT EXISTS (
+                          SELECT 1
+                          FROM product_variants AS pv0
+                          WHERE pv0.product_id = p.id
+                      )
+                      )
 
-             UNION ALL
+                  UNION ALL
 
-             SELECT
-                 p.store_id,
-                 p.branch_id,
-                 p.id AS product_id,
-                 pv.id AS variant_id,
-                 GREATEST(COALESCE(pv.stock, 0), 0) AS quantity_on_hand,
-                 GREATEST(COALESCE(pv.alert_level, 0), 0) AS reorder_level,
-                 COALESCE(pv.original_price, 0.00) AS cost_price,
-                 COALESCE(pv.sales_price, 0.00) AS sales_price
-             FROM products AS p
-             INNER JOIN product_variants AS pv
-                 ON pv.product_id = p.id
-             WHERE p.store_id = ?
-               AND COALESCE(p.has_variants, 0) = 1
-         ) AS legacy_inventory
-         LEFT JOIN branch_inventory AS bi
-           ON bi.store_id = legacy_inventory.store_id
-          AND bi.branch_id = legacy_inventory.branch_id
-          AND bi.product_id = legacy_inventory.product_id
-          AND bi.variant_id <=> legacy_inventory.variant_id
+                  SELECT
+                      p.store_id,
+                      p.branch_id,
+                      p.id AS product_id,
+                      pv.id AS variant_id,
+                      GREATEST(COALESCE(pv.stock, 0), 0) AS quantity_on_hand,
+                      GREATEST(COALESCE(pv.alert_level, 0), 0) AS reorder_level,
+                      COALESCE(pv.original_price, 0.00) AS cost_price,
+                      COALESCE(pv.sales_price, 0.00) AS sales_price
+                  FROM products AS p
+                           INNER JOIN product_variants AS pv
+                                      ON pv.product_id = p.id
+                  WHERE p.store_id = ?
+                    AND COALESCE(p.has_variants, 0) = 1
+              ) AS legacy_inventory
+                  LEFT JOIN branch_inventory AS bi
+                            ON bi.store_id = legacy_inventory.store_id
+                                AND bi.branch_id = legacy_inventory.branch_id
+                                AND bi.product_id = legacy_inventory.product_id
+                                AND bi.variant_id <=> legacy_inventory.variant_id
          WHERE bi.id IS NULL
             OR bi.status <> 'active'
             OR bi.quantity_on_hand <> legacy_inventory.quantity_on_hand
@@ -2103,24 +2106,24 @@ async function verifyV2SeedStore(db, storeId, expectedPackageItems) {
     const [[coverageCheck]] = await db.execute(
         `SELECT
              SUM(
-                 CASE WHEN bi.quantity_on_hand > 0
-                       AND NOT EXISTS (
-                           SELECT 1
-                           FROM inventory_batches AS ib
-                           WHERE ib.branch_inventory_id = bi.id
-                       )
-                      THEN 1 ELSE 0 END
+                     CASE WHEN bi.quantity_on_hand > 0
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM inventory_batches AS ib
+                             WHERE ib.branch_inventory_id = bi.id
+                         )
+                              THEN 1 ELSE 0 END
              ) AS missing_batches,
              SUM(
-                 CASE WHEN bi.quantity_on_hand <> 0
-                       AND NOT EXISTS (
-                           SELECT 1
-                           FROM inventory_movements AS im
-                           WHERE im.branch_inventory_id = bi.id
-                             AND im.movement_type = 'OPENING_BALANCE'
-                             AND im.reference_type = 'DEMO_SEED'
-                       )
-                      THEN 1 ELSE 0 END
+                     CASE WHEN bi.quantity_on_hand <> 0
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM inventory_movements AS im
+                             WHERE im.branch_inventory_id = bi.id
+                               AND im.movement_type = 'OPENING_BALANCE'
+                               AND im.reference_type = 'DEMO_SEED'
+                         )
+                              THEN 1 ELSE 0 END
              ) AS missing_opening_movements
          FROM branch_inventory AS bi
          WHERE bi.store_id = ?
@@ -2131,7 +2134,7 @@ async function verifyV2SeedStore(db, storeId, expectedPackageItems) {
     const [[packageCheck]] = await db.execute(
         `SELECT COUNT(*) AS package_items
          FROM package_items AS pi
-         INNER JOIN packages AS p ON p.id = pi.package_id
+                  INNER JOIN packages AS p ON p.id = pi.package_id
          WHERE p.store_id = ?`,
         [storeId]
     );
@@ -3866,16 +3869,46 @@ async function createMonthlyBookingFixtures(db, context, counters) {
             }
         }
 
-        // Ensure the current-day dashboard has an actionable Preparing booking
-        // without changing the exact monthly status totals.
+        // Rentable daily workflows: each branch needs TWO active bookings today.
+        // One remains Reserved for Prepare -> Release, the second starts checked
+        // out for Receive Return -> Inspect. We SWAP existing statuses rather
+        // than adding bookings or changing the exact plan-wide status totals.
         if (isCurrentMonth) {
-            const todayIndex = bookingDays.findIndex((day) => day === TODAY.getUTCDate());
-            const preparingIndex = statuses.findIndex((status) => status === "preparing");
-            if (todayIndex >= 0 && preparingIndex >= 0 && todayIndex !== preparingIndex) {
-                [statuses[todayIndex], statuses[preparingIndex]] = [
-                    statuses[preparingIndex],
-                    statuses[todayIndex],
-                ];
+            const active = (value) => value === "confirmed" || value === "preparing";
+            for (let b = 0; b < branches.length; b += 1) {
+                const own = branchIndexes.map((branchIndex, i) => branchIndex === b ? i : -1)
+                    .filter((i) => i >= 0);
+                if (own.length < 2) throw new Error(`Not enough monthly bookings for rental tasks in branch ${b + 1}`);
+                const slots = own.slice(0, 2);
+                for (const targetIndex of slots) {
+                    if (!active(statuses[targetIndex])) {
+                        const donor = statuses.findIndex((status, i) => {
+                            if (!active(status) || branchIndexes[i] === b) return false;
+                            const donorActive = statuses.filter((candidate, j) =>
+                                branchIndexes[j] === branchIndexes[i] && active(candidate)).length;
+                            const donorSlots = branchIndexes.map((x, j) => x === branchIndexes[i] ? j : -1)
+                                .filter((j) => j >= 0).slice(0, 2);
+                            return donorActive > 2 && !donorSlots.includes(i);
+                        });
+                        // If every other branch has 2 active already, consume an
+                        // extra active booking in this branch (if one exists).
+                        const sameBranchDonor = donor >= 0 ? donor : own.find((i) =>
+                            i !== targetIndex && !slots.includes(i) && active(statuses[i]));
+                        if (sameBranchDonor == null || sameBranchDonor < 0)
+                            throw new Error(`Cannot supply two active rental bookings to branch ${b + 1} without changing monthly plan totals.`);
+                        [statuses[targetIndex], statuses[sameBranchDonor]] =
+                            [statuses[sameBranchDonor], statuses[targetIndex]];
+                    }
+                    bookingDays[targetIndex] = TODAY.getUTCDate();
+                }
+            }
+            // Reserve an actual Preparing task for the first branch if the
+            // original monthly status distribution has a Preparing slot.
+            const firstBranchFirst = branchIndexes.findIndex((branchId) => branchId === 0);
+            const preparingIndex = statuses.findIndex((value, i) => value === "preparing" && branchIndexes[i] === 0);
+            if (firstBranchFirst >= 0 && preparingIndex >= 0 && firstBranchFirst !== preparingIndex) {
+                [statuses[firstBranchFirst], statuses[preparingIndex]] =
+                    [statuses[preparingIndex], statuses[firstBranchFirst]];
             }
         }
 
@@ -5572,63 +5605,63 @@ async function rebuildPosDashboardSummariesForStore(
              o.order_date,
              SUM(o.total) AS gross_sales,
              SUM(
-                 COALESCE(
-                     item_cost.cost,
-                     o.total
-                 )
+                     COALESCE(
+                             item_cost.cost,
+                             o.total
+                     )
              ) AS cost_of_sales,
              COUNT(*) AS transaction_count
          FROM orders o
-         LEFT JOIN (
+                  LEFT JOIN (
              SELECT
                  oi.store_id,
                  oi.order_id,
                  SUM(
-                     COALESCE(
-                         oi.cost_price_at_sale,
-                         CASE
-                             WHEN oi.variant_id IS NOT NULL
-                                 THEN COALESCE(
-                                     pv.original_price,
-                                     p.original_price,
-                                     0
-                                 )
-                             ELSE COALESCE(
-                                 p.original_price,
+                         COALESCE(
+                                 oi.cost_price_at_sale,
+                                 CASE
+                                     WHEN oi.variant_id IS NOT NULL
+                                         THEN COALESCE(
+                                             pv.original_price,
+                                             p.original_price,
+                                             0
+                                              )
+                                     ELSE COALESCE(
+                                             p.original_price,
+                                             0
+                                          )
+                                     END,
                                  0
-                             )
-                         END,
-                         0
-                     ) * oi.quantity
+                         ) * oi.quantity
                  ) AS cost
              FROM order_items oi
-             LEFT JOIN products p
-               ON p.id = oi.product_id
-              AND p.store_id = oi.store_id
-             LEFT JOIN product_variants pv
-               ON pv.id = oi.variant_id
-              AND pv.product_id = oi.product_id
+                      LEFT JOIN products p
+                                ON p.id = oi.product_id
+                                    AND p.store_id = oi.store_id
+                      LEFT JOIN product_variants pv
+                                ON pv.id = oi.variant_id
+                                    AND pv.product_id = oi.product_id
              WHERE oi.store_id = ?
              GROUP BY
                  oi.store_id,
                  oi.order_id
          ) item_cost
-           ON item_cost.store_id = o.store_id
-          AND item_cost.order_id = o.order_id
+                            ON item_cost.store_id = o.store_id
+                                AND item_cost.order_id = o.order_id
          WHERE o.store_id = ?
            AND LOWER(
-               TRIM(COALESCE(o.status, ''))
-           ) NOT IN (
-               'pending',
-               'pending payment',
-               'unpaid',
-               'cancelled',
-               'canceled',
-               'refunded',
-               'void',
-               'draft',
-               'failed'
-           )
+                       TRIM(COALESCE(o.status, ''))
+               ) NOT IN (
+                         'pending',
+                         'pending payment',
+                         'unpaid',
+                         'cancelled',
+                         'canceled',
+                         'refunded',
+                         'void',
+                         'draft',
+                         'failed'
+                   )
          GROUP BY
              o.store_id,
              o.branch_id,
@@ -5651,43 +5684,43 @@ async function rebuildPosDashboardSummariesForStore(
              o.store_id,
              o.branch_id,
              STR_TO_DATE(
-                 DATE_FORMAT(
-                     o.order_date,
-                     '%Y-%m-01'
-                 ),
-                 '%Y-%m-%d'
+                     DATE_FORMAT(
+                             o.order_date,
+                             '%Y-%m-01'
+                     ),
+                     '%Y-%m-%d'
              ) AS month_start,
              oi.product_id,
              MAX(oi.product_name) AS product_name,
              SUM(oi.quantity) AS units_sold,
              SUM(oi.line_total) AS sales_amount
          FROM orders o
-         INNER JOIN order_items oi
-            ON oi.store_id = o.store_id
-           AND oi.order_id = o.order_id
+                  INNER JOIN order_items oi
+                             ON oi.store_id = o.store_id
+                                 AND oi.order_id = o.order_id
          WHERE o.store_id = ?
            AND LOWER(
-               TRIM(COALESCE(o.status, ''))
-           ) NOT IN (
-               'pending',
-               'pending payment',
-               'unpaid',
-               'cancelled',
-               'canceled',
-               'refunded',
-               'void',
-               'draft',
-               'failed'
-           )
+                       TRIM(COALESCE(o.status, ''))
+               ) NOT IN (
+                         'pending',
+                         'pending payment',
+                         'unpaid',
+                         'cancelled',
+                         'canceled',
+                         'refunded',
+                         'void',
+                         'draft',
+                         'failed'
+                   )
          GROUP BY
              o.store_id,
              o.branch_id,
              STR_TO_DATE(
-                 DATE_FORMAT(
-                     o.order_date,
-                     '%Y-%m-01'
-                 ),
-                 '%Y-%m-%d'
+                     DATE_FORMAT(
+                             o.order_date,
+                             '%Y-%m-01'
+                     ),
+                     '%Y-%m-%d'
              ),
              oi.product_id`,
         [storeId]
@@ -5740,8 +5773,344 @@ function printConfiguration(storeCount = DEMO_STORE_COUNT) {
     console.log(
         `Future POS coverage:    ${isoDate(DEMO_FUTURE_MONTH_START)} through ${isoDate(DEMO_WINDOW_END)}`
     );
-    console.log(`Default test password: ${CONFIG.defaultPassword}`);
+    console.log(`Demo account password configured: ${Boolean(CONFIG.defaultPassword)}`);
     console.log("");
+}
+
+
+// -------------------------------------------------------------
+// Event-rental transaction fixtures. This is DEMO DATA ONLY.
+// Every rental booking below REUSES an existing monthly booking;
+// no plan's booking count is increased by these fixtures.
+// -------------------------------------------------------------
+const RENTAL_DEMO_EQUIPMENT = Object.freeze([
+    { name: "Monoblock Chair", category: "Chairs", units: 90, cost: 280, dailyRate: 20 },
+    { name: "Folding Event Table", category: "Tables", units: 26, cost: 1800, dailyRate: 150 },
+    { name: "Event Tent", category: "Tents", units: 8, cost: 5800, dailyRate: 500 },
+    { name: "Portable Sound System", category: "Sound Equipment", units: 6, cost: 8200, dailyRate: 900 },
+]);
+
+function dateStamp(date) { return isoDate(date).replace(/-/g, ""); }
+function rentalDemoPrefix(storeIndex, branchIndex) {
+    return `DEMO-${CONFIG.runTag.toUpperCase()}-S${String(storeIndex).padStart(3, "0")}-B${String(branchIndex + 1).padStart(2, "0")}`;
+}
+
+async function requireRentalFixtureTables(db) {
+    // backup(5).zip (latest user-supplied export) ALREADY includes booking_rental_items
+    // and rental_booking_allocations.rental_charge_total. Check the CURRENT connected
+    // database instead of applying or recreating an unnecessary revenue migration.
+    // Validate the actual insert/read columns before any store is added or removed.
+    const required = {
+        rental_categories: ["id","store_id","branch_id","name","category_key"],
+        rental_equipment: ["id","store_id","branch_id","category_id","equipment_number","name","name_key",
+            "alert_level","total_units","rented_out_units","maintenance_units","missing_units",
+            "average_unit_cost","last_supplier","rental_rate_per_day","pricing_method","created_at"],
+        rental_purchase_transactions: ["id","store_id","branch_id","purchase_number","supplier",
+            "supplier_invoice_number","purchase_date","payment_method","purchase_total","payment_due_date","source","created_at"],
+        rental_purchase_items: ["id","purchase_id","equipment_id","quantity_ordered","unit_purchase_cost"],
+        rental_receiving_tasks: ["id","store_id","branch_id","purchase_id","purchase_item_id","equipment_id",
+            "quantity_expected","quantity_received","unit_cost","received_by","last_received_at","created_at"],
+        rental_stock_receipts: ["id","store_id","branch_id","purchase_item_id","equipment_id","receiving_number",
+            "quantity_received","unit_purchase_cost","received_date","received_by","created_at"],
+        rental_stock_movements: ["store_id","branch_id","equipment_id","type","quantity",
+            "reference_number","description","actor_name","occurred_at"],
+        rental_supplier_payments: ["purchase_id","amount","payment_date","request_key"],
+        rental_booking_allocations: ["id","store_id","branch_id","booking_reference","equipment_id",
+            "quantity","start_date","end_date","status","rental_charge_total"],
+        rental_staff_allocation_workflow: ["allocation_id","store_id","branch_id","prepared_at","prepared_by",
+            "released_at","released_by","returned_at","returned_by","inspected_at","inspected_by",
+            "inspection_status","returned_received_units","inspection_cleaning_units","inspection_damaged_units"],
+        rental_maintenance_records: ["store_id","branch_id","equipment_id","quantity_started","quantity_remaining",
+            "start_reason","condition_status","opened_at"],
+        rental_missing_unit_reports: ["store_id","branch_id","equipment_id","quantity","reason","reported_by",
+            "status","created_at"],
+        booking_rental_items: ["id","booking_id","store_id","branch_id","booking_reference","equipment_id",
+            "equipment_name","quantity","start_date","end_date","billable_days","daily_rate_snapshot",
+            "agreed_line_total"],
+        bookings: ["id","store_id","branch_id","booking_reference","booking_type","status","event_date",
+            "package_json","custom_order","notes","agreed_price","amount_paid","balance",
+            "required_down_payment","payment_status"],
+    };
+    for (const [table, columns] of Object.entries(required)) {
+        if (!(await tableExists(db, table))) {
+            throw new Error(`SCHEMA PRECHECK FAILED: ${table} is missing from the connected database. ` +
+                `It exists in backup(5).zip; restore/check the CURRENT staging database before seeding.`);
+        }
+        const current = await getTableColumns(db, table);
+        for (const column of columns) {
+            if (!current.has(column)) {
+                throw new Error(`SCHEMA PRECHECK FAILED: ${table}.${column} is missing from the connected database. ` +
+                    `Compare it with backup(5).zip. No demo stores have been created.`);
+            }
+        }
+    }
+    console.log("Rental booking, recorded-charge, and receiving schema verified against backup(5) requirements.");
+}
+
+async function createRentalDemoForStore(db, context, counters) {
+    const { storeId, storeIndex, branches, staff } = context;
+    const storeCode = String(storeIndex).padStart(3, "0");
+    const savedEquipment = new Map();
+    for (const [branchIndex, branch] of branches.entries()) {
+        const prefix = rentalDemoPrefix(storeIndex, branchIndex);
+        const actor = staff.find((s) => s.branchId === branch.id)?.name || "Demo Operations Staff";
+        const eqByName = new Map();
+        const stamp = sqlDateTime(addDays(TODAY, -5), 10);
+        const rowReference = (kind, seq) => `${prefix}-${kind}-${String(seq).padStart(3, "0")}`;
+
+        const move = async (equipmentId, type, quantity, ref, description, date = stamp) => {
+            await db.execute(`INSERT INTO rental_stock_movements
+                              (store_id,branch_id,equipment_id,type,quantity,reference_number,description,actor_name,occurred_at)
+                              VALUES (?,?,?,?,?,?,?,?,?)`,
+                [storeId,branch.id,equipmentId,type,quantity,ref,description,actor,date]);
+            counters.rentalMovements++;
+        };
+
+        // A real supplier transaction is the provenance for starting equipment stock.
+        // Completed receiving tasks never appear in Staff's pending delivery queue.
+        for (const [equipmentIndex, item] of RENTAL_DEMO_EQUIPMENT.entries()) {
+            const [category] = await db.execute(`INSERT INTO rental_categories
+                                                     (store_id,branch_id,name,category_key) VALUES (?,?,?,?)`,
+                [storeId,branch.id,item.category,item.category.toLowerCase()]);
+            const eqNumber = rowReference("EQ",equipmentIndex+1);
+            const [eq] = await db.execute(`INSERT INTO rental_equipment
+                                           (store_id,branch_id,category_id,equipment_number,name,name_key,alert_level,rental_rate_per_day,
+                                            total_units,average_unit_cost,last_supplier,pricing_method,created_at)
+                                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                [storeId,branch.id,category.insertId,eqNumber,item.name,item.name.toLowerCase(),3,
+                    item.dailyRate,item.units,item.cost,"Demo Event Supplies Co.","manual",stamp]);
+            eqByName.set(item.name,{id:Number(eq.insertId),...item,total:item.units});
+            counters.rentalEquipment++;
+            const purchaseRef=rowReference("RPUR",equipmentIndex+1);
+            const [p] = await db.execute(`INSERT INTO rental_purchase_transactions
+                                          (store_id,branch_id,purchase_number,supplier,purchase_date,payment_method,purchase_total,source,created_at)
+                                          VALUES (?,?,?,?,?,'cash',?,'add',?)`,
+                [storeId,branch.id,purchaseRef,"Demo Event Supplies Co.",isoDate(addDays(TODAY,-5)),
+                    roundMoney(item.units*item.cost),stamp]);
+            const [pi]=await db.execute(`INSERT INTO rental_purchase_items
+                                             (purchase_id,equipment_id,quantity_ordered,unit_purchase_cost) VALUES (?,?,?,?)`,
+                [p.insertId,eq.insertId,item.units,item.cost]);
+            await db.execute(`INSERT INTO rental_receiving_tasks
+                              (store_id,branch_id,purchase_id,purchase_item_id,equipment_id,quantity_expected,quantity_received,unit_cost,received_by,last_received_at,created_at)
+                              VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                [storeId,branch.id,p.insertId,pi.insertId,eq.insertId,item.units,item.units,item.cost,actor,stamp,stamp]);
+            await db.execute(`INSERT INTO rental_stock_receipts
+                              (store_id,branch_id,purchase_item_id,equipment_id,receiving_number,quantity_received,unit_purchase_cost,received_date,received_by,created_at)
+                              VALUES (?,?,?,?,?,?,?,?,?,?)`,
+                [storeId,branch.id,pi.insertId,eq.insertId,rowReference("RRCV",equipmentIndex+1),
+                    item.units,item.cost,isoDate(addDays(TODAY,-5)),actor,stamp]);
+            await db.execute(`INSERT INTO rental_supplier_payments
+                                  (purchase_id,amount,payment_date,request_key) VALUES (?,?,?,?)`,
+                [p.insertId,roundMoney(item.units*item.cost),isoDate(addDays(TODAY,-5)),rowReference("PAY",equipmentIndex+1)]);
+            await move(eq.insertId,"received",item.units,purchaseRef,"Demo opening equipment physically received");
+            counters.rentalPurchases++;
+        }
+
+        // New purchases are intentionally NOT available until a Staff account
+        // physically confirms them. One pending and one partly received task.
+        for (const [purchaseSequence, itemName, requested, received, method] of [
+            [5,"Monoblock Chair",6,0,"credit"],
+            [6,"Folding Event Table",4,2,"credit"],
+        ]) {
+            const item=eqByName.get(itemName);
+            const purchaseRef=rowReference("RPUR",purchaseSequence);
+            const price=roundMoney(requested*item.cost);
+            const [p]=await db.execute(`INSERT INTO rental_purchase_transactions
+                                        (store_id,branch_id,purchase_number,supplier,supplier_invoice_number,purchase_date,payment_method,purchase_total,payment_due_date,source)
+                                        VALUES (?,?,?,?,?,?,?,?,?,'receive')`,
+                [storeId,branch.id,purchaseRef,"Demo Event Supplies Co.",rowReference("INV",purchaseSequence),
+                    isoDate(TODAY),method,price,isoDate(addDays(TODAY,10))]);
+            const [pi]=await db.execute(`INSERT INTO rental_purchase_items
+                                             (purchase_id,equipment_id,quantity_ordered,unit_purchase_cost) VALUES (?,?,?,?)`,
+                [p.insertId,item.id,requested,item.cost]);
+            await db.execute(`INSERT INTO rental_receiving_tasks
+                              (store_id,branch_id,purchase_id,purchase_item_id,equipment_id,quantity_expected,quantity_received,unit_cost,received_by,last_received_at)
+                              VALUES (?,?,?,?,?,?,?,?,?,?)`,
+                [storeId,branch.id,p.insertId,pi.insertId,item.id,requested,received,item.cost,
+                    received?actor:null,received?stamp:null]);
+            if (received>0) {
+                await db.execute(`INSERT INTO rental_stock_receipts
+                                  (store_id,branch_id,purchase_item_id,equipment_id,receiving_number,quantity_received,unit_purchase_cost,received_date,received_by)
+                                  VALUES (?,?,?,?,?,?,?,?,?)`,
+                    [storeId,branch.id,pi.insertId,item.id,rowReference("RRCV",purchaseSequence),received,item.cost,isoDate(TODAY),actor]);
+                await db.execute(`UPDATE rental_equipment SET total_units=total_units+? WHERE id=?`,[received,item.id]);
+                item.total+=received;
+                await move(item.id,"received",received,purchaseRef,"Part delivery confirmed; remaining units still pending");
+                await db.execute(`INSERT INTO rental_supplier_payments
+                                      (purchase_id,amount,payment_date,request_key) VALUES (?,?,?,?)`,
+                    [p.insertId,roundMoney(price/2),isoDate(TODAY),rowReference("PAY",purchaseSequence)]);
+            }
+            counters.rentalPurchases++;
+            counters.pendingRentalReceipts += requested-received;
+        }
+
+        // Storage condition fixtures. No units are retired and the inventory
+        // conservation rule holds: available = total - out - on_hold - missing.
+        const chair=eqByName.get("Monoblock Chair");
+        await db.execute(`INSERT INTO rental_maintenance_records
+                          (store_id,branch_id,equipment_id,quantity_started,quantity_remaining,start_reason,condition_status,opened_at)
+                          VALUES (?,?,?,?,?,?,?,?)`,
+            [storeId,branch.id,chair.id,2,2,"Demo: 2 chairs with loose legs; needs Manager repair approval","In Repair",stamp]);
+        await db.execute('UPDATE rental_equipment SET maintenance_units=maintenance_units+2 WHERE id=?',[chair.id]);
+        await move(chair.id,"damage_reported",2,rowReference("MAINT",1),"Demo storage damage placed on hold");
+        const table=eqByName.get("Folding Event Table");
+        await db.execute(`INSERT INTO rental_missing_unit_reports
+                          (store_id,branch_id,equipment_id,quantity,reason,reported_by,status,created_at)
+                          VALUES (?,?,?,?,?,?,'pending',?)`,
+            [storeId,branch.id,table.id,1,"Demo: one table unaccounted for after storage inventory",actor,stamp]);
+        await db.execute('UPDATE rental_equipment SET missing_units=missing_units+1 WHERE id=?',[table.id]);
+        await move(table.id,"missing_reported",1,rowReference("MISS",1),"Demo missing unit awaiting Manager review");
+
+        savedEquipment.set(branch.id,{byName:eqByName,move,actor});
+    }
+
+    // Convert a subset of already-seeded MONTHLY bookings to genuine rental
+    // bookings (remove their Sales booking_items). This preserves exact per-plan
+    // booking counts and doesn't count a single booking as both a sale and rental.
+    const [bookings]=await db.execute(`SELECT id,branch_id,booking_reference,
+                                              DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDay,LOWER(status) AS bookingStatus
+                                       FROM bookings WHERE store_id=? AND booking_reference LIKE ?
+                                       ORDER BY event_date,id`,[storeId,`MON-BKG-${CONFIG.runTag.toUpperCase()}-${String(storeIndex).padStart(3,"0")}%`]);
+    const byBranchMonth=new Map();
+    for (const b of bookings) {
+        const key=`${Number(b.branch_id)}:${String(b.eventDay).slice(0,7)}`;
+        if(!byBranchMonth.has(key))byBranchMonth.set(key,[]);
+        byBranchMonth.get(key).push(b);
+    }
+    const currentMonth=isoDate(TODAY).slice(0,7);
+    for(const branch of branches) {
+        const f=savedEquipment.get(branch.id);
+        const rowsForBranch=[...byBranchMonth.entries()]
+            .filter(([key])=>key.startsWith(`${branch.id}:`))
+            .sort(([a],[b])=>a.localeCompare(b));
+        let seenActiveToday=false;
+        let seenCheckedOutToday=false;
+        for (const [monthKey,monthRows] of rowsForBranch) {
+            const month=monthKey.split(':')[1];
+            const isCurrent=month===currentMonth;
+            const isFuture=month>currentMonth;
+            const isPast=month<currentMonth;
+            const candidates=[];
+            const completed=monthRows.find(b=>b.bookingStatus==='completed' && b.eventDay<isoDate(TODAY));
+            if (completed) candidates.push({row:completed,state:'returned'});
+            if (isCurrent || isFuture) {
+                const active=monthRows.filter(b=>['confirmed','preparing'].includes(b.bookingStatus));
+                if(active.length) {
+                    // The first active current-month booking begins today so
+                    // Staff can press Prepare / Release without waiting weeks.
+                    const first=active[0];
+                    candidates.push({row:first,state:'reserved',forceToday:isCurrent});
+                    if(isCurrent && active.length>1) {
+                        candidates.push({row:active[1],state:'checked_out',forceToday:true});
+                    }
+                }
+            }
+            for (const [i,entry] of candidates.entries()) {
+                const b=entry.row;
+                if(!b || candidates.some((prior,j)=>j<i && prior.row.id===b.id))continue;
+                const equipment=[...f.byName.values()][ (isPast?0:((month.charCodeAt(5)+i)%2)) ];
+                const quantity=Math.min(equipment.total>20?10:2,Math.floor(equipment.total/4));
+                const from=entry.forceToday?isoDate(TODAY):String(b.eventDay);
+                const rentalDays=entry.state==='returned'?2:1;
+                const until=isoDate(addDays(parseIsoDate(from,'Rental start date'),rentalDays-1));
+                if(entry.state==='returned'&&until>isoDate(TODAY))continue;
+                const charge=roundMoney(quantity*equipment.dailyRate*rentalDays);
+                // Last month's returned rental still requires cleaning TODAY;
+                // no fake stock release or extra booking is created.
+                const cleaningFixture = entry.state==='returned' &&
+                    month===isoDate(addMonthsUtc(CURRENT_MONTH_START,-1)).slice(0,7);
+                if (!(quantity>0 && charge>0))continue;
+                const bookedJson=JSON.stringify({type:'custom',purchaseType:'rental equipment',
+                    rentalItems:[{equipmentId:equipment.id,name:equipment.name,quantity,
+                        startDate:from,endDate:until,billableDays:rentalDays,
+                        dailyRateSnapshot:equipment.dailyRate,agreedLineTotal:charge}],selectedProducts:[]});
+                const payment=entry.state==='returned'?charge:roundMoney(charge*0.5);
+                const [removed]=await db.execute('DELETE FROM booking_items WHERE booking_id=? AND store_id=?',[b.id,storeId]);
+                counters.bookingItems-=Number(removed.affectedRows||0);
+                await db.execute(`UPDATE bookings SET booking_type='custom',package_name=NULL,package_price=0,
+                                                      package_json=?,custom_order=?,notes=?,event_date=?,agreed_price=?,amount_paid=?,
+                                                      balance=?,required_down_payment=?,payment_status=? WHERE id=? AND store_id=?`,
+                    [bookedJson,`${quantity} x ${equipment.name} (${rentalDays} rental day(s))`,
+                        'Demo rental-equipment booking (not a sale of consumable products)',from,charge,payment,
+                        roundMoney(charge-payment),roundMoney(charge*0.5),entry.state==='returned'?'paid':'partial',b.id,storeId]);
+                await db.execute(`INSERT INTO booking_rental_items
+                                  (booking_id,store_id,branch_id,booking_reference,equipment_id,equipment_name,quantity,
+                                   start_date,end_date,billable_days,daily_rate_snapshot,agreed_line_total)
+                                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+                    [b.id,storeId,branch.id,b.booking_reference,equipment.id,equipment.name,quantity,
+                        from,until,rentalDays,equipment.dailyRate,charge]);
+                const [a]=await db.execute(`INSERT INTO rental_booking_allocations
+                                            (store_id,branch_id,booking_reference,equipment_id,quantity,start_date,end_date,status,rental_charge_total)
+                                            VALUES (?,?,?,?,?,?,?,?,?)`,
+                    [storeId,branch.id,b.booking_reference,equipment.id,quantity,from,until,entry.state,charge]);
+                counters.rentalAllocations++;
+                counters.rentalCharges+=charge;
+                if(entry.state==='returned') {
+                    const returnedAt=cleaningFixture ? sqlDateTime(TODAY,10) :
+                        sqlDateTime(parseIsoDate(until,'Rental return date'),16);
+                    await db.execute(`INSERT INTO rental_staff_allocation_workflow
+                                      (store_id,branch_id,allocation_id,prepared_at,prepared_by,released_at,released_by,
+                                       returned_at,returned_by,inspected_at,inspected_by,inspection_status,returned_received_units,
+                                       inspection_cleaning_units,inspection_damaged_units)
+                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                        [storeId,branch.id,a.insertId,sqlDateTime(parseIsoDate(from,'Date'),8),f.actor,
+                            sqlDateTime(parseIsoDate(from,'Date'),9),f.actor,returnedAt,f.actor,returnedAt,f.actor,
+                            cleaningFixture?'cleaning':'cleared',quantity,cleaningFixture?quantity:0,0]);
+                    if (cleaningFixture) {
+                        await db.execute('UPDATE rental_equipment SET maintenance_units=maintenance_units+? WHERE id=?',
+                            [quantity,equipment.id]);
+                        await f.move(equipment.id,'inspected',quantity,b.booking_reference,
+                            'Returned equipment held for Staff cleaning',returnedAt);
+                        counters.rentalCleaningTasks += 1;
+                    }
+                    // Historical completed rentals do not change live OUT stock.
+                    // The latest return requiring cleaning is held until Staff
+                    // marks it cleaned; all other returned fixtures are cleared.
+                    await f.move(equipment.id,'rented_out',quantity,b.booking_reference,
+                        'Historical demo rental released',sqlDateTime(parseIsoDate(from,'Rental start date'),9));
+                    await f.move(equipment.id,'returned',quantity,b.booking_reference,
+                        'Historical demo rental returned and inspected',returnedAt);
+                } else if(entry.state==='checked_out') {
+                    seenCheckedOutToday=true;
+                    await db.execute('UPDATE rental_equipment SET rented_out_units=rented_out_units+? WHERE id=?',[quantity,equipment.id]);
+                    await db.execute(`INSERT INTO rental_staff_allocation_workflow
+                                      (store_id,branch_id,allocation_id,prepared_at,prepared_by,released_at,released_by)
+                                      VALUES (?,?,?,?,?,?,?)`,
+                        [storeId,branch.id,a.insertId,sqlDateTime(TODAY,8),f.actor,sqlDateTime(TODAY,9),f.actor]);
+                    await f.move(equipment.id,'rented_out',quantity,b.booking_reference,'Demo currently out on rental',sqlDateTime(TODAY,9));
+                } else if(entry.forceToday) {
+                    seenActiveToday=true;
+                }
+            }
+        }
+        if (!seenActiveToday || !seenCheckedOutToday)
+            console.warn(`  Rental demo ${storeCode}/${branch.name}: no ${!seenActiveToday?'today reserved':'today out'} fixture; check monthly booking status distribution.`);
+    }
+    // Every seeded booking charge must match its allocation. A daily equipment
+    // catalog price is NOT historical income; Owner reports use these snapshots.
+    const [[chargeCheck]] = await db.execute(`SELECT COUNT(*) AS mismatches
+                                              FROM rental_booking_allocations a
+                                                       LEFT JOIN booking_rental_items i
+                                                                 ON i.store_id=a.store_id AND i.branch_id=a.branch_id
+                                                                     AND i.booking_reference=a.booking_reference AND i.equipment_id=a.equipment_id
+                                                       LEFT JOIN bookings b
+                                                                 ON b.store_id=a.store_id AND b.branch_id=a.branch_id
+                                                                     AND b.booking_reference COLLATE utf8mb4_0900_ai_ci = a.booking_reference
+                                              WHERE a.store_id=? AND (
+                                                  i.id IS NULL OR b.id IS NULL OR b.id<>i.booking_id
+                                                      OR a.quantity<>i.quantity OR a.start_date<>i.start_date
+                                                      OR a.end_date<>i.end_date
+                                                      OR a.rental_charge_total IS NULL
+                                                      OR a.rental_charge_total<>i.agreed_line_total
+                                                      OR i.agreed_line_total<>ROUND(i.quantity*i.billable_days*i.daily_rate_snapshot,2)
+                                                  )`,[storeId]);
+    if (Number(chargeCheck.mismatches)) {
+        throw new Error(`Saved rental charge verification failed: ${chargeCheck.mismatches} inconsistent allocations in store ${storeId}.`);
+    }
+    // Check the physical stock equation for every newly seeded branch item.
+    const [[check]]=await db.execute(`SELECT COUNT(*) AS bad FROM rental_equipment
+                                      WHERE store_id=? AND (rented_out_units+maintenance_units+missing_units>total_units)`,[storeId]);
+    if(Number(check.bad))throw new Error(`Rental fixture quantities exceed total stock for ${check.bad} equipment rows.`);
 }
 
 async function main() {
@@ -5777,10 +6146,16 @@ async function main() {
         subscriptionAuditLogs: 0,
         employeeActions: 0,
         restockHistory: 0,
+        rentalEquipment: 0, rentalPurchases: 0, pendingRentalReceipts: 0,
+        rentalMovements: 0, rentalAllocations: 0, rentalCharges: 0,
+        rentalCleaningTasks: 0,
     };
 
     try {
-        // Ensure schema/tables exist so we can fetch plans
+        // BACKUP(5) SCHEMA PRE-FLIGHT: run this BEFORE the original V2 helper.
+        // Confirm booking_rental_items and saved-charge fields without creating
+        // new schema or deleting any previous demo records.
+        await requireRentalFixtureTables(db);
         await ensureSeederSchema(db);
 
         const plans = await fetchRealPlans(db);
@@ -5802,7 +6177,17 @@ async function main() {
         printConfiguration(STORE_COUNT);
 
         await ensureSeederLookupIndexes(db);
-        await removeExistingSeedRun(db);
+        if (!CONFIG.resetExistingRun) {
+            const [[existing]] = await db.execute(
+                `SELECT COUNT(*) AS count FROM stores WHERE slug LIKE ? OR email LIKE ?`,
+                [`${STORE_SLUG_PREFIX}%`, `%@${STORE_EMAIL_DOMAIN}`]
+            );
+            if (Number(existing.count) > 0) {
+                throw new Error(`Found ${existing.count} demo stores with SEED_RUN_TAG=${CONFIG.runTag}. ` +
+                    `Back up the database, run the safe destroyer with explicit confirmation, then seed again. ` +
+                    `No store rows were deleted by the seeder.`);
+            }
+        }
 
         const platformAdminIds = await fetchPlatformAdminIds(db);
         const passwordHash = await bcrypt.hash(CONFIG.defaultPassword, 10);
@@ -6130,6 +6515,12 @@ async function main() {
                     counters
                 );
 
+                // Create rental inventory, purchase receipts, unresolved delivery tasks,
+                // reservation/return scenarios and real stored rental-charge snapshots.
+                await createRentalDemoForStore(db, {
+                    storeId: store.storeId, storeIndex, branches: store.branches, staff: store.staff,
+                }, counters);
+
                 // Seed branch-scoped restock/report source data across the
                 // same rolling 25-month window.
                 await createRestockHistory25Month(
@@ -6200,9 +6591,15 @@ async function main() {
         console.log(`Sub. audit logs: ${counters.subscriptionAuditLogs.toLocaleString()}`);
         console.log(`Employee actions:${String(counters.employeeActions.toLocaleString()).padStart(12, " ")}`);
         console.log(`Restock history: ${counters.restockHistory.toLocaleString()}`);
+        console.log(`Rental equipment: ${counters.rentalEquipment.toLocaleString()}`);
+        console.log(`Rental purchases: ${counters.rentalPurchases.toLocaleString()}`);
+        console.log(`Pending rental units to receive: ${counters.pendingRentalReceipts.toLocaleString()}`);
+        console.log(`Rental allocations: ${counters.rentalAllocations.toLocaleString()}`);
+        console.log(`Staff cleaning tasks: ${counters.rentalCleaningTasks.toLocaleString()}`);
+        console.log(`Recorded rental charges (incl. active/scheduled): PHP ${counters.rentalCharges.toFixed(2)}`);
         console.log("");
         console.log(`Owner 001 login: owner001@${STORE_EMAIL_DOMAIN}`);
-        console.log(`Password:        ${CONFIG.defaultPassword}`);
+        console.log("Demo credentials: use SEED_DEFAULT_PASSWORD from your local .env.local; do not share it.");
     } finally {
         await db.end();
     }

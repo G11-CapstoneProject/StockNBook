@@ -2,1032 +2,747 @@
 
 import * as React from "react";
 import * as XLSX from "xlsx";
+import { fieldClass, labelClass } from "./_shared";
 import {
-    AlertTriangle, Building2, CheckCircle2, ChevronDown, Download, Eye, Package,
-    ReceiptText, RefreshCw, Search, ShoppingCart, X,
+    AlertTriangle, BarChart3, Box, Building2, CalendarDays, CheckCircle2,
+    ChevronDown, ChevronLeft, ChevronRight, Clock3, Download, MapPin, PieChart,
+    ReceiptText, RefreshCw, Search, ShoppingCart, TrendingUp, X,
 } from "lucide-react";
-import { useInventoryController } from "@/hooks/useInventory";
-import { EmptyInventory, type Product } from "./_shared";
 
-const OWNER_EXPIRING_SOON_DAYS = 30;
-const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
-
-function formatCurrentDateTime(value: Date) {
-    const dateLabel = value.toLocaleDateString("en-US", {
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-    });
-
-    const timeLabel = value
-        .toLocaleTimeString("en-US", {
-            hour: "numeric",
-            minute: "2-digit",
-            hour12: true,
-        })
-        .toLowerCase();
-
-    return `${dateLabel} | ${timeLabel}`;
-}
-
-function formatNumber(value: number) {
-    return value.toLocaleString("en-PH", {
-        maximumFractionDigits: 0,
-    });
-}
-
-function formatPeso(value: number) {
-    return value.toLocaleString("en-PH", {
-        style: "currency",
-        currency: "PHP",
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-    });
-}
-
-function formatCompactPeso(value: number) {
-    return value.toLocaleString("en-PH", {
-        style: "currency",
-        currency: "PHP",
-        notation: "compact",
-        maximumFractionDigits: 1,
-    });
-}
-
-function parseOwnerExpirationDate(value?: string | null) {
-    const rawValue = String(value || "").trim();
-
-    if (!rawValue) return null;
-
-    const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(rawValue)
-        ? new Date(`${rawValue}T00:00:00`)
-        : new Date(rawValue);
-
-    if (Number.isNaN(parsedDate.getTime())) return null;
-
-    parsedDate.setHours(0, 0, 0, 0);
-    return parsedDate;
-}
-
-function getOwnerDaysUntilExpiration(value?: string | null) {
-    const expirationDate = parseOwnerExpirationDate(value);
-
-    if (!expirationDate) return null;
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    return Math.round(
-        (expirationDate.getTime() - today.getTime()) / DAY_IN_MILLISECONDS
-    );
-}
-
-type OwnerStockLine = {
-    stock: number;
-    alertLevel: number;
-    costPrice: number;
-    salesPrice: number;
-    expirationDate?: string | null;
+type Branch = { id: number; branchName: string };
+type Amount = number | null;
+type TrendPoint = { date: string; consumableSales: Amount; rentalRevenue: Amount };
+type BranchRevenue = { branchId: number | null; branchName: string; consumableSales: Amount; rentalRevenue: Amount };
+type ConsumablePerformance = { key: string; name: string; unitsSold: number; sales: number; grossProfit: Amount };
+type RentalPerformance = { key: string; name: string; revenue: number; share: number };
+type OwnerPerformance = {
+    dateRange: { startDate: string; endDate: string };
+    asOfDate: string;
+    storeName: string;
+    branches: Branch[];
+    totals: { consumableSales: Amount; consumableGrossProfit: Amount; rentalRevenue: Amount; totalRevenue: Amount };
+    trend: TrendPoint[];
+    branchRevenue: BranchRevenue[];
+    consumables: ConsumablePerformance[];
+    rentals: RentalPerformance[];
+    warnings: string[];
 };
-
-function getProductStockLines(product: Product): OwnerStockLine[] {
-    const variants = Array.isArray(product.variants) ? product.variants : [];
-
-    if (product.hasVariants && variants.length > 0) {
-        return variants.map((variant) => ({
-            stock: Number(variant.stock || 0),
-            alertLevel: Number(variant.alertLevel || 0),
-            costPrice: Number(variant.originalPrice || 0),
-            salesPrice: Number(variant.salesPrice || 0),
-            expirationDate: variant.expirationDate,
-        }));
-    }
-
-    return [
-        {
-            stock: Number(product.stock || 0),
-            alertLevel: Number(product.alertLevel || 0),
-            costPrice: Number(product.originalPrice || 0),
-            salesPrice: Number(product.salesPrice || 0),
-            expirationDate: product.expirationDate,
-        },
-    ];
-}
-
-type OwnerProductStatus =
-    | "In Stock"
-    | "Low Stock"
-    | "Out of Stock"
-    | "Expiring"
-    | "Expired";
-
-function getStockLineStatus(line: OwnerStockLine): OwnerProductStatus {
-    const daysRemaining = getOwnerDaysUntilExpiration(line.expirationDate);
-
-    if (daysRemaining !== null && daysRemaining < 0) {
-        return "Expired";
-    }
-
-    if (
-        daysRemaining !== null &&
-        daysRemaining >= 0 &&
-        daysRemaining <= OWNER_EXPIRING_SOON_DAYS
-    ) {
-        return "Expiring";
-    }
-
-    if (line.stock <= 0) {
-        return "Out of Stock";
-    }
-
-    if (line.stock <= line.alertLevel) {
-        return "Low Stock";
-    }
-
-    return "In Stock";
-}
-
-function getProductStatus(product: Product): OwnerProductStatus {
-    const lines = getProductStockLines(product);
-    const statuses = lines.map(getStockLineStatus);
-
-    if (statuses.includes("Expired")) return "Expired";
-    if (statuses.includes("Expiring")) return "Expiring";
-    if (statuses.every((status) => status === "Out of Stock")) {
-        return "Out of Stock";
-    }
-    if (statuses.includes("Low Stock") || statuses.includes("Out of Stock")) {
-        return "Low Stock";
-    }
-
-    return "In Stock";
-}
-
-function getOwnerProductFinancials(product: Product) {
-    return getProductStockLines(product).reduce(
-        (totals, line) => {
-            const availableStock = Math.max(0, line.stock);
-            const inventoryValue = availableStock * line.costPrice;
-            const retailValue = availableStock * line.salesPrice;
-
-            totals.stock += availableStock;
-            totals.inventoryValue += inventoryValue;
-            totals.retailValue += retailValue;
-            totals.potentialProfit += retailValue - inventoryValue;
-
-            return totals;
-        },
-        {
-            stock: 0,
-            inventoryValue: 0,
-            retailValue: 0,
-            potentialProfit: 0,
-        }
-    );
-}
-
-function getOwnerInventoryOverview(products: Product[]) {
-    return products.reduce(
-        (totals, product) => {
-            getProductStockLines(product).forEach((line) => {
-                const availableStock = Math.max(0, line.stock);
-                const costValue = availableStock * line.costPrice;
-                const retailValue = availableStock * line.salesPrice;
-                const status = getStockLineStatus(line);
-
-                totals.inventoryCostValue += costValue;
-                totals.retailValue += retailValue;
-
-                if (status !== "In Stock") {
-                    totals.atRiskInventoryValue += costValue;
-                }
-            });
-
-            totals.potentialGrossProfit =
-                totals.retailValue - totals.inventoryCostValue;
-
-            return totals;
-        },
-        {
-            inventoryCostValue: 0,
-            retailValue: 0,
-            potentialGrossProfit: 0,
-            atRiskInventoryValue: 0,
-        }
-    );
-}
-
-type BranchValueRow = {
-    branchName: string;
-    costValue: number;
-    retailValue: number;
-    potentialProfit: number;
+type SupplierPurchase = {
+    purchaseId: number; branchId: number; branchName?: string | null; purchaseNumber: string;
+    supplier: string; supplierInvoiceNumber: string | null; purchaseTotal: number; amountPaid: number;
+    outstandingBalance: number; paymentStatus: string; paymentMethod: "cash" | "credit";
+    purchaseDate: string; paymentDueDate: string | null;
 };
-
-function getInventoryValueByBranch(products: Product[]): BranchValueRow[] {
-    const branchMap = new Map<string, BranchValueRow>();
-
-    products.forEach((product) => {
-        const branchName = product.branchName || "Unassigned Branch";
-        const financials = getOwnerProductFinancials(product);
-        const current = branchMap.get(branchName) || {
-            branchName,
-            costValue: 0,
-            retailValue: 0,
-            potentialProfit: 0,
-        };
-
-        current.costValue += financials.inventoryValue;
-        current.retailValue += financials.retailValue;
-        current.potentialProfit += financials.potentialProfit;
-
-        branchMap.set(branchName, current);
-    });
-
-    return Array.from(branchMap.values()).sort(
-        (first, second) => second.costValue - first.costValue
-    );
-}
-
-
-type OwnerPosOrderItem = {
-    productId?: number | string | null;
-    product_id?: number | string | null;
-    productName?: string | null;
-    product_name?: string | null;
-    name?: string | null;
-    quantity?: number | string | null;
-    qty?: number | string | null;
+type SupplierBill = SupplierPurchase & { key: string; source: "consumable" | "rental" };
+type PurchaseItem = {
+    productId?: number; productNumber?: string | null; productName?: string;
+    equipmentId?: number; equipmentNumber?: string | null; name?: string;
+    variantId?: number | null; variantNumber?: string | null;
+    variantValues?: Record<string, string> | string | null;
+    quantity: number; unitCost: number; lineTotal: number;
 };
-
-type OwnerPosOrder = {
-    orderId?: string | null;
-    order_id?: string | null;
-    branchId?: number | string | null;
-    branch_id?: number | string | null;
-    branchName?: string | null;
-    branch_name?: string | null;
-    date?: string | null;
-    orderDate?: string | null;
-    order_date?: string | null;
-    createdAt?: string | null;
-    created_at?: string | null;
-    item?: string | null;
-    orderItems?: OwnerPosOrderItem[];
-    order_items?: OwnerPosOrderItem[];
-};
-
-type OwnerPosOrdersResponse = {
-    success?: boolean;
-    orders?: OwnerPosOrder[];
-    error?: string;
-};
-
-function getNumericSalesValue(value: unknown) {
-    if (value === null || value === undefined || value === "") return null;
-
-    const numericValue = Number(value);
-    return Number.isFinite(numericValue) ? numericValue : null;
-}
-
-function normalizeSalesProductName(value: unknown) {
-    return String(value ?? "")
-        .trim()
-        .toLowerCase()
-        .replace(/\s+/g, " ");
-}
-
-function getOrderItemProductId(item: OwnerPosOrderItem) {
-    const rawId = item.productId ?? item.product_id;
-    const numericId = Number(rawId);
-
-    return Number.isFinite(numericId) && numericId > 0
-        ? String(numericId)
-        : "";
-}
-
-function getOrderItemQuantity(item: OwnerPosOrderItem) {
-    const quantity = getNumericSalesValue(item.quantity ?? item.qty);
-    return quantity !== null && quantity > 0 ? quantity : 0;
-}
-
-function getOrderItemName(item: OwnerPosOrderItem) {
-    return normalizeSalesProductName(
-        item.productName ?? item.product_name ?? item.name ?? ""
-    );
-}
-
-/*
- * Current POS responses already return structured orderItems containing
- * productId and quantity. This legacy parser is only a fallback for older
- * saved orders that may contain the comma-separated `item` text instead.
- */
-function parseLegacyOrderItems(value?: string | null): OwnerPosOrderItem[] {
-    return String(value || "")
-        .split(",")
-        .map((part) => part.trim())
-        .filter(Boolean)
-        .map((part) => {
-            const match = part.match(/^(.*?)(?:\s+x|\s*×\s*)(\d+)\s*$/i);
-
-            if (!match) {
-                return {
-                    name: part,
-                    quantity: 0,
-                };
-            }
-
-            return {
-                name: match[1].trim(),
-                quantity: Number(match[2] || 0),
-            };
-        });
-}
-
-type OwnerProductSalesMetric = {
-    unitsLast30Days: number;
-    allTimeUnits: number;
-    lastSoldAt: Date | null;
-};
-
-type OwnerSalesAnalytics = {
-    byProductId: Map<string, OwnerProductSalesMetric>;
-    byProductName: Map<string, OwnerProductSalesMetric>;
-    hasDatedOrders: boolean;
-};
-
-const OWNER_SALES_PERIOD_DAYS = 30;
-
-function parseOwnerOrderDate(order: OwnerPosOrder) {
-    const rawValue = String(
-        order.orderDate ??
-        order.order_date ??
-        order.createdAt ??
-        order.created_at ??
-        order.date ??
-        ""
-    ).trim();
-
-    if (!rawValue) return null;
-
-    const parsedDate = new Date(rawValue);
-    return Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
-}
-
-function createEmptySalesMetric(): OwnerProductSalesMetric {
-    return {
-        unitsLast30Days: 0,
-        allTimeUnits: 0,
-        lastSoldAt: null,
-    };
-}
-
-function addSalesMetric(
-    map: Map<string, OwnerProductSalesMetric>,
-    key: string,
-    quantity: number,
-    orderDate: Date | null,
-    includeInLast30Days: boolean
-) {
-    if (!key) return;
-
-    const current = map.get(key) || createEmptySalesMetric();
-
-    current.allTimeUnits += quantity;
-
-    if (includeInLast30Days) {
-        current.unitsLast30Days += quantity;
-    }
-
-    if (
-        orderDate &&
-        (!current.lastSoldAt || orderDate.getTime() > current.lastSoldAt.getTime())
-    ) {
-        current.lastSoldAt = orderDate;
-    }
-
-    map.set(key, current);
-}
-
-function getOwnerSalesAnalytics(orders: OwnerPosOrder[]): OwnerSalesAnalytics {
-    const byProductId = new Map<string, OwnerProductSalesMetric>();
-    const byProductName = new Map<string, OwnerProductSalesMetric>();
-    const parsedOrderDates = orders.map(parseOwnerOrderDate);
-    const hasDatedOrders = parsedOrderDates.some(Boolean);
-
-    const today = new Date();
-    const periodStart = new Date(today);
-    periodStart.setHours(0, 0, 0, 0);
-    periodStart.setDate(periodStart.getDate() - (OWNER_SALES_PERIOD_DAYS - 1));
-
-    orders.forEach((order, orderIndex) => {
-        const orderDate = parsedOrderDates[orderIndex];
-        const includeInLast30Days = hasDatedOrders
-            ? Boolean(orderDate && orderDate.getTime() >= periodStart.getTime())
-            : true;
-
-        const structuredItems = Array.isArray(order.orderItems)
-            ? order.orderItems
-            : Array.isArray(order.order_items)
-                ? order.order_items
-                : [];
-
-        const items =
-            structuredItems.length > 0
-                ? structuredItems
-                : parseLegacyOrderItems(order.item);
-
-        items.forEach((item) => {
-            const quantity = getOrderItemQuantity(item);
-
-            if (quantity <= 0) return;
-
-            const productId = getOrderItemProductId(item);
-            const productName = getOrderItemName(item);
-
-            addSalesMetric(
-                byProductId,
-                productId,
-                quantity,
-                orderDate,
-                includeInLast30Days
-            );
-            addSalesMetric(
-                byProductName,
-                productName,
-                quantity,
-                orderDate,
-                includeInLast30Days
-            );
-        });
-    });
-
-    return {
-        byProductId,
-        byProductName,
-        hasDatedOrders,
-    };
-}
-
-function getSalesMetricForProduct(
-    product: Product,
-    analytics: OwnerSalesAnalytics
-): OwnerProductSalesMetric {
-    const productId = String(product.id ?? "").trim();
-    const productNameKey = normalizeSalesProductName(product.name);
-
-    return (
-        (productId ? analytics.byProductId.get(productId) : undefined) ??
-        analytics.byProductName.get(productNameKey) ??
-        createEmptySalesMetric()
-    );
-}
-
-
-// Owner-only financial risk categories. Expiration takes precedence over sales inactivity.
-type AtRiskCategoryKey =
-    | "expired"
-    | "expiringSoon"
-    | "deadStock"
-    | "slowMoving";
-
-type AtRiskBreakdownRow = {
-    key: AtRiskCategoryKey;
-    label: string;
-    value: number;
-    percentage: number;
-    color: string;
-};
-
-type AtRiskBreakdown = {
-    total: number;
-    rows: AtRiskBreakdownRow[];
-    gradient: string;
-};
-
-const OWNER_SLOW_MOVING_DAYS = 90;
-const OWNER_DEAD_STOCK_DAYS = 180;
-
-type RiskDatedSales = {
-    lastSoldAt: Date | null;
-    hasUndatedSales: boolean;
-};
-
-function getOwnerAtRiskBreakdown(
-    products: Product[],
-    salesAnalytics: OwnerSalesAnalytics,
-    salesReady: boolean,
-    orders: OwnerPosOrder[]
-): AtRiskBreakdown {
-    const values: Record<AtRiskCategoryKey, number> = {
-        expired: 0,
-        expiringSoon: 0,
-        deadStock: 0,
-        slowMoving: 0,
-    };
-
-    // This breakdown only needs POS dates/variant IDs; the other sales metrics
-    // and their 12-month rules remain untouched.
-    const byProductId = new Map(products.map(product => [String(product.id), product]));
-    const uniqueProductNames = new Map<string, string>();
-    const ambiguousNames = new Set<string>();
-    products.forEach(product => {
-        const nameKey = normalizeSalesProductName(product.name);
-        const productId = String(product.id);
-        if (uniqueProductNames.has(nameKey) && uniqueProductNames.get(nameKey) !== productId) {
-            ambiguousNames.add(nameKey);
-        } else {
-            uniqueProductNames.set(nameKey, productId);
-        }
-    });
-
-    const productSales = new Map<string, RiskDatedSales>();
-    const variantSales = new Map<string, RiskDatedSales>();
-    const unattributedVariantSales = new Set<string>();
-    const unattributedProductSales = new Set<string>();
-
-    const trackDatedSale = (map: Map<string, RiskDatedSales>, key: string, date: Date | null) => {
-        const entry = map.get(key) ?? { lastSoldAt: null, hasUndatedSales: false };
-        if (!date) entry.hasUndatedSales = true;
-        else if (!entry.lastSoldAt || date > entry.lastSoldAt) entry.lastSoldAt = date;
-        map.set(key, entry);
-    };
-
-    if (salesReady) {
-        orders.filter(isValidCompletedOrder).forEach(order => {
-            const date = parseOwnerOrderDate(order);
-            const orderBranch = order.branchId ?? order.branch_id;
-            const items = Array.isArray(order.orderItems) ? order.orderItems :
-                Array.isArray(order.order_items) ? order.order_items : parseLegacyOrderItems(order.item);
-
-            items.forEach(item => {
-                if (getOrderItemQuantity(item) <= 0) return;
-                const rawId = getOrderItemProductId(item);
-                const nameKey = getOrderItemName(item);
-                // Product IDs are authoritative. Fall back to a name only when
-                // it belongs to precisely one product across the Owner's store.
-                if (!rawId && ambiguousNames.has(nameKey)) {
-                    products.forEach(candidate => {
-                        if (normalizeSalesProductName(candidate.name) === nameKey &&
-                            (orderBranch == null || orderBranch === "" || Number(candidate.branchId) === Number(orderBranch))) {
-                            unattributedProductSales.add(String(candidate.id));
-                        }
-                    });
-                    return;
-                }
-                const productId = rawId || uniqueProductNames.get(nameKey);
-                if (!productId) return;
-                const product = byProductId.get(productId);
-                if (!product) return;
-                if (orderBranch != null && orderBranch !== "" &&
-                    Number(orderBranch) !== Number(product.branchId)) return;
-
-                trackDatedSale(productSales, productId, date);
-                if (!product.hasVariants || !product.variants?.length) return;
-
-                const orderItem = item as OwnerPosOrderItem & {
-                    variantId?: number | string | null;
-                    variant_id?: number | string | null;
-                };
-                const variantId = String(orderItem.variantId ?? orderItem.variant_id ?? "").trim();
-                const knownVariant = variantId && product.variants.some(variant => String(variant.id) === variantId);
-                if (knownVariant) {
-                    trackDatedSale(variantSales, `${productId}:${variantId}`, date);
-                } else {
-                    // Older POS records without a valid variant ID cannot prove
-                    // that a particular variant has NOT been sold.
-                    unattributedVariantSales.add(productId);
-                }
-            });
-        });
-    }
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const parseCreatedAt = (value?: string | null): Date | null => {
-        if (!value) return null;
-        const parsed = new Date(value);
-        if (Number.isNaN(parsed.getTime()) || parsed > new Date()) return null;
-        parsed.setHours(0, 0, 0, 0);
-        return parsed;
-    };
-    const latestDate = (a: Date | null, b: Date | null) =>
-        !a ? b : !b ? a : a > b ? a : b;
-
-    const classifyStock = (
-        stock: number,
-        unitCost: number,
-        expirationDate: string | null | undefined,
-        createdAt: string | null | undefined,
-        sale: RiskDatedSales | undefined,
-        unknownSalesDate: boolean
-    ) => {
-        const stockValue = Math.max(0, stock) * Math.max(0, unitCost);
-        if (!Number.isFinite(stockValue) || stockValue <= 0) return;
-
-        // Priority: expired -> expiring -> dead -> slow. Each stock line is
-        // counted at most once, so variant values do not double-count parents.
-        const daysUntilExpiry = getOwnerDaysUntilExpiration(expirationDate);
-        if (daysUntilExpiry !== null && daysUntilExpiry < 0) {
-            values.expired += stockValue;
-            return;
-        }
-        if (daysUntilExpiry !== null && daysUntilExpiry <= OWNER_EXPIRING_SOON_DAYS) {
-            values.expiringSoon += stockValue;
-            return;
-        }
-
-        // POS data must be complete and dated enough to support inactivity.
-        // Missing creation dates or undated sales are NOT evidence of dead stock.
-        if (!salesReady || unknownSalesDate || sale?.hasUndatedSales) return;
-        const created = parseCreatedAt(createdAt);
-        const lastSold = sale?.lastSoldAt ?? null;
-        const anchor = latestDate(created, lastSold);
-        if (!anchor) return;
-        const anchorDay = new Date(anchor);
-        anchorDay.setHours(0, 0, 0, 0);
-        const daysInactive = Math.floor((today.getTime() - anchorDay.getTime()) / DAY_IN_MILLISECONDS);
-        if (daysInactive >= OWNER_DEAD_STOCK_DAYS) {
-            values.deadStock += stockValue;
-        } else if (daysInactive >= OWNER_SLOW_MOVING_DAYS) {
-            values.slowMoving += stockValue;
-        }
-    };
-
-    products.forEach(product => {
-        const productId = String(product.id);
-        const data = product as OwnerFinancialProduct;
-        const productDate = data.createdAt ?? data.created_at;
-        const parentActivity = productSales.get(productId);
-        // Existing POS analytics are retained, but only trusted for a matching
-        // product ID or an unambiguous product name (never a cross-branch guess).
-        const key = normalizeSalesProductName(product.name);
-        const trustedName = !ambiguousNames.has(key) && uniqueProductNames.get(key) === productId;
-        const metric = getSalesMetricForProduct(product, salesAnalytics);
-        const analyticDate = (salesAnalytics.byProductId.has(productId) || trustedName)
-            ? metric.lastSoldAt : null;
-        const parentDate = latestDate(parentActivity?.lastSoldAt ?? null, analyticDate);
-        const fullParentActivity: RiskDatedSales = {
-            lastSoldAt: parentDate,
-            hasUndatedSales: parentActivity?.hasUndatedSales ?? false,
-        };
-
-        if (product.hasVariants && product.variants?.length) {
-            product.variants.forEach(variant => {
-                const variantData = variant as typeof variant & { created_at?: string | null };
-                const knownSale = variantSales.get(`${productId}:${variant.id}`);
-                const cannotAttribute = unattributedVariantSales.has(productId);
-                const effectiveSale: RiskDatedSales = {
-                    lastSoldAt: cannotAttribute
-                        ? latestDate(knownSale?.lastSoldAt ?? null, parentDate)
-                        : knownSale?.lastSoldAt ?? null,
-                    hasUndatedSales: knownSale?.hasUndatedSales ?? false,
-                };
-                classifyStock(
-                    Number(variant.stock || 0), Number(variant.originalPrice || 0),
-                    variant.expirationDate, variantData.createdAt ?? variantData.created_at ?? productDate,
-                    effectiveSale, unattributedProductSales.has(productId) ||
-                    (cannotAttribute && fullParentActivity.hasUndatedSales)
-                );
-            });
-        } else {
-            classifyStock(
-                Number(product.stock || 0), Number(product.originalPrice || 0),
-                product.expirationDate, productDate, fullParentActivity, unattributedProductSales.has(productId)
-            );
-        }
-    });
-
-    const total = Object.values(values).reduce((sum, value) => sum + value, 0);
-    const definitions: Array<{ key: AtRiskCategoryKey; label: string; color: string }> = [
-        { key: "expired", label: "Expired Inventory", color: "#E93B4F" },
-        { key: "expiringSoon", label: "Expiring Soon", color: "#F5A12D" },
-        { key: "deadStock", label: "Dead Stock", color: "#7255D9" },
-        { key: "slowMoving", label: "Slow-Moving Inventory", color: "#F6C443" },
-    ];
-    const rows = definitions.map(definition => ({
-        ...definition,
-        value: values[definition.key],
-        percentage: total > 0 ? (values[definition.key] / total) * 100 : 0,
-    }));
-
-    let currentAngle = 0;
-    const gradientStops = rows.filter(row => row.value > 0).map(row => {
-        const startAngle = currentAngle;
-        currentAngle += row.percentage * 3.6;
-        return `${row.color} ${startAngle}deg ${currentAngle}deg`;
-    });
-    return {
-        total,
-        rows,
-        gradient: gradientStops.length > 0
-            ? `conic-gradient(${gradientStops.join(", ")})`
-            : "conic-gradient(#EEE7F2 0deg 360deg)",
-    };
-}
-
-
-// Financial purchase records are transaction-based. A supplier invoice belongs
-// to a purchase, not to each product/variant in that purchase.
-type OwnerSupplierPayable = {
-    purchaseId: number;
-    branchId: number;
-    branchName?: string | null;
-    purchaseNumber: string;
-    supplier: string;
-    supplierInvoiceNumber: string | null;
-    purchaseTotal: number;
-    amountPaid: number;
-    outstandingBalance: number;
-    paymentStatus: string;
-    paymentMethod: "cash" | "credit";
-    purchaseDate: string;
-    paymentDueDate: string | null;
-};
-
-type OwnerPurchaseItem = {
-    productId: number;
-    productNumber: string | null;
-    productName: string;
-    variantId: number | null;
-    variantNumber: string | null;
-    variantValues: Record<string, string> | string | null;
-    quantity: number;
-    unitCost: number;
-    lineTotal: number;
-};
-
-type OwnerFinancialProduct = Product & {
-    productNumber?: string | null;
-    product_number?: string | null;
-    created_at?: string | null;
-};
-
-type DetailedPosItem = OwnerPosOrderItem & {
-    unitPrice?: number | string | null;
-    unit_price?: number | string | null;
-    sellingPrice?: number | string | null;
-    selling_price?: number | string | null;
-    price?: number | string | null;
-    lineTotal?: number | string | null;
-    line_total?: number | string | null;
-    totalPrice?: number | string | null;
-    total_price?: number | string | null;
-    subtotal?: number | string | null;
-    variantId?: number | string | null;
-    variant_id?: number | string | null;
-};
-
-type PurchasedProductSales = {
-    units: number;
-    revenue: number;
-    // Unknown revenue is NOT estimated from today's selling price.
-    revenueComplete: boolean;
-};
-
-type PurchasingVariantRow = {
-    id: string;
-    variantNumber: string;
-    variantName: string;
-    stockValue: number;
-    unitsSold: number | null;
-    salesRevenue: number | null;
-};
-
-type PurchasingRow = {
-    id: string;
-    productNumber: string;
-    productName: string;
-    branchName: string;
-    category: string;
-    stockValue: number;
-    unitsSold: number;
-    salesRevenue: number | null;
-    velocity: number;
-    salesVelocity: "High" | "Medium" | "Low" | "No Data";
-    variants: PurchasingVariantRow[];
-};
-
-type PayableStatus = "Paid" | "Partially Paid" | "Unpaid" | "Overdue";
-type PaymentStatusFilter = "All Statuses" | "Outstanding" | PayableStatus;
-
-// The Owner purchasing table uses a vertical scroll, not numbered pages.
-// Load rows in chunks so stores with thousands of products remain responsive.
-const PURCHASING_SCROLL_BATCH = 100;
-
-function formatShortDate(date?: string | null) {
-    if (!date) return "—";
-    const value = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00`) : new Date(date);
-    return Number.isNaN(value.getTime()) ? "—" : value.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" });
-}
+type BillStatus = "Paid" | "Overdue" | "Due soon" | "Partially paid" | "Unpaid";
+type DateRange = { startDate: string; endDate: string };
+
+const cardClass = "min-w-0 overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm";
+const headerCell = "px-3 py-2.5 text-[10px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]";
+const bodyCell = "px-3 py-2.5 text-xs text-[#4F3A5A]";
 
 function businessDateString() {
     return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" });
 }
-
-function ownerProductNumber(product: OwnerFinancialProduct) {
-    // Never derive a fake business reference from the numeric database ID.
-    return String(product.productNumber ?? product.product_number ?? "").trim() || "—";
+function formatPeso(value: number) {
+    return value.toLocaleString("en-PH", { style: "currency", currency: "PHP", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-
-function payableIsOverdue(record: OwnerSupplierPayable) {
-    if (Number(record.outstandingBalance || 0) <= 0 || !record.paymentDueDate) return false;
-    return String(record.paymentDueDate).slice(0, 10) < businessDateString();
+function formatNumber(value: number) {
+    return value.toLocaleString("en-PH", { maximumFractionDigits: 0 });
 }
-
-function payableStatus(record: OwnerSupplierPayable): PayableStatus {
-    if (Number(record.outstandingBalance || 0) <= 0) return "Paid";
-    if (payableIsOverdue(record)) return "Overdue";
-    return Number(record.amountPaid || 0) > 0 ? "Partially Paid" : "Unpaid";
+function shortDate(value?: string | null, year = true) {
+    if (!value) return "—";
+    const date = new Date(`${value.slice(0, 10)}T00:00:00Z`);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleDateString("en-PH", {
+        timeZone: "Asia/Manila", month: "short", day: "numeric", ...(year ? { year: "numeric" as const } : {}),
+    });
 }
-
-function PayableBadge({ status }: { status: PayableStatus }) {
-    const palette = {
-        "Paid": "border-[#BDE6CC] bg-[#ECF8F0] text-[#168A48]",
-        "Partially Paid": "border-[#F4D79A] bg-[#FFF8D8] text-[#A56607]",
-        "Unpaid": "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]",
-        "Overdue": "border-[#F2C4C4] bg-[#FFE8E8] text-[#CE263E]",
-    }[status];
-    return <span className={`inline-flex min-w-[94px] justify-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${palette}`}>{status}</span>;
+function shownMoney(value: Amount | undefined) {
+    return value == null || !Number.isFinite(value) ? "—" : formatPeso(value);
 }
-
-async function ownerPurchasesRequest(body: Record<string, unknown>) {
+function billStatus(bill: SupplierPurchase, today = businessDateString()): BillStatus {
+    if (Number(bill.outstandingBalance) <= 0) return "Paid";
+    const due = bill.paymentDueDate?.slice(0, 10);
+    if (due && due < today) return "Overdue";
+    if (Number(bill.amountPaid) > 0) return "Partially paid";
+    const soon = new Date(`${today}T00:00:00Z`);
+    soon.setUTCDate(soon.getUTCDate() + 7);
+    return due && due <= soon.toISOString().slice(0, 10) ? "Due soon" : "Unpaid";
+}
+function supplierEndpoint(source: SupplierBill["source"]) {
+    return source === "rental" ? "/api/rental-inventory" : "/api/products";
+}
+async function ownerRequest<T>(endpoint: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
     const token = sessionStorage.getItem("token");
     if (!token) throw new Error("Your session has expired. Please sign in again.");
-    const response = await fetch("/api/products", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-        cache: "no-store",
+    const response = await fetch(endpoint, {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body), cache: "no-store", signal,
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok || payload.success !== true) {
-        throw new Error(String(payload.error || `Request failed (HTTP ${response.status}).`));
-    }
+    const payload = await response.json().catch(() => {
+        throw new Error(`The inventory API returned an invalid response (HTTP ${response.status}).`);
+    }) as T & { success?: boolean; error?: string };
+    if (!response.ok || payload.success === false) throw new Error(payload.error || `Inventory request failed (HTTP ${response.status}).`);
     return payload;
 }
-
-function isValidCompletedOrder(order: OwnerPosOrder) {
-    const value = order as OwnerPosOrder & Record<string, unknown>;
-    const status = String(value.status ?? value.orderStatus ?? value.order_status ??
-        value.transactionStatus ?? value.transaction_status ?? "").trim().toLowerCase();
-    if (!status) return true; // Existing POS get_orders endpoint ordinarily returns recorded sales.
-    if (["cancel", "invalid", "void", "refund", "pending", "fail"].some(word => status.includes(word))) return false;
-    return ["complete", "paid", "success"].some(word => status.includes(word));
+function validDateRange(range: DateRange) {
+    const from = new Date(`${range.startDate}T00:00:00Z`);
+    const to = new Date(`${range.endDate}T00:00:00Z`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(range.startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(range.endDate) ||
+        Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) ||
+        from.toISOString().slice(0, 10) !== range.startDate || to.toISOString().slice(0, 10) !== range.endDate) return "Choose valid start and end dates.";
+    if (range.startDate > range.endDate) return "The start date must be on or before the end date.";
+    if ((to.getTime() - from.getTime()) / 86400000 >= 366) return "Choose a period of 366 days or fewer.";
+    return "";
 }
 
-function getItemRevenue(item: DetailedPosItem, units: number): number | null {
-    const lineTotal = getNumericSalesValue(item.lineTotal ?? item.line_total ?? item.totalPrice ?? item.total_price ?? item.subtotal);
-    if (lineTotal !== null && lineTotal >= 0) return lineTotal;
-    const unitPrice = getNumericSalesValue(item.unitPrice ?? item.unit_price ?? item.sellingPrice ?? item.selling_price ?? item.price);
-    if (unitPrice !== null && unitPrice >= 0) return Math.round(unitPrice * units * 100) / 100;
-    return null;
+function SectionHeading({ icon, title, subtitle }: { icon: React.ReactNode; title: string; subtitle?: string }) {
+    return <div className="flex min-w-0 items-center gap-2">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5] [&>svg]:h-[18px] [&>svg]:w-[18px]">{icon}</span>
+        <div className="min-w-0"><h2 className="text-[15px] font-bold text-[#21132E]">{title}</h2>
+            {subtitle && <p className="mt-0.5 text-[11px] text-[#86778F]">{subtitle}</p>}</div>
+    </div>;
+}
+function MetricCard({ label, value, helper, icon, tone = "purple" }: {
+    label: string; value: string; helper: string; icon: React.ReactNode; tone?: "purple" | "green" | "blue" | "red";
+}) {
+    const tones = {
+        purple: "bg-[#F1ECFF] text-[#5F35D8]",
+        green: "bg-[#E5F8EC] text-[#23834A]",
+        blue: "bg-[#E9F2FF] text-[#1E6FE8]",
+        red: "bg-[#FFE8E8] text-[#E23B4A]",
+    };
+    return <article className={cardClass + " flex min-h-[118px] flex-row-reverse items-start justify-between gap-3 p-4"}>
+        <span className={tones[tone] + " flex h-10 w-10 shrink-0 items-center justify-center rounded-full [&>svg]:h-5 [&>svg]:w-5"}>{icon}</span>
+        <div className="min-w-0"><p className="text-sm font-bold text-[#21132E]">{label}</p>
+            <p className={"mt-2 break-words text-[27px] font-bold leading-none tabular-nums " + (tone === 'red' ? 'text-[#D52035]' : tone === 'green' ? 'text-[#23834A]' : tone === 'blue' ? 'text-[#1E6FE8]' : 'text-[#4E2DB8]')}>{value}</p>
+            <p className={"mt-1.5 text-[11px] leading-4 text-[#86778F]"}>{helper}</p>
+        </div>
+    </article>;
+}
+function Pagination({ page, total, pageSize, onChange, label }: { page: number; total: number; pageSize: number; onChange: (page: number) => void; label: string }) {
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    const current = Math.min(page, pages);
+    const numbers = [...new Set([1, current - 1, current, current + 1, pages])].filter(value => value >= 1 && value <= pages).sort((a, b) => a - b);
+    return <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+        <p className="text-[11px] text-[#7A6A84]">Showing {Math.min(pageSize, Math.max(0, total - (current - 1) * pageSize))} of {formatNumber(total)} items</p>
+        <nav aria-label={`${label} pages`} className="flex items-center gap-1.5">
+            <button type="button" aria-label={`Previous ${label} page`} disabled={current <= 1} onClick={() => onChange(current - 1)} className="rounded-xl border border-[#E3D8EA] bg-white p-2 text-[#5F4E75] hover:bg-[#F7F1FF] disabled:opacity-35"><ChevronLeft size={14}/></button>
+            {numbers.map((number, index) => <React.Fragment key={number}>
+                {index > 0 && number > numbers[index - 1] + 1 && <span className="px-1 text-xs text-[#7A6A84]">…</span>}
+                <button type="button" aria-current={number === current ? "page" : undefined} onClick={() => onChange(number)} className={`h-8 min-w-8 rounded-lg px-2 text-xs ${number === current ? "bg-[#2B174C] font-semibold text-white shadow-sm" : "text-[#5F4E75] hover:bg-[#F7F1FF]"}`}>{number}</button>
+            </React.Fragment>)}
+            <button type="button" aria-label={`Next ${label} page`} disabled={current >= pages} onClick={() => onChange(current + 1)} className="rounded-xl border border-[#E3D8EA] bg-white p-2 text-[#5F4E75] hover:bg-[#F7F1FF] disabled:opacity-35"><ChevronRight size={14}/></button>
+        </nav>
+    </div>;
+}
+function RevenueTrend({ points, rentalRecorded, loading, unavailable, controls }: { points: TrendPoint[]; rentalRecorded: boolean; loading: boolean; unavailable: boolean; controls: React.ReactNode }) {
+    const gradient = React.useId().replace(/:/g, "");
+    const maximum = Math.max(1, ...points.flatMap(point => [point.consumableSales || 0, point.rentalRevenue || 0]));
+    const magnitude = Math.pow(10, Math.floor(Math.log10(maximum / 4)));
+    const step = Math.ceil(maximum / 4 / magnitude) * magnitude;
+    const axisMax = step * 4;
+    const x = (index: number) => 62 + index / Math.max(1, points.length - 1) * 626;
+    const y = (value: number) => 184 - value / axisMax * 156;
+    const segments = (field: "consumableSales" | "rentalRevenue") => {
+        const result: Array<Array<{ index: number; value: number }>> = [];
+        let current: Array<{ index: number; value: number }> = [];
+        points.forEach((point, index) => {
+            const value = point[field];
+            if (value == null || !Number.isFinite(value)) { if (current.length) result.push(current); current = []; }
+            else current.push({ index, value });
+        });
+        if (current.length) result.push(current);
+        return result;
+    };
+    const line = (segment: Array<{ index: number; value: number }>) => segment.map((point, index) => `${index ? "L" : "M"}${x(point.index)},${y(point.value)}`).join(" ");
+    const labels = [...new Set([0, Math.floor((points.length - 1) / 3), Math.floor((points.length - 1) * 2 / 3), points.length - 1])].filter(index => index >= 0);
+    const tick = (value: number) => `₱${value >= 1000000 ? `${(value / 1000000).toLocaleString("en-PH", { maximumFractionDigits: 1 })}M` : value >= 1000 ? `${(value / 1000).toLocaleString("en-PH", { maximumFractionDigits: 1 })}K` : formatNumber(value)}`;
+    return <section className={`${cardClass} p-4`}>
+        <div className="mb-3 flex min-w-0 items-center justify-between gap-2 border-b border-[#E9E1EE] pb-3">
+            <div className="min-w-0 shrink-0"><SectionHeading icon={<BarChart3 size={24}/>} title="Revenue trend" subtitle="Combined revenue across all stores for the selected period."/></div>{controls}
+        </div><div className="mb-1 flex justify-end">
+        <div className="flex flex-wrap gap-4 text-[10px] text-[#5F4E75]">
+            <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-[#7C3AED]"/>Consumable sales</span>
+            <span className={`inline-flex items-center gap-1.5 ${rentalRecorded ? "" : "text-[#9B8AAA]"}`}><span className="h-2.5 w-2.5 rounded-full bg-[#F5A623]"/>Rental revenue{!rentalRecorded && " · not recorded yet"}</span>
+        </div>
+    </div>
+        {loading || unavailable ? <div className="flex h-[215px] items-center justify-center text-sm text-[#7A6A84]">{loading ? "Loading revenue trend…" : "Recorded revenue is unavailable."}</div> :
+            <svg viewBox="0 0 720 220" role="img" aria-label="Daily consumable sales and recorded rental revenue for the selected period" className="h-[230px] w-full overflow-visible">
+                <defs><linearGradient id={`${gradient}-rental`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#F5A623" stopOpacity="0.16"/><stop offset="100%" stopColor="#F5A623" stopOpacity="0.025"/></linearGradient><linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7C3AED" stopOpacity="0.12"/><stop offset="100%" stopColor="#7C3AED" stopOpacity="0.015"/></linearGradient></defs>
+                {[0, 1, 2, 3, 4].map(index => <g key={index}>
+                    <line x1="62" x2="688" y1={y(index * step)} y2={y(index * step)} stroke="#EFE7F4"/>
+                    <text x="49" y={y(index * step) + 4} textAnchor="end" fontSize="11" fill="#806A8C">{tick(index * step)}</text>
+                </g>)}
+                {labels.map(index => <g key={index}><line x1={x(index)} x2={x(index)} y1="28" y2="184" stroke="#F3EDF7"/><text x={x(index)} y="208" textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"} fontSize="11" fill="#806A8C">{shortDate(points[index]?.date, false)}</text></g>)}
+                {points.length > 0 && <>
+                    {segments("consumableSales").map((segment, index) => <g key={index}>
+                        <path d={`${line(segment)} L${x(segment[segment.length - 1].index)},184 L${x(segment[0].index)},184 Z`} fill={`url(#${gradient})`}/>
+                        <path d={line(segment)} fill="none" stroke="#7C3AED" strokeWidth="2.5" strokeLinejoin="round"/>
+                    </g>)}
+                    {rentalRecorded && segments("rentalRevenue").map((segment, index) => <g key={index}><path d={`${line(segment)} L${x(segment[segment.length - 1].index)},184 L${x(segment[0].index)},184 Z`} fill={`url(#${gradient}-rental)`}/><path d={line(segment)} fill="none" stroke="#F5A623" strokeWidth="2.5" strokeLinejoin="round"/></g>)}
+                    {points.filter((_, index) => labels.includes(index) || points.length <= 16).map(point => {
+                        const index = points.indexOf(point);
+                        return <g key={point.date}>{point.consumableSales != null && <circle cx={x(index)} cy={y(point.consumableSales)} r="3" fill="#7C3AED"><title>{`${shortDate(point.date)} · Consumable sales: ${shownMoney(point.consumableSales)}`}</title></circle>}
+                            {rentalRecorded && point.rentalRevenue != null && <circle cx={x(index)} cy={y(point.rentalRevenue)} r="3" fill="#F5A623"><title>{`${shortDate(point.date)} · Rental revenue: ${shownMoney(point.rentalRevenue)}`}</title></circle>}</g>;
+                    })}
+                </>}
+                {points.length === 0 && <text x="375" y="110" textAnchor="middle" fontSize="12" fill="#7A6A84">No recorded revenue for this period.</text>}
+            </svg>}
+    </section>;
+}
+function ExpandedPurchaseProducts({ bill }: { bill: SupplierBill }) {
+    const [items, setItems] = React.useState<PurchaseItem[]>([]);
+    const [loading, setLoading] = React.useState(true);
+    const [error, setError] = React.useState("");
+    const [retry, setRetry] = React.useState(0);
+    React.useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        setError("");
+        void ownerRequest<{ items: PurchaseItem[] }>(supplierEndpoint(bill.source), {
+            action: bill.source === "rental" ? "get_rental_purchase_items" : "get_supplier_purchase_items",
+            purchaseId: bill.purchaseId,
+            branch_id: bill.branchId,
+        }, controller.signal).then(result => {
+            if (!Array.isArray(result.items)) throw new Error("The purchase items were not returned by the inventory API.");
+            if (!controller.signal.aborted) setItems(result.items);
+        }).catch(reason => {
+            if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to load purchase items.");
+        }).finally(() => {
+            if (!controller.signal.aborted) setLoading(false);
+        });
+        return () => controller.abort();
+    }, [bill.key, bill.purchaseId, bill.branchId, bill.source, retry]);
+    return <tr className="border-b border-[#E9E1EE] bg-[#FAF7FF]">
+        <td colSpan={9} className="px-3 py-3 sm:px-4">
+            <div className="rounded-xl border border-[#E3D8EA] bg-[#FAF7FF] p-3">
+                <h3 className="text-xs font-bold text-[#2B174C]">{bill.purchaseNumber} — Linked Products</h3>
+                <p className="mt-1 text-[11px] text-[#806A8C]">Only products or equipment recorded for this purchase are shown. Purchased quantities may differ from current stock.</p>
+                {loading ? <p className="py-4 text-xs text-[#806A8C]">Loading purchased products…</p> : error ?
+                    <div role="alert" className="flex flex-wrap items-center gap-3 py-3 text-xs text-[#C32F2F]">{error}<button type="button" onClick={() => setRetry(value => value + 1)} className="rounded-lg border border-[#E3D8EA] bg-white px-3 py-1.5 text-[#2B174C]">Retry</button></div> :
+                    items.length === 0 ? <p className="py-4 text-xs text-[#806A8C]">No linked purchase items were returned.</p> :
+                        <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[530px] text-left">
+                            <thead className="border-b border-[#BCA9CE]"><tr><th className={headerCell}>Product / Variant</th><th className={`${headerCell} text-right`}>Quantity Purchased</th><th className={`${headerCell} text-right`}>Unit Cost</th><th className={`${headerCell} text-right`}>Line Total</th></tr></thead>
+                            <tbody>{items.map((item, index) => <tr key={`${item.productId ?? item.equipmentId ?? 'item'}-${item.variantId ?? 'base'}-${index}`} className="border-b border-[#E3D8EA] last:border-0">
+                                <td className={bodyCell}><span className="font-semibold text-[#2B174C]">{item.productName || item.name || "Recorded item"}</span><span className="ml-1 text-[11px] text-[#806A8C]">{item.productNumber || item.equipmentNumber ? `(${item.productNumber || item.equipmentNumber})` : ""}</span>{item.variantNumber && <p className="mt-0.5 text-[10px] text-[#806A8C]">Variant: {item.variantNumber}</p>}</td>
+                                <td className={`${bodyCell} text-right tabular-nums`}>{formatNumber(Number(item.quantity))}</td>
+                                <td className={`${bodyCell} text-right tabular-nums`}>{formatPeso(Number(item.unitCost))}</td>
+                                <td className={`${bodyCell} text-right tabular-nums`}>{formatPeso(Number(item.lineTotal))}</td>
+                            </tr>)}</tbody>
+                        </table></div>}
+            </div>
+        </td>
+    </tr>;
 }
 
-function getProductMonthsActive(product: OwnerFinancialProduct, now: Date) {
-    const raw = String(product.createdAt ?? product.created_at ?? "");
-    const created = new Date(raw);
-    if (!raw || Number.isNaN(created.getTime())) return 12;
-    const yearAgo = new Date(now);
-    yearAgo.setFullYear(yearAgo.getFullYear() - 1);
-    if (created <= yearAgo) return 12;
-    if (created > now) return 1;
-    return Math.min(12, Math.max(1, Math.ceil((now.getTime() - created.getTime()) / (30.4375 * DAY_IN_MILLISECONDS))));
+function StatusBadge({ status }: { status: BillStatus }) {
+    const colors = { Paid: "bg-[#EAF8EF] text-[#168A48]", Overdue: "bg-[#FFF0F0] text-[#C32F2F]", "Due soon": "bg-[#FFF8D8] text-[#A56607]", "Partially paid": "bg-[#F7F1FF] text-[#2B174C]", Unpaid: "bg-[#EFE8F8] text-[#5F4E75]" };
+    return <span className={`inline-flex min-w-[128px] justify-center items-center gap-1.5 whitespace-nowrap rounded px-2.5 py-1 text-[11px] font-semibold ${colors[status]}`}>
+        {status === "Overdue" ? <AlertTriangle size={13}/> : status === "Paid" ? <CheckCircle2 size={13}/> : <Clock3 size={13}/>}{status}
+    </span>;
 }
 
-function getOwnerPurchasingRows(products: OwnerFinancialProduct[], orders: OwnerPosOrder[], salesReady: boolean): PurchasingRow[] {
-    const now = new Date();
-    const start = new Date(now);
-    start.setFullYear(start.getFullYear() - 1);
-    start.setHours(0, 0, 0, 0);
-    const salesById = new Map<string, PurchasedProductSales>();
-    const salesByVariantId = new Map<string, PurchasedProductSales>();
-    const unattributedVariantProducts = new Set<string>();
-    const validVariantsByProduct = new Map<string, Set<string>>();
-    products.forEach(product => {
-        validVariantsByProduct.set(String(product.id), new Set(
-            (product.variants || []).map(variant => String(variant.id)).filter(Boolean)
-        ));
-    });
-    const productIds = new Set(products.map(product => String(product.id)));
-    const uniqueNames = new Map<string, string>();
-    const duplicatedNames = new Set<string>();
-    products.forEach(product => {
-        const key = normalizeSalesProductName(product.name);
-        if (uniqueNames.has(key) && uniqueNames.get(key) !== String(product.id)) duplicatedNames.add(key);
-        else uniqueNames.set(key, String(product.id));
-    });
-
-    if (salesReady) orders.forEach(order => {
-        if (!isValidCompletedOrder(order)) return;
-        const date = parseOwnerOrderDate(order);
-        if (!date || date < start || date > now) return;
-        const items = Array.isArray(order.orderItems) ? order.orderItems :
-            Array.isArray(order.order_items) ? order.order_items : parseLegacyOrderItems(order.item);
-        items.forEach(raw => {
-            const item = raw as DetailedPosItem;
-            const units = getOrderItemQuantity(item);
-            if (units <= 0) return;
-            const id = getOrderItemProductId(item);
-            const nameKey = getOrderItemName(item);
-            const resolvedId = id && productIds.has(id) ? id :
-                !id && !duplicatedNames.has(nameKey) ? uniqueNames.get(nameKey) : undefined;
-            if (!resolvedId) return;
-            const prev = salesById.get(resolvedId) ?? { units: 0, revenue: 0, revenueComplete: true };
-            const lineRevenue = getItemRevenue(item, units);
-            salesById.set(resolvedId, {
-                units: prev.units + units,
-                revenue: prev.revenue + (lineRevenue ?? 0),
-                revenueComplete: prev.revenueComplete && lineRevenue !== null,
+function SupplierBillDialog({ bill, onClose, onPaid }: { bill: SupplierBill; onClose: () => void; onPaid: (message: string) => Promise<void> }) {
+    const [items, setItems] = React.useState<PurchaseItem[]>([]);
+    const [itemsLoading, setItemsLoading] = React.useState(true);
+    const [itemsError, setItemsError] = React.useState("");
+    const [error, setError] = React.useState("");
+    const [amount, setAmount] = React.useState(() => Number(bill.outstandingBalance).toFixed(2));
+    const [date, setDate] = React.useState(businessDateString);
+    const [confirm, setConfirm] = React.useState(false);
+    const [saving, setSaving] = React.useState(false);
+    const inFlight = React.useRef(false);
+    const requestKey = React.useRef("");
+    React.useEffect(() => { requestKey.current = crypto.randomUUID(); }, []);
+    React.useEffect(() => {
+        const abort = new AbortController();
+        void ownerRequest<{ items: PurchaseItem[] }>(supplierEndpoint(bill.source), {
+            action: bill.source === "rental" ? "get_rental_purchase_items" : "get_supplier_purchase_items",
+            purchaseId: bill.purchaseId, branch_id: bill.branchId,
+        }, abort.signal).then(result => setItems(Array.isArray(result.items) ? result.items : []))
+            .catch(reason => { if (!abort.signal.aborted) setItemsError(reason instanceof Error ? reason.message : "Unable to load purchased items."); })
+            .finally(() => { if (!abort.signal.aborted) setItemsLoading(false); });
+        return () => abort.abort();
+    }, [bill.source, bill.purchaseId, bill.branchId]);
+    const prepare = (event: React.FormEvent) => {
+        event.preventDefault(); if (saving) return;
+        const payment = Number(amount);
+        if (!Number.isFinite(payment) || payment <= 0 || payment > Number(bill.outstandingBalance) || Math.abs(payment * 100 - Math.round(payment * 100)) > 0.00001) {
+            setError("Enter a positive payment with up to two decimal places, within this bill's outstanding balance."); return;
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > businessDateString()) { setError("Choose a valid payment date on or before today."); return; }
+        setError(""); setConfirm(true);
+    };
+    const pay = async () => {
+        if (inFlight.current || !confirm) return;
+        inFlight.current = true; setSaving(true); setError("");
+        try {
+            const result = await ownerRequest<{ alreadyProcessed?: boolean }>(supplierEndpoint(bill.source), {
+                action: bill.source === "rental" ? "pay_rental_supplier_purchase" : "pay_supplier_purchase",
+                purchaseId: bill.purchaseId, branch_id: bill.branchId, amount: Number(amount), paymentDate: date, requestKey: requestKey.current,
             });
-            // Allocate sales to a variant ONLY when the POS line supplies a
-            // real variant ID belonging to this product. Otherwise do not guess.
-            const variantId = String(item.variantId ?? item.variant_id ?? "").trim();
-            if ((validVariantsByProduct.get(resolvedId)?.size ?? 0) > 0) {
-                if (!variantId || !validVariantsByProduct.get(resolvedId)?.has(variantId)) {
-                    unattributedVariantProducts.add(resolvedId);
-                } else {
-                    const variantKey = `${resolvedId}:${variantId}`;
-                    const variantSales = salesByVariantId.get(variantKey) ?? {
-                        units: 0, revenue: 0, revenueComplete: true,
-                    };
-                    salesByVariantId.set(variantKey, {
-                        units: variantSales.units + units,
-                        revenue: variantSales.revenue + (lineRevenue ?? 0),
-                        revenueComplete: variantSales.revenueComplete && lineRevenue !== null,
-                    });
-                }
-            }
-        });
-    });
+            await onPaid(result.alreadyProcessed ? "This supplier payment was already recorded." : `Payment recorded for ${bill.purchaseNumber}.`);
+            onClose();
+        } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to record the payment."); setConfirm(false); }
+        finally { inFlight.current = false; setSaving(false); }
+    };
+    return <div role="dialog" aria-modal="true" aria-labelledby="owner-bill-title" className="fixed inset-0 z-[140] flex items-center justify-center bg-black/50 px-3 py-5" onKeyDown={event => { if (event.key === "Escape" && !saving) { event.stopPropagation(); if (confirm) setConfirm(false); else onClose(); } }}>
+        <div className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-4 border-b border-[#E9E1EE] px-5 py-4">
+                <div><h2 id="owner-bill-title" className="text-lg font-bold text-[#21132E]">{Number(bill.outstandingBalance) > 0 ? "Pay Supplier Bill" : "View Supplier Bill"}</h2><p className="mt-1 text-xs text-[#7A6A84]">{bill.purchaseNumber} · {bill.branchName || "Branch"} · {bill.source === "rental" ? "Rental equipment" : "Consumables"}</p></div>
+                <button type="button" autoFocus disabled={saving} onClick={onClose} aria-label="Close supplier bill" className="rounded-lg p-2 text-[#7A6A84] hover:bg-[#F7F1FF] disabled:opacity-40"><X size={19}/></button>
+            </div>
+            <div className="space-y-4 overflow-y-auto p-5 sm:p-6">
+                <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-xl bg-[#F7F1FF] p-3"><p className="text-xs text-[#7A6A84]">Original purchase total</p><p className="mt-1 text-lg font-bold text-[#1A1220]">{formatPeso(Number(bill.purchaseTotal))}</p></div>
+                    <div className="rounded-xl bg-[#FFF0F0] p-3"><p className="text-xs text-[#7A6A84]">Outstanding balance</p><p className="mt-1 text-lg font-bold text-[#C32F2F]">{formatPeso(Number(bill.outstandingBalance))}</p></div>
+                </div>
+                <dl className="grid gap-3 text-xs sm:grid-cols-2">
+                    {[['Supplier', bill.supplier], ['Invoice', bill.supplierInvoiceNumber || '—'], ['Purchase date', shortDate(bill.purchaseDate)], ['Due date', shortDate(bill.paymentDueDate)], ['Already paid', formatPeso(Number(bill.amountPaid))], ['Payment method', bill.paymentMethod === 'cash' ? 'Cash' : 'Credit (Utang)']].map(([label, value]) => <div key={label}><dt className="text-[#7A6A84]">{label}</dt><dd className="mt-1 font-medium text-[#1A1220]">{value}</dd></div>)}
+                </dl>
+                <section className="space-y-2 border-t border-[#E6DDF0] pt-4"><h3 className="text-sm font-bold text-[#1A1220]">Purchased items</h3>
+                    {itemsError ? <p role="alert" className="text-xs text-[#C32F2F]">{itemsError}</p> : itemsLoading ? <p className="text-xs text-[#7A6A84]">Loading purchase details…</p> : items.length === 0 ? <p className="text-xs text-[#7A6A84]">No purchased items are available.</p> :
+                        <div className="overflow-x-auto"><table className="w-full min-w-[430px] text-left"><thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={headerCell}>Item</th><th className={`${headerCell} text-right`}>Qty</th><th className={`${headerCell} text-right`}>Unit cost</th><th className={`${headerCell} text-right`}>Total</th></tr></thead>
+                            <tbody>{items.map((item, index) => <tr key={`${item.productId ?? item.equipmentId}-${item.variantId ?? ''}-${index}`} className="border-b border-[#EFE8F2] last:border-0 hover:bg-[#FFFCF8]"><td className={bodyCell}>{item.productName || item.name || "Recorded item"}<p className="mt-0.5 text-[10px] text-[#7A6A84]">{item.productNumber || item.equipmentNumber || ""}{item.variantNumber ? ` · ${item.variantNumber}` : ""}</p></td><td className={`${bodyCell} text-right`}>{formatNumber(Number(item.quantity))}</td><td className={`${bodyCell} text-right`}>{formatPeso(Number(item.unitCost))}</td><td className={`${bodyCell} text-right`}>{formatPeso(Number(item.lineTotal))}</td></tr>)}</tbody>
+                        </table></div>}
+                </section>
+                {Number(bill.outstandingBalance) > 0 ? <form onSubmit={prepare} className="space-y-3 border-t border-[#E6DDF0] pt-4">
+                    <h3 className="text-sm font-bold text-[#1A1220]">Record full or partial payment</h3>
+                    <fieldset disabled={saving || confirm} className="grid gap-3 sm:grid-cols-2">
+                        <label className={`space-y-1 ${labelClass}`}>Amount paid (₱)<input type="number" required min="0.01" max={bill.outstandingBalance} step="0.01" value={amount} onChange={event => setAmount(event.target.value)} className={fieldClass}/></label>
+                        <label className={`space-y-1 ${labelClass}`}>Payment date<input type="date" required max={businessDateString()} value={date} onChange={event => setDate(event.target.value)} className={fieldClass}/></label>
+                    </fieldset>
+                    {error && <p role="alert" className="rounded-lg bg-[#FFF0F0] p-3 text-xs text-[#C32F2F]">{error}</p>}
+                    {confirm && <p className="rounded-lg bg-[#F7F1FF] p-3 text-sm text-[#5F4E75]">Record <strong>{formatPeso(Number(amount))}</strong> for <strong>{bill.purchaseNumber}</strong> on {shortDate(date)}?</p>}
+                    <div className="flex justify-end gap-2">{confirm ? <><button type="button" disabled={saving} onClick={() => setConfirm(false)} className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-sm font-semibold text-[#2B174C] hover:bg-[#F7F1FF]">Back</button><button type="button" disabled={saving} onClick={() => void pay()} className="rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">{saving ? "Recording…" : "Confirm payment"}</button></> : <button type="submit" className="rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white">Continue</button>}</div>
+                </form> : <p className="flex items-center gap-2 rounded-lg bg-[#EAF8EF] p-3 text-xs font-medium text-[#168A48]"><CheckCircle2 size={15}/>This supplier bill is fully paid.</p>}
+            </div>
+        </div>
+    </div>;
+}
 
-    const rows: PurchasingRow[] = products.map(product => {
-        const financials = getOwnerProductFinancials(product);
-        const history = salesById.get(String(product.id));
-        const units = history?.units ?? 0;
-        const canAllocateVariantSales = salesReady && !unattributedVariantProducts.has(String(product.id));
-        const variants: PurchasingVariantRow[] = product.hasVariants
-            ? (product.variants || []).map(variant => {
-                const variantId = String(variant.id);
-                const variantSales = salesByVariantId.get(`${product.id}:${variantId}`);
-                const variantData = variant as typeof variant & {
-                    variantNumber?: string | null;
-                    variant_number?: string | null;
-                };
-                const values = Object.values(variant.variantValues || {})
-                    .map(value => String(value || "").trim()).filter(Boolean);
-                return {
-                    id: variantId,
-                    variantNumber: String(variantData.variantNumber ?? variantData.variant_number ?? "").trim() || "—",
-                    variantName: values.join(", ") || "Variant",
-                    stockValue: Math.max(0, Number(variant.stock || 0)) * Number(variant.originalPrice || 0),
-                    unitsSold: canAllocateVariantSales ? (variantSales?.units ?? 0) : null,
-                    salesRevenue: !canAllocateVariantSales ? null : !variantSales ? 0 :
-                        variantSales.revenueComplete ? variantSales.revenue : null,
-                };
-            }) : [];
-        return {
-            id: String(product.id),
-            productNumber: ownerProductNumber(product),
-            productName: product.name,
-            branchName: product.branchName || "Unassigned Branch",
-            category: product.category || "Uncategorized",
-            stockValue: financials.inventoryValue,
-            unitsSold: units,
-            salesRevenue: !salesReady ? null : !history ? 0 : history.revenueComplete ? history.revenue : null,
-            velocity: units / getProductMonthsActive(product, now),
-            salesVelocity: salesReady ? "Low" : "No Data",
-            variants,
+type StockCondition = { counts: Record<'healthy' | 'expiring' | 'low' | 'slow' | 'maintenance', number>; total: number; asOfDate: string };
+const compactControl = "inline-flex h-9 items-center justify-center gap-1.5 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F8F5FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#5B31D4] disabled:opacity-50";
+
+function BranchPicker({ branches, value, onChange, label }: { branches: Branch[] | null; value: string; onChange: (value: string) => void; label: string }) {
+    return <label className={`${compactControl} relative max-w-full`}><Building2 size={15}/>
+        <select aria-label={`${label} branch (updates all reports)`} value={value} onChange={event => onChange(event.target.value)} className="min-w-0 max-w-[150px] bg-transparent pr-1 outline-none">
+            <option value="">All branches</option>{branches?.map(item => <option key={item.id} value={item.id}>{item.branchName}</option>)}
+        </select>
+    </label>;
+}
+function ExportMenu({ disabled, onExport }: { disabled: boolean; onExport: (format: 'xlsx' | 'pdf') => void }) {
+    return <details className="relative"><summary aria-label="Export options" title="Export to Excel or PDF" className={`${compactControl} w-9 shrink-0 !px-0 cursor-pointer list-none [&::-webkit-details-marker]:hidden`}><Download size={16}/></summary>
+        <div className="absolute right-0 top-full z-40 mt-1 w-36 rounded-xl border border-[#E3D8EA] bg-white p-1 shadow-lg">
+            {(['xlsx', 'pdf'] as const).map(format => <button type="button" key={format} disabled={disabled} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); onExport(format); }} className="block w-full rounded px-3 py-2 text-left text-xs text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-40">{format === 'xlsx' ? 'Excel (.xlsx)' : 'PDF (.pdf)'}</button>)}
+        </div>
+    </details>;
+}
+function StockConditionOverview({ storeName, branches, branch, setBranch, refresh }: { storeName: string; branches: Branch[] | null; branch: string; setBranch: (value: string) => void; refresh: number }) {
+    const [data, setData] = React.useState<StockCondition | null>(null);
+    const [loading, setLoading] = React.useState(true);
+    const [error, setError] = React.useState('');
+    const [retry, setRetry] = React.useState(0);
+    React.useEffect(() => {
+        const abort = new AbortController();
+        setLoading(true); setData(null); setError('');
+        void ownerRequest<{ stockCondition: StockCondition }>('/api/products', { action: 'get_owner_stock_condition', ...(branch ? { branch_id: Number(branch) } : {}) }, abort.signal)
+            .then(result => {
+                if (!result.stockCondition || !Number.isFinite(result.stockCondition.total)) throw new Error('Stock condition report is unavailable.');
+                if (!abort.signal.aborted) setData(result.stockCondition);
+            }).catch(reason => { if (!abort.signal.aborted) setError(reason instanceof Error ? reason.message : 'Unable to load stock conditions.'); })
+            .finally(() => { if (!abort.signal.aborted) setLoading(false); });
+        return () => abort.abort();
+    }, [branch, refresh, retry]);
+    const categories = [
+        { key: 'healthy', label: 'Healthy', color: '#168A48' },
+        { key: 'expiring', label: 'Expiring soon', color: '#F5A623' },
+        { key: 'low', label: 'Low stock', color: '#C32F2F' },
+        { key: 'slow', label: 'Slow-moving stock', color: '#7C3AED' },
+        { key: 'maintenance', label: 'On hold / maintenance', color: '#245EDB' },
+    ] as const;
+    let angle = -Math.PI / 2;
+    const slices = categories.map(category => {
+        const count = data?.counts[category.key] || 0;
+        const share = data?.total ? count / data.total : 0;
+        const start = angle; angle += share * Math.PI * 2;
+        const middle = (start + angle) / 2;
+        return { ...category, count, share, start, end: angle, middle };
+    });
+    const exportStock = (format: 'xlsx' | 'pdf') => {
+        if (!data) return;
+        const table: OwnerReportTable = { headers: ['Primary status', 'Item types', 'Share (%)'], rows: slices.map(row => [row.label, row.count, Number((row.share * 100).toFixed(1))]), columnWidths: [220, 100, 100], moneyColumns: [] };
+        const details: OwnerReportDetails = { title: 'Stock Condition Overview', fileTag: 'Stock_Condition', sheetName: 'Stock Condition', storeName, branchName: branches?.find(row => String(row.id) === branch)?.branchName || 'All branches', generatedAt: new Date(), filters: [`Current as of ${data.asOfDate}`, 'One item type per branch; expiry within 30 days includes expired stock; slow-moving means no sale/rental in 90 days.'] };
+        try { if (format === 'pdf') exportOwnerTablePdf(table, details); else exportOwnerTableExcel(table, details); }
+        catch (reason) { setError(reason instanceof Error ? reason.message : 'Export failed.'); }
+    };
+    return <section className={`${cardClass} p-4`}>
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E9E1EE] pb-3"><SectionHeading icon={<PieChart size={24}/>} title="Stock Condition Overview" subtitle="Share of item types by primary status"/>
+            <div className="flex gap-2"><BranchPicker branches={branches} value={branch} onChange={setBranch} label="Stock condition"/><ExportMenu disabled={!data || loading} onExport={exportStock}/></div>
+        </div>
+        {loading ? <div className="flex min-h-[235px] items-center justify-center text-sm text-[#7A6A84]">Loading stock conditions…</div> : error ? <div role="alert" className="flex min-h-[235px] flex-col items-center justify-center gap-3 px-5 text-center text-sm"><PieChart size={42} className="text-[#B7A6CB]"/><p className="font-semibold text-[#4F3A5A]">Stock condition data unavailable</p><p className="max-w-sm text-xs text-[#86778F]">{error === "Invalid action" ? "The inventory API does not recognize get_owner_stock_condition. The pie chart will display after this API action is implemented." : error}</p><button type="button" className={compactControl} onClick={() => setRetry(value => value + 1)}>Retry</button></div> : <div className="mt-2 grid items-center gap-3 sm:grid-cols-[minmax(150px,0.9fr)_1.3fr]">
+            <svg viewBox="0 0 240 240" role="img" aria-label={`Stock conditions: ${slices.map(row => `${row.label} ${row.count}`).join(', ')}`} className="mx-auto h-[230px] w-full max-w-[250px]">
+                {!data?.total && <><circle cx="120" cy="120" r="110" fill="#F1EBFF"/><text x="120" y="124" textAnchor="middle" fontSize="13" fill="#806A8C">No inventory items</text></>}
+                {slices.filter(row => row.count > 0).map(row => <g key={row.key}>
+                    {row.share === 1 ? <circle cx="120" cy="120" r="110" fill={row.color}/> : <path d={`M120 120 L${120 + 110 * Math.cos(row.start)} ${120 + 110 * Math.sin(row.start)} A110 110 0 ${row.share > 0.5 ? 1 : 0} 1 ${120 + 110 * Math.cos(row.end)} ${120 + 110 * Math.sin(row.end)} Z`} fill={row.color} stroke="white" strokeWidth="1"/>}
+
+                    <title>{row.label}: {row.count} ({(row.share * 100).toFixed(1)}%)</title>
+                </g>)}
+                {Boolean(data?.total) && <><circle cx="120" cy="120" r="51" fill="white"/><text x="120" y="116" textAnchor="middle" fontSize="12" fill="#806A8C">Item types</text><text x="120" y="136" textAnchor="middle" fontSize="22" fontWeight="700" fill="#2B174C">{formatNumber(data?.total ?? 0)}</text></>}
+            </svg>
+            <div><ul className="divide-y divide-[#EFE7F4]">{slices.map(row => <li key={row.key} className="flex items-center justify-between gap-3 py-2 text-xs text-[#2B174C]"><span className="flex items-center gap-2"><span className="h-3.5 w-3.5 shrink-0 rounded-full" style={{ background: row.color }}/>{row.label}</span><span className="tabular-nums text-[#7A6A84]">{(row.share * 100).toFixed(1)}%</span></li>)}</ul>
+                <p title="Priority: maintenance, expiry, low stock, slow-moving, healthy. Expiry includes expired stock and the next 30 days. Slow-moving: at least 90 days old with no sale/rental in the last 90 days." className="mt-3 text-[10px] leading-4 text-[#806A8C]">Each item type is counted once per branch by primary status.</p>
+            </div>
+        </div>}
+    </section>;
+}
+
+export default function OwnerInventory() {
+    const [clock, setClock] = React.useState('');
+    React.useEffect(() => {
+        const update = () => {
+            const now = new Date();
+            const dateLabel = now.toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'long', day: 'numeric', year: 'numeric' });
+            const timeLabel = now.toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+            setClock(`${dateLabel} | ${timeLabel}`);
         };
-    });
-
-    // Rank products against other products in the SAME branch, not the whole store.
-    const byBranch = new Map<string, PurchasingRow[]>();
-    rows.forEach(row => byBranch.set(row.branchName, [...(byBranch.get(row.branchName) || []), row]));
-    for (const branchRows of byBranch.values()) {
-        const sold = branchRows.filter(row => row.velocity > 0)
-            .sort((a, b) => b.velocity - a.velocity || a.productName.localeCompare(b.productName));
-        sold.forEach((row, index) => {
-            const group = Math.min(2, Math.floor(index * 3 / Math.max(1, sold.length)));
-            row.salesVelocity = group === 0 ? "High" : group === 1 ? "Medium" : "Low";
+        update(); const timer = window.setInterval(update, 30000); return () => window.clearInterval(timer);
+    }, []);
+    const [branch, setBranch] = React.useState("");
+    const [range, setRange] = React.useState<DateRange>(() => { const today = businessDateString(); return { startDate: `${today.slice(0, 7)}-01`, endDate: today }; });
+    const [dateDraft, setDateDraft] = React.useState(range);
+    const [calendarOpen, setCalendarOpen] = React.useState(false);
+    const [dateError, setDateError] = React.useState("");
+    const [refresh, setRefresh] = React.useState(0);
+    const [performance, setPerformance] = React.useState<OwnerPerformance | null>(null);
+    const [allStoresPerformance, setAllStoresPerformance] = React.useState<OwnerPerformance | null>(null);
+    const [allStoresLoading, setAllStoresLoading] = React.useState(false);
+    const [allStoresError, setAllStoresError] = React.useState("");
+    const [branches, setBranches] = React.useState<Branch[] | null>(null);
+    const [performanceLoading, setPerformanceLoading] = React.useState(true);
+    const [performanceError, setPerformanceError] = React.useState("");
+    const [bills, setBills] = React.useState<SupplierBill[]>([]);
+    const [billsLoading, setBillsLoading] = React.useState(true);
+    const [billsReady, setBillsReady] = React.useState(false);
+    const [billsError, setBillsError] = React.useState("");
+    const [branchLoadError, setBranchLoadError] = React.useState("");
+    const [supplierSearch, setSupplierSearch] = React.useState("");
+    const [supplierFilter, setSupplierFilter] = React.useState("all");
+    const [supplierPage, setSupplierPage] = React.useState(1);
+    const [selectedBill, setSelectedBill] = React.useState<SupplierBill | null>(null);
+    const [expandedPurchaseKey, setExpandedPurchaseKey] = React.useState<string | null>(null);
+    const [notice, setNotice] = React.useState("");
+    const billRequestSequence = React.useRef(0);
+    const billTrigger = React.useRef<HTMLButtonElement | null>(null);
+    const controlsRef = React.useRef<HTMLDivElement>(null);
+    React.useEffect(() => {
+        const abort = new AbortController();
+        setPerformanceLoading(true); setPerformanceError(""); setPerformance(null);
+        void ownerRequest<{ performance: OwnerPerformance }>("/api/products", {
+            action: "get_owner_inventory_performance", date_from: range.startDate, date_to: range.endDate,
+            ...(branch ? { branch_id: Number(branch) } : {}),
+        }, abort.signal).then(result => {
+            if (!result.performance || !Array.isArray(result.performance.branches)) throw new Error("The owner inventory report is unavailable.");
+            if (abort.signal.aborted) return;
+            setPerformance(result.performance);
+            setBranches(previous => JSON.stringify(previous) === JSON.stringify(result.performance.branches) ? previous : result.performance.branches);
+        }).catch(reason => { if (!abort.signal.aborted) setPerformanceError(reason instanceof Error ? reason.message : "Unable to load the owner inventory report."); })
+            .finally(() => { if (!abort.signal.aborted) setPerformanceLoading(false); });
+        return () => abort.abort();
+    }, [branch, range.startDate, range.endDate, refresh]);
+    // Revenue Trend always covers ALL stores, independently of the shared branch selection.
+    // Reuse the existing response when All branches is selected to avoid duplicate calls.
+    React.useEffect(() => {
+        if (!branch) {
+            setAllStoresPerformance(null);
+            setAllStoresLoading(false);
+            setAllStoresError("");
+            return;
+        }
+        const abort = new AbortController();
+        setAllStoresLoading(true);
+        setAllStoresError("");
+        setAllStoresPerformance(null);
+        void ownerRequest<{ performance: OwnerPerformance }>("/api/products", {
+            action: "get_owner_inventory_performance",
+            date_from: range.startDate,
+            date_to: range.endDate,
+        }, abort.signal).then(result => {
+            if (!result.performance || !Array.isArray(result.performance.trend)) {
+                throw new Error("Overall revenue trend is unavailable.");
+            }
+            if (!abort.signal.aborted) setAllStoresPerformance(result.performance);
+        }).catch(reason => {
+            if (!abort.signal.aborted) setAllStoresError(reason instanceof Error ? reason.message : "Overall revenue trend is unavailable.");
+        }).finally(() => { if (!abort.signal.aborted) setAllStoresLoading(false); });
+        return () => abort.abort();
+    }, [branch, range.startDate, range.endDate, refresh]);
+    // Keep existing supplier bills accessible even if the new sales report is unavailable.
+    React.useEffect(() => {
+        const abort = new AbortController();
+        setBranchLoadError("");
+        const load = async () => {
+            try {
+                const token = sessionStorage.getItem("token");
+                if (!token) throw new Error("Your session has expired. Please sign in again.");
+                const response = await fetch("/api/branches", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: abort.signal });
+                const payload = await response.json() as { branches?: Array<{ id?: number; branch_id?: number; branchId?: number; branchName?: string; branch_name?: string; name?: string }>; error?: string };
+                if (!response.ok || !Array.isArray(payload.branches)) throw new Error(payload.error || "Branch information is unavailable.");
+                const loaded = payload.branches.map(item => ({ id: Number(item.id ?? item.branch_id ?? item.branchId), branchName: item.branchName || item.branch_name || item.name || "Unnamed branch" })).filter(item => Number.isSafeInteger(item.id) && item.id > 0);
+                if (!abort.signal.aborted) setBranches(previous => previous ?? loaded);
+            } catch (reason) {
+                if (!abort.signal.aborted) setBranchLoadError(reason instanceof Error ? reason.message : "Unable to load branch information.");
+            }
+        };
+        void load();
+        return () => abort.abort();
+    }, [refresh]);
+    const loadBills = React.useCallback(async () => {
+        const sequence = ++billRequestSequence.current;
+        // The sales backend already enforces store_id from the verified JWT.
+        // Its unscoped action returns purchases from ALL branches in that store.
+        // Do not discard returned purchases if /api/branches is incomplete.
+        const scopedBranches = (branches ?? []).filter(item => !branch || String(item.id) === branch);
+        const requests: Array<{ source: SupplierBill["source"]; branch?: Branch; endpoint: string; body: Record<string, unknown> }> = [
+            { source: "consumable", endpoint: "/api/products", body: { action: "get_supplier_payables", ...(branch ? { branch_id: Number(branch) } : {}) } },
+            ...scopedBranches.map(item => ({
+                source: "rental" as const, branch: item, endpoint: "/api/rental-inventory",
+                body: { action: "get_rental_supplier_payables", branch_id: item.id },
+            })),
+        ];
+        const results = await Promise.allSettled(requests.map(async request => {
+            const result = await ownerRequest<{ payables: SupplierPurchase[] }>(request.endpoint, request.body);
+            if (!Array.isArray(result.payables)) throw new Error("The supplier purchase list is missing from the response.");
+            return result.payables.flatMap(record => {
+                const actualBranchId = Number(record.branchId ?? request.branch?.id);
+                if (!Number.isSafeInteger(actualBranchId) || actualBranchId <= 0) return [];
+                if (branch && String(actualBranchId) !== branch) return [];
+                const matchingBranch = branches?.find(item => item.id === actualBranchId);
+                return [{ ...record, source: request.source,
+                    branchId: actualBranchId,
+                    branchName: record.branchName || matchingBranch?.branchName || request.branch?.branchName || `Branch ${actualBranchId}`,
+                    key: `${request.source}:${actualBranchId}:${record.purchaseId}`,
+                }];
+            });
+        }));
+        if (sequence !== billRequestSequence.current) return;
+        const records = new Map<string, SupplierBill>();
+        const failures: string[] = [];
+        results.forEach((result, index) => {
+            if (result.status === "fulfilled") result.value.forEach(row => records.set(row.key, row));
+            else failures.push(`${requests[index].branch?.branchName || "Store-wide"} ${requests[index].source === "rental" ? "rental" : "sales"} purchases: ${result.reason instanceof Error ? result.reason.message : "Unable to load purchases."}`);
         });
-    }
-    return rows;
+        setBills([...records.values()]);
+        setBillsReady(failures.length === 0);
+        setBillsError(failures.join(" "));
+        setBillsLoading(false);
+    }, [branch, branches]);
+    React.useEffect(() => {
+        const requestSequence = billRequestSequence;
+        setBillsLoading(true); setBillsReady(false); setBills([]); setBillsError("");
+        void loadBills();
+        const update = () => { if (document.visibilityState === "visible") void loadBills(); };
+        window.addEventListener("stocknbook:purchase-updated", update);
+        window.addEventListener("focus", update);
+        document.addEventListener("visibilitychange", update);
+        const timer = window.setInterval(update, 30000);
+        return () => {
+            requestSequence.current++;
+            window.clearInterval(timer); window.removeEventListener("stocknbook:purchase-updated", update);
+            window.removeEventListener("focus", update); document.removeEventListener("visibilitychange", update);
+        };
+    }, [branches, loadBills, refresh]);
+    React.useEffect(() => {
+        const close = (event: PointerEvent) => { if (!controlsRef.current?.contains(event.target as Node)) { setCalendarOpen(false); } };
+        document.addEventListener("pointerdown", close);
+        return () => document.removeEventListener("pointerdown", close);
+    }, []);
+    React.useEffect(() => { setSupplierPage(1); }, [branch, range.startDate, range.endDate]);
+    React.useEffect(() => { setSupplierPage(1); }, [supplierSearch, supplierFilter]);
+    React.useEffect(() => { setExpandedPurchaseKey(null); }, [branch, supplierSearch, supplierFilter, supplierPage]);
+    React.useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(""), 6000); return () => window.clearTimeout(timer); }, [notice]);
+
+    const outstanding = billsReady ? bills.reduce((sum, bill) => sum + Math.max(0, Number(bill.outstandingBalance) || 0), 0) : null;
+    const overdue = billsReady ? bills.reduce((sum, bill) => sum + (billStatus(bill) === "Overdue" ? Math.max(0, Number(bill.outstandingBalance) || 0) : 0), 0) : null;
+    const supplierError = billsError || (branches === null ? branchLoadError : "");
+    const filteredBills = bills.filter(bill => {
+        const search = supplierSearch.trim().toLowerCase();
+        const matches = !search || [bill.supplier, bill.supplierInvoiceNumber, bill.purchaseNumber, bill.branchName].some(value => String(value ?? "").toLowerCase().includes(search));
+        return matches && (supplierFilter === "all" || (supplierFilter === "outstanding" ? bill.outstandingBalance > 0 : billStatus(bill) === supplierFilter));
+    }).sort((a, b) => {
+        const aOutstanding = Number(a.outstandingBalance) > 0;
+        const bOutstanding = Number(b.outstandingBalance) > 0;
+        if (aOutstanding !== bOutstanding) return aOutstanding ? -1 : 1;
+        return (a.paymentDueDate || "9999").localeCompare(b.paymentDueDate || "9999") || b.purchaseId - a.purchaseId;
+    });
+    const revenueTrendPerformance = branch ? allStoresPerformance : performance;
+    const revenueTrendLoading = branch ? allStoresLoading : performanceLoading;
+    const revenueTrendError = branch ? allStoresError : performanceError;
+    const consumables = performance?.consumables || [];
+    const rentals = performance?.rentals || [];
+    const currentSupplierPage = Math.min(supplierPage, Math.max(1, Math.ceil(filteredBills.length / 3)));
+    const branchName = branch ? branches?.find(item => String(item.id) === branch)?.branchName || "Selected branch" : "All branches";
+    const selectedLabel = `${shortDate(range.startDate, false)} – ${shortDate(range.endDate)}`;
+    const applyRange = (next: DateRange) => { const message = validDateRange(next); setDateError(message); if (!message) { setRange(next); setCalendarOpen(false); } };
+    const closeBill = () => { setSelectedBill(null); window.setTimeout(() => billTrigger.current?.focus(), 0); };
+    const onPaid = async (message: string) => {
+        setNotice(message);
+        try { await loadBills(); } catch (reason) { setBillsError(reason instanceof Error ? reason.message : "Payment saved. Supplier balances could not refresh."); }
+        window.dispatchEvent(new Event("stocknbook:purchase-updated"));
+    };
+    const exportReport = (format: "xlsx" | "pdf", scope: "all" | "trend" | "consumables" | "rentals" | "suppliers" = "all") => {
+        if (!performance && !(scope === "trend" && revenueTrendPerformance)) return;
+        const reportPerformance = (scope === "trend" ? revenueTrendPerformance : performance);
+        if (!reportPerformance || !performance) return;
+
+        const unavailable = "Not recorded yet";
+        const value = (amount: Amount) => amount === null ? unavailable : amount;
+        let report: OwnerReportTable = {
+            headers: ["Section / Item", "Branch / Details", "Units", "Revenue (PHP)", "Gross profit (PHP)", "Balance (PHP)"],
+            rows: [
+                ["Total sales & rental revenue", selectedLabel, "", value(performance.totals.totalRevenue), "", ""],
+                ["Consumable sales", selectedLabel, "", value(performance.totals.consumableSales), value(performance.totals.consumableGrossProfit), ""],
+                ["Rental revenue", selectedLabel, "", value(performance.totals.rentalRevenue), "", ""],
+                ["Supplier balance", `Current as of ${shortDate(businessDateString())}`, "", "", "", outstanding === null ? "Unavailable" : outstanding],
+                ["Overdue supplier balance", "Current balances", "", "", "", overdue === null ? "Unavailable" : overdue],
+                ...performance.branchRevenue.map(row => ["Branch consumable sales", row.branchName, "", value(row.consumableSales), "", ""] as Array<string | number>),
+                ...performance.branchRevenue.map(row => ["Branch rental revenue", row.branchName, "", value(row.rentalRevenue), "", ""] as Array<string | number>),
+                ...consumables.map(row => [row.name, "Consumables", row.unitsSold, row.sales, row.grossProfit === null ? "Historical cost unavailable" : row.grossProfit, ""] as Array<string | number>),
+                ...rentals.map(row => [row.name, "Rentals", "", row.revenue, "", ""] as Array<string | number>),
+                ...bills.map(row => [row.supplier, `${row.branchName || "Branch"} · ${row.purchaseNumber} · ${row.supplierInvoiceNumber || "No invoice"}`, "", "", "", Number(row.outstandingBalance)] as Array<string | number>),
+            ], columnWidths: [180, 210, 55, 100, 110, 100], moneyColumns: [3, 4, 5],
+        };
+        const details: OwnerReportDetails = {
+            title: "Owner Inventory Performance", fileTag: "Owner_Inventory_Performance", sheetName: "Business Performance",
+            storeName: performance.storeName || "Store", branchName, generatedAt: new Date(),
+            filters: [`Revenue: ${selectedLabel}`, "Supplier balances are current, independent of the revenue period", "Gross profit = recorded POS sales less recorded cost at sale, before operating expenses; POS totals include VAT where applicable", ...performance.warnings, ...(billsError ? [billsError] : [])],
+        };
+        if (scope === 'trend') details.branchName = 'All branches';
+        if (scope === 'trend') report = { headers: ['Date', 'Consumable sales', 'Rental revenue'], rows: reportPerformance.trend.map(row => [row.date, value(row.consumableSales), value(row.rentalRevenue)]), columnWidths: [160, 180, 180], moneyColumns: [1, 2] };
+        if (scope === 'consumables') report = { headers: ['Item', 'Units sold', 'Sales', 'Gross profit'], rows: consumables.map(row => [row.name, row.unitsSold, row.sales, value(row.grossProfit)]), columnWidths: [220, 80, 140, 140], moneyColumns: [2, 3] };
+        if (scope === 'rentals') report = { headers: ['Item', 'Rental revenue', 'Revenue share (%)'], rows: rentals.map(row => [row.name, row.revenue, row.share]), columnWidths: [220, 140, 140], moneyColumns: [1] };
+        if (scope === 'suppliers') report = { headers: ['Purchase', 'Supplier', 'Branch', 'Method', 'Total', 'Paid', 'Outstanding', 'Due date', 'Status'], rows: filteredBills.map(row => [row.purchaseNumber, row.supplier, row.branchName || 'Branch', row.paymentMethod === 'cash' ? 'Cash' : 'Credit', Number(row.purchaseTotal), Number(row.amountPaid), Number(row.outstandingBalance), row.paymentDueDate || '—', billStatus(row)]), columnWidths: [150, 160, 150, 90, 105, 105, 105, 100, 105], moneyColumns: [4, 5, 6] };
+        if (scope !== 'all') {
+            const titles = { trend: 'Revenue Trend', consumables: 'Consumable Sales Performance', rentals: 'Rental Revenue Performance', suppliers: 'Supplier Payments' };
+            details.title = titles[scope]; details.fileTag = titles[scope].replace(/ /g, '_'); details.sheetName = titles[scope].slice(0, 31);
+            if (scope === 'suppliers') details.filters.push('Status: ' + supplierFilter, 'Search: ' + (supplierSearch || 'None'));
+        }
+        try { if (format === "pdf") exportOwnerTablePdf(report, details); else exportOwnerTableExcel(report, details); }
+        catch (reason) { setNotice(reason instanceof Error ? `Export failed: ${reason.message}` : "Unable to export this report."); }
+    };
+
+    return <div className="min-h-screen bg-[#FFFDF8] font-sans text-[#1A1220]">
+        <div inert={selectedBill ? true : undefined}>
+            <header className="sticky top-0 z-20 flex min-h-[74px] flex-wrap items-center justify-between gap-4 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 px-6 py-3 backdrop-blur">
+                <div><h1 className="text-[25px] font-bold text-[#1A1220]">Inventory</h1><p className="mt-0.5 text-xs text-[#766983]">Sales performance and supplier payments across your business.</p></div>
+                <div className="flex flex-wrap items-center gap-2.5"><time className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">{clock || 'Asia/Manila'}</time>
+                    <button type="button" onClick={() => setRefresh(value => value + 1)} className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"><RefreshCw size={16} className={performanceLoading || billsLoading ? 'animate-spin' : ''}/>Refresh</button>
+                </div>
+            </header>
+            <main className="space-y-4 px-5 py-5">
+                {performanceError && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] p-4 text-sm text-[#C32F2F]"><p>Could not load the owner report: {performanceError}</p><button type="button" onClick={() => setRefresh(value => value + 1)} className="rounded-lg border border-current px-3 py-1.5 text-xs font-semibold">Retry</button></div>}
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <MetricCard label="Total sales & rental revenue" value={shownMoney(performance?.totals.totalRevenue)} helper={performanceLoading ? "Loading recorded revenue…" : performance?.totals.rentalRevenue === null ? "Total available once rentals are recorded" : "Consumables + rentals"} icon={<BarChart3 size={19}/>}/>
+                    <MetricCard label="Consumable sales" value={shownMoney(performance?.totals.consumableSales)} helper={`Gross profit: ${shownMoney(performance?.totals.consumableGrossProfit)}`} icon={<TrendingUp size={19}/>} tone="green"/>
+                    <MetricCard label="Rental revenue" value={shownMoney(performance?.totals.rentalRevenue)} helper={performanceLoading ? "Loading recorded revenue…" : performance?.totals.rentalRevenue === null ? "No itemized charges" : "Selected period"} icon={<Box size={19}/>} tone="blue"/>
+                    <MetricCard label="Supplier balance" value={shownMoney(outstanding)} helper={billsLoading && !supplierError ? "Loading supplier balances…" : billsReady ? `${formatPeso(overdue || 0)} overdue` : "Supplier balances unavailable"} icon={<ReceiptText size={19}/>} tone="red"/>
+                </div>
+                {performance && performance.warnings.length > 0 && <p role="note" className="rounded-lg bg-[#F7F1FF] px-3 py-2 text-[11px] leading-5 text-[#806A8C]">{performance.warnings.join(" ")}</p>}
+                <div className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                    <RevenueTrend controls={<div ref={controlsRef} className="flex shrink-0 flex-nowrap items-center justify-end gap-1.5"><div className="relative"><button type="button" aria-expanded={calendarOpen} onClick={() => { setDateDraft(range); setDateError(""); setCalendarOpen(!calendarOpen); }} className="inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-xl border border-[#E3D8EA] bg-white px-2.5 text-[11px] font-semibold text-[#2B174C] shadow-sm"><CalendarDays size={17}/>{selectedLabel}<ChevronDown size={14}/></button>
+                        {calendarOpen && <section role="dialog" aria-label="Select revenue date range" className="absolute left-0 top-full mt-2 z-30 w-[min(340px,calc(100vw-40px))] sm:left-auto sm:right-0 space-y-3 rounded-xl border border-[#E6DDF0] bg-white p-4 shadow-xl">
+                            <h2 className="text-sm font-bold">Revenue period</h2>
+                            <form onSubmit={event => { event.preventDefault(); const values = new FormData(event.currentTarget); applyRange({ startDate: String(values.get("startDate") || ""), endDate: String(values.get("endDate") || "") }); }} className="space-y-3">
+                                <div className="grid gap-3 sm:grid-cols-2"><label className={`space-y-1 ${labelClass}`}>From<input name="startDate" type="date" required value={dateDraft.startDate} onChange={event => setDateDraft(previous => ({ ...previous, startDate: event.target.value }))} className={fieldClass}/></label><label className={`space-y-1 ${labelClass}`}>To<input name="endDate" type="date" required value={dateDraft.endDate} onChange={event => setDateDraft(previous => ({ ...previous, endDate: event.target.value }))} className={fieldClass}/></label></div>
+                                {dateError && <p role="alert" className="text-xs text-[#C32F2F]">{dateError}</p>}
+                                <div className="flex items-center justify-between gap-2"><button type="button" onClick={() => { const today = businessDateString(); applyRange({ startDate: `${today.slice(0, 7)}-01`, endDate: today }); }} className="text-xs font-medium text-[#2B174C]">This month</button><button type="submit" className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white">Apply dates</button></div>
+                            </form>
+                        </section>}
+                    </div><ExportMenu disabled={!revenueTrendPerformance || revenueTrendLoading} onExport={format => exportReport(format, "trend")}/></div>} points={revenueTrendPerformance?.trend || []} loading={revenueTrendLoading} rentalRecorded={revenueTrendPerformance?.totals.rentalRevenue != null} unavailable={!!revenueTrendError || revenueTrendPerformance?.totals.consumableSales === null}/>
+                    <StockConditionOverview storeName={performance?.storeName || "Store"} branches={branches} branch={branch} setBranch={setBranch} refresh={refresh}/>
+                </div>
+                <section className={`${cardClass} pb-1`}>
+                    <div className="flex min-w-0 items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5 max-lg:flex-wrap">
+                        <SectionHeading icon={<ReceiptText size={19}/>} title="Supplier Payables" subtitle="Purchase-based supplier balances across sales and rental inventory. Pay outstanding bills or review settled purchases."/>
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+                            <label className="relative block min-w-[180px] flex-1 sm:max-w-[310px]">
+                                <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
+                                <input aria-label="Search supplier or invoice" value={supplierSearch} onChange={event => setSupplierSearch(event.target.value)} placeholder="Search supplier or invoice..." className="h-9 w-full rounded-xl border border-[#E3D8EA] bg-white pl-9 pr-3 text-xs text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]"/>
+                            </label>
+                            <BranchPicker branches={branches} value={branch} onChange={setBranch} label="Supplier payments"/>
+                            <select aria-label="Filter supplier payments by status" value={supplierFilter} onChange={event => setSupplierFilter(event.target.value)} className={compactControl}>
+                                <option value="all">All purchases</option>
+                                <option value="outstanding">Outstanding bills</option>
+                                {(["Overdue", "Due soon", "Partially paid", "Unpaid", "Paid"] as const).map(status => <option key={status} value={status}>{status}</option>)}
+                            </select>
+                            <ExportMenu disabled={!performance || performanceLoading || billsLoading || !!supplierError} onExport={format => exportReport(format, "suppliers")}/>
+                        </div>
+                    </div>
+                    {supplierError && <div role="alert" className="mx-4 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#FFF0F0] p-3 text-xs text-[#C32F2F]"><p>Some supplier records are unavailable. {supplierError}</p><button type="button" onClick={() => { setBillsLoading(true); if (branches === null) setRefresh(value => value + 1); else void loadBills(); }} className="rounded-md border border-current px-2.5 py-1 font-semibold">Retry</button></div>}
+                    <div className="overflow-x-auto px-4 pb-2 pt-3"><table className="w-full min-w-[1100px] text-left">
+                        <thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr>
+                            <th className={headerCell}>Purchase</th><th className={headerCell}>Branch</th><th className={headerCell}>Supplier</th><th className={headerCell}>Method</th>
+                            <th className={`${headerCell} text-right`}>Total</th><th className={`${headerCell} text-right`}>Paid</th>
+                            <th className={`${headerCell} text-right`}>Outstanding</th><th className={headerCell}>Status</th>
+                            <th className={`${headerCell} text-right`}>Action</th>
+                        </tr></thead>
+                        <tbody>
+                        {filteredBills.slice((currentSupplierPage - 1) * 3, currentSupplierPage * 3).map(bill => {
+                            const unpaid = Number(bill.outstandingBalance) > 0;
+                            return <React.Fragment key={bill.key}><tr className="border-b border-[#EFE8F2] hover:bg-[#FFFCF8]">
+                                <td className={bodyCell}><button type="button" aria-expanded={expandedPurchaseKey === bill.key} aria-label={`${expandedPurchaseKey === bill.key ? "Hide" : "Show"} linked products for ${bill.purchaseNumber}`} onClick={() => setExpandedPurchaseKey(current => current === bill.key ? null : bill.key)} className="font-semibold text-[#5330B6] underline underline-offset-2 hover:text-[#2B174C] focus-visible:rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#5B31D4]">{bill.purchaseNumber}</button><p className="mt-1 text-[10px] text-[#7A6A84]">{bill.source === "rental" ? "Rental purchase" : "Sales purchase"}</p></td><td className={bodyCell}><span className="font-medium">{bill.branchName || branches?.find(item => item.id === bill.branchId)?.branchName || "Unknown branch"}</span></td>
+                                <td className={bodyCell}><span className="font-medium">{bill.supplier}</span><p className="mt-1 text-[10px] text-[#7A6A84]">{bill.supplierInvoiceNumber || "No supplier invoice"}</p></td>
+                                <td className={bodyCell}>{bill.paymentMethod === "cash" ? "Cash" : "Credit (Utang)"}</td>
+                                <td className={`${bodyCell} text-right tabular-nums`}>{formatPeso(Number(bill.purchaseTotal))}</td>
+                                <td className={`${bodyCell} text-right tabular-nums`}>{formatPeso(Number(bill.amountPaid))}</td>
+                                <td className={`${bodyCell} text-right font-semibold tabular-nums`}>{formatPeso(Number(bill.outstandingBalance))}<p className="mt-1 text-[10px] font-normal text-[#7A6A84]">{unpaid ? `Due ${shortDate(bill.paymentDueDate)}` : "Settled"}</p></td>
+                                <td className={bodyCell}><StatusBadge status={billStatus(bill)}/></td>
+                                <td className={`${bodyCell} text-right`}><button type="button" aria-label={`${unpaid ? "Pay" : "View"} supplier bill ${bill.purchaseNumber}`} onClick={event => { billTrigger.current = event.currentTarget; setSelectedBill(bill); }} className={`inline-flex min-w-[94px] items-center justify-center whitespace-nowrap rounded-lg border px-3 py-2 text-xs font-semibold shadow-sm transition ${unpaid ? "border-[#2B174C] bg-[#2B174C] text-white hover:bg-[#1B0D31]" : "border-[#D9CDF0] bg-[#F5F0FF] text-[#5330B6] hover:bg-[#ECE3FF]"}`}>{unpaid ? "Pay Now" : "View Bill"}</button></td>
+                            </tr>{expandedPurchaseKey === bill.key && <ExpandedPurchaseProducts bill={bill}/>}</React.Fragment>;
+                        })}
+                        {filteredBills.length === 0 && <tr><td colSpan={9} className="px-3 py-8 text-center text-xs text-[#7A6A84]">{supplierError ? "Supplier records are unavailable." : billsLoading ? "Loading supplier purchases…" : "No supplier purchases returned for the selected branches. Check Owner API access if Manager shows purchases."}</td></tr>}
+                        </tbody>
+                    </table></div>
+                    {filteredBills.length > 3 && <Pagination label="supplier bills" page={currentSupplierPage} total={filteredBills.length} pageSize={3} onChange={setSupplierPage}/>}
+                </section>
+                <div className="grid gap-4 xl:grid-cols-2">
+                    <section className={cardClass}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5"><SectionHeading icon={<ShoppingCart size={23}/>} title="Consumable sales performance"/><div className="flex gap-2"><BranchPicker branches={branches} value={branch} onChange={setBranch} label="Consumable sales performance"/><ExportMenu disabled={!performance || performanceLoading} onExport={format => exportReport(format, "consumables")}/></div></div>
+                        <div className="h-[220px] overflow-auto px-4 [scrollbar-color:#7C3AED_#F1EBFF] [scrollbar-width:thin]"><table className="w-full min-w-[390px] text-left"><thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={`${headerCell}`}>Item</th><th className={`${headerCell} text-right`}>Units sold</th><th className={`${headerCell} text-right`}>Sales</th><th className={`${headerCell} text-right`}>Gross profit</th></tr></thead><tbody>
+                        {consumables.map(row => <tr key={row.key} className="border-b border-[#EFE8F2] last:border-0 hover:bg-[#FFFCF8]"><td className={bodyCell}>{row.name}</td><td className={`${bodyCell} text-right tabular-nums`}>{formatNumber(row.unitsSold)}</td><td className={`${bodyCell} text-right tabular-nums`}>{formatPeso(row.sales)}</td><td title={row.grossProfit === null ? "Historical cost is not available for every sold item." : undefined} className={`${bodyCell} text-right tabular-nums`}>{shownMoney(row.grossProfit)}</td></tr>)}
+                        {consumables.length === 0 && <tr><td colSpan={4} className="h-[123px] px-3 text-center text-xs text-[#7A6A84]">{performanceLoading ? "Loading consumable sales…" : performanceError ? "Sales report unavailable." : "No completed consumable sales in this period."}</td></tr>}
+                        </tbody></table></div>
+                    </section>
+                    <section className={cardClass}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5"><SectionHeading icon={<Box size={23}/>} title="Rental revenue performance"/><div className="flex gap-2"><BranchPicker branches={branches} value={branch} onChange={setBranch} label="Rental revenue performance"/><ExportMenu disabled={!performance || performanceLoading} onExport={format => exportReport(format, "rentals")}/></div></div>
+                        <div className="h-[220px] overflow-auto px-4 [scrollbar-color:#7C3AED_#F1EBFF] [scrollbar-width:thin]"><table className="w-full min-w-[360px] text-left"><thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={`${headerCell}`}>Item</th><th className={`${headerCell} text-right`}>Rental revenue</th><th className={`${headerCell} text-right`}>Revenue share</th></tr></thead><tbody>
+                        {rentals.map(row => <tr key={row.key} className="border-b border-[#EFE8F2] last:border-0 hover:bg-[#FFFCF8]"><td className={bodyCell}>{row.name}</td><td className={`${bodyCell} text-right tabular-nums`}>{formatPeso(row.revenue)}</td><td className={`${bodyCell} text-right tabular-nums`}>{row.share.toFixed(1)}%</td></tr>)}
+                        {rentals.length === 0 && <tr><td colSpan={3} className="h-[123px] px-5 text-center text-xs leading-5 text-[#7A6A84]">{performanceLoading ? "Loading rental revenue…" : performanceError ? "Rental report unavailable." : performance?.totals.rentalRevenue === null ? "No recorded itemized rental charges are available yet. Rental stock and daily rates alone are not rental revenue." : "No rental revenue recorded in this period."}</td></tr>}
+                        </tbody></table></div>
+                    </section>
+                </div>
+                <details className="text-xs text-[#7A6A84]"><summary className="cursor-pointer py-2">Report details & revenue by branch</summary>                <p className="text-[11px] leading-5 text-[#7A6A84]">Revenue reflects {selectedLabel}. Supplier balances as of {shortDate(businessDateString())}. Gross profit uses recorded POS sales less recorded cost at sale, before operating expenses; POS totals include VAT where applicable.</p>
+                    <section className={`${cardClass} p-4`}><SectionHeading icon={<MapPin size={19}/>} title="Revenue by branch"/>
+                        <div className="mt-3 max-h-[214px] overflow-auto"><table className="w-full min-w-[330px] text-left"><thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={`${headerCell}`}>Branch</th><th className={`${headerCell} text-right`}>Consumables</th><th className={`${headerCell} text-right`}>Rentals</th></tr></thead><tbody>
+                        {performance?.branchRevenue.map(row => <tr key={row.branchId ?? row.branchName} className="border-b border-[#EFE8F2] last:border-0 hover:bg-[#FFFCF8]"><td className={bodyCell}>{row.branchName}</td><td className={`${bodyCell} text-right tabular-nums`}>{shownMoney(row.consumableSales)}</td><td className={`${bodyCell} text-right tabular-nums`}>{shownMoney(row.rentalRevenue)}</td></tr>)}
+                        {(!performance || performance.branchRevenue.length === 0) && <tr><td colSpan={3} className="px-3 py-8 text-center text-xs text-[#7A6A84]">{performanceLoading ? "Loading branches…" : performanceError ? "Report unavailable." : "No branch revenue recorded for this period."}</td></tr>}
+                        </tbody></table></div>
+                    </section></details>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-[#806A8C]"><span>Branch selectors update all reports. Stock and supplier balances are current.</span><ExportMenu disabled={!performance || performanceLoading} onExport={format => exportReport(format, "all")}/></div>
+            </main>
+        </div>
+        {notice && <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[150] flex max-w-[min(420px,calc(100vw-40px))] items-start gap-3 rounded-xl border border-[#E6DDF0] bg-white p-4 text-sm text-[#5F4E75] shadow-xl"><p>{notice}</p><button type="button" onClick={() => setNotice("")} aria-label="Dismiss notification"><X size={16}/></button></div>}
+        {selectedBill && <SupplierBillDialog key={selectedBill.key} bill={selectedBill} onClose={closeBill} onPaid={onPaid}/>}
+    </div>;
 }
 
-function OwnerVelocityBadge({ value }: { value: PurchasingRow["salesVelocity"] }) {
-    const palette = {
-        High: "bg-[#ECF8F0] text-[#168A48] border-[#BDE6CC]",
-        Medium: "bg-[#FFF8D8] text-[#A56607] border-[#F4D79A]",
-        Low: "bg-[#FFF0F0] text-[#C32F2F] border-[#F2C4C4]",
-        "No Data": "bg-[#F5F0F8] text-[#86778F] border-[#E6DDF0]",
-    }[value];
-    return <span className={`inline-flex min-w-[76px] justify-center rounded-full border px-2 py-1 text-[11px] font-semibold ${palette}`}>{value}</span>;
-}
 
-// Owner-only exports use the already-filtered table data, not just visible scroll rows.
-// Excel uses the existing project's xlsx dependency; PDF follows the Manager's
-// package-free canvas / PDF download approach. Neither alters database records.
 type OwnerReportTable = {
     headers: string[];
     rows: Array<Array<string | number>>;
@@ -1057,32 +772,6 @@ function ownerReportFilename(extension: "pdf" | "xlsx", details: OwnerReportDeta
         .replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 45) || "Unknown";
     const date = details.generatedAt.toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" });
     return `StockNBook_${details.fileTag}_${slug(details.storeName)}_${slug(details.branchName)}_${date}.${extension}`;
-}
-
-function ownerPurchasingReport(rows: PurchasingRow[], salesReady: boolean): OwnerReportTable {
-    return {
-        headers: ["Product No.", "Product", "Branch", "Category", "Stock Value (PHP)",
-            "Units Sold (12 Mo.)", "Sales Revenue (PHP)", "Sales Velocity"],
-        rows: rows.map(row => [row.productNumber, row.productName, row.branchName, row.category,
-            row.stockValue, salesReady ? row.unitsSold : "Unavailable", row.salesRevenue ?? "Unavailable", row.salesVelocity]),
-        columnWidths: [112, 175, 133, 123, 97, 91, 107, 76],
-        moneyColumns: [4, 6],
-    };
-}
-
-function ownerSupplierReport(rows: OwnerSupplierPayable[], branches: Array<{ id: number; branchName: string }>): OwnerReportTable {
-    const branchById = new Map(branches.map(branch => [Number(branch.id), branch.branchName]));
-    return {
-        headers: ["Purchase No.", "Supplier", "Branch", "Method", "Total (PHP)",
-            "Paid (PHP)", "Outstanding (PHP)", "Payment Deadline", "Status"],
-        rows: rows.map(row => [row.purchaseNumber, row.supplier,
-            row.branchName || branchById.get(Number(row.branchId)) || "Unassigned Branch",
-            row.paymentMethod === "cash" ? "Cash" : "Credit",
-            Number(row.purchaseTotal) || 0, Number(row.amountPaid) || 0,
-            Number(row.outstandingBalance) || 0, formatShortDate(row.paymentDueDate), payableStatus(row)]),
-        columnWidths: [92, 122, 122, 66, 88, 88, 104, 101, 85],
-        moneyColumns: [4, 5, 6],
-    };
 }
 
 function exportOwnerTableExcel(table: OwnerReportTable, details: OwnerReportDetails) {
@@ -1124,8 +813,6 @@ function exportOwnerTableExcel(table: OwnerReportTable, details: OwnerReportDeta
     XLSX.writeFile(workbook, ownerReportFilename("xlsx", details), { bookType: "xlsx" });
 }
 
-// Download a real A4 landscape PDF with repeating table headings and page numbers.
-// Reuse the image-backed PDF generator design already used by Manager Inventory.
 function exportOwnerTablePdf(table: OwnerReportTable, details: OwnerReportDetails) {
     const pageWidth = 841.89;
     const pageHeight = 595.28;
@@ -1286,888 +973,4 @@ function exportOwnerTablePdf(table: OwnerReportTable, details: OwnerReportDetail
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
-}
-
-function OwnerCard({ label, value, helper, icon, tone = "purple" }: {
-    label: string; value: string; helper: string; icon: React.ReactNode;
-    tone?: "purple" | "blue" | "red" | "amber";
-}) {
-    const tones = {
-        purple: { icon: "bg-[#F1ECFF] text-[#5F35D8]", value: "text-[#2B174C]" },
-        blue: { icon: "bg-[#E9F2FF] text-[#1E6FE8]", value: "text-[#1E6FE8]" },
-        red: { icon: "bg-[#FFE8E8] text-[#E23B4A]", value: "text-[#D52035]" },
-        amber: { icon: "bg-[#FFF3DE] text-[#E68A00]", value: "text-[#D87B00]" },
-    }[tone];
-    return <section className="min-w-0 rounded-[16px] border border-[#E7DFEC] bg-white p-4 shadow-sm">
-        <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-                <p className="text-sm font-bold text-[#21132E]">{label}</p>
-                <p className={`mt-2 break-words text-[clamp(19px,1.7vw,27px)] font-bold leading-tight tabular-nums tracking-tight ${tones.value}`}>{value}</p>
-                <p className="mt-1.5 text-[11px] leading-4 text-[#86778F]">{helper}</p>
-            </div>
-            <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${tones.icon}`}>{icon}</span>
-        </div>
-    </section>;
-}
-
-function OwnerTableTh({ children, right = false, center = false }: { children: React.ReactNode; right?: boolean; center?: boolean }) {
-    return <th scope="col" className={`break-words px-2 py-2.5 text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C] ${center ? "text-center" : right ? "text-right" : "text-left"}`}>{children}</th>;
-}
-
-// Manager-style export control for the two Owner inventory tables.
-// Keep both existing PDF and Excel generators unchanged.
-function OwnerReportExportMenu({
-                                   source,
-                                   disabled,
-                                   onExport,
-                               }: {
-    source: "suppliers" | "purchasing";
-    disabled: boolean;
-    onExport: (source: "suppliers" | "purchasing", format: "pdf" | "xlsx") => void;
-}) {
-    const [open, setOpen] = React.useState(false);
-    const menuRef = React.useRef<HTMLDivElement>(null);
-
-    React.useEffect(() => {
-        if (!open) return;
-        const handleOutsideClick = (event: PointerEvent) => {
-            if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-                setOpen(false);
-            }
-        };
-        const handleEscape = (event: KeyboardEvent) => {
-            if (event.key === "Escape") setOpen(false);
-        };
-        document.addEventListener("pointerdown", handleOutsideClick);
-        document.addEventListener("keydown", handleEscape);
-        return () => {
-            document.removeEventListener("pointerdown", handleOutsideClick);
-            document.removeEventListener("keydown", handleEscape);
-        };
-    }, [open]);
-
-    return (
-        <div ref={menuRef} className="relative shrink-0">
-            <button
-                type="button"
-                disabled={disabled}
-                aria-expanded={open}
-                aria-haspopup="true"
-                aria-label={`Export ${source === "suppliers" ? "supplier payments" : "inventory purchasing"}`}
-                onClick={() => setOpen(value => !value)}
-                className="inline-flex h-10 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-4 text-xs font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
-            >
-                <Download size={16} /> Export
-            </button>
-            {open && (
-                <div className="absolute right-0 top-full z-50 mt-1.5 w-52 overflow-hidden rounded-xl border border-[#DDD2ED] bg-white py-1.5 shadow-[0_6px_22px_rgba(43,23,76,0.16)]" aria-label="Choose report format">
-                    <button type="button" onClick={() => { setOpen(false); onExport(source, "xlsx"); }} className="block w-full px-4 py-2.5 text-left text-xs font-medium text-[#2B174C] hover:bg-[#F7F1FF]">
-                        Excel (.xlsx)
-                    </button>
-                    <button type="button" onClick={() => { setOpen(false); onExport(source, "pdf"); }} className="block w-full px-4 py-2.5 text-left text-xs font-medium text-[#2B174C] hover:bg-[#F7F1FF]">
-                        PDF (.pdf)
-                    </button>
-                </div>
-            )}
-        </div>
-    );
-}
-
-function OwnerInventory() {
-    const [refreshKey, setRefreshKey] = React.useState(0);
-    const [date, setDate] = React.useState<Date | null>(null);
-    React.useEffect(() => {
-        const update = () => setDate(new Date());
-        update();
-        const timer = window.setInterval(update, 30_000);
-        return () => window.clearInterval(timer);
-    }, []);
-    return <>
-        <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
-            <div className="flex min-h-[74px] flex-wrap items-center justify-between gap-4 px-6 py-3">
-                <div>
-                    <h1 className="text-[25px] font-bold text-[#1A1220]">Inventory</h1>
-                    <p className="mt-0.5 text-xs text-[#766983]">Strategic and financial view of inventory purchasing across branches.</p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2.5">
-                    <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-                        {date ? formatCurrentDateTime(date) : "Loading date..."}
-                    </span>
-                    <button type="button" onClick={() => setRefreshKey(value => value + 1)} className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"><RefreshCw size={16}/>Refresh</button>
-                </div>
-            </div>
-        </header>
-        <OwnerInventoryContent key={refreshKey}/>
-    </>;
-}
-export default OwnerInventory;
-
-function OwnerInventoryContent() {
-    const inv = useInventoryController();
-    const [productNumbersById, setProductNumbersById] = React.useState<Record<number, string>>({});
-    const [productCreatedAtById, setProductCreatedAtById] = React.useState<Record<number, string>>({});
-    const [variantNumbersById, setVariantNumbersById] = React.useState<Record<number, string>>({});
-    const products = React.useMemo(() => ((Array.isArray(inv.products) ? inv.products : []) as OwnerFinancialProduct[])
-        .map(product => {
-            const id = Number(product.id);
-            const number = String(product.productNumber || product.product_number || productNumbersById[id] || "").trim();
-            const createdAt = product.createdAt || product.created_at || productCreatedAtById[id] || undefined;
-            return {
-                ...product,
-                productNumber: number || null,
-                createdAt,
-                variants: (product.variants || []).map(variant => {
-                    const item = variant as typeof variant & { variantNumber?: string | null; variant_number?: string | null };
-                    return { ...variant, variantNumber: item.variantNumber || item.variant_number || variantNumbersById[Number(variant.id)] || null };
-                }),
-            };
-        }), [inv.products, productNumbersById, productCreatedAtById, variantNumbersById]);
-    // The owner list may omit permanent product references; use the same
-    // read-only get_products lookup already used by Manager Inventory.
-    React.useEffect(() => {
-        let active = true;
-        const loadProductNumbers = async () => {
-            try {
-                const token = sessionStorage.getItem("token");
-                if (!token) return;
-                const response = await fetch("/api/products", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                    body: JSON.stringify({ action: "get_products" }), cache: "no-store",
-                });
-                const payload = await response.json().catch(() => ({}));
-                if (!response.ok || !Array.isArray(payload.products)) return;
-                const ids: Record<number, string> = {};
-                const createdDates: Record<number, string> = {};
-                const variantNumbers: Record<number, string> = {};
-                for (const product of payload.products) {
-                    for (const variant of Array.isArray(product.variants) ? product.variants : []) {
-                        const variantId = Number(variant.id);
-                        const variantNumber = String(variant.variantNumber ?? variant.variant_number ?? "").trim();
-                        if (Number.isInteger(variantId) && variantId > 0 && variantNumber) {
-                            variantNumbers[variantId] = variantNumber;
-                        }
-                    }
-                    const id = Number(product.id);
-                    const number = String(product.productNumber ?? product.product_number ?? "").trim();
-                    const createdAt = String(product.createdAt ?? product.created_at ?? "").trim();
-                    if (Number.isInteger(id) && id > 0) {
-                        if (number) ids[id] = number;
-                        if (createdAt) createdDates[id] = createdAt;
-                    }
-                }
-                if (active) {
-                    setProductNumbersById(previous => ({ ...previous, ...ids }));
-                    setProductCreatedAtById(previous => ({ ...previous, ...createdDates }));
-                    setVariantNumbersById(previous => ({ ...previous, ...variantNumbers }));
-                }
-            } catch { /* This is an optional read-only reference lookup. */ }
-        };
-        void loadProductNumbers();
-        window.addEventListener("stocknbook:created-product-numbers", loadProductNumbers);
-        window.addEventListener("stocknbook:imported-product-numbers", loadProductNumbers);
-        return () => {
-            active = false;
-            window.removeEventListener("stocknbook:created-product-numbers", loadProductNumbers);
-            window.removeEventListener("stocknbook:imported-product-numbers", loadProductNumbers);
-        };
-    }, []);
-    const overview = React.useMemo(() => getOwnerInventoryOverview(products), [products]);
-    const branchValues = React.useMemo(() => getInventoryValueByBranch(products), [products]);
-    const [orders, setOrders] = React.useState<OwnerPosOrder[]>([]);
-    const [salesReady, setSalesReady] = React.useState(false);
-    const [salesLoading, setSalesLoading] = React.useState(true);
-    const [salesError, setSalesError] = React.useState("");
-    const [payables, setPayables] = React.useState<OwnerSupplierPayable[]>([]);
-    const [payablesReady, setPayablesReady] = React.useState(false);
-    const [payablesError, setPayablesError] = React.useState("");
-    const [payablesLoading, setPayablesLoading] = React.useState(true);
-    const [paymentNotice, setPaymentNotice] = React.useState("");
-    React.useEffect(() => {
-        if (!paymentNotice) return;
-        const timeout = window.setTimeout(() => setPaymentNotice(""), 5000);
-        return () => window.clearTimeout(timeout);
-    }, [paymentNotice]);
-    const payablesRequestSequence = React.useRef(0);
-
-    const loadPayables = React.useCallback(async () => {
-        const sequence = ++payablesRequestSequence.current;
-        const payload = await ownerPurchasesRequest({ action: "get_supplier_payables" });
-        if (sequence !== payablesRequestSequence.current) return;
-        setPayables(Array.isArray(payload.payables) ? payload.payables : []);
-        setPayablesReady(true);
-        setPayablesError("");
-    }, []);
-    React.useEffect(() => {
-        let active = true;
-        const requestSequence = payablesRequestSequence;
-        const refresh = () => {
-            if (document.visibilityState === "hidden") return;
-            void loadPayables().catch(error => {
-                if (active) setPayablesError(error instanceof Error ? error.message : "Unable to load supplier purchases.");
-            }).finally(() => { if (active) setPayablesLoading(false); });
-        };
-        refresh();
-        const refreshIfVisible = () => { if (document.visibilityState === "visible") refresh(); };
-        window.addEventListener("stocknbook:purchase-updated", refresh);
-        window.addEventListener("focus", refresh);
-        document.addEventListener("visibilitychange", refreshIfVisible);
-        const interval = window.setInterval(refresh, 30_000);
-        return () => {
-            active = false;
-            requestSequence.current++;
-            window.clearInterval(interval);
-            window.removeEventListener("stocknbook:purchase-updated", refresh);
-            window.removeEventListener("focus", refresh);
-            document.removeEventListener("visibilitychange", refreshIfVisible);
-        };
-    }, [loadPayables]);
-
-    const retrySupplierPayables = () => {
-        setPayablesLoading(true);
-        void loadPayables().catch(error => {
-            setPayablesError(error instanceof Error ? error.message : "Unable to load supplier purchases.");
-        }).finally(() => setPayablesLoading(false));
-    };
-
-    // Obtain recorded POS order lines from the database through the existing POS API.
-    // Some installations require a branch_id for Owner requests; request each
-    // store branch independently to avoid silently showing only one branch.
-    const ownerBranchIds = React.useMemo(
-        () => [...new Set(inv.branches.map(branch => Number(branch.id)).filter(id => Number.isInteger(id) && id > 0))],
-        [inv.branches]
-    );
-    const ownerBranchIdsKey = ownerBranchIds.join(",");
-    React.useEffect(() => {
-        let active = true;
-        const load = async () => {
-            setSalesLoading(true);
-            setSalesReady(false);
-            try {
-                const token = sessionStorage.getItem("token");
-                if (!token) throw new Error("Your session has expired. Please sign in again.");
-                const branchIds = ownerBranchIdsKey.split(",").filter(Boolean).map(Number);
-                const requests = branchIds.length ? branchIds : [null];
-                const results = await Promise.allSettled(requests.map(async branchId => {
-                    const response = await fetch("/api/pos", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({
-                            action: "get_orders", include_order_items: true,
-                            ...(branchId ? { branch_id: branchId } : {}),
-                        }),
-                        cache: "no-store",
-                    });
-                    const payload = (await response.json().catch(() => ({}))) as OwnerPosOrdersResponse;
-                    if (!response.ok || payload.success === false || !Array.isArray(payload.orders)) {
-                        throw new Error(payload.error || `Failed to fetch POS orders${branchId ? ` for branch ${branchId}` : ""}.`);
-                    }
-                    // Trust a branch-scoped request only for its branch. When the API
-                    // supplies branch IDs, reject unrelated orders defensively.
-                    return payload.orders.filter(order => {
-                        const raw = order.branchId ?? order.branch_id;
-                        return !branchId || raw == null || raw === "" || Number(raw) === branchId;
-                    });
-                }));
-                if (!active) return;
-                const failures = results.filter(result => result.status === "rejected");
-                // Partial data must not be treated as a complete cross-branch report.
-                if (failures.length) {
-                    throw new Error(failures.map(result => result.status === "rejected"
-                        ? (result.reason instanceof Error ? result.reason.message : "POS request failed") : "").join("; "));
-                }
-                const seen = new Set<string>();
-                const allOrders: OwnerPosOrder[] = [];
-                results.forEach((result, branchIndex) => {
-                    if (result.status !== "fulfilled") return;
-                    result.value.forEach((order, index) => {
-                        const reference = String(order.orderId ?? order.order_id ?? "").trim();
-                        const branch = String(order.branchId ?? order.branch_id ?? requests[branchIndex] ?? "");
-                        const dedupeKey = reference ? `${branch}:${reference}` : `${branch}:${branchIndex}:${index}`;
-                        if (seen.has(dedupeKey)) return;
-                        seen.add(dedupeKey);
-                        allOrders.push(order);
-                    });
-                });
-                setOrders(allOrders);
-                setSalesReady(true);
-                setSalesError("");
-            } catch (error) {
-                if (active) {
-                    setSalesReady(false);
-                    setSalesError(error instanceof Error ? error.message : "Unable to load recorded POS sales.");
-                }
-            } finally { if (active) setSalesLoading(false); }
-        };
-        void load();
-        return () => { active = false; };
-    }, [ownerBranchIdsKey]);
-
-    const riskAnalytics = React.useMemo(() => getOwnerSalesAnalytics(orders.filter(isValidCompletedOrder)), [orders]);
-    const riskBreakdown = React.useMemo(() => getOwnerAtRiskBreakdown(products, riskAnalytics, salesReady, orders), [products, riskAnalytics, salesReady, orders]);
-    const allPurchasingRows = React.useMemo(() => getOwnerPurchasingRows(products, orders, salesReady), [products, orders, salesReady]);
-    const unpaidTotal = payables.reduce((sum, row) => sum + Math.max(0, Number(row.outstandingBalance) || 0), 0);
-    const overdueTotal = payables.reduce((sum, row) => sum + (payableIsOverdue(row) ? Math.max(0, Number(row.outstandingBalance) || 0) : 0), 0);
-
-    const [purchaseSearch, setPurchaseSearch] = React.useState("");
-    const [statusFilter, setStatusFilter] = React.useState<PaymentStatusFilter>("All Statuses");
-    const [methodFilter, setMethodFilter] = React.useState("all");
-    const filteredPayables = payables.filter(row => {
-        const matchesText = [row.purchaseNumber, row.supplier, row.supplierInvoiceNumber, row.paymentMethod]
-            .some(value => String(value ?? "").toLowerCase().includes(purchaseSearch.trim().toLowerCase()));
-        const status = payableStatus(row);
-        return matchesText && (statusFilter === "All Statuses" || (statusFilter === "Outstanding" ? row.outstandingBalance > 0 : status === statusFilter))
-            && (methodFilter === "all" || methodFilter === row.paymentMethod);
-    }).sort((first, second) => {
-        // Outstanding purchases come first, oldest/nearest deadlines at the top
-        // (including overdue balances). Paid purchases are listed afterward.
-        const firstOutstanding = Number(first.outstandingBalance || 0) > 0;
-        const secondOutstanding = Number(second.outstandingBalance || 0) > 0;
-        if (firstOutstanding !== secondOutstanding) return firstOutstanding ? -1 : 1;
-
-        if (firstOutstanding && secondOutstanding) {
-            const firstDeadline = String(first.paymentDueDate ?? "").slice(0, 10);
-            const secondDeadline = String(second.paymentDueDate ?? "").slice(0, 10);
-            if (!firstDeadline && secondDeadline) return 1;
-            if (firstDeadline && !secondDeadline) return -1;
-            if (firstDeadline !== secondDeadline) return firstDeadline.localeCompare(secondDeadline);
-        }
-        // Keep a predictable order for equal/missing deadlines and paid purchases.
-        return Number(second.purchaseId) - Number(first.purchaseId);
-    });
-
-    const [productSearch, setProductSearch] = React.useState("");
-    const [categoryFilter, setCategoryFilter] = React.useState("All Categories");
-    const [branchFilter, setBranchFilter] = React.useState("All Branches");
-    const [visibleProductCount, setVisibleProductCount] = React.useState(PURCHASING_SCROLL_BATCH);
-    const [expandedProductIds, setExpandedProductIds] = React.useState<Record<string, boolean>>({});
-    const purchasingScrollRef = React.useRef<HTMLDivElement>(null);
-    const resetPurchasingScroll = () => {
-        setVisibleProductCount(PURCHASING_SCROLL_BATCH);
-        if (purchasingScrollRef.current) purchasingScrollRef.current.scrollTop = 0;
-    };
-    const onPurchasingScroll = (event: React.UIEvent<HTMLDivElement>) => {
-        const element = event.currentTarget;
-        if (element.scrollTop + element.clientHeight >= element.scrollHeight - 220) {
-            setVisibleProductCount(current => Math.min(current + PURCHASING_SCROLL_BATCH, filteredPurchasingRows.length));
-        }
-    };
-    const categories = React.useMemo(() => [...new Set(products.map(product => product.category).filter(Boolean))].sort(), [products]);
-    const branches = React.useMemo(() => [...new Set(products.map(product => product.branchName || "Unassigned Branch"))].sort(), [products]);
-    const filteredPurchasingRows = allPurchasingRows.filter(row => {
-        const search = productSearch.trim().toLowerCase();
-        const matchesSearch = !search || [row.productNumber, row.productName, row.category].some(value => value.toLowerCase().includes(search));
-        return matchesSearch && (categoryFilter === "All Categories" || row.category === categoryFilter)
-            && (branchFilter === "All Branches" || row.branchName === branchFilter);
-    });
-    const visiblePurchasingRows = filteredPurchasingRows.slice(0, visibleProductCount);
-
-    const downloadOwnerReport = (source: "suppliers" | "purchasing", format: "pdf" | "xlsx") => {
-        const table = source === "suppliers"
-            ? ownerSupplierReport(filteredPayables, inv.branches)
-            : ownerPurchasingReport(filteredPurchasingRows, salesReady);
-        const details: OwnerReportDetails = source === "suppliers"
-            ? {
-                title: "Supplier Payment Overview", fileTag: "Supplier_Payments", sheetName: "Supplier Payments",
-                storeName: inv.storeName || "Unknown Store", branchName: "All Branches",
-                filters: [statusFilter, methodFilter === "all" ? "All Methods" : methodFilter,
-                    purchaseSearch.trim() ? `Search: ${purchaseSearch.trim()}` : "All Purchases"],
-                generatedAt: new Date(),
-            }
-            : {
-                title: "Inventory Purchasing Overview", fileTag: "Inventory_Purchasing", sheetName: "Inventory Purchasing",
-                storeName: inv.storeName || "Unknown Store", branchName: branchFilter,
-                filters: [categoryFilter, branchFilter,
-                    productSearch.trim() ? `Search: ${productSearch.trim()}` : "All Products",
-                    "POS Sales: Last 12 Months"],
-                generatedAt: new Date(),
-            };
-        try {
-            if (format === "pdf") exportOwnerTablePdf(table, details);
-            else exportOwnerTableExcel(table, details);
-        } catch (error) {
-            alert(error instanceof Error ? `Unable to export report: ${error.message}` : "Unable to export report.");
-        }
-    };
-
-    const [dialog, setDialog] = React.useState<{ mode: "view" | "pay"; record: OwnerSupplierPayable } | null>(null);
-    const [purchaseItems, setPurchaseItems] = React.useState<OwnerPurchaseItem[]>([]);
-    const [itemsLoading, setItemsLoading] = React.useState(false);
-    const [dialogError, setDialogError] = React.useState("");
-    const [savingPayment, setSavingPayment] = React.useState(false);
-    const [paymentAmount, setPaymentAmount] = React.useState("");
-    const [paymentDate, setPaymentDate] = React.useState(businessDateString);
-    const [confirmPayment, setConfirmPayment] = React.useState(false);
-    const paymentKey = React.useRef("");
-
-    const openPurchase = async (record: OwnerSupplierPayable, mode: "view" | "pay") => {
-        setDialog({ mode, record });
-        setDialogError("");
-        setPurchaseItems([]);
-        setConfirmPayment(false);
-        setPaymentAmount(String(Number(record.outstandingBalance).toFixed(2)));
-        setPaymentDate(businessDateString());
-        paymentKey.current = crypto.randomUUID();
-        if (mode === "view") {
-            setItemsLoading(true);
-            try {
-                const response = await ownerPurchasesRequest({ action: "get_supplier_purchase_items", purchaseId: record.purchaseId, branch_id: record.branchId });
-                setPurchaseItems(Array.isArray(response.items) ? response.items : []);
-            } catch (error) { setDialogError(error instanceof Error ? error.message : "Unable to load purchase details."); }
-            finally { setItemsLoading(false); }
-        }
-    };
-
-    const preparePayment = (event: React.FormEvent) => {
-        event.preventDefault();
-        if (!dialog || dialog.mode !== "pay" || savingPayment) return;
-        const amount = Number(paymentAmount);
-        if (!Number.isFinite(amount) || amount <= 0 || amount > Number(dialog.record.outstandingBalance)) {
-            setDialogError("The payment must be greater than zero and cannot exceed the outstanding balance."); return;
-        }
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(paymentDate)) {
-            setDialogError("Enter a valid payment date."); return;
-        }
-        setDialogError("");
-        setConfirmPayment(true);
-    };
-
-    const recordPayment = async () => {
-        if (!dialog || dialog.mode !== "pay" || savingPayment || !confirmPayment) return;
-        setSavingPayment(true);
-        setDialogError("");
-        setPaymentNotice("");
-        try {
-            const result = await ownerPurchasesRequest({ action: "pay_supplier_purchase", purchaseId: dialog.record.purchaseId,
-                amount: Number(paymentAmount), paymentDate, branch_id: dialog.record.branchId, requestKey: paymentKey.current });
-            paymentKey.current = crypto.randomUUID();
-            setPaymentNotice(result.alreadyProcessed ? "This supplier payment was already recorded." : `Payment recorded for ${dialog.record.purchaseNumber}.`);
-            // Recording succeeded: a later refresh failure must not be reported
-            // as a failed payment or lead the Owner to accidentally pay twice.
-            try {
-                await loadPayables();
-            } catch (refreshError) {
-                setPayablesError(refreshError instanceof Error ? refreshError.message : "Unable to refresh supplier balances.");
-            }
-            setDialog(null);
-            setConfirmPayment(false);
-        } catch (error) { setDialogError(error instanceof Error ? error.message : "Unable to record the payment."); }
-        finally { setSavingPayment(false); }
-    };
-
-    return <main className="space-y-4 px-5 py-5 font-sans">
-        {paymentNotice && <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[150] flex w-[min(380px,calc(100vw-32px))] items-start gap-3 rounded-2xl border border-[#BDE6CC] bg-white p-4 shadow-[0_8px_36px_rgba(43,23,76,0.15)]">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#E6F8ED] text-[#168A48]"><CheckCircle2 size={21}/></span>
-            <div className="min-w-0 flex-1"><p className="text-[13px] font-bold text-[#21132E]">Supplier payment {paymentNotice.includes("already") ? "already recorded" : "recorded successfully"}</p><p className="mt-1 text-xs text-[#7A6A84]">{paymentNotice}</p></div>
-            <button type="button" aria-label="Dismiss payment notification" onClick={() => setPaymentNotice("")} className="rounded-md p-1 text-[#86778F] hover:bg-[#F7F1FF]"><X size={16}/></button>
-        </div>}
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <OwnerCard label="Inventory Value at Cost" value={formatPeso(overview.inventoryCostValue)} helper="Capital currently tied to stock at acquisition cost." icon={<Package size={21}/>} />
-            <OwnerCard label="Inventory Sales" value={formatPeso(overview.retailValue)} helper="Estimated sales value if current stock is sold; not actual revenue." icon={<ShoppingCart size={21}/>} tone="blue"/>
-            <OwnerCard label="Supplier Payables" value={payablesReady ? formatPeso(unpaidTotal) : "—"} helper="Outstanding balances from recorded supplier purchases." icon={<ReceiptText size={21}/>} tone="red"/>
-            <OwnerCard label="Overdue Payables" value={payablesReady ? formatPeso(overdueTotal) : "—"} helper="Supplier balances past the payment due date." icon={<AlertTriangle size={21}/>} tone="red"/>
-        </div>
-
-        <div className="grid items-stretch gap-4 xl:grid-cols-2">
-            <InventoryValueByBranchCard rows={branchValues}/>
-            <AtRiskInventoryBreakdownCard breakdown={riskBreakdown}/>
-        </div>
-
-        <section className="scroll-mt-32 overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
-            <div className="relative z-20 flex flex-col gap-3 border-b border-[#E6DDF0] p-4 xl:flex-row xl:items-center xl:justify-between">
-                <div className="flex items-start gap-3">
-                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1ECFF] text-[#5F35D8]"><ReceiptText size={20}/></span>
-                    <div><h2 className="text-[16px] font-bold text-[#21132E]">Supplier Payment Overview</h2><p className="mt-0.5 text-[11px] text-[#86778F]">Track and pay outstanding supplier purchases by transaction.</p></div>
-                </div>
-                <div className="flex flex-1 flex-wrap items-center gap-2 xl:justify-end">
-                    <div className="relative min-w-[185px] flex-1 xl:max-w-[270px]"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/><input aria-label="Search supplier purchases" value={purchaseSearch} onChange={event => { setPurchaseSearch(event.target.value); }} placeholder="Search purchase no., supplier, invoice..." className="h-10 w-full rounded-xl border border-[#E3D8EA] bg-white pl-9 pr-3 text-xs text-[#21132E] outline-none focus:border-[#2B174C]"/></div>
-                    <select aria-label="Filter supplier payment status" value={statusFilter} onChange={event => { setStatusFilter(event.target.value as PaymentStatusFilter); }} className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none">
-                        {["All Statuses", "Outstanding", "Overdue", "Unpaid", "Partially Paid", "Paid"].map(value => <option key={value} value={value}>{value}</option>)}
-                    </select>
-                    <select aria-label="Filter supplier payment method" value={methodFilter} onChange={event => { setMethodFilter(event.target.value); }} className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none">
-                        <option value="all">All Methods</option><option value="cash">Cash</option><option value="credit">Credit</option>
-                    </select>
-                    <OwnerReportExportMenu source="suppliers" disabled={!filteredPayables.length} onExport={downloadOwnerReport}/>
-                </div>
-            </div>
-            {payablesError && <div role="alert" className={`mx-4 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-xs ${payablesReady ? "border-[#F4D79A] bg-[#FFF8ED] text-[#966310]" : "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"}`}>
-                <span>{payablesReady ? "Unable to refresh supplier payments. Showing previously loaded records." : "Unable to load supplier payments."} {payablesError === "Failed to fetch" ? "Check the inventory API connection." : payablesError}</span>
-                <button type="button" onClick={retrySupplierPayables} disabled={payablesLoading} className="rounded-lg border border-current px-3 py-1.5 font-semibold transition hover:bg-white/70 disabled:opacity-50">{payablesLoading ? "Retrying..." : "Retry"}</button>
-            </div>}
-            {payablesLoading && !payablesReady ? <p className="px-5 py-9 text-sm text-[#806A8C]">Loading supplier purchases...</p> :
-                filteredPayables.length === 0 ? <p className="px-5 py-9 text-sm text-[#806A8C]">{payablesReady ? "No supplier purchases match the selected filters." : "Supplier purchase records are unavailable."}</p> :
-                    <div className="h-[310px] w-full overflow-y-auto overflow-x-auto overscroll-contain" aria-label="Scrollable supplier payment table" tabIndex={0}><table className="w-full min-w-[1030px] table-fixed border-collapse">
-                        <colgroup><col className="w-[12%]"/><col className="w-[15%]"/><col className="w-[9%]"/><col className="w-[10%]"/><col className="w-[10%]"/><col className="w-[12%]"/><col className="w-[12%]"/><col className="w-[11%]"/><col className="w-[9%]"/></colgroup>
-                        <thead className="sticky top-0 z-10 bg-[#FFFCF7]"><tr className="h-[40px] border-b border-[#E6DDF0]"><OwnerTableTh>Purchase No.</OwnerTableTh><OwnerTableTh>Supplier</OwnerTableTh><OwnerTableTh>Method</OwnerTableTh><OwnerTableTh right>Total</OwnerTableTh><OwnerTableTh right>Paid</OwnerTableTh><OwnerTableTh right>Outstanding</OwnerTableTh><OwnerTableTh>Payment Deadline</OwnerTableTh><OwnerTableTh>Status</OwnerTableTh><OwnerTableTh>Action</OwnerTableTh></tr></thead>
-                        <tbody>{filteredPayables.map(row => <tr key={row.purchaseId} className="h-[54px] border-b border-[#EEE7F2] last:border-b-0 hover:bg-[#FFFCF9]">
-                            <td className="px-3 py-2.5 text-xs font-semibold text-[#4E2DB8]"><button type="button" className="text-left hover:underline" onClick={() => void openPurchase(row, "view")}>{row.purchaseNumber}</button></td>
-                            <td className="px-3 py-2.5 text-xs text-[#21132E]">{row.supplier || "—"}</td>
-                            <td className="px-3 py-2.5 text-xs text-[#5F4E75]">{row.paymentMethod === "cash" ? "Cash" : "Credit"}</td>
-                            <td className="px-3 py-2.5 text-right text-xs tabular-nums text-[#5F4E75]">{formatPeso(Number(row.purchaseTotal) || 0)}</td>
-                            <td className="px-3 py-2.5 text-right text-xs tabular-nums text-[#5F4E75]">{formatPeso(Number(row.amountPaid) || 0)}</td>
-                            <td className="px-3 py-2.5 text-right text-xs font-semibold tabular-nums text-[#2B174C]">{formatPeso(Number(row.outstandingBalance) || 0)}</td>
-                            <td className={`whitespace-nowrap px-3 py-2.5 text-xs tabular-nums ${payableIsOverdue(row) ? "font-semibold text-[#C32F2F]" : "text-[#5F4E75]"}`}>{formatShortDate(row.paymentDueDate)}</td>
-                            <td className="px-3 py-2.5"><PayableBadge status={payableStatus(row)}/></td>
-                            <td className="px-3 py-2.5">{Number(row.outstandingBalance) > 0 ?
-                                <button type="button" onClick={() => void openPurchase(row, "pay")} className="inline-flex min-w-[82px] justify-center rounded-lg bg-[#2B174C] px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-[#1B0D31]">Pay Now</button> :
-                                <button type="button" onClick={() => void openPurchase(row, "view")} className="inline-flex min-w-[82px] justify-center rounded-lg border border-[#DDD2ED] bg-[#F7F1FF] px-3 py-1.5 text-[11px] font-semibold text-[#2B174C] hover:bg-[#EFE6FF]"><Eye size={13} className="mr-1"/>View</button>}</td>
-                        </tr>)}</tbody>
-                    </table></div>}
-            {filteredPayables.length > 0 && <p className="border-t border-[#EEE7F2] px-4 py-2.5 text-[11px] text-[#806A8C]" role="status">
-                Showing {filteredPayables.length.toLocaleString("en-PH")} of {payables.length.toLocaleString("en-PH")} supplier purchases · Scroll inside the table to see all records
-            </p>}
-        </section>
-
-        <section className="scroll-mt-32 overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
-            <div className="relative z-20 flex flex-col gap-3 border-b border-[#E6DDF0] p-4 xl:flex-row xl:items-center xl:justify-between">
-                <div className="flex items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1ECFF] text-[#5F35D8]"><ShoppingCart size={20}/></span><div><h2 className="text-[16px] font-bold text-[#21132E]">Inventory Purchasing Overview</h2><p className="mt-0.5 text-[11px] text-[#86778F]">Stock investment and recorded POS sales across branches (last 12 months).</p></div></div>
-                <div className="flex flex-1 flex-wrap gap-2 xl:justify-end">
-                    <div className="relative min-w-[185px] flex-1 xl:max-w-[240px]"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/><input aria-label="Search products" value={productSearch} onChange={event => { setProductSearch(event.target.value); resetPurchasingScroll(); }} placeholder="Search product no. or name..." className="h-10 w-full rounded-xl border border-[#E3D8EA] bg-white pl-9 pr-3 text-xs text-[#21132E] outline-none focus:border-[#2B174C]"/></div>
-                    <select aria-label="Filter products by category" value={categoryFilter} onChange={event => { setCategoryFilter(event.target.value); resetPurchasingScroll(); }} className="h-10 max-w-[180px] rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none"><option>All Categories</option>{categories.map(value => <option key={value}>{value}</option>)}</select>
-                    <select aria-label="Filter products by branch" value={branchFilter} onChange={event => { setBranchFilter(event.target.value); resetPurchasingScroll(); }} className="h-10 max-w-[190px] rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none"><option>All Branches</option>{branches.map(value => <option key={value}>{value}</option>)}</select>
-                    <OwnerReportExportMenu source="purchasing" disabled={!filteredPurchasingRows.length} onExport={downloadOwnerReport}/>
-                </div>
-            </div>
-            {salesError && <div role="alert" className="mx-4 mt-3 rounded-lg border border-[#F2C4C4] bg-[#FFF0F0] p-3 text-xs text-[#C32F2F]">POS sales are unavailable: {salesError}. Stock values are still shown; sales metrics are not estimated.</div>}
-            {salesLoading && <p className="px-4 pt-3 text-xs text-[#806A8C]">Loading sales metrics...</p>}
-            {filteredPurchasingRows.length === 0 ? <div className="p-4"><EmptyInventory message="No products found for the selected filters."/></div> :
-                <div ref={purchasingScrollRef} onScroll={onPurchasingScroll}
-                     className="max-h-[610px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"
-                     aria-label="Scrollable inventory purchasing table" tabIndex={0}>
-                    <table className="w-full table-fixed text-[10px] xl:text-[11px]">
-                        <colgroup>
-                            <col className="w-[11%]"/>
-                            <col className="w-[18%]"/>
-                            <col className="w-[17%]"/>
-                            <col className="w-[14%]"/>
-                            <col className="w-[12%]"/>
-                            <col className="w-[8%]"/>
-                            <col className="w-[12%]"/>
-                            <col className="w-[8%]"/>
-                        </colgroup>
-                        <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
-                        <tr className="border-b border-[#E9E1EE]">
-                            <OwnerTableTh center>Product No.</OwnerTableTh>
-                            <OwnerTableTh>Product</OwnerTableTh>
-                            <OwnerTableTh>Branch</OwnerTableTh>
-                            <OwnerTableTh>Category</OwnerTableTh>
-                            <OwnerTableTh center>Stock Value</OwnerTableTh>
-                            <OwnerTableTh center>Units Sold</OwnerTableTh>
-                            <OwnerTableTh center>Sales Revenue</OwnerTableTh>
-                            <OwnerTableTh center>Sales Velocity</OwnerTableTh>
-                        </tr>
-                        </thead>
-                        <tbody>
-                        {visiblePurchasingRows.map(row => {
-                            const expandable = row.variants.length > 0;
-                            const expanded = Boolean(expandedProductIds[row.id]);
-                            return <React.Fragment key={row.id}>
-                                <tr className="border-b border-[#EFE8F2] hover:bg-[#FFFCF8]">
-                                    <td className="break-words px-2 py-2.5 text-center font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">
-                                        <div className="flex items-center justify-center gap-1">
-                                            {expandable ? <button type="button"
-                                                                  aria-label={`${expanded ? "Collapse" : "Expand"} variants of ${row.productName}`}
-                                                                  aria-expanded={expanded}
-                                                                  onClick={() => setExpandedProductIds(current => ({ ...current, [row.id]: !current[row.id] }))}
-                                                                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[#5F35D8] hover:bg-[#F1EBFF] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#5F35D8]"
-                                                                  title={expanded ? "Hide variants" : "Show variants"}>
-                                                <ChevronDown size={14} className={`transition-transform ${expanded ? "rotate-180" : ""}`}/>
-                                            </button> : <span className="inline-block w-6 shrink-0"/>}
-                                            <span>{row.productNumber}</span>
-                                        </div>
-                                    </td>
-                                    <td className="break-words px-3 py-2.5 font-semibold text-[#2B174C]">{row.productName}</td>
-                                    <td className="break-words px-2 py-2.5 text-[#5F4E75]">{row.branchName}</td>
-                                    <td className="break-words px-2 py-2.5 text-[#5F4E75]">{row.category}</td>
-                                    <td className="break-words px-2 py-2.5 text-center font-semibold tabular-nums text-[#2B174C]">{formatPeso(row.stockValue)}</td>
-                                    <td className="px-2 py-2.5 text-center tabular-nums text-[#5F4E75]">{salesReady ? formatNumber(row.unitsSold) : "—"}</td>
-                                    <td className="break-words px-2 py-2.5 text-center tabular-nums text-[#5F4E75]" title={row.salesRevenue === null ? "Recorded line-level POS selling prices are not available." : "Recorded POS line-item revenue"}>{row.salesRevenue === null ? "—" : formatPeso(row.salesRevenue)}</td>
-                                    <td className="px-1 py-2.5 text-center"><OwnerVelocityBadge value={row.salesVelocity}/></td>
-                                </tr>
-                                {expandable && expanded && row.variants.map(variant =>
-                                    <tr key={`${row.id}-variant-${variant.id}`} className="border-b border-[#EFE8F2] bg-[#FCF9FF]">
-                                        <td className="break-all px-2 py-2.5 text-center font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">{variant.variantNumber}</td>
-                                        <td className="break-words px-3 py-2.5 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {variant.variantName}</td>
-                                        <td className="break-words px-2 py-2.5 text-[#8A7D90]">{row.branchName}</td>
-                                        <td className="break-words px-2 py-2.5 text-[#8A7D90]">Variant</td>
-                                        <td className="break-words px-2 py-2.5 text-center font-semibold tabular-nums text-[#2B174C]">{formatPeso(variant.stockValue)}</td>
-                                        <td className="px-2 py-2.5 text-center tabular-nums text-[#5F4E75]" title={variant.unitsSold === null ? "POS sales cannot be reliably attributed to this variant." : "Recorded variant POS units sold"}>{variant.unitsSold === null ? "—" : formatNumber(variant.unitsSold)}</td>
-                                        <td className="break-words px-2 py-2.5 text-center tabular-nums text-[#5F4E75]" title={variant.salesRevenue === null ? "Recorded variant POS line revenue is unavailable." : "Recorded variant POS line revenue"}>{variant.salesRevenue === null ? "—" : formatPeso(variant.salesRevenue)}</td>
-                                        <td className="px-2 py-2.5 text-center text-[#8A7D90]" title="Sales velocity is ranked per product within its branch.">—</td>
-                                    </tr>)}
-                            </React.Fragment>;
-                        })}
-                        </tbody>
-                    </table>
-                </div>}
-            <p className="border-t border-[#EEE7F2] px-4 py-2.5 text-[11px] text-[#806A8C]" role="status">
-                Showing {Math.min(visibleProductCount, filteredPurchasingRows.length).toLocaleString("en-PH")} of {filteredPurchasingRows.length.toLocaleString("en-PH")} products · Scroll down to see more
-            </p>
-            <p className="border-t border-[#EEE7F2] px-4 py-2.5 text-[10px] leading-4 text-[#86778F]">Stock Value uses current stock × inventory cost. Units Sold and Sales Velocity use completed POS transactions over the previous 12 months. Sales Revenue appears only when recorded POS line-item prices are available. H/M/L is ranked within each branch. Expanded variants show saved Variant Numbers and stock value; variant sales appear only when POS records identify the variant.</p>
-        </section>
-
-        {dialog && <div role="dialog" aria-modal="true" aria-label={dialog.mode === "pay" ? "Record supplier payment" : "View supplier purchase"} className="fixed inset-0 z-[140] flex items-center justify-center bg-black/50 p-4">
-            <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-                <div className="flex items-center justify-between border-b border-[#E3D8EA] px-5 py-4"><div><h2 className="text-lg font-bold text-[#2B174C]">{dialog.mode === "pay" ? "Pay Supplier" : "Purchase Details"}</h2><p className="mt-0.5 text-xs text-[#806A8C]">{dialog.record.purchaseNumber} · {dialog.record.supplier}</p></div><button type="button" aria-label="Close dialog" disabled={savingPayment} onClick={() => setDialog(null)} className="rounded-lg p-2 text-[#806A8C] hover:bg-[#F7F1FF]"><X size={20}/></button></div>
-                <div className="space-y-4 overflow-y-auto p-5">
-                    <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="rounded-xl bg-[#FBF8FF] p-3"><p className="text-xs text-[#806A8C]">Total Purchase</p><p className="mt-1 text-lg font-bold text-[#2B174C]">{formatPeso(Number(dialog.record.purchaseTotal))}</p></div>
-                        <div className="rounded-xl bg-[#FBF8FF] p-3"><p className="text-xs text-[#806A8C]">Outstanding Balance</p><p className="mt-1 text-lg font-bold text-[#2B174C]">{formatPeso(Number(dialog.record.outstandingBalance))}</p></div>
-                        <div className="text-xs text-[#5F4E75]">Already Paid: <strong>{formatPeso(Number(dialog.record.amountPaid))}</strong></div>
-                        <div className="text-xs text-[#5F4E75]">Due Date: <strong>{formatShortDate(dialog.record.paymentDueDate)}</strong></div>
-                        <div className="text-xs text-[#5F4E75]">Purchase Date: <strong>{formatShortDate(dialog.record.purchaseDate)}</strong></div>
-                        <div className="text-xs text-[#5F4E75]">Invoice: <strong>{dialog.record.supplierInvoiceNumber || "—"}</strong></div>
-                    </div>
-                    {dialogError && <p role="alert" className="rounded-lg border border-[#F2C4C4] bg-[#FFF0F0] p-3 text-xs text-[#C32F2F]">{dialogError}</p>}
-                    {dialog.mode === "view" ? <section className="space-y-3"><h3 className="text-sm font-bold text-[#2B174C]">Products in this Purchase</h3>
-                            {itemsLoading ? <p className="text-xs text-[#806A8C]">Loading purchased items...</p> : purchaseItems.length === 0 ? <p className="text-xs text-[#806A8C]">No line items available.</p> :
-                                <div className="overflow-x-auto"><table className="w-full min-w-[560px] text-left text-xs"><thead className="bg-[#FFFCF7] text-[#806A8C]"><tr><th className="p-2">Product / Variant</th><th className="p-2 text-right">Qty</th><th className="p-2 text-right">Unit Cost</th><th className="p-2 text-right">Line Total</th></tr></thead><tbody>{purchaseItems.map((item, idx) => <tr key={`${item.productId}-${item.variantId ?? "regular"}-${idx}`} className="border-b border-[#EEE7F2]"><td className="p-2"><strong>{item.productName}</strong> {item.productNumber || ""}{item.variantNumber ? <p className="text-[#806A8C]">Variant {item.variantNumber}</p> : null}</td><td className="p-2 text-right">{formatNumber(Number(item.quantity))}</td><td className="p-2 text-right">{formatPeso(Number(item.unitCost))}</td><td className="p-2 text-right">{formatPeso(Number(item.lineTotal))}</td></tr>)}</tbody></table></div>}
-                            <p className="text-[11px] text-[#806A8C]">Purchase quantities are historical records; they do not represent current remaining stock.</p>
-                        </section> :
-                        <form onSubmit={preparePayment} className="space-y-4">
-                            <p className="text-xs text-[#806A8C]">Record a payment against this purchase. This reduces the supplier balance and does not change product stock.</p>
-                            <div className="grid gap-3 sm:grid-cols-2">
-                                <label className="space-y-1 text-xs font-semibold text-[#5A476A]">Amount Paid (₱)<input type="number" min="0.01" max={dialog.record.outstandingBalance} step="0.01" required disabled={confirmPayment || savingPayment} value={paymentAmount} onChange={event => setPaymentAmount(event.target.value)} className="h-11 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#21132E] outline-none focus:border-[#2B174C]"/></label>
-                                <label className="space-y-1 text-xs font-semibold text-[#5A476A]">Payment Date<input type="date" required disabled={confirmPayment || savingPayment} value={paymentDate} onChange={event => setPaymentDate(event.target.value)} className="h-11 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#21132E] outline-none focus:border-[#2B174C]"/></label>
-                            </div>
-                            {confirmPayment && <p className="rounded-lg border border-[#D8CBE7] bg-[#F7F1FF] p-3 text-sm text-[#2B174C]">Confirm payment of <strong>{formatPeso(Number(paymentAmount))}</strong> for <strong>{dialog.record.purchaseNumber}</strong> on {formatShortDate(paymentDate)}?</p>}
-                            <div className="flex flex-wrap justify-end gap-2">{confirmPayment ? <><button type="button" disabled={savingPayment} onClick={() => setConfirmPayment(false)} className="rounded-xl border border-[#E3D8EA] px-4 py-2.5 text-xs font-semibold text-[#2B174C]">Back</button><button type="button" disabled={savingPayment} onClick={() => void recordPayment()} className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-xs font-semibold text-white disabled:opacity-50">{savingPayment ? "Recording..." : "Confirm Payment"}</button></> : <button type="submit" disabled={savingPayment} className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-xs font-semibold text-white">Continue</button>}</div>
-                        </form>}
-                </div>
-            </div>
-        </div>}
-    </main>;
-}
-
-function InventoryValueByBranchCard({ rows }: { rows: BranchValueRow[] }) {
-    const visibleRows = rows.slice(0, 6);
-    const rawMaxValue = Math.max(0, ...visibleRows.map((row) => row.costValue));
-
-    const getNiceAxisMax = (value: number) => {
-        if (value <= 0) return 500000;
-
-        const roughStep = value / 4;
-        const magnitude = Math.pow(10, Math.floor(Math.log10(roughStep)));
-        const normalized = roughStep / magnitude;
-        const niceMultiplier =
-            normalized <= 1
-                ? 1
-                : normalized <= 2
-                    ? 2
-                    : normalized <= 2.5
-                        ? 2.5
-                        : normalized <= 5
-                            ? 5
-                            : 10;
-        const step = niceMultiplier * magnitude;
-
-        return step * 4;
-    };
-
-    const axisMax = getNiceAxisMax(rawMaxValue);
-    const axisStep = axisMax / 4;
-    const axisTicks = [axisMax, axisStep * 3, axisStep * 2, axisStep, 0];
-
-    const formatAxisPeso = (value: number) =>
-        value.toLocaleString("en-PH", {
-            style: "currency",
-            currency: "PHP",
-            minimumFractionDigits: 0,
-            maximumFractionDigits: 0,
-        });
-
-    const barColors = [
-        "#4E2A91",
-        "#6D4BD2",
-        "#9278E5",
-        "#B5A0EF",
-        "#C7B8F5",
-        "#D7CDF9",
-    ];
-
-    return (
-        <section className="rounded-[16px] border border-[#E8E1ED] bg-white p-4 shadow-[0_1px_3px_rgba(43,23,76,0.08)]">
-            <div className="mb-3 flex items-start gap-3">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
-                    <Building2 size={19} strokeWidth={1.9} />
-                </span>
-
-                <div className="min-w-0">
-                    <h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">
-                        Inventory Value by Branch
-                    </h2>
-                    <p className="mt-0.5 text-[11px] leading-4 text-[#7A6A84]">
-                        Total inventory value (at cost price) per branch
-                    </p>
-                </div>
-            </div>
-
-            {visibleRows.length === 0 ? (
-                <div className="flex py-10 items-center justify-center text-sm text-[#7A6A84]">
-                    No branch inventory data available.
-                </div>
-            ) : (
-                <div className="overflow-x-auto overflow-y-hidden">
-                    <div className="min-w-[560px]">
-                        <div className="grid grid-cols-[78px_minmax(0,1fr)]">
-                            <div className="relative h-[210px] pb-[42px] pt-[14px]">
-                                {axisTicks.map((tickValue, index) => {
-                                    const top = (index / 4) * 150 + 14;
-
-                                    return (
-                                        <span
-                                            key={`${tickValue}-${index}`}
-                                            className="absolute right-3 -translate-y-1/2 whitespace-nowrap text-[10px] font-medium text-[#817489]"
-                                            style={{ top }}
-                                        >
-                                            {formatAxisPeso(tickValue)}
-                                        </span>
-                                    );
-                                })}
-                            </div>
-
-                            <div className="relative h-[210px] pb-[42px] pt-[14px]">
-                                <div className="absolute inset-x-0 top-[14px] h-[150px]">
-                                    {axisTicks.map((_, index) => (
-                                        <div
-                                            key={index}
-                                            className="absolute left-0 right-0 border-t border-[#ECE7F0]"
-                                            style={{ top: `${(index / 4) * 100}%` }}
-                                        />
-                                    ))}
-                                </div>
-
-                                <div className="absolute inset-x-2 top-[14px] flex h-[150px] items-end justify-around gap-4">
-                                    {visibleRows.map((row, index) => {
-                                        const barHeight = Math.max(
-                                            7,
-                                            Math.min(150, (row.costValue / axisMax) * 150)
-                                        );
-
-                                        return (
-                                            <div
-                                                key={row.branchName}
-                                                className="relative flex h-full min-w-[68px] flex-1 items-end justify-center"
-                                            >
-                                                <div
-                                                    className="relative w-full max-w-[72px] rounded-t-[7px] shadow-[0_1px_2px_rgba(43,23,76,0.10)]"
-                                                    style={{
-                                                        height: `${barHeight}px`,
-                                                        backgroundColor:
-                                                            barColors[index % barColors.length],
-                                                    }}
-                                                    title={`${row.branchName}: ${formatPeso(
-                                                        row.costValue
-                                                    )}`}
-                                                >
-                                                    <span className="absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-bold text-[#24152F]">
-                                                        {formatAxisPeso(row.costValue)}
-                                                    </span>
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-
-                                <div className="absolute inset-x-2 bottom-0 flex h-[36px] justify-around gap-4">
-                                    {visibleRows.map((row) => (
-                                        <div
-                                            key={`${row.branchName}-label`}
-                                            className="min-w-[68px] flex-1 text-center"
-                                        >
-                                            <p className="mx-auto max-w-[88px] text-[10px] font-semibold leading-[13px] text-[#51445A]">
-                                                {row.branchName}
-                                            </p>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-        </section>
-    );
-}
-
-const OWNER_RISK_DEFINITIONS: Record<AtRiskCategoryKey, string> = {
-    expired: "Current remaining stock past its recorded expiration date. Value = affected stock × unit acquisition cost; this category takes priority over inactivity.",
-    expiringSoon: "Current remaining stock expiring today or within the next 30 days. Value = affected stock × unit acquisition cost; expired stock is excluded.",
-    deadStock: "Current stock with no verified sale for at least 180 days, using product/variant creation and dated POS history when available. Missing or ambiguous sales data are not treated as zero sales.",
-    slowMoving: "Current stock with no verified sale for 90–179 days, based on creation and dated POS history when available. Items already expired or expiring soon are excluded.",
-};
-
-function AtRiskInventoryBreakdownCard({
-                                          breakdown,
-                                      }: {
-    breakdown: AtRiskBreakdown;
-}) {
-    return (
-        <section className="min-w-0 rounded-[16px] border border-[#E8E1ED] bg-white p-4 shadow-[0_1px_3px_rgba(43,23,76,0.08)]">
-            <div className="mb-3 flex items-start gap-3">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#FFF0F0] text-[#C32F2F]">
-                    <AlertTriangle size={19} strokeWidth={1.9} />
-                </span>
-
-                <div className="min-w-0">
-                    <h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">
-                        At-Risk Inventory Breakdown
-                    </h2>
-                    <p className="mt-0.5 text-[11px] leading-4 text-[#7A6A84]">
-                        Inventory that may lose value or tie up capital.
-                    </p>
-                </div>
-            </div>
-
-            <div className="grid w-full min-w-0 grid-cols-1 items-center gap-3 py-1 sm:grid-cols-[minmax(0,152px)_minmax(0,1fr)] 2xl:grid-cols-[minmax(0,170px)_minmax(0,1fr)]">
-                <div className="relative mx-auto aspect-square w-full min-w-0 max-w-[170px]">
-                    <div
-                        className="h-full w-full rounded-full"
-                        style={{ background: breakdown.gradient }}
-                    />
-
-                    <div className="absolute inset-[19%] flex min-w-0 flex-col items-center justify-center rounded-full bg-white shadow-[inset_0_0_0_1px_#F1EDF3]">
-                        <span className="max-w-full px-1 text-center text-[clamp(12px,1vw,17px)] font-bold leading-none text-[#23122F]">
-                            {formatCompactPeso(breakdown.total)}
-                        </span>
-                        <span className="mt-2 text-[10px] font-medium text-[#8A7D90]">
-                            At-Risk Value
-                        </span>
-                    </div>
-                </div>
-
-                <div className="min-w-0 divide-y divide-[#EEE8F1]">
-                    {breakdown.rows.map((row) => (
-                        <div
-                            key={row.key}
-                            className="group relative grid min-h-[42px] min-w-0 grid-cols-[10px_minmax(0,1fr)_minmax(72px,125px)_36px] items-center gap-1.5 py-1.5 text-[11px] hover:z-20 focus-within:z-20"
-                            tabIndex={0}
-                            aria-label={`${row.label}: ${OWNER_RISK_DEFINITIONS[row.key]}`}
-                        >
-                            <span
-                                className="h-2.5 w-2.5 rounded-full"
-                                style={{ backgroundColor: row.color }}
-                            />
-
-                            <span className="min-w-0 break-words font-medium text-[#51445A]">
-                                {row.label}
-                            </span>
-
-                            <span className="min-w-0 break-words text-right text-[10px] font-bold tabular-nums text-[#23122F]">
-                                {formatPeso(row.value)}
-                            </span>
-
-                            <span className="text-right font-medium text-[#8A7D90]">
-                                {row.percentage.toFixed(1)}%
-                            </span>
-                            <span role="tooltip" className="pointer-events-none absolute bottom-full right-0 z-30 mb-1 hidden w-[min(300px,80vw)] rounded-xl border border-[#E3D8EA] bg-white px-3 py-2 text-left text-[11px] font-normal leading-4 text-[#51445A] shadow-[0_8px_25px_rgba(43,23,76,0.18)] group-hover:block group-focus:block">
-                                <strong className="block pb-1 text-[#2B174C]">{row.label}</strong>
-                                {OWNER_RISK_DEFINITIONS[row.key]}
-                            </span>
-                        </div>
-                    ))}
-                </div>
-            </div>
-        </section>
-    );
 }

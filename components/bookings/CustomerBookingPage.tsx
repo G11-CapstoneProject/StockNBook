@@ -95,6 +95,15 @@ type SelectedCustomItem = CustomInventoryItem & {
     quantity: number;
 };
 
+type RentalCatalogItem = {
+    id: number;
+    name: string;
+    dailyRate: number;
+    physicallyAvailable: number;
+};
+type SelectedRentalItem = RentalCatalogItem & { quantity: number };
+
+
 type Store = {
     id: number;
     store_name: string;
@@ -109,6 +118,7 @@ type Booking = {
     phone: string;
     email: string;
     date: string;
+    eventEndDate?: string | null;
     eventTime: string;
     eventType: string;
     package: string;
@@ -399,6 +409,24 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
     const [polling, setPolling] = useState(false);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
     const [error, setError] = useState("");
+    const [statementPhone,setStatementPhone] = useState("");
+    const [statement,setStatement] = useState<null | {
+        packageBase:number;rentalItems:{name:string;quantity:number;days:number;dailyRate:number;amount:number}[];
+        deliveryFee:number;setupFee:number;agreedCharges:number;depositRequired:number;depositCollected:number;
+        depositApplied:number;depositRefunded:number;depositHeld:number;claimBalance:number;
+        booking:{agreedPrice:number|null;bookingPayments:number;balance:number};
+    }>(null);
+    const [statementError,setStatementError] = useState("");
+
+    async function fetchStatement(ref:string){
+        if(!/^09\d{9}$/.test(statementPhone.trim())){setStatementError('Enter the phone number used for this booking.');return;}
+        try{
+            const res=await fetch('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({action:'get_public_booking_statement',bookingReference:ref,phone:statementPhone.trim()})});
+            const json=await res.json();if(!res.ok)throw new Error(json.error||'Statement unavailable.');
+            setStatement(json.statement);setStatementError('');
+        }catch(err){setStatementError(err instanceof Error?err.message:'Cannot load statement.');}
+    }
 
     // Cancellation state
     const [showCancelModal, setShowCancelModal] = useState(false);
@@ -425,6 +453,7 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
     function reset() {
         setRefInput(""); setPhoneInput(""); setDateInput("");
         setBooking(null); setPhoneBookings([]); setSelectedBooking(null);
+        setStatement(null);setStatementError('');setStatementPhone('');
         setError(""); setLastUpdated(null);
         setShowCancelModal(false);
         setCancelSuccess(false);
@@ -435,7 +464,7 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
 
     // Core fetch by reference — used for initial search + polling
     const fetchByRef = useCallback(async (ref: string, silent = false) => {
-        if (!silent) setLoading(true);
+        if (!silent) {setLoading(true);setStatement(null);setStatementError('');}
         else setPolling(true);
         try {
             const res = await fetch("/api/bookings", {
@@ -760,8 +789,8 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
                         <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-gray-100 pt-4 text-sm md:grid-cols-4">
                             <DetailItem label="Name" value={displayBooking.name} />
                             <DetailItem
-                                label="Event Date"
-                                value={new Date(displayBooking.date).toLocaleDateString("en-PH", { month: "long", day: "numeric", year: "numeric" })}
+                                label={displayBooking.eventEndDate && new Date(displayBooking.eventEndDate) > new Date(displayBooking.date) ? "Event Dates" : "Event Date"}
+                                value={`${new Date(displayBooking.date).toLocaleDateString("en-PH", { month: "long", day: "numeric", year: "numeric" })}${displayBooking.eventEndDate && new Date(displayBooking.eventEndDate) > new Date(displayBooking.date) ? ` – ${new Date(displayBooking.eventEndDate).toLocaleDateString("en-PH", { month: "long", day: "numeric", year: "numeric" })}` : ""}`}
                                 icon={<CalendarDays size={13} className="text-purple-400" />}
                             />
                             {displayBooking.eventTime && <DetailItem label="Time" value={displayBooking.eventTime} icon={<Clock size={13} className="text-purple-400" />} />}
@@ -769,6 +798,31 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
                             {displayBooking.theme && <DetailItem label="Theme" value={displayBooking.theme} icon={<Palette size={13} className="text-purple-400" />} />}
                             {displayBooking.bookingType === "package" && displayBooking.package && <DetailItem label="Package" value={displayBooking.package} />}
                             {displayBooking.bookingType === "custom" && displayBooking.customOrder && <DetailItem label="Custom Request" value={displayBooking.customOrder} />}
+                        </div>
+
+                        <div className="mt-4 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-4 text-sm">
+                            <h4 className="font-bold text-[#2B174C]">Itemized booking statement</h4>
+                            <p className="mt-1 text-xs text-[#806A8C]">Confirm your booking phone to view charges, payments and refundable deposit details. This is not an official tax invoice.</p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                                <input aria-label="Phone for booking statement" type="tel" value={statementPhone} onChange={e=>setStatementPhone(e.target.value)}
+                                       placeholder="09XXXXXXXXX" className="min-w-0 flex-1 rounded-lg border border-[#E6DDF0] bg-white px-3 py-2"/>
+                                <button type="button" onClick={()=>void fetchStatement(displayBooking.bookingReference!)} className="rounded-lg bg-[#2B174C] px-3 py-2 text-xs font-bold text-white">View breakdown</button>
+                            </div>
+                            {statementError&&<p role="alert" className="mt-2 text-xs text-red-600">{statementError}</p>}
+                            {statement&&<div className="mt-3 space-y-2 border-t pt-3 text-xs text-[#2B174C]">
+                                <div className="flex justify-between"><span>Package</span><strong>₱{Number(statement.packageBase).toFixed(2)}</strong></div>
+                                {statement.rentalItems.map((item,i)=><div key={i} className="flex justify-between gap-2"><span>{item.name} · {item.quantity} × {item.days} day(s)</span><strong>₱{Number(item.amount).toFixed(2)}</strong></div>)}
+                                <div className="flex justify-between"><span>Delivery / pickup</span><strong>₱{Number(statement.deliveryFee).toFixed(2)}</strong></div>
+                                <div className="flex justify-between"><span>Setup</span><strong>₱{Number(statement.setupFee).toFixed(2)}</strong></div>
+                                <div className="flex justify-between border-t pt-2 font-bold"><span>Saved itemized charge subtotal</span><strong>₱{Number(statement.agreedCharges).toFixed(2)}</strong></div>
+                                <div className="flex justify-between"><span>Agreed booking charge</span><strong>{statement.booking.agreedPrice!=null?`₱${Number(statement.booking.agreedPrice).toFixed(2)}`:'Awaiting agreement'}</strong></div>
+                                <div className="flex justify-between"><span>Booking payments recorded</span><strong>₱{Number(statement.booking.bookingPayments).toFixed(2)}</strong></div>
+                                <div className="flex justify-between"><span>Booking balance</span><strong>₱{Number(statement.booking.balance).toFixed(2)}</strong></div>
+                                <div className="flex justify-between"><span>Refundable security deposit required</span><strong>₱{Number(statement.depositRequired).toFixed(2)}</strong></div>
+                                <div className="flex justify-between"><span>Deposit currently held</span><strong>₱{Number(statement.depositHeld).toFixed(2)}</strong></div>
+                                <div className="flex justify-between"><span>Outstanding approved equipment claims</span><strong>₱{Number(statement.claimBalance).toFixed(2)}</strong></div>
+                                <button type="button" onClick={()=>window.print()} className="rounded-lg border border-[#D8CBE7] px-3 py-2">Print statement</button>
+                            </div>}
                         </div>
 
                         {/* Status-based Cancel Section */}
@@ -876,6 +930,17 @@ export default function CustomerBookingPage() {
     const [inventoryCategory, setInventoryCategory] = useState("All");
     const [selectedCustomItems, setSelectedCustomItems] = useState<SelectedCustomItem[]>([]);
     const [customItemQty, setCustomItemQty] = useState<Record<string, number>>({});
+    const [rentalCatalog, setRentalCatalog] = useState<RentalCatalogItem[]>([]);
+    const [rentalBranchId, setRentalBranchId] = useState<number | null>(null);
+    const [rentalCatalogError, setRentalCatalogError] = useState("");
+    const [rentalSearch, setRentalSearch] = useState("");
+    const [selectedRentalItems, setSelectedRentalItems] = useState<SelectedRentalItem[]>([]);
+    const [rentalEndDate, setRentalEndDate] = useState("");
+    const [eventDurationType, setEventDurationType] = useState<"single" | "multiple">("single");
+    const [serviceDelivery, setServiceDelivery] = useState(false);
+    const [serviceSetup, setServiceSetup] = useState(false);
+    const [feePolicy, setFeePolicy] = useState({deliveryFee:0,setupFee:0,refundableDeposit:0,
+        deliveryIncludedPackage:false,setupIncludedPackage:false});
 
     const [name, setName] = useState("");
     const [facebookName, setFacebookName] = useState("");
@@ -895,9 +960,33 @@ export default function CustomerBookingPage() {
     // Default branch for custom bookings
     const defaultBranchId = useMemo(() => {
         if (!store || packages.length === 0) return null;
-        const pkgWithBranch = packages.find((p) => p.branch_id || p.branchId);
+        const chosenPackage = bookingType==='package' && selectedPackage
+            ? packages.find(pkg=>`${pkg.name} - ₱${Number(pkg.package_price||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2})}`===selectedPackage)
+            : null;
+        const pkgWithBranch = chosenPackage || packages.find((p) => p.branch_id || p.branchId);
         return pkgWithBranch?.branch_id || pkgWithBranch?.branchId || null;
-    }, [store, packages]);
+    }, [store, packages, selectedPackage, bookingType]);
+
+    const customBranchId = branchIdFromUrl ? Number(branchIdFromUrl) : (defaultBranchId || rentalBranchId);
+    const eventEndDate = eventDurationType === "multiple" ? rentalEndDate : date;
+    const requestedEventDays = date && eventEndDate && eventEndDate >= date
+        ? Math.round((Date.parse(`${eventEndDate}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`)) / 86400000) + 1
+        : 0;
+    // Invalid or unusually long ranges must never generate a misleading quotation.
+    const rentalDuration = requestedEventDays <= 30 && (eventDurationType === "single" || eventEndDate > date)
+        ? requestedEventDays : 0;
+    const todayForPicker = (() => {
+        const now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        return now.toISOString().slice(0, 10);
+    })();
+    const estimatedDelivery = serviceDelivery && !(bookingType === "package" && feePolicy.deliveryIncludedPackage) ? feePolicy.deliveryFee : 0;
+    const estimatedSetup = serviceSetup && !(bookingType === "package" && feePolicy.setupIncludedPackage) ? feePolicy.setupFee : 0;
+    const estimatedBase = bookingType === "package" ? (packages.find(pkg => `${pkg.name} - ₱${Number(pkg.package_price || 0).toLocaleString("en-PH",{minimumFractionDigits:2,maximumFractionDigits:2})}` === selectedPackage)?.package_price || 0) : 0;
+    // The custom product subtotal is a request estimate; Manager confirms its agreed price.
+    const selectedRentalTotal = selectedRentalItems.reduce(
+        (sum, item) => sum + item.dailyRate * item.quantity * rentalDuration, 0
+    );
 
     const customInventoryCategories = useMemo(() => {
         const uniqueCategories = Array.from(
@@ -945,7 +1034,10 @@ export default function CustomerBookingPage() {
             )
             .join("\n");
 
-        const requestText = customOrder.trim();
+        const rentalText = selectedRentalItems.map(item =>
+            `${item.name} x ${item.quantity} x ${rentalDuration} day(s) = ${peso(item.dailyRate * item.quantity * rentalDuration)}`
+        ).join("\n");
+        const requestText = [rentalText,customOrder.trim()].filter(Boolean).join("\n\n");
 
         if (selectedItemsText && requestText) {
             return `Selected inventory items:\n${selectedItemsText}\n\nAdditional request:\n${requestText}`;
@@ -956,8 +1048,23 @@ export default function CustomerBookingPage() {
         }
 
         return requestText;
-    }, [selectedCustomItems, customOrder]);
+    }, [selectedCustomItems, selectedRentalItems, rentalDuration, customOrder]);
 
+
+    useEffect(() => {
+        if (!store || !customBranchId) return;
+        let cancelled=false;
+        void (async()=>{
+            try {
+                const res=await fetch('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({action:'get_public_booking_fees',storeId:store.id,branchId:customBranchId})});
+                const data=await res.json();
+                if(!cancelled && res.ok && data.policy)setFeePolicy(data.policy);
+            } catch { if(!cancelled)setFeePolicy({deliveryFee:0,setupFee:0,refundableDeposit:0,
+                deliveryIncludedPackage:false,setupIncludedPackage:false}); }
+        })();
+        return ()=>{cancelled=true;};
+    },[store,customBranchId]);
 
     function clearError(key: string) {
         setFieldErrors((prev) => ({ ...prev, [key]: "" }));
@@ -1027,7 +1134,7 @@ export default function CustomerBookingPage() {
         const hasSelection =
             bookingType === "package"
                 ? !!selectedPackage
-                : selectedCustomItems.length > 0 || !!customOrder.trim();
+                : selectedCustomItems.length > 0 || selectedRentalItems.length > 0 || !!customOrder.trim();
 
         if (!hasSelection) {
             errors.selection =
@@ -1037,6 +1144,15 @@ export default function CustomerBookingPage() {
         }
 
         if (bookingType === "custom" && !eventType.trim()) errors.eventType = "Event type is required.";
+        if (selectedRentalItems.length && !customBranchId)
+            errors.selection = "Select a rental branch before booking equipment.";
+        if (eventDurationType === "multiple") {
+            if (!date || !rentalEndDate) errors.rentalEndDate = "Choose both event dates.";
+            else if (rentalEndDate <= date) errors.rentalEndDate = "End date must be after the event start date.";
+            else if (requestedEventDays > 30) errors.rentalEndDate = "Events can span at most 30 calendar days.";
+            else if (new Date(`${rentalEndDate}T12:00:00`) > maxDate)
+                errors.rentalEndDate = "End date is too far ahead. Max 2 years from now.";
+        }
 
         if (!name.trim()) errors.name = "Full name is required.";
         else if (!/^[a-zA-Z\s.'-]+$/.test(name.trim())) errors.name = "Name should contain letters only.";
@@ -1130,6 +1246,30 @@ export default function CustomerBookingPage() {
 
     useEffect(() => {
         if (!store) return;
+        let cancelled=false;
+        (async () => {
+            try {
+                const response=await fetch("/api/bookings",{
+                    method:"POST",headers:{"Content-Type":"application/json"},
+                    body:JSON.stringify({action:"get_public_rental_catalog",storeId:store.id,
+                        ...(branchIdFromUrl ? {branchId:Number(branchIdFromUrl)} :
+                            defaultBranchId ? {branchId:defaultBranchId} : {})})
+                });
+                const data=await response.json();
+                if(!response.ok)throw new Error(data.error||"Unable to load rental equipment.");
+                if(cancelled)return;
+                setRentalCatalog(data.equipment||[]);
+                setRentalBranchId(Number(data.branchId));
+                setSelectedRentalItems([]);
+                setRentalCatalogError("");
+            }catch(error){if(!cancelled){setRentalCatalog([]);setSelectedRentalItems([]);
+                setRentalCatalogError(error instanceof Error ? error.message : "Rental equipment unavailable.");}}
+        })();
+        return ()=>{cancelled=true;};
+    },[store,branchIdFromUrl,defaultBranchId]);
+
+    useEffect(() => {
+        if (!store) return;
 
         const storeId = store.id;
 
@@ -1198,7 +1338,8 @@ export default function CustomerBookingPage() {
 
     function resetForm() {
         setBookingType("package");
-        setSelectedPackage(""); setCustomOrder(""); setSelectedCustomItems([]); setCustomItemQty({}); setName(""); setFacebookName("");
+        setSelectedPackage(""); setCustomOrder(""); setSelectedCustomItems([]); setCustomItemQty({});
+        setSelectedRentalItems([]); setRentalEndDate(""); setEventDurationType("single"); setServiceDelivery(false); setServiceSetup(false); setName(""); setFacebookName("");
         setPhone(""); setEmail(""); setDate(""); setEventTime("");
         setEventType(""); setTheme(""); setVenue(""); setNotes("");
     }
@@ -1219,7 +1360,7 @@ export default function CustomerBookingPage() {
         const selectedBranchId =
             bookingType === "package"
                 ? selectedPackageData?.branch_id || selectedPackageData?.branchId || null
-                : defaultBranchId; // default branch for custom bookings
+                : customBranchId; // same branch as selected rental equipment
 
         const newBooking = {
             bookingReference: reference,
@@ -1249,6 +1390,12 @@ export default function CustomerBookingPage() {
                     storeId: store.id,
                     branchId: selectedBranchId,
                     ...newBooking,
+                    rentalItems: selectedRentalItems.map(item => ({equipmentId:item.id,quantity:item.quantity,expectedDailyRate:item.dailyRate})),
+                    eventEndDate: eventEndDate || undefined,
+                    rentalEndDate: selectedRentalItems.length ? eventEndDate : undefined,
+                    requestedServices:{delivery:serviceDelivery,setup:serviceSetup},
+                    expectedFeePolicy:feePolicy,
+                    expectedPackagePrice:bookingType==='package'?Number(selectedPackageData?.package_price||0):undefined,
                     bookingItems:
                         bookingType === "custom"
                             ? selectedCustomItems.map((item) => ({
@@ -1694,6 +1841,7 @@ export default function CustomerBookingPage() {
                                             {fieldErrors.selection && (
                                                 <p className="mt-1.5 text-xs font-medium text-red-500">{fieldErrors.selection}</p>
                                             )}
+
                                         </>
                                     ) : (
                                         <>
@@ -2076,51 +2224,63 @@ export default function CustomerBookingPage() {
                                         error={fieldErrors.email}
                                     />
 
-                                    {/* Event Date */}
-                                    <div>
-                                        <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
-                                            Event date
-                                        </label>
-                                        <div className="relative">
-                                            <CalendarDays size={17} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]" />
-                                            <input
-                                                type="date"
-                                                value={date}
-                                                onChange={(e) => { setDate(e.target.value); clearError("date"); }}
-                                                className={`h-[48px] w-full rounded-xl border bg-[#FFFDF8] pl-11 pr-3 text-sm outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${
-                                                    date ? "text-[#1A1220]" : "text-[#9B8AAA]"
-                                                } ${
-                                                    fieldErrors.date
-                                                        ? "border-[#F2C4C4] bg-[#FFF0F0]"
-                                                        : "border-[#E6DDF0]"
-                                                }`}
-                                            />
+                                    {/* Shared event schedule for packages and custom requests. */}
+                                    <div className="md:col-span-2 rounded-2xl border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                        <div className="mb-3 flex items-center gap-2">
+                                            <CalendarDays size={18} className="text-[#4E2C66]" />
+                                            <div>
+                                                <h3 className="text-sm font-bold text-[#2B174C]">Event schedule</h3>
+                                                <p className="mt-1 text-xs text-[#806A8C]">Select your event dates. Rental equipment uses these dates to calculate the estimated charge.</p>
+                                            </div>
                                         </div>
-                                        {fieldErrors.date && (
-                                            <p className="mt-1.5 text-xs font-medium text-red-500">{fieldErrors.date}</p>
-                                        )}
+                                        <div className="mb-4 flex flex-wrap gap-2" role="group" aria-label="Event duration">
+                                            <button type="button" aria-pressed={eventDurationType === "single"}
+                                                    onClick={() => { setEventDurationType("single"); setRentalEndDate(""); clearError("rentalEndDate"); }}
+                                                    className={`rounded-xl border px-4 py-2.5 text-sm font-semibold transition ${eventDurationType === "single" ? "border-[#2B174C] bg-[#2B174C] text-white" : "border-[#D8CBE7] bg-white text-[#2B174C] hover:bg-[#F7F1FF]"}`}>
+                                                One-day event
+                                            </button>
+                                            <button type="button" aria-pressed={eventDurationType === "multiple"}
+                                                    onClick={() => { setEventDurationType("multiple"); setRentalEndDate(prev => prev > date ? prev : ""); clearError("rentalEndDate"); }}
+                                                    className={`rounded-xl border px-4 py-2.5 text-sm font-semibold transition ${eventDurationType === "multiple" ? "border-[#2B174C] bg-[#2B174C] text-white" : "border-[#D8CBE7] bg-white text-[#2B174C] hover:bg-[#F7F1FF]"}`}>
+                                                Multi-day event
+                                            </button>
+                                        </div>
+                                        <div className="grid gap-4 sm:grid-cols-2">
+                                            <div>
+                                                <label htmlFor="event-start-date" className="mb-2 block text-xs font-semibold text-[#2B174C]">{eventDurationType === "multiple" ? "Event start date" : "Event date"}</label>
+                                                <input id="event-start-date" type="date" min={todayForPicker} value={date}
+                                                       onChange={e => { const next = e.target.value; setDate(next); if (rentalEndDate && rentalEndDate <= next) setRentalEndDate(""); clearError("date"); clearError("rentalEndDate"); }}
+                                                       className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${fieldErrors.date ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
+                                                {fieldErrors.date && <p className="mt-1 text-xs text-red-600">{fieldErrors.date}</p>}
+                                            </div>
+                                            {eventDurationType === "multiple" && (
+                                                <div>
+                                                    <label htmlFor="event-end-date" className="mb-2 block text-xs font-semibold text-[#2B174C]">Event end date</label>
+                                                    <input id="event-end-date" type="date" min={date ? new Date(Date.parse(`${date}T00:00:00Z`) + 86400000).toISOString().slice(0, 10) : todayForPicker}
+                                                           value={rentalEndDate}
+                                                           max={date ? new Date(Date.parse(`${date}T00:00:00Z`) + 29 * 86400000).toISOString().slice(0, 10) : undefined}
+                                                           onChange={e => { setRentalEndDate(e.target.value); clearError("rentalEndDate"); }}
+                                                           className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${fieldErrors.rentalEndDate ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
+                                                    {fieldErrors.rentalEndDate && <p className="mt-1 text-xs text-red-600">{fieldErrors.rentalEndDate}</p>}
+                                                </div>
+                                            )}
+                                            <div>
+                                                <label htmlFor="event-start-time" className="mb-2 block text-xs font-semibold text-[#2B174C]">Event time</label>
+                                                <input id="event-start-time" type="time" value={eventTime}
+                                                       onChange={e => { setEventTime(e.target.value); clearError("eventTime"); }}
+                                                       className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${fieldErrors.eventTime ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
+                                                {fieldErrors.eventTime && <p className="mt-1 text-xs text-red-600">{fieldErrors.eventTime}</p>}
+                                            </div>
+                                        </div>
+                                        <p aria-live="polite" className="mt-3 text-xs font-medium text-[#5F4E75]">
+                                            {!date ? "Choose your event date to calculate the rental duration." : eventDurationType === "multiple" && !rentalEndDate
+                                                ? "Choose the end date for your multi-day event."
+                                                : requestedEventDays > 30 ? "The maximum event period is 30 days."
+                                                    : rentalDuration > 0 ? `${rentalDuration} ${rentalDuration === 1 ? "day" : "days"} selected for the event and rental estimate.`
+                                                        : "Choose valid event dates."}
+                                        </p>
                                     </div>
 
-                                    {/* Event Time */}
-                                    <div>
-                                        <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
-                                            Event time
-                                        </label>
-                                        <input
-                                            type="time"
-                                            value={eventTime}
-                                            onChange={(e) => { setEventTime(e.target.value); clearError("eventTime"); }}
-                                            placeholder="--:--"
-                                            className={`h-[48px] w-full rounded-xl border bg-[#FFFDF8] px-3 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${
-                                                fieldErrors.eventTime
-                                                    ? "border-[#F2C4C4] bg-[#FFF0F0]"
-                                                    : "border-[#E6DDF0]"
-                                            } placeholder:text-[#9B8AAA]`}
-                                        />
-                                        {fieldErrors.eventTime && (
-                                            <p className="mt-1.5 text-xs font-medium text-red-500">{fieldErrors.eventTime}</p>
-                                        )}
-                                    </div>
                                 </div>
 
                                 <div className="mt-6 grid gap-5 md:grid-cols-2">
@@ -2140,6 +2300,57 @@ export default function CustomerBookingPage() {
                                         placeholder="Home, restaurant, event hall..."
                                         error={fieldErrors.venue}
                                     />
+                                </div>
+
+                                {/* Rental equipment comes after event scheduling for both booking types. */}
+                                <div className="mt-6 rounded-2xl border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                    <h3 className="text-sm font-bold text-[#2B174C]">{bookingType === "package" ? "Additional rental equipment (optional)" : "Rental equipment (optional)"}</h3>
+                                    <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
+                                        {bookingType === "package"
+                                            ? "Add equipment beyond what your package includes. Package inclusions stay in the package price."
+                                            : "Choose tables, chairs, tents, or other equipment for your event."}
+                                        {" "}Rates are per item, per day. Equipment is reserved after booking confirmation.
+                                    </p>
+                                    <p className="mt-2 text-xs font-medium text-[#4E2C66]" aria-live="polite">
+                                        {!date ? "Select your event date in Event Schedule above to see the rental estimate."
+                                            : eventDurationType === "multiple" && !rentalEndDate ? "Select the event end date above to calculate multi-day rentals."
+                                                : rentalDuration > 0 ? `Rental duration: ${rentalDuration} ${rentalDuration === 1 ? "day" : "days"}.`
+                                                    : "Choose valid event dates above."}
+                                    </p>
+                                    <input type="search" value={rentalSearch} onChange={e => setRentalSearch(e.target.value)}
+                                           placeholder="Search rental equipment..." aria-label="Search rental equipment"
+                                           className="mt-3 h-11 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm outline-none focus:border-[#2B174C]" />
+                                    {rentalCatalogError && <p className="mt-2 text-xs text-red-600">{rentalCatalogError}</p>}
+                                    <div className="mt-2 max-h-52 space-y-2 overflow-y-auto">
+                                        {rentalCatalog.filter(item => item.name.toLowerCase().includes(rentalSearch.toLowerCase())).map(item => {
+                                            const chosen = selectedRentalItems.find(x => x.id === item.id);
+                                            return <div key={item.id} className="flex items-center justify-between gap-2 rounded-lg border border-[#E6DDF0] bg-white p-2">
+                                                <div className="min-w-0 text-xs">
+                                                    <p className="font-semibold text-[#2B174C]">{item.name}</p>
+                                                    <p className="text-[#806A8C]">{peso(item.dailyRate)} / item / day · {item.physicallyAvailable} physically ready</p>
+                                                </div>
+                                                <div className="flex shrink-0 items-center gap-2">
+                                                    <input type="number" aria-label={`Quantity of ${item.name}`} min={1} max={item.physicallyAvailable}
+                                                           value={chosen?.quantity || 1}
+                                                           onChange={e => {
+                                                               const quantity = Math.max(1, Math.min(item.physicallyAvailable, Number(e.target.value) || 1));
+                                                               setSelectedRentalItems(prev => prev.some(x => x.id === item.id) ? prev.map(x => x.id === item.id ? {...x, quantity} : x) : [...prev, {...item, quantity}]);
+                                                           }} className="w-16 rounded-lg border border-[#E6DDF0] p-1.5 text-sm" />
+                                                    <button type="button" onClick={() => {
+                                                        setSelectedRentalItems(prev => chosen ? prev.filter(x => x.id !== item.id) : [...prev, {...item, quantity:1}]);
+                                                        clearError("selection");
+                                                    }} className="rounded-lg border border-[#E6DDF0] px-2 py-1.5 text-xs font-semibold text-[#2B174C]">
+                                                        {chosen ? "Remove" : "Add"}
+                                                    </button>
+                                                </div>
+                                            </div>;
+                                        })}
+                                        {!rentalCatalog.length && !rentalCatalogError && <p className="py-2 text-xs text-[#806A8C]">No priced rental equipment in this branch yet.</p>}
+                                    </div>
+                                    {selectedRentalItems.length > 0 && <div className="mt-3 border-t border-[#E6DDF0] pt-3 text-sm text-[#2B174C]">
+                                        <p className="font-semibold">Rental subtotal: {peso(selectedRentalTotal)}</p>
+                                        <p className="mt-1 text-xs text-[#7A6A84]">The final price and availability are confirmed by the business before approval.</p>
+                                    </div>}
                                 </div>
 
                                 {/* Theme */}
@@ -2308,8 +2519,9 @@ export default function CustomerBookingPage() {
                                             )}
                                             {date && (
                                                 <SummaryItem
-                                                    label="Date"
-                                                    value={date}
+                                                    label={eventDurationType === "multiple" ? "Event dates" : "Date"}
+                                                    value={eventDurationType === "multiple" && eventEndDate && eventEndDate >= date
+                                                        ? `${date} to ${eventEndDate} (${rentalDuration} days)` : date}
                                                 />
                                             )}
                                             {eventTime && (
@@ -2320,6 +2532,21 @@ export default function CustomerBookingPage() {
                                             )}
                                         </div>
 
+                                        <div className="mt-5 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-4 text-xs text-[#2B174C]">
+                                            <h4 className="mb-2 text-sm font-bold">Itemized booking quotation · Estimate</h4>
+                                            {bookingType==='package' && <div className="flex justify-between py-1"><span>Package (included items)</span><strong>{peso(Number(estimatedBase))}</strong></div>}
+                                            {bookingType==='custom' && <div className="flex justify-between py-1"><span>Requested sales items (estimate)</span><strong>{peso(selectedCustomTotal)}</strong></div>}
+                                            {selectedRentalItems.length > 0 && rentalDuration === 0 && <p className="py-2 text-xs text-[#806A8C]">Choose your event dates above to calculate the rental charges.</p>}
+                                            {selectedRentalItems.map(item=><div key={item.id} className="flex justify-between gap-3 py-1"><span>{item.name} · {item.quantity} × {rentalDuration} day(s)</span><strong>{peso(item.dailyRate*item.quantity*rentalDuration)}</strong></div>)}
+                                            <div className="mt-2 border-t border-[#E6DDF0] pt-2 space-y-2">
+                                                <label className="flex justify-between gap-2"><span><input type="checkbox" checked={serviceDelivery} onChange={e=>setServiceDelivery(e.target.checked)}/> Delivery & pickup</span><strong>{bookingType==='package'&&feePolicy.deliveryIncludedPackage?'Included':peso(feePolicy.deliveryFee)}</strong></label>
+                                                <label className="flex justify-between gap-2"><span><input type="checkbox" checked={serviceSetup} onChange={e=>setServiceSetup(e.target.checked)}/> Setup assistance</span><strong>{bookingType==='package'&&feePolicy.setupIncludedPackage?'Included':peso(feePolicy.setupFee)}</strong></label>
+                                            </div>
+                                            <div className="mt-2 flex justify-between border-t border-[#E6DDF0] pt-2 font-bold"><span>Estimated booking charge</span><span>{peso(estimatedBase+(bookingType==='custom'?selectedCustomTotal:0)+selectedRentalTotal+estimatedDelivery+estimatedSetup)}</span></div>
+                                            <div className="mt-2 flex justify-between"><span>Refundable security deposit (held separately)</span><strong>{peso(feePolicy.refundableDeposit)}</strong></div>
+                                            <p className="mt-2 text-[#806A8C]">Booking charges, required down payment and refundable deposit are distinct. Final custom prices and availability require business confirmation. This quotation is not a tax invoice.</p>
+                                            <button type="button" onClick={()=>window.print()} className="mt-3 rounded-lg border border-[#D8CBE7] px-3 py-2 font-semibold">Print quotation</button>
+                                        </div>
                                         <div className="mt-5 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3">
                                             <p className="text-xs font-semibold text-[#1A1220]">
                                                 After submission

@@ -296,6 +296,200 @@ async function findPackageSnapshot(connection, options) {
     return snapshotFromPackagePayload(packageInput);
 }
 
+// Rental equipment is stored separately from consumable Sales booking_items.
+// Quotes come from the database (never client-supplied prices). They are NOT revenue
+// until Staff completes the physical rental and the allocation is returned.
+function rentalDate(value, label) {
+    const text = String(value ?? "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text) ||
+        new Date(`${text}T00:00:00Z`).toISOString().slice(0, 10) !== text) {
+        throw new Error(`${label} must be a valid YYYY-MM-DD date.`);
+    }
+    return text;
+}
+function rentalDays(from, to) {
+    const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000) + 1;
+    if (days < 1 || days > 30) throw new Error("Rental period must be from 1 to 30 calendar days.");
+    return days;
+}
+function rentalMoneyCents(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0 || !Number.isSafeInteger(Math.round(n * 100)))
+        throw new Error("Invalid rental price in catalog.");
+    return Math.round(n * 100);
+}
+function parseRentalSelection(raw) {
+    if (raw == null) return [];
+    if (!Array.isArray(raw) || raw.length > 30) throw new Error("Select at most 30 rental equipment types.");
+    const seen = new Set();
+    return raw.map(line => {
+        const equipmentId = Number(line?.equipmentId);
+        const quantity = Number(line?.quantity);
+        if (!Number.isSafeInteger(equipmentId) || equipmentId <= 0 ||
+            !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 100000 || seen.has(equipmentId))
+            throw new Error("Rental equipment selections must have unique IDs and valid quantities.");
+        seen.add(equipmentId);
+        return {equipmentId, quantity,expectedDailyRate:line.expectedDailyRate};
+    });
+}
+async function saveRentalRequestLines(connection,{bookingId,storeId,branchId,reference,startDate,endDate,lines}) {
+    if (!lines.length) return {amount:0,count:0};
+    const days = rentalDays(startDate,endDate);
+    let totalCents=0;
+    // Read active catalog entries server-side; do not trust client-supplied amounts.
+    for (const line of [...lines].sort((a,b)=>a.equipmentId-b.equipmentId)) {
+        const [equipment] = await connection.execute(`SELECT id,name,rental_rate_per_day,total_units,maintenance_units,missing_units
+                                                      FROM rental_equipment WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL LIMIT 1`,
+            [line.equipmentId,storeId,branchId]);
+        if (!equipment.length) throw new Error("Selected rental equipment is unavailable in this branch.");
+        const e=equipment[0];
+        if (Number(e.total_units)-Number(e.maintenance_units)-Number(e.missing_units)<line.quantity)
+            throw new Error(`${e.name}: selected quantity exceeds physical rental stock.`);
+        const cents=rentalMoneyCents(e.rental_rate_per_day);
+        if(line.expectedDailyRate!==undefined&&rentalMoneyCents(line.expectedDailyRate)!==cents)
+            throw rentalError(`${e.name}: the daily rental rate changed. Refresh the page before requesting this booking.`);
+        if (cents<=0) throw new Error(`${e.name}: daily rental price has not been set.`);
+        const lineCents=cents*line.quantity*days;
+        if (!Number.isSafeInteger(lineCents)) throw new Error("Rental quotation is too large.");
+        totalCents+=lineCents;
+        await connection.execute(`INSERT INTO booking_rental_items
+                                  (booking_id,store_id,branch_id,booking_reference,equipment_id,equipment_name,quantity,start_date,end_date,
+                                   billable_days,daily_rate_snapshot,agreed_line_total)
+                                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [bookingId,storeId,branchId,reference,line.equipmentId,e.name,line.quantity,startDate,endDate,days,cents/100,lineCents/100]);
+    }
+    if (!Number.isSafeInteger(totalCents)) throw new Error("Rental quotation total is too large.");
+    return {amount:totalCents/100,count:lines.length};
+}
+async function rentalQuoteTotal(connection,bookingId,storeId,branchId) {
+    const [rows]=await connection.execute(`SELECT COALESCE(SUM(agreed_line_total),0) AS rentalTotal,COUNT(*) AS lineCount
+                                           FROM booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
+    return {total:Number(rows[0].rentalTotal),count:Number(rows[0].lineCount)};
+}
+function rentalError(message) {const e=new Error(message);e.rentalValidation=true;return e;}
+// The equipment row lock serializes reservations of one equipment type, including
+// overlapping dates and different booking references. Everything runs in the
+// same transaction as the booking's Confirmed/Cancelled status transition.
+async function confirmRentalAllocations(connection,{bookingId,storeId,branchId,price}) {
+    const [lines]=await connection.execute(`SELECT equipment_id AS equipmentId,quantity,
+                                                   DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
+                                                   DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate,
+                                                   booking_reference AS bookingReference,agreed_line_total AS lineTotal
+                                            FROM booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=? ORDER BY equipment_id FOR UPDATE`,
+        [bookingId,storeId,branchId]);
+    if(!lines.length)return;
+    const agreed=Number(price);
+    const minimum=lines.reduce((sum,l)=>sum+Math.round(Number(l.lineTotal)*100),0)/100;
+    if(!Number.isFinite(agreed)||agreed<minimum-0.005)
+        throw rentalError(`Set an agreed booking price of at least ₱${minimum.toFixed(2)} before confirming this rental.`);
+    for(const line of lines) {
+        const [eq]=await connection.execute(`SELECT id,total_units,maintenance_units,missing_units FROM rental_equipment
+                                             WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL FOR UPDATE`,
+            [line.equipmentId,storeId,branchId]);
+        if(!eq.length)throw rentalError("Rental equipment was archived. Update the request before confirming.");
+        const from=String(line.startDate).slice(0,10),to=String(line.endDate).slice(0,10);
+        const [existing]=await connection.execute(`SELECT quantity,
+                                                          DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate,status
+                                                   FROM rental_booking_allocations WHERE store_id=? AND branch_id=? AND equipment_id=?
+                                                                                     AND status IN ('reserved','checked_out') AND start_date<=? AND (end_date>=? OR status='checked_out')`,
+            [storeId,branchId,line.equipmentId,to,from]);
+        const dayParts=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+        const part=type=>dayParts.find(x=>x.type===type)?.value||'';
+        const today=`${part('year')}-${part('month')}-${part('day')}`;
+        const events=new Map();
+        for(const a of existing){
+            const first=String(a.startDate)>from?String(a.startDate):from;
+            const lastDate=a.status==='checked_out'&&String(a.endDate)<today?today:String(a.endDate);
+            const last=lastDate<to?lastDate:to;
+            if(first>last)continue;
+            events.set(first,(events.get(first)||0)+Number(a.quantity));
+            const following=new Date(Date.parse(`${last}T00:00:00Z`)+86400000).toISOString().slice(0,10);
+            events.set(following,(events.get(following)||0)-Number(a.quantity));
+        }
+        let active=0,peak=0;
+        for(const [,change] of [...events].sort(([a],[b])=>a.localeCompare(b))) {active+=change;peak=Math.max(peak,active);}
+        const physical=Number(eq[0].total_units)-Number(eq[0].maintenance_units)-Number(eq[0].missing_units);
+        if(physical-peak<Number(line.quantity))throw rentalError(`Not enough rental equipment for ${from} to ${to}. Choose another date or reduce quantity.`);
+        await connection.execute(`INSERT INTO rental_booking_allocations
+                                  (store_id,branch_id,booking_reference,equipment_id,quantity,start_date,end_date,status,rental_charge_total)
+                                  VALUES (?,?,?,?,?,?,?,'reserved',?)`,
+            [storeId,branchId,line.bookingReference,line.equipmentId,line.quantity,from,to,line.lineTotal]);
+    }
+}
+async function cancelRentalAllocations(connection,{bookingId,storeId,branchId}) {
+    const [rows]=await connection.execute(`SELECT a.id,a.status FROM rental_booking_allocations a
+                                                                         JOIN booking_rental_items r ON r.booking_reference=a.booking_reference AND r.equipment_id=a.equipment_id
+        AND r.store_id=a.store_id AND r.branch_id=a.branch_id
+                                           WHERE r.booking_id=? AND a.store_id=? AND a.branch_id=? FOR UPDATE`,[bookingId,storeId,branchId]);
+    if(rows.some(r=>r.status==='checked_out'))
+        throw rentalError("Receive the checked-out rental equipment before cancelling this booking.");
+    if(rows.some(r=>r.status==='returned'))
+        throw rentalError("Returned rentals already contain fulfilled charges; contact an administrator for refund adjustments.");
+    for(const row of rows)if(row.status==='reserved')
+        await connection.execute("UPDATE rental_booking_allocations SET status='cancelled' WHERE id=?",[row.id]);
+}
+async function requireRentalReturnBeforeCompletion(connection,{bookingId,storeId,branchId}) {
+    const [rows]=await connection.execute(`SELECT a.status FROM rental_booking_allocations a
+                                                                    JOIN booking_rental_items r ON r.booking_reference=a.booking_reference AND r.equipment_id=a.equipment_id
+        AND r.store_id=a.store_id AND r.branch_id=a.branch_id
+                                           WHERE r.booking_id=? AND a.store_id=? AND a.branch_id=?`,[bookingId,storeId,branchId]);
+    if(rows.some(x=>x.status!=='returned'))throw rentalError("Receive and account for rented equipment before completing the booking.");
+    const [requests]=await connection.execute(`SELECT COUNT(*) AS total FROM booking_rental_items
+                                               WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
+    if(Number(requests[0].total)>rows.length)throw rentalError("Rental allocation is missing. Confirm the booking correctly before completion.");
+}
+
+
+// Booking billing: prices come from store policy; a deposit is a refundable LIABILITY.
+function financeCurrency(value,label='Amount') {
+    const raw=Number(value);
+    if(!Number.isFinite(raw)||raw<0||raw>100000000||Math.abs(raw*100-Math.round(raw*100))>0.00001)
+        throw rentalError(`${label} must be a non-negative amount with at most two decimal places.`);
+    return Math.round(raw*100)/100;
+}
+function financePositive(value,label='Amount') {
+    const n=financeCurrency(value,label);if(n<=0)throw rentalError(`${label} must be positive.`);return n;
+}
+async function getFeePolicy(db,storeId,branchId){
+    const [rows]=await db.execute(`SELECT p.* FROM booking_fee_policies p
+                                                       JOIN branches br ON br.id=p.branch_id AND br.store_id=p.store_id
+                                   WHERE p.store_id=? AND p.branch_id=? LIMIT 1`,[storeId,branchId]);
+    const row=rows[0]||{};
+    return {deliveryFee:Number(row.delivery_fee||0),setupFee:Number(row.setup_fee||0),
+        refundableDeposit:Number(row.refundable_deposit||0),
+        deliveryIncludedPackage:!!row.delivery_included_package,
+        setupIncludedPackage:!!row.setup_included_package};
+}
+async function getBookingStatement(db,bookingId,storeId,branchId){
+    const [bs]=await db.execute(`SELECT id,booking_reference AS reference,name,phone,booking_type AS bookingType,
+                                        package_name AS packageName,DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate,
+                                        status,agreed_price AS agreedPrice,package_price AS packagePrice,
+                                        required_down_payment AS downPayment,amount_paid AS bookingPayments,balance
+                                 FROM bookings WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,[bookingId,storeId,branchId]);
+    if(!bs.length)throw rentalError('Booking not found in assigned branch.');
+    const b=bs[0];
+    const [d]=await db.execute('SELECT * FROM booking_financial_details WHERE booking_id=?',[bookingId]);
+    const [items]=await db.execute(`SELECT equipment_name AS name,quantity,billable_days AS days,
+                                           daily_rate_snapshot AS dailyRate,agreed_line_total AS amount FROM booking_rental_items
+                                    WHERE booking_id=? AND store_id=? AND branch_id=? ORDER BY id`,[bookingId,storeId,branchId]);
+    const [claims]=await db.execute(`SELECT id,source_type AS sourceType,source_record_id AS sourceId,
+                                            quantity,reason,approved_amount AS amount,amount_paid AS amountPaid,deposit_applied AS depositApplied,status
+                                     FROM booking_customer_claims WHERE booking_id=? AND store_id=? AND branch_id=? ORDER BY id`,[bookingId,storeId,branchId]);
+    const fin=d[0]||{};
+    const numbers={packageBase:Number(fin.package_base??b.packagePrice??0),rentalSubtotal:Number(fin.rental_subtotal??0),
+        deliveryFee:Number(fin.delivery_fee||0),setupFee:Number(fin.setup_fee||0),
+        depositRequired:Number(fin.refundable_deposit_required||0),depositCollected:Number(fin.deposit_collected||0),
+        depositApplied:Number(fin.deposit_applied||0),depositRefunded:Number(fin.deposit_refunded||0)};
+    const agreedCharges=numbers.packageBase+numbers.rentalSubtotal+numbers.deliveryFee+numbers.setupFee;
+    const claimBalance=claims.reduce((sum,c)=>sum+Math.max(0,Number(c.amount)-Number(c.amountPaid)-Number(c.depositApplied)),0);
+    return {booking:{id:b.id,reference:b.reference,name:b.name,eventDate:b.eventDate,status:b.status,
+            bookingType:b.bookingType,packageName:b.packageName,agreedPrice:b.agreedPrice,
+            downPayment:Number(b.downPayment||0),bookingPayments:Number(b.bookingPayments||0),balance:Number(b.balance||0)},
+        ...numbers,agreedCharges,claimBalance,depositHeld:Math.max(0,numbers.depositCollected-numbers.depositApplied-numbers.depositRefunded),
+        rentalItems:items.map(x=>({...x,quantity:Number(x.quantity),days:Number(x.days),dailyRate:Number(x.dailyRate),amount:Number(x.amount)})),
+        claims:claims.map(x=>({...x,amount:Number(x.amount),amountPaid:Number(x.amountPaid),depositApplied:Number(x.depositApplied)}))};
+}
+
 function getBookingItemsInput(body) {
     const rawItems =
         body.bookingItems ||
@@ -1213,7 +1407,7 @@ const totalPriceExpr = `
         WHEN LOWER(COALESCE(bookings.booking_type, '')) LIKE '%custom%'
              OR COALESCE(bookings.custom_order, '') <> ''
         THEN COALESCE(NULLIF(bookings.agreed_price, 0), 0)
-        ELSE ${packagePriceExpr}
+        ELSE COALESCE(NULLIF(bookings.agreed_price,0),${packagePriceExpr})
     END
 `;
 
@@ -1239,6 +1433,7 @@ function bookingSelectFields() {
         bookings.phone,
         bookings.email,
         bookings.event_date             AS date,
+        bookings.event_end_date         AS eventEndDate,
         bookings.event_time             AS eventTime,
         bookings.event_type             AS eventType,
         bookings.package_name           AS package,
@@ -1296,6 +1491,7 @@ function bookingPageSelectFields() {
         bookings.phone,
         bookings.email,
         bookings.event_date                     AS date,
+        bookings.event_end_date                 AS eventEndDate,
         bookings.event_time                     AS eventTime,
         bookings.event_type                     AS eventType,
         bookings.event_type                     AS eventName,
@@ -1379,6 +1575,46 @@ exports.handler = async (event) => {
 
         connection = await dbPool.getConnection();
 
+        // PUBLIC: limited rental catalog for the selected storefront/branch.
+        // Read-only; prices are reloaded from the DB on submit.
+        if (action === "get_public_rental_catalog") {
+            const targetStoreId=Number(body.storeId ?? body.store_id);
+            const requestedBranch=Number(body.branchId ?? body.branch_id ?? 0);
+            if(!Number.isSafeInteger(targetStoreId)||targetStoreId<=0||
+                (requestedBranch && (!Number.isSafeInteger(requestedBranch)||requestedBranch<=0)))
+                return response(400,{error:"Valid store and branch IDs are required."});
+            const [branches]=await connection.execute(`SELECT id,branch_name AS branchName FROM branches
+                                                       WHERE store_id=? ${requestedBranch?'AND id=?':''} ORDER BY id LIMIT 50`,
+                [targetStoreId,...(requestedBranch?[requestedBranch]:[])]);
+            if(!branches.length)return response(404,{error:"Store branch not found."});
+            const chosen=Number(requestedBranch||branches[0].id);
+            const [items]=await connection.execute(`SELECT id,name,rental_rate_per_day AS dailyRate,
+                                                           total_units AS totalUnits,maintenance_units AS maintenanceUnits,missing_units AS missingUnits
+                                                    FROM rental_equipment WHERE store_id=? AND branch_id=? AND archived_at IS NULL
+                                                                            AND rental_rate_per_day>0 AND total_units>maintenance_units+missing_units ORDER BY name LIMIT 200`,
+                [targetStoreId,chosen]);
+            return response(200,{branchId:chosen,branchName:branches[0].branchName,
+                equipment:items.map(e=>({id:Number(e.id),name:e.name,dailyRate:Number(e.dailyRate),
+                    physicallyAvailable:Number(e.totalUnits)-Number(e.maintenanceUnits)-Number(e.missingUnits)}))});
+        }
+
+        if (action === 'get_public_booking_fees') {
+            const sid=Number(body.storeId||body.store_id),bid=Number(body.branchId||body.branch_id);
+            if(!Number.isSafeInteger(sid)||sid<=0||!Number.isSafeInteger(bid)||bid<=0)
+                return response(400,{error:'Store and branch required.'});
+            const [br]=await connection.execute('SELECT id FROM branches WHERE id=? AND store_id=?',[bid,sid]);
+            if(!br.length)return response(404,{error:'Branch not found.'});
+            return response(200,{policy:await getFeePolicy(connection,sid,bid)});
+        }
+        if (action === 'get_public_booking_statement') {
+            // Booking reference AND matching contact details are required to access customer finances.
+            const ref=String(body.bookingReference||'').trim(),phone=String(body.phone||'').trim();
+            if(!ref||!phone)return response(400,{error:'Booking reference and phone required.'});
+            const [bs]=await connection.execute('SELECT id,store_id,branch_id FROM bookings WHERE booking_reference=? AND phone=? LIMIT 1',[ref,phone]);
+            if(!bs.length)return response(404,{error:'Booking not found.'});
+            return response(200,{statement:await getBookingStatement(connection,bs[0].id,bs[0].store_id,bs[0].branch_id)});
+        }
+
         // ── PUBLIC: create_booking ────────────────────────────────────────────
         if (action === "create_booking") {
             const {
@@ -1412,6 +1648,35 @@ exports.handler = async (event) => {
             const targetStoreId = Number(storeId || store_id);
             const targetBranchId = branchId || branch_id ? Number(branchId || branch_id) : null;
 
+            let rentalSelections;
+            try {rentalSelections=parseRentalSelection(body.rentalItems);}
+            catch(error) {return response(400,{error:error.message});}
+            if(rentalSelections.length && (!targetBranchId || !Number.isSafeInteger(targetBranchId) || targetBranchId<=0))
+                return response(400,{error:"Select a valid rental branch before booking equipment."});
+            // Event start/end belong to the booking even when no equipment is rented.
+            // Keep the legacy rentalEndDate input accepted for older portal clients.
+            const requestedStart = date || event_date;
+            const requestedEnd = body.eventEndDate || body.event_end_date || body.rentalEndDate || requestedStart;
+            let finalEventEndDate = null;
+            try {
+                if (requestedStart) {
+                    const validStart = rentalDate(requestedStart, 'Event start date');
+                    finalEventEndDate = rentalDate(requestedEnd, 'Event end date');
+                    rentalDays(validStart, finalEventEndDate);
+                    if (body.rentalEndDate && body.eventEndDate && body.rentalEndDate !== body.eventEndDate)
+                        throw new Error('Rental end date must match the selected event end date.');
+                }
+            } catch(error) { return response(400,{error:error.message}); }
+            let rentalStartDate=null,rentalEndDate=null;
+            if(rentalSelections.length){
+                try {rentalStartDate=rentalDate(requestedStart,'Event date');
+                    rentalEndDate=finalEventEndDate;
+                    const nowParts=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+                    const datePart=type=>nowParts.find(x=>x.type===type)?.value||'';
+                    const today=`${datePart('year')}-${datePart('month')}-${datePart('day')}`;
+                    if(rentalStartDate<today)throw new Error('Rental start date cannot be in the past.');
+                } catch(error){return response(400,{error:error.message});}
+            }
             const finalBookingReference = bookingReference || booking_reference || null;
             const finalBookingType = bookingType || booking_type || "";
             const finalDate = date || event_date;
@@ -1479,7 +1744,7 @@ exports.handler = async (event) => {
             }
 
             if (
-                rawPackageName &&
+                rawPackageName && packageSnapshot &&
                 normalizeText(packageSnapshot.name) !== normalizeText(rawPackageName)
             ) {
                 return response(400, {
@@ -1492,6 +1757,9 @@ exports.handler = async (event) => {
             const packagePrice = isCustom
                 ? 0
                 : toNumber(packageSnapshot?.package_price ?? packageSnapshot?.price ?? 0);
+            if(!isCustom && body.expectedPackagePrice !== undefined &&
+                rentalMoneyCents(body.expectedPackagePrice)!==rentalMoneyCents(packagePrice))
+                return response(409,{error:'This package price has changed. Refresh the quotation before booking.'});
 
             const requiredDownPayment = isCustom
                 ? 0
@@ -1515,94 +1783,143 @@ exports.handler = async (event) => {
             const balance = isCustom ? 0 : packagePrice;
             const paymentStatus = "Unpaid";
 
-            const [result] = await connection.execute(
-                `
-                    INSERT INTO bookings
-                    (
-                        store_id,
-                        branch_id,
-                        booking_reference,
-                        booking_type,
+            await connection.beginTransaction();
+            try {
+                const [result] = await connection.execute(
+                    `
+                        INSERT INTO bookings
+                        (
+                            store_id,
+                            branch_id,
+                            booking_reference,
+                            booking_type,
+                            name,
+                            facebook_name,
+                            phone,
+                            email,
+                            event_date,
+                            event_end_date,
+                            event_time,
+                            event_type,
+                            package_name,
+                            package_json,
+                            custom_order,
+                            theme,
+                            venue,
+                            notes,
+                            status,
+                            agreed_price,
+                            package_price,
+                            required_down_payment,
+                            amount_paid,
+                            balance,
+                            payment_status
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `,
+                    [
+                        targetStoreId,
+                        targetBranchId,
+                        finalBookingReference,
+                        finalBookingType,
                         name,
-                        facebook_name,
+                        facebookName || facebook_name || null,
                         phone,
-                        email,
-                        event_date,
-                        event_time,
-                        event_type,
-                        package_name,
-                        package_json,
-                        custom_order,
-                        theme,
-                        venue,
-                        notes,
-                        status,
-                        agreed_price,
-                        package_price,
-                        required_down_payment,
-                        amount_paid,
+                        email || null,
+                        finalDate,
+                        finalEventEndDate,
+                        finalEventTime,
+                        finalEventType,
+                        packageNameForSave,
+                        packageJsonForSave,
+                        finalCustomOrder,
+                        theme || null,
+                        venue || null,
+                        notes || "",
+                        normalizeBookingStatus(status) || "Pending Review",
+                        null,
+                        packagePrice,
+                        requiredDownPayment,
+                        amountPaid,
                         balance,
-                        payment_status
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `,
-                [
-                    targetStoreId,
-                    targetBranchId,
-                    finalBookingReference,
-                    finalBookingType,
-                    name,
-                    facebookName || facebook_name || null,
-                    phone,
-                    email || null,
-                    finalDate,
-                    finalEventTime,
-                    finalEventType,
-                    packageNameForSave,
-                    packageJsonForSave,
-                    finalCustomOrder,
-                    theme || null,
-                    venue || null,
-                    notes || "",
-                    normalizeBookingStatus(status) || "Pending Review",
-                    null,
-                    packagePrice,
-                    requiredDownPayment,
-                    amountPaid,
+                        paymentStatus,
+                    ]
+                );
+
+                const bookingId = result.insertId;
+
+                const bookingItemsToSave = isCustom
+                    ? normalizeBookingItemsForSave(getBookingItemsInput(body), {
+                        bookingId,
+                        storeId: targetStoreId,
+                        branchId: targetBranchId,
+                        sourceType: "custom",
+                        packageId: null,
+                    })
+                    : normalizeBookingItemsForSave(packageSnapshot?.inclusions || [], {
+                        bookingId,
+                        storeId: targetStoreId,
+                        branchId: targetBranchId,
+                        sourceType: "package",
+                        packageId: packageSnapshot?.id || packageId || null,
+                    });
+
+                await insertBookingItems(connection, bookingItemsToSave);
+                let rentalQuote={amount:0,count:0};
+                if(rentalSelections.length){
+                    if(!finalBookingReference || String(finalBookingReference).length>100)
+                        throw rentalError("Rental bookings need a booking reference of at most 100 characters.");
+                    const [duplicate]=await connection.execute(`SELECT id FROM bookings
+                                                                WHERE store_id=? AND booking_reference=? AND id<>? LIMIT 1`,
+                        [targetStoreId,finalBookingReference,bookingId]);
+                    if(duplicate.length)throw rentalError("Booking reference is already used. Try again.");
+                    rentalQuote=await saveRentalRequestLines(connection,{
+                        bookingId,storeId:targetStoreId,branchId:targetBranchId,reference:finalBookingReference,
+                        startDate:rentalStartDate,endDate:rentalEndDate,lines:rentalSelections
+                    });
+                }
+                // Snapshot optional services and the refundable deposit separately from rental revenue.
+                const policy=await getFeePolicy(connection,targetStoreId,targetBranchId);
+                const expectedPolicy=body.expectedFeePolicy;
+                if(expectedPolicy && (rentalMoneyCents(expectedPolicy.deliveryFee)!==rentalMoneyCents(policy.deliveryFee)||
+                    rentalMoneyCents(expectedPolicy.setupFee)!==rentalMoneyCents(policy.setupFee)||
+                    rentalMoneyCents(expectedPolicy.refundableDeposit)!==rentalMoneyCents(policy.refundableDeposit)||
+                    Boolean(expectedPolicy.deliveryIncludedPackage)!==policy.deliveryIncludedPackage||
+                    Boolean(expectedPolicy.setupIncludedPackage)!==policy.setupIncludedPackage))
+                    throw rentalError('Service fees or deposit policy changed. Refresh the booking quotation.');
+                const services=body.requestedServices||{};
+                const wantsDelivery=services.delivery===true;
+                const wantsSetup=services.setup===true;
+                const delivery=wantsDelivery&&!(packageSnapshot&&policy.deliveryIncludedPackage)?policy.deliveryFee:0;
+                const setup=wantsSetup&&!(packageSnapshot&&policy.setupIncludedPackage)?policy.setupFee:0;
+                const quoteTotal=Math.round((packagePrice+rentalQuote.amount+delivery+setup)*100)/100;
+                await connection.execute(`INSERT INTO booking_financial_details
+                                          (booking_id,store_id,branch_id,package_base,rental_subtotal,delivery_fee,setup_fee,refundable_deposit_required)
+                                          VALUES (?,?,?,?,?,?,?,?)`,[bookingId,targetStoreId,targetBranchId,packagePrice,rentalQuote.amount,
+                    delivery,setup,policy.refundableDeposit]);
+                if(!isCustom) {
+                    await connection.execute(`UPDATE bookings SET agreed_price=?,balance=? WHERE id=?`,
+                        [quoteTotal,quoteTotal,bookingId]);
+                }
+                await connection.commit();
+                return response(201, {
+                    success: true,
+                    id: bookingId,
+                    quoted_booking_charges:quoteTotal,
+                    refundable_deposit_required:policy.refundableDeposit,
+                    service_fees:{delivery,setup},
+                    package_price: packagePrice,
+                    required_down_payment: requiredDownPayment,
                     balance,
-                    paymentStatus,
-                ]
-            );
-
-            const bookingId = result.insertId;
-
-            const bookingItemsToSave = isCustom
-                ? normalizeBookingItemsForSave(getBookingItemsInput(body), {
-                    bookingId,
-                    storeId: targetStoreId,
-                    branchId: targetBranchId,
-                    sourceType: "custom",
-                    packageId: null,
-                })
-                : normalizeBookingItemsForSave(packageSnapshot?.inclusions || [], {
-                    bookingId,
-                    storeId: targetStoreId,
-                    branchId: targetBranchId,
-                    sourceType: "package",
-                    packageId: packageSnapshot?.id || packageId || null,
+                    payment_status: paymentStatus,
+                    booking_items_saved: bookingItemsToSave.length,
+                    rental_items_saved: rentalQuote.count,
+                    rental_quoted_subtotal: rentalQuote.amount,
                 });
-
-            await insertBookingItems(connection, bookingItemsToSave);
-
-            return response(201, {
-                success: true,
-                id: bookingId,
-                package_price: packagePrice,
-                required_down_payment: requiredDownPayment,
-                balance,
-                payment_status: paymentStatus,
-                booking_items_saved: bookingItemsToSave.length,
-            });
+            } catch(error) {await connection.rollback();
+                if(error.rentalValidation||rentalSelections.length)return response(409,{error:error.message});
+                throw error;
+            }
         }
 
         // ── PUBLIC: get_booking_by_reference ─────────────────────────────────
@@ -1720,7 +2037,7 @@ exports.handler = async (event) => {
             return response(403, { error: "Bookings access is not permitted for this account." });
         }
         const bookingReadActions = new Set([
-            "get_booking_page_bookings", "get_dashboard_bookings", "get_bookings", "get_booking_items",
+            "get_booking_page_bookings", "get_dashboard_bookings", "get_bookings", "get_booking_items", "get_booking_financial_statement", "get_booking_claim_sources", "get_booking_fee_policy",
         ]);
         if (bookingAccess !== "full" && !bookingReadActions.has(action)) {
             return response(403, { error: "Full Bookings access is required for this action." });
@@ -1742,6 +2059,156 @@ exports.handler = async (event) => {
             body.branchId = tokenBranchId;
         }
 
+        // Owner-configured branch service fees and deposits (no client-supplied prices).
+        if (action === 'get_booking_fee_policy') {
+            const branchId=Number(body.branchId||body.branch_id);
+            if(tokenRole!=='owner' && branchId!==Number(tokenBranchId))return response(403,{error:'Different branch.'});
+            const [branches]=await connection.execute('SELECT id FROM branches WHERE id=? AND store_id=?',[branchId,store_id]);
+            if(!branches.length)return response(404,{error:'Branch not found.'});
+            return response(200,{policy:await getFeePolicy(connection,store_id,branchId)});
+        }
+        if (action === 'set_booking_fee_policy') {
+            if(tokenRole!=='owner')return response(403,{error:'Only Owner sets fee policies.'});
+            const branchId=Number(body.branchId);
+            const [br]=await connection.execute('SELECT id FROM branches WHERE id=? AND store_id=?',[branchId,store_id]);
+            if(!br.length)return response(404,{error:'Store branch not found.'});
+            const delivery=financeCurrency(body.deliveryFee,'Delivery fee');
+            const setup=financeCurrency(body.setupFee,'Setup fee');
+            const deposit=financeCurrency(body.refundableDeposit,'Refundable deposit');
+            await connection.execute(`INSERT INTO booking_fee_policies
+                                      (store_id,branch_id,delivery_fee,setup_fee,refundable_deposit,delivery_included_package,setup_included_package)
+                                      VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE delivery_fee=VALUES(delivery_fee),setup_fee=VALUES(setup_fee),
+                                          refundable_deposit=VALUES(refundable_deposit),delivery_included_package=VALUES(delivery_included_package),
+                                          setup_included_package=VALUES(setup_included_package)`,
+                [store_id,branchId,delivery,setup,deposit,body.deliveryIncludedPackage?1:0,body.setupIncludedPackage?1:0]);
+            return response(200,{success:true,policy:await getFeePolicy(connection,store_id,branchId)});
+        }
+        if(action==='get_booking_financial_statement'||action==='get_booking_claim_sources'||
+            action==='approve_booking_claim'||action==='record_booking_financial_event') {
+            const bookingId=Number(body.bookingId||body.booking_id);
+            if(!Number.isSafeInteger(bookingId)||bookingId<=0)return response(400,{error:'Valid booking ID required.'});
+            const [bs]=await connection.execute('SELECT id,store_id,branch_id,booking_reference FROM bookings WHERE id=? AND store_id=?',[bookingId,store_id]);
+            if(!bs.length)return response(404,{error:'Booking not found.'});
+            const book=bs[0];
+            if(tokenRole!=='owner'&&Number(book.branch_id)!==Number(tokenBranchId))return response(403,{error:'Different branch.'});
+            if(action==='get_booking_financial_statement')
+                return response(200,{statement:await getBookingStatement(connection,bookingId,store_id,book.branch_id),
+                    viewerRole:tokenRole,canWrite:bookingAccess==='full'});
+            if(action==='get_booking_claim_sources'){
+                const [missing]=await connection.execute(`SELECT id,equipment_id AS equipmentId,quantity,reason,status
+                                                          FROM rental_missing_unit_reports WHERE store_id=? AND branch_id=? AND booking_reference=?`,
+                    [store_id,book.branch_id,book.booking_reference]);
+                const [damage]=await connection.execute(`SELECT id,equipment_id AS equipmentId,quantity_started AS quantity,
+                                                                start_reason AS reason,quantity_remaining AS outstanding FROM rental_maintenance_records
+                                                         WHERE store_id=? AND branch_id=? AND booking_reference=?`,
+                    [store_id,book.branch_id,book.booking_reference]);
+                return response(200,{missing,damage});
+            }
+            if(action==='approve_booking_claim') {
+                if(tokenRole!=='manager')return response(403,{error:'Manager approval is required for loss/damage charges.'});
+                const source=String(body.sourceType||'');
+                if(!['missing','damage'].includes(source))return response(400,{error:'Choose missing or damage.'});
+                const sourceId=Number(body.sourceId),amount=financePositive(body.amount,'Claim charge');
+                const table=source==='missing'?'rental_missing_unit_reports':'rental_maintenance_records';
+                const [sources]=await connection.execute(`SELECT equipment_id,${source==='missing'?'quantity':'quantity_started'} AS quantity
+                                                          FROM ${table} WHERE id=? AND store_id=? AND branch_id=? AND booking_reference=?`,
+                    [sourceId,store_id,book.branch_id,book.booking_reference]);
+                if(!sources.length)return response(409,{error:'This booking has no matching documented equipment issue.'});
+                if(source==='missing'){
+                    const [missingState]=await connection.execute(`SELECT status FROM rental_missing_unit_reports
+                                                                   WHERE id=? AND store_id=? AND branch_id=?`,[sourceId,store_id,book.branch_id]);
+                    if(String(missingState[0]?.status||'').toLowerCase()==='found')
+                        return response(409,{error:'Recovered equipment cannot be billed as lost.'});
+                }
+                const reason=String(body.reason||'').trim().slice(0,500);
+                if(reason.length<10)return response(400,{error:'Explain the claim and agreed replacement/repair policy (10+ characters).'});
+                try{
+                    await connection.execute(`INSERT INTO booking_customer_claims
+                                              (booking_id,store_id,branch_id,source_type,source_record_id,equipment_id,quantity,reason,approved_amount,approved_by)
+                                              VALUES(?,?,?,?,?,?,?,?,?,?)`,[bookingId,store_id,book.branch_id,source,sourceId,
+                        sources[0].equipment_id,sources[0].quantity,reason,amount,'Manager']);
+                }catch(e){if(e.code==='ER_DUP_ENTRY')return response(409,{error:'This physical issue already has an approved charge.'});throw e;}
+                return response(200,{success:true,statement:await getBookingStatement(connection,bookingId,store_id,book.branch_id)});
+            }
+            // All financial movements are append-only and require a unique request key.
+            if(tokenRole==='owner')return response(403,{error:'Use an authorized branch transaction account for settlements.'});
+            const type=String(body.eventType||'');
+            if(!['deposit_received','deposit_refunded','deposit_applied','claim_paid'].includes(type))
+                return response(400,{error:'Invalid financial event.'});
+            if((type==='deposit_refunded'||type==='deposit_applied')&&tokenRole!=='manager')
+                return response(403,{error:'Manager authorization required for deposit refunds or allocations.'});
+            const amount=financePositive(body.amount,'Payment amount');
+            const requestKey=String(body.requestKey||'').trim();
+            if(!/^[a-zA-Z0-9_-]{12,100}$/.test(requestKey))return response(400,{error:'Unique transaction key required.'});
+            const claimId=type==='deposit_applied'||type==='claim_paid'?Number(body.claimId):null;
+            await connection.beginTransaction();
+            try{
+                const [prior]=await connection.execute(`SELECT id FROM booking_financial_events WHERE store_id=? AND request_key=?`,[store_id,requestKey]);
+                if(prior.length){await connection.rollback();return response(200,{success:true,alreadyRecorded:true});}
+                const [details]=await connection.execute(`SELECT * FROM booking_financial_details
+                                                          WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,store_id,book.branch_id]);
+                if(!details.length)throw rentalError('This booking has no financial snapshot. Existing bookings require migration/backfill.');
+                const d=details[0];
+                const held=Math.round((Number(d.deposit_collected)-Number(d.deposit_applied)-Number(d.deposit_refunded))*100)/100;
+                let claim=null;
+                if(claimId!==null){
+                    const [c]=await connection.execute(`SELECT * FROM booking_customer_claims WHERE id=? AND booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                        [claimId,bookingId,store_id,book.branch_id]);
+                    if(!c.length||c[0].status==='waived')throw rentalError('Active approved claim not found.');
+                    claim=c[0];
+                    const outstanding=Number(claim.approved_amount)-Number(claim.amount_paid)-Number(claim.deposit_applied);
+                    if(amount>outstanding+0.005)throw rentalError('Amount exceeds outstanding claim.');
+                }
+                if(type==='deposit_received'&&amount>Number(d.refundable_deposit_required)-Number(d.deposit_collected)+0.005)
+                    throw rentalError('Deposit collected exceeds the agreed refundable deposit.');
+                if((type==='deposit_refunded'||type==='deposit_applied')&&amount>held+0.005)
+                    throw rentalError('Not enough refundable deposit is held.');
+                if(type==='deposit_refunded'){
+                    const [bookingStatus]=await connection.execute('SELECT status FROM bookings WHERE id=? AND store_id=? FOR UPDATE',[bookingId,store_id]);
+                    if(!['completed','cancelled'].includes(String(bookingStatus[0]?.status||'').toLowerCase()))
+                        throw rentalError('Refund the deposit only after the booking is completed or cancelled and physically reconciled.');
+                    const [unsettled]=await connection.execute(`SELECT COUNT(*) AS pending FROM booking_customer_claims
+                                                                WHERE booking_id=? AND status='approved' AND approved_amount>amount_paid+deposit_applied`,[bookingId]);
+                    if(Number(unsettled[0].pending)>0)throw rentalError('Resolve outstanding loss/damage claims before refunding the deposit.');
+                    const [unreturned]=await connection.execute(`SELECT COUNT(*) AS pending FROM booking_rental_items i
+                                                                                                     JOIN rental_booking_allocations a ON a.store_id=i.store_id AND a.branch_id=i.branch_id
+                        AND a.booking_reference COLLATE utf8mb4_unicode_ci=i.booking_reference COLLATE utf8mb4_unicode_ci
+                        AND a.equipment_id=i.equipment_id
+                                                                 WHERE i.booking_id=? AND a.status IN ('reserved','checked_out')`,[bookingId]);
+                    if(Number(unreturned[0].pending)>0)throw rentalError('Rental equipment must be returned or cancelled before deposit refund.');
+                }
+                if(type==='deposit_applied'&&claim===null)throw rentalError('Choose an approved loss or damage claim.');
+                await connection.execute(`INSERT INTO booking_financial_events
+                                          (booking_id,store_id,branch_id,claim_id,event_type,amount,request_key,actor_role,actor_name)
+                                          VALUES(?,?,?,?,?,?,?,?,?)`,[bookingId,store_id,book.branch_id,claimId,type,amount,requestKey,
+                    tokenRole,tokenRole]);
+                const map={deposit_received:'deposit_collected',deposit_refunded:'deposit_refunded',deposit_applied:'deposit_applied'};
+                if(map[type])await connection.execute(`UPDATE booking_financial_details SET ${map[type]}=${map[type]}+? WHERE booking_id=?`,[amount,bookingId]);
+                if(claim!==null){await connection.execute(`UPDATE booking_customer_claims SET
+                                                                                              ${type==='deposit_applied'?'deposit_applied':'amount_paid'}=${type==='deposit_applied'?'deposit_applied':'amount_paid'}+?,
+                                                                                              status=IF(approved_amount<=amount_paid+deposit_applied,'settled','approved') WHERE id=?`,[amount,claimId]);}
+                await connection.commit();
+            }catch(e){await connection.rollback();if(e.rentalValidation)return response(409,{error:e.message});throw e;}
+            return response(200,{success:true,statement:await getBookingStatement(connection,bookingId,store_id,book.branch_id)});
+        }
+
+        if (action === 'get_owner_booking_financial_overview') {
+            if(tokenRole!=='owner')return response(403,{error:'Owner-only financial report.'});
+            const [fees]=await connection.execute(`SELECT
+                                                       COALESCE(SUM(CASE WHEN LOWER(b.status)='completed' AND b.event_date<=CURDATE() THEN f.delivery_fee ELSE 0 END),0) AS delivery,
+                                                       COALESCE(SUM(CASE WHEN LOWER(b.status)='completed' AND b.event_date<=CURDATE() THEN f.setup_fee ELSE 0 END),0) AS setup,
+                                                       COALESCE(SUM(f.deposit_collected-f.deposit_refunded-f.deposit_applied),0) AS heldDeposits
+                                                   FROM booking_financial_details f JOIN bookings b ON b.id=f.booking_id
+                                                   WHERE f.store_id=?`,[store_id]);
+            const [claims]=await connection.execute(`SELECT COALESCE(SUM(approved_amount),0) AS approved,
+                                                            COALESCE(SUM(amount_paid),0) AS recoveredCash,COALESCE(SUM(deposit_applied),0) AS appliedDeposits,
+                                                            COALESCE(SUM(GREATEST(approved_amount-amount_paid-deposit_applied,0)),0) AS outstanding
+                                                     FROM booking_customer_claims WHERE store_id=? AND status <> 'waived'`,[store_id]);
+            return response(200,{overview:{deliveryFees:Number(fees[0].delivery),setupFees:Number(fees[0].setup),
+                    refundableDepositsHeld:Number(fees[0].heldDeposits),approvedClaims:Number(claims[0].approved),
+                    cashRecovered:Number(claims[0].recoveredCash),depositsApplied:Number(claims[0].appliedDeposits),
+                    outstandingClaims:Number(claims[0].outstanding)}});
+        }
         // ── PROTECTED: get_booking_page_bookings ────────────────────────────────
         // Use this action on the OwnerBookings, ManagerBookings, and
         // StaffBookings screens. It returns the fields needed by those pages
@@ -2107,7 +2574,13 @@ exports.handler = async (event) => {
                 // 1️⃣ Update booking status
                 let query = `UPDATE bookings SET status = ?`;
                 const params = [status];
-                if (agreed_price !== undefined && agreed_price !== null) { query += `, agreed_price = ?`; params.push(Number(agreed_price)); }
+                if (agreed_price !== undefined && agreed_price !== null) {
+                    const newPrice=financeCurrency(agreed_price,'Agreed booking price');
+                    const [f]=await connection.execute('SELECT package_base,rental_subtotal,delivery_fee,setup_fee FROM booking_financial_details WHERE booking_id=?',[Number(booking_id)]);
+                    if(f.length && newPrice + 0.005 < Number(f[0].package_base)+Number(f[0].rental_subtotal)+Number(f[0].delivery_fee)+Number(f[0].setup_fee))
+                        throw rentalError('Booking price cannot be below package, rental and service charges.');
+                    query += `, agreed_price = ?`; params.push(newPrice);
+                }
                 query += ` WHERE id = ? AND store_id = ?`;
                 params.push(Number(booking_id), store_id);
                 if (requestedBranchId) { query += ` AND branch_id = ?`; params.push(Number(requestedBranchId)); }
@@ -2132,7 +2605,23 @@ exports.handler = async (event) => {
                     }
                 }
 
+                if(status === "Confirmed") {
+                    await confirmRentalAllocations(connection,{
+                        bookingId:Number(booking_id),storeId:store_id,
+                        branchId:requestedBranchId||rows[0].branch_id,
+                        price:agreed_price??(await connection.execute(
+                            "SELECT agreed_price FROM bookings WHERE id=? AND store_id=?",[Number(booking_id),store_id]))[0][0]?.agreed_price
+                    });
+                }
+                if(status === "Completed") {
+                    await requireRentalReturnBeforeCompletion(connection,{
+                        bookingId:Number(booking_id),storeId:store_id,branchId:requestedBranchId||rows[0].branch_id
+                    });
+                }
                 if (status === "Cancelled") {
+                    await cancelRentalAllocations(connection,{
+                        bookingId:Number(booking_id),storeId:store_id,branchId:requestedBranchId||rows[0].branch_id
+                    });
                     inventoryResult = await restoreBookingInventoryOnCancel(connection, {
                         bookingId: Number(booking_id),
                         storeId: rows[0].store_id,
@@ -2153,6 +2642,7 @@ exports.handler = async (event) => {
                 await connection.commit();
             } catch (err) {
                 await connection.rollback();
+                if(err.rentalValidation)return response(409,{error:err.message});
                 throw err;
             }
 
@@ -2248,6 +2738,23 @@ exports.handler = async (event) => {
             }
 
             const previousBooking = priceRows[0];
+            const rentalQuote=await rentalQuoteTotal(connection,Number(booking_id),store_id,
+                requestedBranchId||previousBooking.branch_id);
+            const [financeLines]=await connection.execute(`SELECT package_base,rental_subtotal,delivery_fee,setup_fee
+                                                           FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                [Number(booking_id),store_id,requestedBranchId||previousBooking.branch_id]);
+            const requiredMinimum=financeLines.length ?
+                Number(financeLines[0].package_base)+Number(financeLines[0].rental_subtotal)+
+                Number(financeLines[0].delivery_fee)+Number(financeLines[0].setup_fee) : rentalQuote.total;
+            if(rentalQuote.count || requiredMinimum>0){
+                const [state]=await connection.execute("SELECT status FROM bookings WHERE id=? AND store_id=?",
+                    [Number(booking_id),store_id]);
+                if(normalizeBookingStatus(state[0]?.status)!=='Pending Review')
+                    return response(409,{error:"Rental booking prices cannot be changed after confirmation."});
+                if(total<requiredMinimum-0.005)
+                    return response(400,{error:`Booking price cannot be below the saved package, rental, and service charges of ₱${requiredMinimum.toFixed(2)}.`});
+            }
+
 
             let query = `
                 UPDATE bookings
@@ -2357,6 +2864,22 @@ exports.handler = async (event) => {
                 return response(400, { error: "Payment amounts must be valid non-negative numbers." });
             }
 
+            // Do not accept a self-declared Fully Paid status at less than the agreed charge.
+            const [monetaryState]=await connection.execute(`SELECT agreed_price,package_price,required_down_payment
+                                                            FROM bookings WHERE id=? AND store_id=?`,[Number(booking_id),store_id]);
+            if(!monetaryState.length)return response(404,{error:'Booking not found.'});
+            const monetaryTotal=Number(monetaryState[0].agreed_price||monetaryState[0].package_price||0);
+            if((payment_status==='Fully Paid'||payment_status==='Down Payment Paid')&&monetaryTotal<=0)
+                return response(409,{error:'Confirm the agreed booking price before recording its down payment.'});
+            if(paid>monetaryTotal+0.005&&monetaryTotal>0)
+                return response(400,{error:'Collected booking payments cannot exceed the agreed charge. Track refundable deposits separately.'});
+            if((payment_status==='Fully Paid'&&paid+0.005<monetaryTotal)||
+                (payment_status==='Down Payment Paid'&&paid+0.005<Number(monetaryState[0].required_down_payment||0)))
+                return response(400,{error:'Payment status does not match the recorded amount collected.'});
+            // Recompute the balance instead of trusting the client-provided balance.
+            if(safeBalance!==null&&Math.abs(safeBalance-Math.max(0,monetaryTotal-paid))>0.01)
+                return response(400,{error:'Booking balance must equal the agreed price minus recorded payments.'});
+
             let selectQuery = `
                 SELECT id, status, store_id, branch_id, booking_reference, name
                 FROM bookings
@@ -2389,7 +2912,7 @@ exports.handler = async (event) => {
                     payment_status = ?,
                     balance = CASE
                                   WHEN ? IS NULL THEN GREATEST(
-                                          COALESCE(NULLIF(package_price, 0), NULLIF(agreed_price, 0), 0) - ?,
+                                          COALESCE(NULLIF(agreed_price, 0), NULLIF(package_price, 0), 0) - ?,
                                           0
                                                       )
                                   ELSE ?
@@ -2446,9 +2969,18 @@ exports.handler = async (event) => {
                     }
                 }
 
+                if(willAutoConfirm){
+                    const [priceRows]=await connection.execute("SELECT agreed_price,package_price FROM bookings WHERE id=? AND store_id=?",
+                        [Number(booking_id),store_id]);
+                    await confirmRentalAllocations(connection,{
+                        bookingId:Number(booking_id),storeId:store_id,branchId:requestedBranchId||bookingRows[0].branch_id,
+                        price:priceRows[0]?.agreed_price??priceRows[0]?.package_price
+                    });
+                }
                 await connection.commit();
             } catch (err) {
                 await connection.rollback();
+                if(err.rentalValidation)return response(409,{error:err.message});
                 throw err;
             }
 

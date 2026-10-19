@@ -14,6 +14,8 @@ import {
     RefreshCw,
     Sparkles,
     TriangleAlert,
+    Wrench as MdWrench, Wallet as MdWallet, Users as MdUsers, Bell as MdBell,
+    X as MdX, CheckCircle2 as MdCheckCircle, Download as MdDownload, Search as MdSearch,
 } from "lucide-react";
 import DashboardExportMenu from "./DashboardExportMenu";
 import type { ExportContext, ExportTable } from "./_shared";
@@ -124,6 +126,7 @@ type Order = {
 
 type ProductVariant = {
     id?: number;
+    variantNumber?: string | null;
     variantValues?: Record<string, string>;
     variant_values?: Record<string, string>;
     stock?: number;
@@ -135,6 +138,7 @@ type ProductVariant = {
 
 type Product = {
     id: number;
+    productNumber?: string | null;
     branchId?: number | null;
     branch_id?: number | null;
     branchName?: string | null;
@@ -667,6 +671,7 @@ function normalizeProduct(value: unknown): Product {
 
             return {
                 id: readNumber(variant, ["id"]),
+                variantNumber: readText(variant, ["variantNumber", "variant_number"]) || null,
                 variantValues: parsedVariantValues,
                 variant_values: parsedVariantValues,
                 stock: readNumber(variant, [
@@ -704,6 +709,7 @@ function normalizeProduct(value: unknown): Product {
 
     return {
         id: readNumber(raw, ["id"]),
+        productNumber: readText(raw, ["productNumber", "product_number"]) || null,
         branchId: rawBranchId,
         branch_id: rawBranchId,
         branchName: readText(raw, ["branchName", "branch_name"]) || null,
@@ -1251,425 +1257,504 @@ function ManagerDashboardSkeleton() {
 export default function ManagerDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
-
-    const [bookings, setBookings] = useState<Booking[]>([]);
+    const [, setBookings] = useState<Booking[]>([]);
     const [bookingsError, setBookingsError] = useState("");
-    const [orders, setOrders] = useState<Order[]>([]);
+    const [, setOrders] = useState<Order[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [hasLoadedDashboard, setHasLoadedDashboard] = useState(false);
     const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
     const [stockAlertFilter, setStockAlertFilter] = useState<"all" | "low" | "out">("all");
-    const [bookingTrendRange, setBookingTrendRange] = useState<BookingTrendRange>("8w");
-
-    // Primitive dashboard identity values stay stable even when useCurrentUser()
-    // replaces its user object after hydration. This prevents an unnecessary
-    // second full dashboard fetch when the actual IDs did not change.
-    const dashboardStoreId =
-        getUserValue(user, "store_id") ||
-        getUserValue(user, "storeId") ||
-        getSavedItem("store_id") ||
-        getSavedItem("stocknbook_store_id");
+    const [rentalMaintenance, setRentalMaintenance] = useState<number | null>(null);
+    const [staffSummary, setStaffSummary] = useState<MDStaffSummary | null>(null);
+    const [mayReviewLeave, setMayReviewLeave] = useState(false);
+    const [staffRecords, setStaffRecords] = useState<MDStaffAttendance[]>([]);
+    const [leaveRows, setLeaveRows] = useState<MDLeaveRow[]>([]);
+    const [staffError, setStaffError] = useState("");
+    const [payables, setPayables] = useState<MDPayable[]>([]);
+    const [payablesError, setPayablesError] = useState("");
+    const [stockSearch, setStockSearch] = useState("");
+    const [payableSearch, setPayableSearch] = useState("");
+    const [selectedLeave, setSelectedLeave] = useState<MDLeaveGroup | null>(null);
+    const [decisionReason, setDecisionReason] = useState("");
+    const [decisionBusy, setDecisionBusy] = useState(false);
+    const [decisionError, setDecisionError] = useState("");
+    const [selectedPayable, setSelectedPayable] = useState<MDPayable | null>(null);
+    const [paymentAmount, setPaymentAmount] = useState("");
+    const [paymentBusy, setPaymentBusy] = useState(false);
+    const paymentKeyRef = useRef("");
+    const payingRef = useRef(false);
+    const [paymentError, setPaymentError] = useState("");
+    const [toast, setToast] = useState<{ title: string; message: string; error?: boolean } | null>(null);
+    const dashboardStoreId = getUserValue(user, "store_id") || getUserValue(user, "storeId") ||
+        getSavedItem("store_id") || getSavedItem("stocknbook_store_id");
     const dashboardBranchId = getAssignedBranchId(user);
     const loadInFlightRef = useRef(false);
-
     useEffect(() => {
-        const timer = window.setInterval(() => {
-            setCurrentDateTime(new Date());
-        }, 30_000);
-
+        const timer = window.setInterval(() => setCurrentDateTime(new Date()), 30_000);
         return () => window.clearInterval(timer);
     }, []);
+    useEffect(() => {
+        if (!toast) return;
+        const timer = window.setTimeout(() => setToast(null), 5500);
+        return () => window.clearTimeout(timer);
+    }, [toast]);
 
     const loadManagerDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
         const token = getSavedItem("token");
-        const storeId = dashboardStoreId;
-        const branchId = dashboardBranchId;
-
-        if (!token || !branchId) {
-            setBookings([]);
-            setOrders([]);
-            setProducts([]);
-            setBookingsError("No assigned branch was found for this account.");
+        if (!token || !dashboardBranchId) {
+            setBookingsError("No valid manager session or branch assignment was found.");
+            setIsRefreshing(false);
             setHasLoadedDashboard(true);
             return;
         }
-
-        // React Strict Mode intentionally re-runs effects in development.
-        // Ignore a duplicate dashboard load while the first one is still active.
         if (loadInFlightRef.current) return;
         loadInFlightRef.current = true;
-
         if (!silent) setIsRefreshing(true);
         setBookingsError("");
-
         try {
             const now = new Date();
-
-            // The manager inventory forecast only reads the last 30 days of POS
-            // movement, so keep the dashboard transaction request date-scoped.
             const ordersStart = new Date(now);
             ordersStart.setDate(ordersStart.getDate() - 30);
-
-            const [bookingsResult, productsResult, ordersResult] =
+            // All dashboard read operations run together, not sequentially.
+            const [bookingsResult, productsResult, ordersResult, staffResult, payablesResult, rentalResult] =
                 await Promise.allSettled([
                     fetch("/api/bookings", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            Authorization: `Bearer ${token}`,
-                        },
-                        body: JSON.stringify({
-                            action: "get_booking_page_bookings",
-                            role: "manager",
-                            store_id: storeId ? Number(storeId) : undefined,
-                            branch_id: Number(branchId),
-                        }),
+                        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ action: "get_booking_page_bookings", role: "manager",
+                            store_id: dashboardStoreId ? Number(dashboardStoreId) : undefined,
+                            branch_id: Number(dashboardBranchId) }), cache: "no-store",
+                    }),
+                    fetch("/api/products", { method: "POST",
+                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ action: "get_products", branch_id: Number(dashboardBranchId) }),
                         cache: "no-store",
                     }),
-                    fetch("/api/products", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            Authorization: `Bearer ${token}`,
-                        },
-                        body: JSON.stringify({
-                            action: "get_products",
-                            branch_id: Number(branchId),
-                        }),
+                    fetch("/api/pos", { method: "POST",
+                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ action: "get_orders", branch_id: Number(dashboardBranchId),
+                            include_order_items: true, date_from: mdLocalDay(ordersStart), date_to: mdLocalDay(now) }),
                         cache: "no-store",
                     }),
-                    fetch("/api/pos", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            Authorization: `Bearer ${token}`,
-                        },
-                        body: JSON.stringify({
-                            action: "get_orders",
-                            branch_id: Number(branchId),
-                            include_order_items: true,
-                            date_from: ordersStart.toISOString().slice(0, 10),
-                            date_to: now.toISOString().slice(0, 10),
-                        }),
+                    fetch("/api/manager-staff-overview", {
+                        headers: { Authorization: `Bearer ${token}` }, cache: "no-store",
+                    }),
+                    fetch("/api/products", { method: "POST",
+                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ action: "get_supplier_payables" }), cache: "no-store",
+                    }),
+                    fetch("/api/rental-inventory", { method: "POST",
+                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ action: "get_manager_inventory", branch_id: Number(dashboardBranchId) }),
                         cache: "no-store",
                     }),
                 ]);
-
             if (bookingsResult.status === "fulfilled") {
                 try {
-                    const response = bookingsResult.value;
-                    const payload = await response.json().catch(() => ({}));
-                    if (response.ok && Array.isArray(payload.bookings)) {
-                        const normalized = (payload.bookings as unknown[]).map(normalizeBooking);
-                        setBookings(
-                            normalized.filter((booking) =>
-                                belongsToAssignedBranch(booking, branchId),
-                            ),
-                        );
-                    } else {
-                        setBookings([]);
-                        setBookingsError(
-                            String(payload.error || payload.message || "Unable to load booking data."),
-                        );
-                    }
-                } catch (error) {
-                    console.warn("Manager dashboard bookings parsing failed:", error);
-                    setBookings([]);
-                    setBookingsError("Unable to load booking data.");
-                }
-            } else {
-                console.warn("Manager dashboard bookings fetch failed:", bookingsResult.reason);
-                setBookingsError("Unable to load booking data.");
-            }
-
+                    const result = bookingsResult.value;
+                    const payload = await result.json().catch(() => ({}));
+                    if (result.ok && Array.isArray(payload.bookings)) {
+                        setBookings((payload.bookings as unknown[]).map(normalizeBooking)
+                            .filter(booking => belongsToAssignedBranch(booking, dashboardBranchId)));
+                    } else { setBookingsError(String(payload.error || "Unable to load bookings.")); }
+                } catch { setBookingsError("Unable to read booking records."); }
+            } else { setBookingsError("Unable to connect to bookings."); }
             if (productsResult.status === "fulfilled") {
                 try {
                     const response = productsResult.value;
                     const payload = await response.json().catch(() => ({}));
                     if (response.ok && Array.isArray(payload.products)) {
-                        const normalized = (payload.products as unknown[]).map(normalizeProduct);
-                        setProducts(
-                            normalized.filter((product) =>
-                                belongsToAssignedBranch(product, branchId),
-                            ),
-                        );
+                        setProducts((payload.products as unknown[]).map(normalizeProduct)
+                            .filter(product => belongsToAssignedBranch(product, dashboardBranchId)));
                     }
-                } catch (error) {
-                    console.warn("Manager dashboard products parsing failed:", error);
-                }
-            } else {
-                console.warn("Manager dashboard products fetch failed:", productsResult.reason);
+                } catch (error) { console.warn("Manager products response failed:", error); }
             }
-
             if (ordersResult.status === "fulfilled") {
                 try {
-                    const response = ordersResult.value;
-                    const payload = await response.json().catch(() => ({}));
-                    if (response.ok && Array.isArray(payload.orders)) {
-                        const normalized = (payload.orders as unknown[]).map(normalizeOrder);
-                        setOrders(
-                            normalized.filter((order) =>
-                                belongsToAssignedBranch(order, branchId),
-                            ),
-                        );
+                    const result = ordersResult.value;
+                    const payload = await result.json().catch(() => ({}));
+                    if (result.ok && Array.isArray(payload.orders)) {
+                        setOrders((payload.orders as unknown[]).map(normalizeOrder)
+                            .filter(order => belongsToAssignedBranch(order, dashboardBranchId)));
                     }
-                } catch (error) {
-                    console.warn("Manager dashboard orders parsing failed:", error);
-                }
-            } else {
-                console.warn("Manager dashboard orders fetch failed:", ordersResult.reason);
+                } catch (error) { console.warn("Manager POS response failed:", error); }
             }
-
+            if (staffResult.status === "fulfilled") {
+                try {
+                    const result = staffResult.value;
+                    const payload = await result.json().catch(() => ({}));
+                    if (!result.ok || payload.success !== true) throw new Error(payload.error || "Unable to load employee records.");
+                    setStaffSummary(payload.attendanceSummary as MDStaffSummary);
+                    setMayReviewLeave(payload.mayReviewLeave === true);
+                    setStaffRecords(Array.isArray(payload.attendance) ? payload.attendance : []);
+                    setLeaveRows(Array.isArray(payload.leaves) ? payload.leaves : []);
+                    setStaffError("");
+                } catch (error) { setStaffError(error instanceof Error ? error.message : "Employee records unavailable."); }
+            } else { setStaffError("Employee attendance service could not be reached."); }
+            if (payablesResult.status === "fulfilled") {
+                try {
+                    const result = payablesResult.value;
+                    const payload = await result.json().catch(() => ({}));
+                    if (!result.ok || payload.success !== true) throw new Error(payload.error || "Unable to load payables.");
+                    setPayables(Array.isArray(payload.payables) ? payload.payables : []);
+                    setPayablesError("");
+                } catch (error) { setPayablesError(error instanceof Error ? error.message : "Supplier payables unavailable."); }
+            } else { setPayablesError("Supplier payables service could not be reached."); }
+            if (rentalResult.status === "fulfilled") {
+                try {
+                    const response = rentalResult.value;
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok || data.success !== true || !Array.isArray(data.equipment)) {
+                        throw new Error("Rental maintenance data unavailable.");
+                    }
+                    const counts = data.equipment.map((item: Record<string, unknown>) => item.maintenanceUnits);
+                    if (counts.some((value: unknown) => value === null || value === undefined ||
+                        !Number.isSafeInteger(Number(value)) || Number(value) < 0)) {
+                        throw new Error("Incomplete rental maintenance counts.");
+                    }
+                    setRentalMaintenance(counts.reduce((sum: number, value: unknown) => sum + Number(value), 0));
+                } catch { setRentalMaintenance(null); }
+            } else { setRentalMaintenance(null); }
         } finally {
             loadInFlightRef.current = false;
             if (!silent) setIsRefreshing(false);
             setHasLoadedDashboard(true);
         }
     }, [dashboardStoreId, dashboardBranchId]);
-
+    useEffect(() => { void loadManagerDashboard(); }, [loadManagerDashboard]);
     useEffect(() => {
-        void loadManagerDashboard();
-    }, [loadManagerDashboard]);
-
-    useEffect(() => {
-        /*
-         * Near-real-time Manager dashboard refresh.
-         * Re-fetch the same authoritative branch-scoped APIs every 60 seconds
-         * without showing the manual Refresh spinner.
-         */
-        const autoRefreshTimer = window.setInterval(() => {
-            void loadManagerDashboard({ silent: true });
+        const timer = window.setInterval(() => {
+            if (document.visibilityState === "visible" && navigator.onLine) void loadManagerDashboard({ silent: true });
         }, 60_000);
-
-        return () => window.clearInterval(autoRefreshTimer);
+        return () => window.clearInterval(timer);
     }, [loadManagerDashboard]);
 
-    const allInventoryAlerts = useMemo(
-        () => getDashboardStockAlertItems(products),
-        [products],
-    );
-
-    const allExpirationAlertItems = useMemo(
-        () => getExpirationAlertItems(products),
-        [products],
-    );
-
-    const lowStockAlertCount = allInventoryAlerts.filter(
-        (item) => item.status === "Low Stock",
-    ).length;
-
-    const outOfStockAlertCount = allInventoryAlerts.filter(
-        (item) => item.status === "Out of Stock",
-    ).length;
-
-    const expiringSoonAlertCount = allExpirationAlertItems.filter(
-        (item) => item.status === "Expiring",
-    ).length;
-
-    const pendingBookingCount = bookings.filter((booking) => {
-        const status = normalizeDashboardBookingStatus(booking.status);
-        return status === "Pending" || status === "Awaiting Down Payment";
-    }).length;
-
-    const bookingOverview = useMemo(
-        () => buildBookingOverview(bookings, currentDateTime),
-        [bookings, currentDateTime],
-    );
-
-    const inventoryHealth = useMemo(
-        () => buildInventoryHealth(products, allInventoryAlerts, allExpirationAlertItems),
-        [products, allInventoryAlerts, allExpirationAlertItems],
-    );
-
-    const attentionItems = useMemo(
-        () => buildManagerAttentionItems(allInventoryAlerts, allExpirationAlertItems),
-        [allInventoryAlerts, allExpirationAlertItems],
-    );
-
-    const bookingTrend = useMemo(
-        () => buildBookingStatusTrend(bookings, currentDateTime, bookingTrendRange),
-        [bookings, currentDateTime, bookingTrendRange],
-    );
-
-    const bookingTrendConfig = BOOKING_TREND_RANGE_CONFIG[bookingTrendRange];
-
-    const inventoryForecast = useMemo(
-        () => buildManagerInventoryForecast(products, orders, currentDateTime),
-        [products, orders, currentDateTime],
-    );
-
-    const currentMonthLabel = currentDateTime.toLocaleDateString("en-US", {
-        month: "long",
-        year: "numeric",
-    });
-
+    const stockAlerts = useMemo(() => getDashboardStockAlertItems(products), [products]);
+    const expiryAlerts = useMemo(() => getExpirationAlertItems(products), [products]);
+    const lowCount = stockAlerts.filter(item => item.status === "Low Stock").length;
+    const outCount = stockAlerts.filter(item => item.status === "Out of Stock").length;
+    const inventoryHealth = useMemo(() => buildInventoryHealth(products, stockAlerts, expiryAlerts), [products, stockAlerts, expiryAlerts]);
+    const attentionItems = useMemo(() => buildManagerAttentionItems(stockAlerts, expiryAlerts), [stockAlerts, expiryAlerts]);
+    const stockRows = attentionItems.map(item => {
+        const product = products.find(entry => entry.name === item.productName);
+        const variant = product?.variants?.find(entry => getDashboardVariantName(entry) === item.variantName);
+        const matchingStock = stockAlerts.find(entry => entry.productName === item.productName &&
+            (entry.variantName || "—") === item.variantName);
+        const matchingExpiry = expiryAlerts.find(entry => entry.productName === item.productName &&
+            (entry.variantName || "—") === item.variantName);
+        return { ...item, sku: variant?.variantNumber || product?.productNumber || "—",
+            currentStock: matchingStock?.currentStock ?? matchingExpiry?.stock ??
+                (variant ? Number(variant.stock || 0) : Number(product?.stock || 0)) };
+    }).filter(item => `${item.productName} ${item.sku} ${item.status}`.toLowerCase().includes(stockSearch.toLowerCase()));
+    const openPayables = payables.filter(item => Number(item.outstandingBalance) > 0.005)
+        .sort((a, b) => String(a.paymentDueDate || "9999-12-31").localeCompare(String(b.paymentDueDate || "9999-12-31")));
+    const filteredPayables = openPayables.filter(row => `${row.purchaseNumber} ${row.supplier}`.toLowerCase().includes(payableSearch.toLowerCase()));
+    const today = mdLocalDay(currentDateTime);
+    const duePayables = openPayables.filter(row => Boolean(row.paymentDueDate && row.paymentDueDate <= mdOffsetDay(currentDateTime, 7))).length;
+    const leaveGroups = useMemo(() => mdGroupLeaveRequests(leaveRows), [leaveRows]);
+    const selectedLeaveIsPending = selectedLeave?.status === "Pending";
     const assignedBranchName = getAssignedBranchName(user);
+    const activeStockAlerts = stockAlerts.filter(item => stockAlertFilter === "all" ||
+        (stockAlertFilter === "low" && item.status === "Low Stock") ||
+        (stockAlertFilter === "out" && item.status === "Out of Stock"));
+    const donutSegments: ManagerSegment[] = [
+        { label: "Present", value: staffSummary?.present || 0, color: "#159455" },
+        { label: "On Leave", value: staffSummary?.onLeave || 0, color: "#F59E0B" },
+        { label: "Absent", value: staffSummary?.absent || 0, color: "#EF4444" },
+        { label: "Not Recorded", value: staffSummary?.notRecorded || 0, color: "#A39AB0" },
+    ];
+    const inventorySegments: ManagerSegment[] = inventoryHealth.segments.map(segment =>
+        segment.label === "Expiring Soon" ? { ...segment, label: "Expiring / Expired" } : segment);
 
-    const visibleStockAlerts = allInventoryAlerts.filter((item) => {
-        if (stockAlertFilter === "low") return item.status === "Low Stock";
-        if (stockAlertFilter === "out") return item.status === "Out of Stock";
-        return true;
+    const decideLeave = async (decision: "Approved" | "Rejected") => {
+        if (!selectedLeave || decisionBusy) return;
+        setDecisionBusy(true);
+        setDecisionError("");
+        try {
+            const response = await fetch("/api/manager-staff-overview", {
+                method: "POST", cache: "no-store",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getSavedItem("token")}` },
+                body: JSON.stringify({ action: "review_leave", decision, requestIds: selectedLeave.ids, decisionReason }),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || "Unable to review leave request.");
+            setLeaveRows(previous => previous.map(row => selectedLeave.ids.includes(row.id)
+                ? { ...row, approvalStatus: decision, decisionReason: decisionReason || null } : row));
+            setSelectedLeave(null);
+            setDecisionReason("");
+            setToast({ title: `Leave ${decision.toLowerCase()}`, message: `${selectedLeave.employeeName}'s request has been ${decision.toLowerCase()}.` });
+            await loadManagerDashboard({ silent: true });
+        } catch (error) {
+            setDecisionError(error instanceof Error ? error.message : "Unable to save the decision.");
+        } finally { setDecisionBusy(false); }
+    };
+    const paySupplier = async () => {
+        if (!selectedPayable || payingRef.current) return;
+        const amount = Number(paymentAmount);
+        if (!Number.isFinite(amount) || amount <= 0 || amount > Number(selectedPayable.outstandingBalance)) {
+            setPaymentError("Enter a payment greater than zero, up to the outstanding balance."); return;
+        }
+        payingRef.current = true;
+        setPaymentBusy(true); setPaymentError("");
+        try {
+            const response = await fetch("/api/products", {
+                method: "POST", cache: "no-store",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getSavedItem("token")}` },
+                body: JSON.stringify({ action: "pay_supplier_purchase", purchaseId: selectedPayable.purchaseId,
+                    amount, paymentDate: mdLocalDay(new Date()), requestKey: paymentKeyRef.current }),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || "Unable to pay supplier.");
+            setToast({ title: "Supplier payment recorded", message: `${selectedPayable.purchaseNumber}: ${peso(amount)} recorded.` });
+            setPayables(previous => previous.map(row => row.purchaseId === selectedPayable.purchaseId
+                ? { ...row, outstandingBalance: Math.max(0, Number(row.outstandingBalance) - amount) } : row));
+            setSelectedPayable(null); setPaymentAmount(""); paymentKeyRef.current = "";
+            await loadManagerDashboard({ silent: true });
+        } catch (error) { setPaymentError(error instanceof Error ? error.message : "Unable to pay supplier."); }
+        finally { setPaymentBusy(false); payingRef.current = false; }
+    };
+    const exportStaffAttendance = () => {
+        const rows = staffRecords.map(record => [
+            String(record.employeeId), record.employeeName, record.status,
+            record.timeIn || "—", record.timeOut || "—",
+        ]);
+        mdExportRows("Daily Employee Attendance", ["Employee ID", "Employee Name", "Status", "Time In", "Time Out"], rows,
+            `manager_attendance_${today}`, assignedBranchName, today);
+    };
+    const exportLeave = () => mdExportRows("Employee Requests", ["Employee", "Leave Type", "Date(s)", "Status", "Reason"],
+        leaveGroups.map(r => [r.employeeName, r.leaveType, mdLeaveDatesLabel(r), r.status, r.reason]),
+        "manager_employee_requests", assignedBranchName, today);
+    const exportPayables = () => mdExportRows("Supplier Payables", ["Purchase", "Supplier", "Due Date", "Outstanding"],
+        openPayables.map(r => [r.purchaseNumber, r.supplier, r.paymentDueDate || "—", peso(Number(r.outstandingBalance))]),
+        "manager_supplier_payables", assignedBranchName, today);
+    const exportStock = () => mdExportRows("Stock Action Center", ["Product", "Variant", "Status", "Description"],
+        attentionItems.map(r => [r.productName, r.variantName, r.status, r.detail]), "manager_stock_actions", assignedBranchName, today);
+
+    return <>
+        <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
+            <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
+                <div className="min-w-0">
+                    <h1 className="text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">Manager Dashboard</h1>
+                    <p className="mt-1 text-[12px] text-[#7A6A84]">Operational stock and employee overview for {assignedBranchName}.</p>
+                </div>
+                <div className="flex gap-2.5">
+                    <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm"><CalendarDays size={15} className="mr-2 text-[#6D35D4]"/>{formatCurrentDashboardDateTime(currentDateTime)}</span>
+                    <button type="button" onClick={() => void loadManagerDashboard()} disabled={isRefreshing} className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-60"><RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""}/>{isRefreshing ? "Refreshing..." : "Refresh"}</button>
+                </div>
+            </div>
+        </header>
+        <section className="px-6 py-5 font-sans" aria-busy={!hasLoadedDashboard}>
+            {!hasLoadedDashboard ? <ManagerDashboardSkeleton/> : <div className="space-y-4">
+                {bookingsError && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700">{bookingsError}</p>}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <ManagerMetricCard title="Low Stock" value={lowCount} subtitle="Items below reorder level" icon={<AlertTriangle size={24}/>} tone="orange" onClick={() => { setStockAlertFilter("low"); setShowStockAlertsModal(true); }}/>
+                    <ManagerMetricCard title="Out of Stock" value={outCount} subtitle="Products without available stock" icon={<PackageX size={24}/>} tone="red" onClick={() => { setStockAlertFilter("out"); setShowStockAlertsModal(true); }}/>
+                    <div className="flex min-h-[116px] items-center gap-4 rounded-2xl border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
+                        <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#EAF1FF] text-[#2563EB]"><MdWrenchIcon/></span>
+                        <div><p className="text-[14px] font-semibold text-[#4B3E55]">Under Maintenance</p><p className="mt-1 text-[28px] font-bold text-[#1A1220]">{rentalMaintenance === null ? "—" : rentalMaintenance}</p><p className="mt-2 text-[11px] text-[#8A7D92]">{rentalMaintenance === null ? "Rental condition data not connected" : "Rental units requiring maintenance"}</p></div>
+                    </div>
+                    <ManagerMetricCard title="Supplier Payables Due" value={duePayables} subtitle="Unpaid purchases due within 7 days" icon={<MDWalletIcon/>} tone="violet" onClick={() => document.getElementById("manager-supplier-payables")?.scrollIntoView({ behavior: "smooth" })}/>
+                </div>
+                <div className="grid grid-cols-1 gap-3 xl:grid-cols-12">
+                    <div className="xl:col-span-4"><MDChartCard title="Inventory Health" subtitle="Current sales stock status across products" icon={<Box size={18}/>} segments={inventorySegments} total={inventoryHealth.total} centerLabel="Stock Lines" exportClick={() => exportStock()} badgeLabel="Live Stock"/></div>
+                    <div className="xl:col-span-4"><MDChartCard title="Daily Employee Attendance" subtitle="Today's recorded attendance for branch staff" icon={<MDPeopleIcon/>} segments={donutSegments} total={staffSummary?.total ?? null} centerLabel="Total Staff" exportClick={exportStaffAttendance} badgeLabel="Today" error={staffError}/></div>
+                    <div className="xl:col-span-4"><MDPanel title="Employee Requests" subtitle="Review staff leave and absence requests" icon={<MDBellIcon/>} onExport={exportLeave}>
+                        <div className="min-h-0 flex-1 overflow-auto"><table className="w-full table-fixed text-left text-[11px]"><colgroup><col className="w-[24%]"/><col className="w-[20%]"/><col className="w-[24%]"/><col className="w-[17%]"/><col className="w-[15%]"/></colgroup>
+                            <thead className="sticky top-0 z-10 bg-[#FFFCF7] text-[9px] font-semibold uppercase tracking-wide text-[#806A8C]"><tr>{["Employee", "Leave Type", "Date / Range", "Status", "Action"].map(h => <th className="px-2 py-2" key={h}>{h}</th>)}</tr></thead>
+                            <tbody>{leaveGroups.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={row.key}>
+                                <td className="px-2 py-2 font-semibold text-[#2B174C]" title={row.employeeName}>{row.employeeName}</td>
+                                <td className="px-2 py-2 text-[#665875]">{row.leaveType}</td><td className="px-2 py-2 text-[#665875]">{mdLeaveDatesLabel(row)}</td>
+                                <td className="px-2 py-2"><MDStatusBadge status={row.status}/></td>
+                                <td className="px-2 py-2"><button type="button" onClick={() => { setSelectedLeave(row); setDecisionReason(""); setDecisionError(""); }} className="rounded-lg border border-[#DCCCED] bg-[#F7F1FF] px-2.5 py-1.5 text-[10px] font-semibold text-[#5D2DAB] hover:bg-[#EDE4FA]">Review</button></td>
+                            </tr>)}{leaveGroups.length === 0 && <tr><td className="px-4 py-12 text-center text-[#8A7D92]" colSpan={5}>{staffError || "No leave requests recorded for this branch."}</td></tr>}</tbody>
+                        </table></div><p className="border-t border-[#EEE7F2] px-4 py-2 text-right text-[10px] text-[#8A7D92]">Showing {leaveGroups.length} requests</p>
+                    </MDPanel></div>
+                </div>
+                <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                    <div id="manager-supplier-payables"><MDPanel title="Supplier Payables" subtitle="Purchase orders with outstanding balances" icon={<MDWalletIcon/>} onExport={exportPayables} search={payableSearch} setSearch={setPayableSearch} searchPlaceholder="Search purchase orders...">
+                        <div className="min-h-0 flex-1 overflow-auto"><table className="w-full table-fixed text-left text-[11px]"><colgroup><col className="w-[21%]"/><col className="w-[29%]"/><col className="w-[17%]"/><col className="w-[16%]"/><col className="w-[17%]"/></colgroup>
+                            <thead className="sticky top-0 bg-[#FFFCF7] text-[9px] uppercase text-[#806A8C]"><tr>{["Purchase ID", "Supplier", "Due Date", "Balance", "Action"].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr></thead>
+                            <tbody>{filteredPayables.map(row => <tr key={row.purchaseId} className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]">
+                                <td className="break-all px-3 py-2 font-semibold text-[#2B174C]">{row.purchaseNumber}</td><td className="px-3 py-2 text-[#5F4E75]">{row.supplier}</td>
+                                <td className="px-3 py-2"><span className={row.paymentDueDate && row.paymentDueDate < today ? "text-[#C32F2F]" : "text-[#806A8C]"}>{row.paymentDueDate || "No due date"}</span></td>
+                                <td className="px-3 py-2 font-semibold text-[#2B174C]">{peso(Number(row.outstandingBalance))}</td>
+                                <td className="px-3 py-2"><button type="button" className="rounded-lg bg-[#2B174C] px-3 py-1.5 text-[10px] font-semibold text-white hover:bg-[#442569]" onClick={() => { setSelectedPayable(row); setPaymentAmount(""); setPaymentError(""); paymentKeyRef.current = window.crypto.randomUUID(); }}>Pay</button></td>
+                            </tr>)}{filteredPayables.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-[#8A7D92]">{payablesError || "No outstanding supplier purchases."}</td></tr>}</tbody>
+                        </table></div><p className="border-t border-[#EEE7F2] px-4 py-2 text-right text-[10px] text-[#8A7D92]">Showing {filteredPayables.length} of {openPayables.length} unpaid purchases</p>
+                    </MDPanel></div>
+                    <MDPanel title="Stock Action Center" subtitle="Stock items needing immediate action" icon={<TriangleAlert size={19}/>} onExport={exportStock} search={stockSearch} setSearch={setStockSearch} searchPlaceholder="Search products...">
+                        <div className="min-h-0 flex-1 overflow-auto"><table className="w-full table-fixed text-left text-[11px]"><colgroup><col className="w-[30%]"/><col className="w-[20%]"/><col className="w-[15%]"/><col className="w-[19%]"/><col className="w-[16%]"/></colgroup>
+                            <thead className="sticky top-0 bg-[#FFFCF7] text-[9px] uppercase text-[#806A8C]"><tr>{["Product", "SKU", "Current Stock", "Status", "Action"].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr></thead>
+                            <tbody>{stockRows.map(row => <tr key={row.key} className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]">
+                                <td className="px-3 py-2 font-semibold text-[#2B174C]">{row.productName}<span className="mt-0.5 block text-[9px] font-normal text-[#8A7D92]">{row.detail}</span></td>
+                                <td className="break-all px-3 py-2 text-[#806A8C]">{row.sku}</td><td className="px-3 py-2 font-semibold text-[#2B174C]">{row.currentStock}</td><td className="px-3 py-2"><MDStockBadge status={row.status}/></td>
+                                <td className="px-3 py-2"><button type="button" onClick={() => router.push("/inventory")} className="rounded-lg border border-[#D9C9EA] bg-[#F7F1FF] px-3 py-1.5 text-[10px] font-semibold text-[#5D2DAB] hover:bg-[#ECE3F8]">{row.status === "Expired" ? "Review" : row.status === "Out of Stock" || row.status.includes("Low") ? "Restock" : "View"}</button></td>
+                            </tr>)}{stockRows.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-[#8A7D92]">No matching stock alerts.</td></tr>}</tbody>
+                        </table></div><p className="border-t border-[#EEE7F2] px-4 py-2 text-right text-[10px] text-[#8A7D92]">Showing {stockRows.length} of {attentionItems.length} items</p>
+                    </MDPanel>
+                </div>
+            </div>}
+        </section>
+        {showStockAlertsModal && <ManagerStockAlertsModal items={activeStockAlerts} activeFilter={stockAlertFilter}
+                                                          totalCount={stockAlerts.length} lowStockCount={lowCount} outOfStockCount={outCount}
+                                                          onChangeFilter={setStockAlertFilter} onClose={() => setShowStockAlertsModal(false)}/>}
+        {selectedLeave && <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/50 p-4 font-sans" onMouseDown={e => { if (e.target === e.currentTarget && !decisionBusy) setSelectedLeave(null); }}>
+            <div role="dialog" aria-modal="true" aria-labelledby="manager-leave-review-title" className="flex max-h-[90vh] w-full max-w-xl flex-col rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl">
+                <div className="flex items-start justify-between border-b border-[#EEE7F2] px-6 py-4"><div><h2 id="manager-leave-review-title" className="text-lg font-bold text-[#1A1220]">Review Employee Leave Request</h2><p className="mt-1 text-xs text-[#806A8C]">Review the reason before approving or disapproving.</p></div><button disabled={decisionBusy} onClick={() => setSelectedLeave(null)} aria-label="Close" className="text-[#806A8C]"><MdCloseIcon/></button></div>
+                <div className="space-y-4 overflow-y-auto px-6 py-5 text-sm">
+                    <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#FBF8FE] p-4 text-[#2B174C]"><div><p className="text-[11px] text-[#806A8C]">Employee</p><p className="font-semibold">{selectedLeave.employeeName}</p></div><div><p className="text-[11px] text-[#806A8C]">Employee ID</p><p className="font-semibold">{selectedLeave.employeeNumber}</p></div><div><p className="text-[11px] text-[#806A8C]">Leave Type</p><p className="font-semibold">{selectedLeave.leaveType}</p></div><div><p className="text-[11px] text-[#806A8C]">Status</p><MDStatusBadge status={selectedLeave.status}/></div><div className="col-span-2"><p className="text-[11px] text-[#806A8C]">Date / Date Range</p><p className="font-semibold">{mdLeaveDatesLabel(selectedLeave)} ({selectedLeave.ids.length} day(s))</p></div></div>
+                    <div><p className="mb-1 text-xs font-semibold text-[#5F4E75]">Employee's Reason</p><p className="whitespace-pre-wrap rounded-xl border border-[#E6DDF0] bg-white p-3 text-sm leading-6 text-[#2B174C]">{selectedLeave.reason}</p></div>
+                    {!selectedLeaveIsPending && selectedLeave.decisionReason && <div><p className="text-xs font-semibold text-[#5F4E75]">Manager Decision Note</p><p className="mt-1 rounded-xl bg-[#FAF7FE] p-3 text-xs">{selectedLeave.decisionReason}</p></div>}
+                    {selectedLeaveIsPending && <div><label htmlFor="md-decision-note" className="mb-1 block text-xs font-semibold text-[#5F4E75]">Decision Note (required when disapproving)</label><textarea id="md-decision-note" rows={3} maxLength={500} value={decisionReason} onChange={e => setDecisionReason(e.target.value)} placeholder="Explain your decision to the employee" className="w-full resize-y rounded-xl border border-[#E6DDF0] p-3 text-sm outline-none focus:border-[#8058BA]"/></div>}
+                    {decisionError && <p role="alert" className="rounded-lg bg-[#FFF0F0] px-3 py-2 text-xs text-[#C32F2F]">{decisionError}</p>}
+                    {!mayReviewLeave && <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">Your manager account needs Staff Management access to approve or disapprove leave requests.</p>}
+                    <p className="text-[11px] text-[#806A8C]">Only pending requests from your assigned branch may be reviewed. Approved leave cannot overlap recorded attendance. Decisions are saved to MySQL with your manager ID and review time.</p>
+                </div>
+                <div className="flex justify-end gap-2 border-t border-[#EEE7F2] px-6 py-4"><button type="button" disabled={decisionBusy} onClick={() => setSelectedLeave(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2.5 text-xs font-semibold text-[#2B174C]">Close</button>
+                    {selectedLeaveIsPending && mayReviewLeave && <><button disabled={decisionBusy || decisionReason.trim().length < 3} type="button" onClick={() => void decideLeave("Rejected")} className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-2.5 text-xs font-semibold text-[#C32F2F] disabled:opacity-50">Disapprove</button><button disabled={decisionBusy} type="button" onClick={() => void decideLeave("Approved")} className="rounded-xl bg-[#2B174C] px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-50">{decisionBusy ? "Saving..." : "Approve"}</button></>}
+                </div>
+            </div>
+        </div>}
+        {selectedPayable && <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/50 p-4 font-sans"><div role="dialog" aria-modal="true" aria-labelledby="manager-payable-title" className="w-full max-w-md rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[#E6DDF0] px-5 py-4"><h2 id="manager-payable-title" className="text-lg font-bold text-[#2B174C]">Record Supplier Payment</h2><button aria-label="Close" disabled={paymentBusy} onClick={() => setSelectedPayable(null)}><MdCloseIcon/></button></div>
+            <div className="space-y-3 p-5 text-sm"><p><b>Purchase:</b> {selectedPayable.purchaseNumber}</p><p><b>Supplier:</b> {selectedPayable.supplier}</p><p><b>Outstanding:</b> {peso(Number(selectedPayable.outstandingBalance))}</p><label className="block text-xs font-semibold text-[#806A8C]" htmlFor="manager-payment-amount">Amount to Pay (₱)</label><input id="manager-payment-amount" type="number" min="0.01" step="0.01" max={selectedPayable.outstandingBalance} value={paymentAmount} onChange={e => setPaymentAmount(e.target.value)} className="w-full rounded-xl border border-[#E6DDF0] p-3" placeholder="Enter payment amount"/>
+                <p className="text-[11px] text-[#806A8C]">Payment date: {today}. This records a supplier payment without changing stock.</p>{paymentError && <p role="alert" className="rounded-lg bg-red-50 p-2 text-xs text-red-700">{paymentError}</p>}</div>
+            <div className="flex justify-end gap-2 border-t border-[#E6DDF0] p-4"><button disabled={paymentBusy} onClick={() => setSelectedPayable(null)} className="rounded-xl border px-4 py-2 text-xs">Cancel</button><button disabled={paymentBusy || !paymentAmount} onClick={() => void paySupplier()} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">{paymentBusy ? "Saving..." : "Confirm Payment"}</button></div>
+        </div></div>}
+        {toast && <div role="status" aria-live="polite" className={`fixed bottom-5 right-5 z-[180] flex w-[min(360px,calc(100vw-2rem))] items-center gap-3 rounded-2xl border bg-white p-4 shadow-xl ${toast.error ? "border-[#F4BFC5]" : "border-[#BCE8CA]"}`}><span className={`rounded-full p-2 ${toast.error ? "bg-red-50 text-red-700" : "bg-green-50 text-green-700"}`}>{toast.error ? <AlertTriangle size={19}/> : <MdCheckIcon/>}</span><div className="flex-1"><p className="text-sm font-bold text-[#1A1220]">{toast.title}</p><p className="mt-0.5 text-xs text-[#806A8C]">{toast.message}</p></div><button onClick={() => setToast(null)} aria-label="Dismiss"><MdCloseIcon/></button></div>}
+    </>;
+}
+
+/* Dashboard overview panels and staff leave workflow. Manager Inventory is unchanged. */
+type MDStaffSummary = { total: number; present: number; absent: number; onLeave: number; notRecorded: number };
+type MDStaffAttendance = { employeeId: number; employeeName: string; status: string; timeIn: string | null; timeOut: string | null };
+type MDLeaveRow = { id: number; employeeId: number; employeeName: string; employeeNumber: string;
+    leaveDate: string; leaveType: string; reason: string; approvalStatus: string;
+    decisionReason: string | null; createdAt: string; reviewedAt?: string | null };
+type MDLeaveGroup = { key: string; ids: number[]; employeeName: string; employeeNumber: string;
+    leaveType: string; dates: string[]; reason: string; status: string; decisionReason: string | null; createdAt: string };
+type MDPayable = { purchaseId: number; purchaseNumber: string; supplier: string; purchaseTotal: number;
+    outstandingBalance: number; paymentDueDate: string | null };
+
+function mdLocalDay(date: Date) {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+    const part = (name: string) => parts.find(p => p.type === name)?.value || "";
+    return `${part("year")}-${part("month")}-${part("day")}`;
+}
+function mdOffsetDay(value: Date, offsetDays: number) {
+    const date = new Date(value);
+    date.setDate(date.getDate() + offsetDays);
+    return mdLocalDay(date);
+}
+function mdGroupLeaveRequests(rows: MDLeaveRow[]): MDLeaveGroup[] {
+    // The original staff leave API stores one row per day, not one row per
+    // request. Combine only contiguous dates from the SAME exact submission
+    // timestamp, employee, type, reason and status; otherwise keep them separate.
+    const sorted = [...rows].sort((a, b) =>
+        a.employeeId - b.employeeId || a.createdAt.localeCompare(b.createdAt) || a.leaveDate.localeCompare(b.leaveDate));
+    const groups: MDLeaveGroup[] = [];
+    for (const row of sorted) {
+        const last = groups[groups.length - 1];
+        const sameRequest = last && last.employeeNumber === String(row.employeeNumber) &&
+            last.leaveType === row.leaveType && last.reason === row.reason &&
+            last.createdAt === row.createdAt && last.status === row.approvalStatus;
+        const previous = sameRequest ? last.dates[last.dates.length - 1] : undefined;
+        const contiguous = previous && mdDatePlusOne(previous) === row.leaveDate;
+        if (sameRequest && contiguous) {
+            last.ids.push(row.id);
+            last.dates.push(row.leaveDate);
+        } else {
+            groups.push({ key: String(row.id), ids: [row.id], employeeName: row.employeeName,
+                employeeNumber: String(row.employeeNumber), leaveType: row.leaveType,
+                dates: [row.leaveDate], reason: row.reason, status: row.approvalStatus,
+                decisionReason: row.decisionReason, createdAt: row.createdAt });
+        }
+    }
+    return groups.sort((a, b) =>
+        Number(b.status === "Pending") - Number(a.status === "Pending") ||
+        b.createdAt.localeCompare(a.createdAt));
+}
+function mdDatePlusOne(value: string) {
+    const d = new Date(`${value}T00:00:00.000Z`);
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+}
+function mdDisplayDate(value: string) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+    return new Date(value + "T12:00:00Z").toLocaleDateString("en-US", {month: "short", day: "numeric", year: "numeric", timeZone: "UTC"});
+}
+function mdLeaveDatesLabel(row: MDLeaveGroup) {
+    const first = row.dates[0], last = row.dates[row.dates.length - 1];
+    return first === last ? mdDisplayDate(first) : `${mdDisplayDate(first)} – ${mdDisplayDate(last)}`;
+}
+function mdExportRows(title: string, headers: string[], rows: string[][], filename: string, branch: string, date: string) {
+    // Reuse the existing StockNBook dashboard PDF generator, loaded only on export.
+    // No separate PDF component, extra file, or duplicate document renderer.
+    exportTableAsPdf({ title, headers, rows }, {
+        storeName: getSavedItem("store_name") || getSavedItem("stocknbook_store_name") || "StockNBook",
+        branch,
+        dateRange: date,
+    }, filename);
+}
+
+function MdWrenchIcon() { return <MdWrench size={24}/>; }
+function MDWalletIcon() { return <MdWallet size={24}/>; }
+function MDPeopleIcon() { return <MdUsers size={18}/>; }
+function MDBellIcon() { return <MdBell size={18}/>; }
+function MdCloseIcon() { return <MdX size={18}/>; }
+function MdCheckIcon() { return <MdCheckCircle size={20}/>; }
+function MDStatusBadge({ status }: { status: string }) {
+    const key = status.toLowerCase();
+    const colors = key === "approved" ? "bg-[#E6F7EE] text-[#16834A]" :
+        key === "rejected" ? "bg-[#FFF0F0] text-[#D52B2B]" : "bg-[#FFF3D8] text-[#B66A00]";
+    return <span className={`inline-flex max-w-full rounded-full px-2 py-1 text-[9px] font-bold uppercase ${colors}`}>{status}</span>;
+}
+function MDStockBadge({ status }: { status: string }) {
+    const colors = status === "Expired" || status === "Out of Stock" ? "bg-[#FFF0F0] text-[#D52B2B]" :
+        status.includes("Low") ? "bg-[#FFF3D8] text-[#B66A00]" : "bg-[#F1EBFF] text-[#6D35D4]";
+    return <span className={`inline-flex rounded-full px-2 py-1 text-[9px] font-bold uppercase ${colors}`}>{status}</span>;
+}
+function MDPanel({ title, subtitle, icon, children, onExport, search, setSearch, searchPlaceholder }: {
+    title: string; subtitle: string; icon: React.ReactNode; children: React.ReactNode;
+    onExport: () => void; search?: string; setSearch?: (value: string) => void; searchPlaceholder?: string;
+}) {
+    return <section className="flex h-[320px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
+        <div className="flex items-start justify-between gap-2 border-b border-[#EEE7F2] px-4 py-3.5">
+            <div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><div className="min-w-0"><h2 className="text-[15px] font-bold text-[#1A1220]">{title}</h2><p className="mt-0.5 text-[11px] text-[#9A8DA8]">{subtitle}</p></div></div>
+            <div className="flex shrink-0 gap-2">{setSearch && <div className="relative hidden sm:block"><MdSearch size={13} className="absolute left-2 top-2.5 text-[#806A8C]"/><input aria-label={`Search ${title}`} value={search || ""} onChange={e => setSearch(e.target.value)} className="h-8 w-40 rounded-lg border border-[#E6DDF0] pl-7 pr-2 text-[10px] outline-none focus:border-[#8B65B9]" placeholder={searchPlaceholder}/></div>}
+                <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={onExport} className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
+            </div>
+        </div>{children}
+    </section>;
+}
+function MDChartCard({title, subtitle, icon, total, centerLabel, segments, exportClick, badgeLabel, error}: {
+    title: string; subtitle: string; icon: React.ReactNode; total: number | null; centerLabel: string;
+    segments: ManagerSegment[]; exportClick: () => void; badgeLabel: string; error?: string;
+}) {
+    const sum = segments.reduce((a, b) => a + b.value, 0);
+    let cursor = 0;
+    const stops = segments.map(seg => {
+        const start = sum ? cursor / sum * 100 : 0;
+        cursor += seg.value;
+        const end = sum ? cursor / sum * 100 : 0;
+        return `${seg.color} ${start}% ${end}%`;
     });
-
-    return (
-        <>
-            <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
-                <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
-                    <div className="min-w-0">
-                        <h1 className="truncate text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                            Manager Dashboard
-                        </h1>
-                        <p className="mt-1 truncate text-[12px] text-[#7A6A84]">
-                            Operational overview for {assignedBranchName} for {currentMonthLabel}.
-                        </p>
-                    </div>
-
-                    <div className="flex shrink-0 items-center gap-2.5">
-                        <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-                            {formatCurrentDashboardDateTime(currentDateTime)}
-                        </span>
-
-                        <button
-                            type="button"
-                            onClick={() => void loadManagerDashboard()}
-                            disabled={isRefreshing}
-                            className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
-                            {isRefreshing ? "Refreshing..." : "Refresh"}
-                        </button>
-                    </div>
-                </div>
-            </header>
-
-            <section
-                aria-busy={!hasLoadedDashboard || isRefreshing}
-                className="px-6 py-5 font-sans"
-            >
-                {!hasLoadedDashboard ? <ManagerDashboardSkeleton /> : null}
-
-                <div className={`mx-auto max-w-none space-y-4 ${!hasLoadedDashboard ? "hidden" : ""}`}>
-                    {bookingsError && (
-                        <div className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs font-medium text-[#C32F2F]">
-                            {bookingsError}
-                        </div>
-                    )}
-
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                        <ManagerMetricCard
-                            title="Pending Bookings"
-                            value={pendingBookingCount}
-                            subtitle="Bookings waiting for confirmation"
-                            icon={<CalendarClock size={24} />}
-                            tone="violet"
-                            onClick={() => router.push("/bookings?status=pending")}
-                        />
-                        <ManagerMetricCard
-                            title="Low Stock"
-                            value={lowStockAlertCount}
-                            subtitle="Items below reorder level"
-                            icon={<AlertTriangle size={24} />}
-                            tone="orange"
-                            onClick={() => {
-                                setStockAlertFilter("low");
-                                setShowStockAlertsModal(true);
-                            }}
-                        />
-                        <ManagerMetricCard
-                            title="Out of Stock"
-                            value={outOfStockAlertCount}
-                            subtitle="Items with no stock remaining"
-                            icon={<PackageX size={24} />}
-                            tone="red"
-                            onClick={() => {
-                                setStockAlertFilter("out");
-                                setShowStockAlertsModal(true);
-                            }}
-                        />
-                        <ManagerMetricCard
-                            title="Expiring Soon"
-                            value={expiringSoonAlertCount}
-                            subtitle={`Items expiring within ${EXPIRING_SOON_DAYS} days`}
-                            icon={<CalendarDays size={24} />}
-                            tone="blue"
-                            onClick={() => router.push("/inventory?filter=expiring-soon")}
-                        />
-                    </div>
-
-                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-12">
-                        <div className="xl:col-span-4">
-                            <ManagerDonutPanel
-                                title="Booking Overview"
-                                subtitle="Status of bookings this month"
-                                icon={<CalendarDays size={18} />}
-                                centerValue={bookingOverview.total}
-                                centerLabel="Total Bookings"
-                                periodLabel="This Month"
-                                segments={bookingOverview.segments}
-                            />
-                        </div>
-
-                        <div className="xl:col-span-4">
-                            <ManagerDonutPanel
-                                title="Inventory Health"
-                                subtitle="Current stock status across all products"
-                                icon={<Box size={18} />}
-                                centerValue={inventoryHealth.total}
-                                centerLabel="Total Items"
-                                periodLabel="This Month"
-                                segments={inventoryHealth.segments}
-                            />
-                        </div>
-
-                        <div className="xl:col-span-4">
-                            <ItemsRequiringAttentionPanel
-                                items={attentionItems.slice(0, 5)}
-                                total={attentionItems.length}
-                                onViewAll={() => router.push("/inventory")}
-                            />
-                        </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
-                        <ManagerLineChartPanel
-                            title="Booking Status Trend"
-                            subtitle={bookingTrendConfig.subtitle}
-                            icon={<BarChart3 size={18} />}
-                            periodValue={bookingTrendRange}
-                            periodOptions={BOOKING_TREND_RANGE_OPTIONS}
-                            onPeriodChange={setBookingTrendRange}
-                            data={bookingTrend}
-                            series={[
-                                { key: "pending", label: "Pending", color: "#F5B51B" },
-                                { key: "confirmed", label: "Confirmed", color: "#159455" },
-                                { key: "completed", label: "Completed", color: "#2F7BEA" },
-                                { key: "cancelled", label: "Cancelled", color: "#EF4444" },
-                            ]}
-                        />
-
-                        <ManagerInventoryForecastPanel
-                            rows={inventoryForecast}
-                            onViewInventory={() => router.push("/inventory")}
-                        />
-                    </div>
-                </div>
-            </section>
-
-            {showStockAlertsModal && (
-                <ManagerStockAlertsModal
-                    items={visibleStockAlerts}
-                    activeFilter={stockAlertFilter}
-                    totalCount={allInventoryAlerts.length}
-                    lowStockCount={lowStockAlertCount}
-                    outOfStockCount={outOfStockAlertCount}
-                    onChangeFilter={setStockAlertFilter}
-                    onClose={() => setShowStockAlertsModal(false)}
-                />
-            )}
-        </>
-    );
+    const background = sum ? `conic-gradient(${stops.join(",")})` : "#F2EDF6";
+    return <section className="flex h-[320px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
+        <div className="flex items-start justify-between gap-2 px-4 py-3.5"><div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><div className="min-w-0"><h2 className="text-[15px] font-bold text-[#1A1220]">{title}</h2><p className="mt-0.5 text-[11px] text-[#9A8DA8]">{subtitle}</p></div></div>
+            <div className="flex shrink-0 gap-1.5"><span className="inline-flex h-8 items-center rounded-lg border border-[#E6DDF0] px-2 text-[10px] font-semibold text-[#5F4E75]">{badgeLabel}</span>
+                <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={exportClick} className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
+            </div>
+        </div>
+        {error ? <p role="alert" className="mx-4 rounded-lg bg-red-50 p-2 text-xs text-red-700">{error}</p> : null}
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(110px,1fr)_minmax(0,1.2fr)] items-center gap-2 px-4 pb-4">
+            <div className="relative mx-auto flex aspect-square w-full max-w-[178px] items-center justify-center rounded-full" style={{ background }} role="img" aria-label={`${title}: ${segments.map(s => `${s.label} ${s.value}`).join(", ")}`}>
+                <div className="absolute inset-[23%] flex flex-col items-center justify-center rounded-full bg-white text-center"><span className="text-[25px] font-bold leading-none text-[#1A1220]">{total === null ? "—" : total.toLocaleString("en-PH")}</span><span className="mt-1 text-[10px] text-[#806A8C]">{centerLabel}</span></div>
+            </div>
+            <div className="min-w-0 space-y-3">{segments.map(seg => <div key={seg.label} className="grid grid-cols-[minmax(0,1fr)_30px_40px] items-center gap-1.5 text-[10px]"><span className="flex min-w-0 items-center gap-1.5 font-semibold text-[#4B3E55]"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{backgroundColor:seg.color}}/><span className="truncate">{seg.label}</span></span><span className="text-right font-bold text-[#2B174C]">{seg.value}</span><span className="text-right text-[#8A7D92]">{sum ? (seg.value / sum * 100).toFixed(1) : "0.0"}%</span></div>)}</div>
+        </div>
+    </section>;
 }
 
 /* ----------------------------------------------------------------------- */

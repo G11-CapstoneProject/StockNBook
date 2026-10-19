@@ -311,7 +311,7 @@ export async function POST(request: NextRequest) {
                 SELECT DATE_FORMAT(attendance_date, '%Y-%m-%d') AS date
                 FROM stocknbook_staff_attendance
                 WHERE employee_id = ? AND employee_role = 'staff' AND attendance_date BETWEEN ? AND ?
-                LIMIT 1 FOR UPDATE
+                    LIMIT 1 FOR UPDATE
             `, [principal.employeeId, startDate, endDate]);
             if (attendance.length) {
                 await connection.rollback();
@@ -323,7 +323,7 @@ export async function POST(request: NextRequest) {
                 SELECT DATE_FORMAT(leave_date, '%Y-%m-%d') AS date
                 FROM stocknbook_staff_leave_requests
                 WHERE employee_id = ? AND employee_role = 'staff' AND leave_date BETWEEN ? AND ?
-                LIMIT 1 FOR UPDATE
+                    LIMIT 1 FOR UPDATE
             `, [principal.employeeId, startDate, endDate]);
             if (existingLeave.length) {
                 await connection.rollback();
@@ -337,8 +337,8 @@ export async function POST(request: NextRequest) {
                     .toISOString().slice(0, 10);
                 await connection.execute(`
                     INSERT INTO stocknbook_staff_leave_requests
-                        (store_id, branch_id, employee_id, employee_role, store_name, branch_name,
-                         employee_name, employee_number, leave_date, leave_type, reason, approval_status)
+                    (store_id, branch_id, employee_id, employee_role, store_name, branch_name,
+                     employee_name, employee_number, leave_date, leave_type, reason, approval_status)
                     VALUES (?, ?, ?, 'staff', ?, ?, ?, ?, ?, ?, ?, 'Pending')
                 `, [principal.storeId, principal.branchId, principal.employeeId, principal.storeName,
                     principal.branchName, principal.employeeName, principal.employeeNumber, day, kind, reason]);

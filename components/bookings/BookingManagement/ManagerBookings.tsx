@@ -16,7 +16,7 @@ import {
     CalendarDropdown,
     FilterType,
     TABS,
-    BookingRow,
+    BookingWorkspace,
     PriceModal,
     dateKey,
     formatDate,
@@ -77,6 +77,8 @@ export default function ManagerBookings() {
     const [loading, setLoading] = useState(true);
     const [filter, setFilter] = useState<FilterType>("All");
     const [search, setSearch] = useState("");
+    const [approvalOnly, setApprovalOnly] = useState(false);
+    const [bookingActionError, setBookingActionError] = useState("");
     const [selectedDate, setSelectedDate] = useState("");
     const [calendarOpen, setCalendarOpen] = useState(false);
     const [priceModal, setPriceModal] = useState<Booking | null>(null);
@@ -296,10 +298,11 @@ export default function ManagerBookings() {
                 throw new Error(data.message || data.error || "Failed to update booking status.");
             }
 
-            updateLocalBooking(id, { status: cleanStatus });
+            setBookingActionError("");
+            updateLocalBooking(id, { status: cleanStatus, approvalStatus: cleanStatus === "Confirmed" && booking.approvalStatus === "pending" ? "approved" : booking.approvalStatus });
         } catch (err) {
             console.error("Failed to update booking status:", err);
-            throw err;
+            setBookingActionError(err instanceof Error ? err.message : "Booking action failed.");
         }
     }
 
@@ -512,20 +515,13 @@ export default function ManagerBookings() {
                 );
             }
 
-            const currentStatus = normalizeStatus(booking.status);
-            const nextStatus =
-                currentStatus === "Pending Review" ||
-                currentStatus === "Awaiting Down Payment"
-                    ? "Confirmed"
-                    : currentStatus;
-
+            // Recording payment is NOT an approval. Manager must confirm separately.
             updateLocalBooking(booking.id, {
                 amount_paid: newAmountPaid,
                 amountPaid: newAmountPaid,
                 balance: newBalance,
                 payment_status: "Down Payment Paid",
                 paymentStatus: "Down Payment Paid",
-                status: nextStatus,
             });
         } catch (err) {
             console.error("Failed to record down payment:", err);
@@ -600,6 +596,7 @@ export default function ManagerBookings() {
 
     const filtered = useMemo(() => {
         return bookings
+            .filter((booking) => !approvalOnly || (booking.approvalStatus === "pending" && booking.status === "Pending Review"))
             .filter((booking) => filter === "All" || booking.status === filter)
             .filter((booking) => !selectedDate || dateKey(booking.date) === selectedDate)
             .filter((booking) => {
@@ -624,7 +621,7 @@ export default function ManagerBookings() {
                     booking.venue?.toLowerCase().includes(query)
                 );
             });
-    }, [bookings, filter, selectedDate, search]);
+    }, [bookings, filter, selectedDate, search, approvalOnly]);
 
     const counts = TABS.reduce((acc, tab) => {
         acc[tab] =
@@ -698,6 +695,7 @@ export default function ManagerBookings() {
             </header>
 
             <section className="px-6 py-4">
+                {bookingActionError && <div role="alert" className="mb-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{bookingActionError}</div>}
                 <div className="mb-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                     <CompactMetricCard
                         title="Booking Sales"
@@ -768,6 +766,10 @@ export default function ManagerBookings() {
                 </div>
 
                 <div className="mb-3 flex flex-wrap gap-2.5">
+                    <button type="button" onClick={()=>{setApprovalOnly(p=>!p);setFilter("All")}}
+                            className={`rounded-xl border px-3.5 py-2.5 text-[11px] font-semibold ${approvalOnly ? "border-amber-400 bg-amber-100 text-amber-950" : "border-[#E6DDF0] bg-white text-[#2B174C]"}`}>
+                        Manager Approval ({bookings.filter(b=>b.approvalStatus==="pending" && b.status==="Pending Review").length})
+                    </button>
                     {TABS.map((tab) => (
                         <button
                             key={tab}
@@ -821,49 +823,12 @@ export default function ManagerBookings() {
                         No bookings found.
                     </div>
                 ) : (
-                    <div className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
-                        <div className="max-h-[600px] overflow-y-auto overflow-x-auto">
-                            <table className="w-full min-w-[930px] border-collapse">
-                                <thead className="sticky top-0 z-10">
-                                <tr className="border-b border-[#E6DDF0] bg-white">
-                                    <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                        Client
-                                    </th>
-                                    <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                        Schedule
-                                    </th>
-                                    <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                        Booking Selection
-                                    </th>
-                                    <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                        Payment
-                                    </th>
-                                    <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                        Status
-                                    </th>
-                                    <th className="px-3 py-3 text-right text-xs font-semibold text-[#806A8C]">
-                                        Details
-                                    </th>
-                                </tr>
-                                </thead>
-
-                                <tbody>
-                                {filtered.map((booking) => (
-                                    <BookingRow
-                                        key={booking.id}
-                                        b={booking}
-                                        canManage={canManage}
-                                        onUpdateStatus={canManage ? updateStatus : undefined}
-                                        onSetPrice={canManage ? setPriceModal : undefined}
-                                        onRecordDownPayment={canManage ? recordDownPayment : undefined}
-                                        onMarkFullyPaid={canManage ? markFullyPaid : undefined}
-                                        onCancelBooking={canManage ? openCancelModal : undefined}
-                                    />
-                                ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
+                    <BookingWorkspace bookings={filtered} canManage={canManage}
+                                      onUpdateStatus={canManage ? updateStatus : undefined}
+                                      onSetPrice={canManage ? setPriceModal : undefined}
+                                      onRecordDownPayment={canManage ? recordDownPayment : undefined}
+                                      onMarkFullyPaid={canManage ? markFullyPaid : undefined}
+                                      onCancelBooking={canManage ? openCancelModal : undefined} />
                 )}
             </section>
 

@@ -23,7 +23,7 @@ function getPool(): Pool {
             host: process.env.DB_HOST || process.env.MYSQL_HOST || "127.0.0.1",
             port: Number(process.env.DB_PORT || process.env.MYSQL_PORT || 3306),
             user: process.env.DB_USER || process.env.MYSQL_USER || "root",
-            password: process.env.DB_PASSWORD || process.env.MYSQL_PASSWORD || "020820@Steph",
+            password: process.env.DB_PASSWORD || process.env.MYSQL_PASSWORD || "BTA5EYVWLfWcebF",
             database: process.env.DB_NAME || process.env.MYSQL_DATABASE || "stocknbook",
             waitForConnections: true,
             connectionLimit: 10,
@@ -205,16 +205,29 @@ export async function GET(request: NextRequest) {
             FROM stocknbook_staff_attendance
             WHERE employee_id = ? AND employee_role = 'staff' AND attendance_date BETWEEN ? AND ?
         `, [principal.employeeId, startDate, endDate]);
+        // The staff leave tab shows every application, including future dates.
+        // Existing PDF exports (export=1) continue to use the chosen report period.
+        const filterLeaveForExport = url.get("export") === "1";
+        const leavePeriodSql = filterLeaveForExport
+            ? " AND leave_date <= ? AND COALESCE(leave_end_date, leave_date) >= ?"
+            : "";
+        const leaveParams = filterLeaveForExport
+            ? [principal.employeeId, principal.storeId, principal.branchId, endDate, startDate]
+            : [principal.employeeId, principal.storeId, principal.branchId];
         const [leaveRows] = await db.query<RowDataPacket[]>(`
             SELECT CONCAT('L-',id) AS id, store_name AS storeName, branch_name AS branchName,
                    employee_name AS employeeName, CAST(employee_id AS CHAR) AS employeeNumber,
                    DATE_FORMAT(leave_date, '%Y-%m-%d') AS date,
+                DATE_FORMAT(COALESCE(leave_end_date, leave_date), '%Y-%m-%d') AS endDate,
                 NULL AS timeIn, NULL AS timeOut, NULL AS hoursWorked,
                 'Leave' AS status, reason, leave_type AS leaveType,
-                approval_status AS approvalStatus
+                approval_status AS approvalStatus,
+                DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS requestCreatedAt
             FROM stocknbook_staff_leave_requests
-            WHERE employee_id = ? AND employee_role = 'staff' AND leave_date BETWEEN ? AND ?
-        `, [principal.employeeId, startDate, endDate]);
+            WHERE employee_id = ? AND employee_role = 'staff'
+              AND store_id = ? AND branch_id = ? ${leavePeriodSql}
+            ORDER BY created_at DESC, leave_date ASC
+        `, leaveParams);
         const records = [...attendanceRows, ...leaveRows].sort((a, b) =>
             String(b.date).localeCompare(String(a.date)) || String(b.id).localeCompare(String(a.id)));
         // Always load today's clock state, even when a user filters an older date.
@@ -261,7 +274,8 @@ export async function POST(request: NextRequest) {
             if (existing.length) { await connection.rollback(); return invalid("Today's attendance is already recorded."); }
             const [approvedLeave] = await connection.query<RowDataPacket[]>(`
                 SELECT id FROM stocknbook_staff_leave_requests
-                WHERE employee_id = ? AND employee_role = 'staff' AND leave_date = ${PH_TODAY}
+                WHERE employee_id = ? AND employee_role = 'staff'
+                  AND leave_date <= ${PH_TODAY} AND COALESCE(leave_end_date, leave_date) >= ${PH_TODAY}
                   AND approval_status = 'Approved' LIMIT 1
             `, [principal.employeeId]);
             if (approvedLeave.length) { await connection.rollback(); return invalid("You have approved leave today. Contact your manager for corrections."); }
@@ -283,8 +297,8 @@ export async function POST(request: NextRequest) {
             }
             await connection.execute(`UPDATE stocknbook_staff_attendance SET time_out = ${PH_NOW}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [rows[0].id]);
         } else {
-            // Single day or inclusive date range. Each day is one pending row so
-            // existing manager review and unique-per-day rules remain unchanged.
+            // One leave application is stored as one row with start/end dates.
+            // The manager reviews the whole date range in a single decision.
             const startDate = readDay(typeof payload.start_date === "string" ? payload.start_date :
                 typeof payload.leave_date === "string" ? payload.leave_date : null);
             const endDate = readDay(typeof payload.end_date === "string" ? payload.end_date :
@@ -319,30 +333,38 @@ export async function POST(request: NextRequest) {
                         error: `Recorded attendance exists on ${attendance[0].date}; choose another leave period.` },
                     { status: 409 });
             }
+            // Serialize requests by this staff member so concurrent submissions cannot overlap.
+            const [lockedStaff] = await connection.query<RowDataPacket[]>(
+                "SELECT id FROM staff WHERE id = ? AND store_id = ? AND branch_id = ? FOR UPDATE",
+                [principal.employeeId, principal.storeId, principal.branchId],
+            );
+            if (!lockedStaff.length) {
+                await connection.rollback();
+                return invalid("Your staff assignment could not be confirmed.");
+            }
             const [existingLeave] = await connection.query<RowDataPacket[]>(`
                 SELECT DATE_FORMAT(leave_date, '%Y-%m-%d') AS date
                 FROM stocknbook_staff_leave_requests
-                WHERE employee_id = ? AND employee_role = 'staff' AND leave_date BETWEEN ? AND ?
+                WHERE employee_id = ? AND employee_role = 'staff'
+                  AND leave_date <= ? AND COALESCE(leave_end_date, leave_date) >= ?
                     LIMIT 1 FOR UPDATE
-            `, [principal.employeeId, startDate, endDate]);
+            `, [principal.employeeId, endDate, startDate]);
             if (existingLeave.length) {
                 await connection.rollback();
                 return NextResponse.json({ success: false,
                         error: `A leave request already exists on ${existingLeave[0].date}.` },
                     { status: 409 });
             }
-            // Bounded inserts occur inside one transaction: no partial leave period.
-            for (let offset = 0; offset < countDays; offset += 1) {
-                const day = new Date(Date.parse(`${startDate}T00:00:00Z`) + offset * 86_400_000)
-                    .toISOString().slice(0, 10);
-                await connection.execute(`
-                    INSERT INTO stocknbook_staff_leave_requests
-                    (store_id, branch_id, employee_id, employee_role, store_name, branch_name,
-                     employee_name, employee_number, leave_date, leave_type, reason, approval_status)
-                    VALUES (?, ?, ?, 'staff', ?, ?, ?, ?, ?, ?, ?, 'Pending')
-                `, [principal.storeId, principal.branchId, principal.employeeId, principal.storeName,
-                    principal.branchName, principal.employeeName, principal.employeeNumber, day, kind, reason]);
-            }
+            // Exactly one INSERT regardless of how many calendar days are requested.
+            await connection.execute(`
+                INSERT INTO stocknbook_staff_leave_requests
+                (store_id, branch_id, employee_id, employee_role, store_name, branch_name,
+                 employee_name, employee_number, leave_date, leave_end_date,
+                 leave_type, reason, approval_status)
+                VALUES (?, ?, ?, 'staff', ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')
+            `, [principal.storeId, principal.branchId, principal.employeeId, principal.storeName,
+                principal.branchName, principal.employeeName, principal.employeeNumber,
+                startDate, endDate, kind, reason]);
         }
         await connection.commit();
         return NextResponse.json({ success: true, message: "Attendance action saved." }, { headers: { "Cache-Control": "no-store" } });

@@ -40,7 +40,17 @@ const isDay = (v: string) => {
     return Number.isFinite(day.getTime()) && day.toISOString().slice(0, 10) === v;
 };
 
-type Manager = { id: number; storeId: number; branchId: number; mayReviewLeave: boolean };
+type Manager = {
+    id: number;
+    storeId: number;
+    branchId: number;
+    managerName: string;
+    storeName: string;
+    branchName: string;
+    mayReviewLeave: boolean;
+};
+const PH_NOW = "CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')";
+const PH_TODAY = `DATE(${PH_NOW})`;
 async function verifyManager(request: NextRequest, db: Pool | PoolConnection): Promise<Manager> {
     const token = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
     if (!token) throw new ApiError(401, "Manager sign-in is required.");
@@ -62,7 +72,13 @@ async function verifyManager(request: NextRequest, db: Pool | PoolConnection): P
     const signedBranchId = positiveInt(claims.branch_id ?? claims.branchId);
     if (!managerId || !signedStoreId) throw new ApiError(403, "Manager identity is missing from the verified login.");
     const [rows] = await db.query<RowDataPacket[]>(
-        "SELECT id, store_id, branch_id, permissions, status FROM managers WHERE id = ? AND store_id = ? LIMIT 1",
+        `SELECT m.id, m.store_id, m.branch_id, m.permissions, m.status,
+                m.manager_name AS managerName, s.store_name AS storeName,
+                br.branch_name AS branchName
+         FROM managers m
+         JOIN branches br ON br.id = m.branch_id AND br.store_id = m.store_id
+         JOIN stores s ON s.id = m.store_id
+         WHERE m.id = ? AND m.store_id = ? LIMIT 1`,
         [managerId, signedStoreId],
     );
     if (!rows.length) throw new ApiError(403, "Your manager account does not match this store.");
@@ -80,7 +96,12 @@ async function verifyManager(request: NextRequest, db: Pool | PoolConnection): P
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) permissions = parsed;
     } catch { /* Missing or invalid permissions never grant approval authority. */ }
     const mayReviewLeave = permissions.staff_management === true || permissions.staffManagement === true;
-    return { id: managerId, storeId: signedStoreId, branchId, mayReviewLeave };
+    return {
+        id: managerId, storeId: signedStoreId, branchId, mayReviewLeave,
+        managerName: String(account.managerName || `Manager ${managerId}`),
+        storeName: String(account.storeName || `Store ${signedStoreId}`),
+        branchName: String(account.branchName || `Branch ${branchId}`),
+    };
 }
 
 function handleError(error: unknown, context: string) {
@@ -98,6 +119,12 @@ function handleError(error: unknown, context: string) {
     }
     if (sqlCode === "ER_NO_SUCH_TABLE" || sqlCode === "ER_BAD_FIELD_ERROR") {
         return response({ success: false, error: "Staff attendance/leave tables or columns are missing. Install the existing attendance SQL schema." }, 503);
+    }
+    if (sqlCode === "ER_TRUNCATED_WRONG_VALUE_FOR_FIELD" || sqlCode === "WARN_DATA_TRUNCATED" || sqlCode === "ER_DATA_TOO_LONG") {
+        return response({ success: false, error: "The attendance schema does not accept manager records. Verify that employee_role supports 'manager' in both attendance and leave tables." }, 503);
+    }
+    if (sqlCode === "ER_DUP_ENTRY") {
+        return response({ success: false, error: "An attendance or leave record already exists for the selected date." }, 409);
     }
     return response({ success: false, error: "Unable to process manager staff records. Check the server log." }, 500);
 }
@@ -154,7 +181,59 @@ export async function GET(request: NextRequest) {
             notRecorded: 0,
         };
         counts.notRecorded = Math.max(0, counts.total - counts.present - counts.onLeave - counts.absent);
-        return response({ success: true, date, mayReviewLeave: manager.mayReviewLeave, attendanceSummary: counts, attendance, leaves });
+
+        // Personal manager log; use the VERIFIED manager ID, not any ID from the browser.
+        // The same attendance/leave tables are used as the Staff Attendance Log.
+        const [managerClockRows] = await db.query<RowDataPacket[]>(`
+            SELECT id, DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date,
+                   DATE_FORMAT(time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
+                   DATE_FORMAT(time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut,
+                   CASE WHEN time_in IS NOT NULL AND time_out IS NOT NULL
+                        THEN ROUND(TIMESTAMPDIFF(MINUTE,time_in,time_out)/60,2) ELSE NULL END AS hoursWorked,
+                   CASE WHEN attendance_status='Present' AND time_out IS NULL THEN 'On Duty'
+                        WHEN attendance_status='Present' THEN 'Completed'
+                        ELSE attendance_status END AS status
+            FROM stocknbook_staff_attendance
+            WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+            ORDER BY attendance_date DESC, id DESC LIMIT 800`,
+            [manager.storeId, manager.branchId, manager.id]);
+        const [managerLeaveRows] = await db.query<RowDataPacket[]>(`
+            SELECT id, DATE_FORMAT(leave_date,'%Y-%m-%d') AS date,
+                   leave_type AS leaveType, reason, approval_status AS approvalStatus
+            FROM stocknbook_staff_leave_requests
+            WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+            ORDER BY leave_date DESC, id DESC LIMIT 800`,
+            [manager.storeId, manager.branchId, manager.id]);
+        const managerAttendance = [
+            ...managerClockRows,
+            ...managerLeaveRows.map(row => ({
+                id: -Number(row.id), date: row.date,
+                timeIn: null, timeOut: null, hoursWorked: null,
+                status: 'Leave', leaveType: row.leaveType, reason: row.reason,
+                approvalStatus: row.approvalStatus,
+            })),
+        ].sort((a,b) => String(b.date).localeCompare(String(a.date)) || Number(b.id)-Number(a.id));
+        const managerAttendanceToday = managerClockRows.find(row => row.date === phToday) || null;
+
+        // Existing Team Attendance panel needs the branch's recent staff history.
+        const [teamAttendance] = await db.query<RowDataPacket[]>(`
+            SELECT id, employee_id AS employeeId, employee_name AS employeeName,
+                   DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date,
+                   DATE_FORMAT(time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
+                   DATE_FORMAT(time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut,
+                   CASE WHEN time_in IS NOT NULL AND time_out IS NOT NULL
+                        THEN ROUND(TIMESTAMPDIFF(MINUTE,time_in,time_out)/60,2) ELSE NULL END AS hoursWorked,
+                   CASE WHEN attendance_status='Present' AND time_out IS NULL THEN 'On Duty'
+                        WHEN attendance_status='Present' THEN 'Completed'
+                        ELSE attendance_status END AS status
+            FROM stocknbook_staff_attendance
+            WHERE store_id=? AND branch_id=? AND employee_role='staff'
+              AND attendance_date >= DATE_SUB(${PH_TODAY}, INTERVAL 90 DAY)
+            ORDER BY attendance_date DESC, id DESC LIMIT 800`,
+            scope);
+        return response({ success: true, date, mayReviewLeave: manager.mayReviewLeave,
+            attendanceSummary: counts, attendance, leaves,
+            managerAttendance, managerAttendanceToday, teamAttendance });
     } catch (error) { return handleError(error, "Manager staff overview GET failed:"); }
 }
 
@@ -163,9 +242,99 @@ export async function POST(request: NextRequest) {
     try {
         connection = await database().getConnection();
         const manager = await verifyManager(request, connection);
-        if (!manager.mayReviewLeave) throw new ApiError(403, "Staff Management permission is required to approve or disapprove leave.");
         const body = await request.json().catch(() => null) as Record<string, unknown> | null;
-        if (!body || body.action !== "review_leave") throw new ApiError(400, "Unsupported leave review action.");
+        if (!body) throw new ApiError(400, "Invalid attendance request.");
+        const action = String(body.action || "");
+
+        // A manager may record their OWN attendance and request leave, irrespective
+        // of permission to review staff requests. Manager leave cannot be self-approved.
+        if (["time_in", "time_out", "request_leave"].includes(action)) {
+            await connection.beginTransaction();
+            if (action === "time_in") {
+                const [existing] = await connection.query<RowDataPacket[]>(`
+                    SELECT id FROM stocknbook_staff_attendance
+                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                      AND attendance_date=${PH_TODAY} LIMIT 1 FOR UPDATE`,
+                    [manager.storeId, manager.branchId, manager.id]);
+                if (existing.length) throw new ApiError(409, "You have already recorded attendance today.");
+                const [approved] = await connection.query<RowDataPacket[]>(`
+                    SELECT id FROM stocknbook_staff_leave_requests
+                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                      AND leave_date=${PH_TODAY} AND approval_status='Approved' LIMIT 1`,
+                    [manager.storeId, manager.branchId, manager.id]);
+                if (approved.length) throw new ApiError(409, "You have approved leave today; attendance cannot also be recorded.");
+                await connection.execute(`
+                    INSERT INTO stocknbook_staff_attendance
+                    (store_id,branch_id,employee_id,employee_role,store_name,branch_name,
+                     employee_name,employee_number,attendance_date,time_in,attendance_status)
+                    VALUES (?,?,?,'manager',?,?,?,?,${PH_TODAY},${PH_NOW},'Present')`,
+                    [manager.storeId, manager.branchId, manager.id, manager.storeName,
+                        manager.branchName, manager.managerName, String(manager.id)]);
+            } else if (action === "time_out") {
+                const [rows] = await connection.query<RowDataPacket[]>(`
+                    SELECT id,time_in,time_out,attendance_status FROM stocknbook_staff_attendance
+                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                      AND attendance_date=${PH_TODAY} LIMIT 1 FOR UPDATE`,
+                    [manager.storeId, manager.branchId, manager.id]);
+                if (!rows.length || !rows[0].time_in || rows[0].time_out || rows[0].attendance_status !== "Present") {
+                    throw new ApiError(409, "Time In is required before Time Out, and Time Out can only be recorded once.");
+                }
+                await connection.execute(`UPDATE stocknbook_staff_attendance
+                                          SET time_out=${PH_NOW},updated_at=CURRENT_TIMESTAMP WHERE id=?`, [rows[0].id]);
+            } else {
+                const startDate = String(body.start_date || body.leave_date || "");
+                const endDate = String(body.end_date || body.leave_date || startDate);
+                const reason = String(body.reason || "").trim();
+                const kind = String(body.leave_type || "Personal");
+                if (!isDay(startDate) || !isDay(endDate) || startDate > endDate ||
+                    reason.length < 3 || reason.length > 1000 ||
+                    !["Personal", "Sick", "Emergency", "Vacation", "Other"].includes(kind)) {
+                    throw new ApiError(400, "Choose valid leave dates, leave type, and a reason of 3–1000 characters.");
+                }
+                const dayCount = Math.round((Date.parse(`${endDate}T00:00:00Z`) -
+                    Date.parse(`${startDate}T00:00:00Z`)) / 86400000) + 1;
+                if (dayCount > 90) throw new ApiError(400, "Leave may cover at most 90 calendar days.");
+                const [dateRows] = await connection.query<RowDataPacket[]>(
+                    `SELECT DATE_FORMAT(${PH_TODAY},'%Y-%m-%d') AS today`);
+                if (startDate < String(dateRows[0].today)) {
+                    throw new ApiError(400, "Leave dates cannot be in the past.");
+                }
+                const [attendanceConflict] = await connection.query<RowDataPacket[]>(`
+                    SELECT DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date
+                    FROM stocknbook_staff_attendance
+                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                      AND attendance_date BETWEEN ? AND ? LIMIT 1 FOR UPDATE`,
+                    [manager.storeId,manager.branchId,manager.id,startDate,endDate]);
+                if (attendanceConflict.length) {
+                    throw new ApiError(409, `Attendance already exists on ${attendanceConflict[0].date}. Choose other leave dates.`);
+                }
+                const [leaveConflict] = await connection.query<RowDataPacket[]>(`
+                    SELECT DATE_FORMAT(leave_date,'%Y-%m-%d') AS date
+                    FROM stocknbook_staff_leave_requests
+                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                      AND leave_date BETWEEN ? AND ? LIMIT 1 FOR UPDATE`,
+                    [manager.storeId,manager.branchId,manager.id,startDate,endDate]);
+                if (leaveConflict.length) {
+                    throw new ApiError(409, `A leave request already exists for ${leaveConflict[0].date}.`);
+                }
+                for (let index = 0; index < dayCount; index++) {
+                    const day = new Date(Date.parse(`${startDate}T00:00:00Z`) + index*86400000).toISOString().slice(0,10);
+                    await connection.execute(`
+                        INSERT INTO stocknbook_staff_leave_requests
+                        (store_id,branch_id,employee_id,employee_role,store_name,branch_name,
+                         employee_name,employee_number,leave_date,leave_type,reason,approval_status)
+                        VALUES (?,?,?,'manager',?,?,?,?,?,?,?,'Pending')`,
+                        [manager.storeId,manager.branchId,manager.id,manager.storeName,
+                            manager.branchName,manager.managerName,String(manager.id),day,kind,reason]);
+                }
+            }
+            await connection.commit();
+            return response({ success: true, action, message: action === 'request_leave'
+                    ? 'Your manager leave request was submitted for approval.' : 'Manager attendance recorded.' });
+        }
+
+        if (action !== "review_leave") throw new ApiError(400, "Unsupported manager action.");
+        if (!manager.mayReviewLeave) throw new ApiError(403, "Staff Management permission is required to approve or disapprove leave.");
         const decision = String(body.decision || "");
         const ids = Array.isArray(body.requestIds) ? body.requestIds.map(positiveInt) : [];
         const decisionReason = String(body.decisionReason || "").trim();

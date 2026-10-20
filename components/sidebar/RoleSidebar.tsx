@@ -141,7 +141,9 @@ function normalizeAccessLevel(
     if (
         value === "view" ||
         value === "view_only" ||
-        value === "viewOnly"
+        value === "viewOnly" ||
+        value === "standard" ||
+        value === "confirm_standard"
     ) {
         return "view";
     }
@@ -161,13 +163,16 @@ function normalizePermissions(
         return {};
     }
 
-    return Object.entries(
-        value as Record<string, unknown>,
-    ).reduce<PermissionMap>((result, [key, item]) => {
-        result[key] = normalizeAccessLevel(item);
-
-        return result;
+    const raw = value as Record<string, unknown>;
+    const result = Object.entries(raw).reduce<PermissionMap>((map, [key, item]) => {
+        map[key] = normalizeAccessLevel(item);
+        return map;
     }, {});
+    // The legacy boolean `bookings` is less specific than the manager-set
+    // `bookings_access` level. A Staff `standard` grant must show the menu.
+    const bookingsAccess = raw.bookings_access ?? raw.booking_access ?? raw.bookings;
+    if (bookingsAccess !== undefined) result.bookings = normalizeAccessLevel(bookingsAccess);
+    return result;
 }
 
 function getSavedPermissions(): PermissionMap {

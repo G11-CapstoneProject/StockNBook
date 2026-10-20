@@ -9,6 +9,9 @@ import {
     Box,
     CalendarClock,
     CalendarDays,
+    ArrowRight,
+    LogIn,
+    LogOut,
     Info,
     PackageX,
     RefreshCw,
@@ -1241,14 +1244,14 @@ function ManagerDashboardSkeleton() {
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
                 {[0, 1, 2, 3].map((item) => <ManagerMetricSkeleton key={item} />)}
             </div>
-            <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-12" aria-hidden="true">
-                <div className="xl:col-span-4"><ManagerDonutSkeleton /></div>
-                <div className="xl:col-span-4"><ManagerDonutSkeleton /></div>
-                <div className="xl:col-span-4"><ManagerAttentionSkeleton /></div>
+            <div className="grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2 2xl:grid-cols-3" aria-hidden="true">
+                <ManagerDonutSkeleton />
+                <ManagerDonutSkeleton />
+                <ManagerAttentionSkeleton />
             </div>
             <div className="grid grid-cols-1 gap-3 xl:grid-cols-2" aria-hidden="true">
-                <ManagerTrendSkeleton />
-                <ManagerForecastSkeleton />
+                <ManagerAttentionSkeleton />
+                <ManagerAttentionSkeleton />
             </div>
         </div>
     );
@@ -1270,11 +1273,37 @@ export default function ManagerDashboard() {
     const [staffSummary, setStaffSummary] = useState<MDStaffSummary | null>(null);
     const [mayReviewLeave, setMayReviewLeave] = useState(false);
     const [staffRecords, setStaffRecords] = useState<MDStaffAttendance[]>([]);
+    const [managerAttendance, setManagerAttendance] = useState<MDManagerAttendance[]>([]);
+    const [teamAttendance, setTeamAttendance] = useState<MDTeamAttendance[]>([]);
+    const [myLogsOpen, setMyLogsOpen] = useState(false);
+    const [teamAttendanceFilter, setTeamAttendanceFilter] = useState("month");
+    const [teamAttendanceSearch, setTeamAttendanceSearch] = useState("");
+    const [managerClockToday, setManagerClockToday] = useState<MDManagerAttendance | null>(null);
+    const [managerClockBusy, setManagerClockBusy] = useState(false);
+    const [managerClockFilter, setManagerClockFilter] = useState("month");
+    // Match the Staff Attendance Log UI without changing the manager API workflow.
+    const [managerAttendanceTab, setManagerAttendanceTab] = useState<"worked" | "exceptions">("worked");
+    const [managerAttendanceRange, setManagerAttendanceRange] = useState<"month" | "90" | "all" | "day" | "custom">("month");
+    const [managerAttendanceDay, setManagerAttendanceDay] = useState(() => mdLocalDay(new Date()));
+    const [managerAttendanceStart, setManagerAttendanceStart] = useState(() => mdLocalDay(new Date()));
+    const [managerAttendanceEnd, setManagerAttendanceEnd] = useState(() => mdLocalDay(new Date()));
+    const [managerClockError, setManagerClockError] = useState("");
+    const [managerLeaveOpen, setManagerLeaveOpen] = useState(false);
+    const [managerLeaveMode, setManagerLeaveMode] = useState<"single" | "range">("single");
+    const [managerLeaveDate, setManagerLeaveDate] = useState("");
+    const [managerLeaveEndDate, setManagerLeaveEndDate] = useState("");
+    const [managerLeaveType, setManagerLeaveType] = useState("Personal");
+    const [managerLeaveReason, setManagerLeaveReason] = useState("");
+    const [managerLeaveBusy, setManagerLeaveBusy] = useState(false);
+    const [managerLeaveError, setManagerLeaveError] = useState("");
     const [leaveRows, setLeaveRows] = useState<MDLeaveRow[]>([]);
     const [staffError, setStaffError] = useState("");
     const [payables, setPayables] = useState<MDPayable[]>([]);
     const [payablesError, setPayablesError] = useState("");
     const [stockSearch, setStockSearch] = useState("");
+    const [stockStatusFilter, setStockStatusFilter] = useState("all");
+    const [leaveStatusFilter, setLeaveStatusFilter] = useState("all");
+    const [leaveTypeFilter, setLeaveTypeFilter] = useState("all");
     const [payableSearch, setPayableSearch] = useState("");
     const [selectedLeave, setSelectedLeave] = useState<MDLeaveGroup | null>(null);
     const [decisionReason, setDecisionReason] = useState("");
@@ -1318,7 +1347,7 @@ export default function ManagerDashboard() {
             const ordersStart = new Date(now);
             ordersStart.setDate(ordersStart.getDate() - 30);
             // All dashboard read operations run together, not sequentially.
-            const [bookingsResult, productsResult, ordersResult, staffResult, payablesResult, rentalResult] =
+            const [bookingsResult, productsResult, ordersResult, staffResult, rentalResult] =
                 await Promise.allSettled([
                     fetch("/api/bookings", {
                         method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -1339,10 +1368,6 @@ export default function ManagerDashboard() {
                     }),
                     fetch("/api/manager-staff-overview", {
                         headers: { Authorization: `Bearer ${token}` }, cache: "no-store",
-                    }),
-                    fetch("/api/products", { method: "POST",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_supplier_payables" }), cache: "no-store",
                     }),
                     fetch("/api/rental-inventory", { method: "POST",
                         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -1388,19 +1413,14 @@ export default function ManagerDashboard() {
                     setStaffSummary(payload.attendanceSummary as MDStaffSummary);
                     setMayReviewLeave(payload.mayReviewLeave === true);
                     setStaffRecords(Array.isArray(payload.attendance) ? payload.attendance : []);
+                    setManagerAttendance(Array.isArray(payload.managerAttendance) ? payload.managerAttendance : []);
+                    setTeamAttendance(Array.isArray(payload.teamAttendance) ? payload.teamAttendance : []);
+                    setManagerClockToday(payload.managerAttendanceToday || null);
+                    setManagerClockError("");
                     setLeaveRows(Array.isArray(payload.leaves) ? payload.leaves : []);
                     setStaffError("");
                 } catch (error) { setStaffError(error instanceof Error ? error.message : "Employee records unavailable."); }
             } else { setStaffError("Employee attendance service could not be reached."); }
-            if (payablesResult.status === "fulfilled") {
-                try {
-                    const result = payablesResult.value;
-                    const payload = await result.json().catch(() => ({}));
-                    if (!result.ok || payload.success !== true) throw new Error(payload.error || "Unable to load payables.");
-                    setPayables(Array.isArray(payload.payables) ? payload.payables : []);
-                    setPayablesError("");
-                } catch (error) { setPayablesError(error instanceof Error ? error.message : "Supplier payables unavailable."); }
-            } else { setPayablesError("Supplier payables service could not be reached."); }
             if (rentalResult.status === "fulfilled") {
                 try {
                     const response = rentalResult.value;
@@ -1446,13 +1466,70 @@ export default function ManagerDashboard() {
         return { ...item, sku: variant?.variantNumber || product?.productNumber || "—",
             currentStock: matchingStock?.currentStock ?? matchingExpiry?.stock ??
                 (variant ? Number(variant.stock || 0) : Number(product?.stock || 0)) };
-    }).filter(item => `${item.productName} ${item.sku} ${item.status}`.toLowerCase().includes(stockSearch.toLowerCase()));
+    }).filter(item => `${item.productName} ${item.sku} ${item.status}`.toLowerCase().includes(stockSearch.toLowerCase()) &&
+        (stockStatusFilter === "all" || item.status === stockStatusFilter));
     const openPayables = payables.filter(item => Number(item.outstandingBalance) > 0.005)
         .sort((a, b) => String(a.paymentDueDate || "9999-12-31").localeCompare(String(b.paymentDueDate || "9999-12-31")));
     const filteredPayables = openPayables.filter(row => `${row.purchaseNumber} ${row.supplier}`.toLowerCase().includes(payableSearch.toLowerCase()));
     const today = mdLocalDay(currentDateTime);
-    const duePayables = openPayables.filter(row => Boolean(row.paymentDueDate && row.paymentDueDate <= mdOffsetDay(currentDateTime, 7))).length;
+    const pendingLeaveEmployeeCount = useMemo(() => new Set(leaveRows
+        .filter(row => row.approvalStatus === "Pending")
+        .map(row => String(row.employeeId))).size, [leaveRows]);
     const leaveGroups = useMemo(() => mdGroupLeaveRequests(leaveRows), [leaveRows]);
+    const pendingLeaveApplicationCount = leaveGroups.filter(row => row.status === "Pending").length;
+    // Present actual staff attendance and approved leave only. Never invent
+    // absence or clock-in records for employees who have not submitted any.
+    const teamAttendanceRows = useMemo(() => {
+        const rows: MDTeamAttendance[] = [...teamAttendance];
+        const alreadyRecorded = new Set(rows.map(row => `${row.employeeId}:${row.date}`));
+        const earliest = mdDatePlusDays(today, -90);
+        for (const leave of leaveRows) {
+            if (leave.approvalStatus !== "Approved") continue;
+            const start = leave.leaveDate;
+            const end = leave.leaveEndDate && leave.leaveEndDate >= start ? leave.leaveEndDate : start;
+            if (end < earliest || start > today) continue;
+            let day = start < earliest ? earliest : start;
+            const last = end > today ? today : end;
+            let index = 0;
+            while (day <= last && index < 91) {
+                const key = `${leave.employeeId}:${day}`;
+                if (!alreadyRecorded.has(key)) {
+                    rows.push({ id: -(leave.id * 100 + index + 1), employeeId: leave.employeeId,
+                        employeeName: leave.employeeName, date: day, timeIn: null,
+                        timeOut: null, hoursWorked: null, status: "On Leave" });
+                    alreadyRecorded.add(key);
+                }
+                day = mdDatePlusDays(day, 1);
+                index += 1;
+            }
+        }
+        return rows.sort((a,b) => b.date.localeCompare(a.date) || a.employeeName.localeCompare(b.employeeName));
+    }, [teamAttendance, leaveRows, today]);
+    const visibleMyAttendance = managerAttendance.filter(row => mdAttendanceInPeriod(row.date, managerClockFilter, today));
+    // Only use manager records returned by the existing manager-staff-overview API.
+    // Never generate attendance, absence, or leave records that do not exist.
+    const myWorkedAttendance = managerAttendance.filter(row => Boolean(row.timeIn || row.timeOut));
+    const myAttendanceExceptions = managerAttendance.filter(row => /absent|leave/i.test(row.status || ""));
+    const myAttendanceTabRecords = managerAttendanceTab === "worked" ? myWorkedAttendance : myAttendanceExceptions;
+    const myAttendanceLogRows = myAttendanceTabRecords.filter(row => {
+        const day = String(row.date || "").slice(0, 10);
+        if (managerAttendanceRange === "90") return day >= mdDatePlusDays(today, -89) && day <= today;
+        if (managerAttendanceRange === "day") return day === managerAttendanceDay;
+        if (managerAttendanceRange === "custom") return Boolean(managerAttendanceStart && managerAttendanceEnd &&
+            managerAttendanceStart <= managerAttendanceEnd && day >= managerAttendanceStart && day <= managerAttendanceEnd);
+        return mdAttendanceInPeriod(day, managerAttendanceRange === "all" ? "all" : "month", today);
+    }).sort((a, b) => String(b.date).localeCompare(String(a.date)) || b.id - a.id);
+    const visibleTeamAttendance = teamAttendanceRows.filter(row =>
+        mdAttendanceInPeriod(row.date, teamAttendanceFilter, today) &&
+        `${row.employeeName} ${row.employeeId} ${row.status}`.toLowerCase().includes(teamAttendanceSearch.trim().toLowerCase())
+    );
+    const duePayables = openPayables.filter(row => Boolean(row.paymentDueDate && row.paymentDueDate <= mdOffsetDay(currentDateTime, 7))).length;
+    const leaveTypes = useMemo(() => Array.from(new Set(leaveGroups.map(row => row.leaveType).filter(Boolean)))
+        .sort((a, b) => a.localeCompare(b)), [leaveGroups]);
+    const filteredLeaveGroups = useMemo(() => leaveGroups.filter(row =>
+            (leaveStatusFilter === "all" || row.status.toLowerCase() === leaveStatusFilter) &&
+            (leaveTypeFilter === "all" || row.leaveType === leaveTypeFilter)),
+        [leaveGroups, leaveStatusFilter, leaveTypeFilter]);
     const selectedLeaveIsPending = selectedLeave?.status === "Pending";
     const assignedBranchName = getAssignedBranchName(user);
     const activeStockAlerts = stockAlerts.filter(item => stockAlertFilter === "all" ||
@@ -1514,22 +1591,84 @@ export default function ManagerDashboard() {
         } catch (error) { setPaymentError(error instanceof Error ? error.message : "Unable to pay supplier."); }
         finally { setPaymentBusy(false); payingRef.current = false; }
     };
+    const submitManagerLeave = async () => {
+        if (managerLeaveBusy) return;
+        const start = managerLeaveDate;
+        const end = managerLeaveMode === "range" ? managerLeaveEndDate : managerLeaveDate;
+        if (!start || !end || end < start || start < today || managerLeaveReason.trim().length < 3) {
+            setManagerLeaveError("Choose future or current dates and enter a reason (at least 3 characters).");
+            return;
+        }
+        setManagerLeaveBusy(true);
+        setManagerLeaveError("");
+        try {
+            const response = await fetch("/api/manager-staff-overview", {
+                method: "POST", cache: "no-store",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getSavedItem("token")}` },
+                body: JSON.stringify({ action: "request_leave", start_date: start, end_date: end,
+                    leave_type: managerLeaveType, reason: managerLeaveReason.trim() }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload.success !== true) {
+                throw new Error(payload.error || "Unable to submit manager leave request.");
+            }
+            setManagerLeaveOpen(false);
+            setManagerLeaveDate(""); setManagerLeaveEndDate(""); setManagerLeaveReason("");
+            setManagerAttendanceTab("exceptions");
+            setToast({ title: "Leave request submitted", message: "Your leave is pending approval and is now in Absent / Leave." });
+            await loadManagerDashboard({ silent: true });
+        } catch (error) {
+            setManagerLeaveError(error instanceof Error ? error.message : "Unable to request leave.");
+        } finally { setManagerLeaveBusy(false); }
+    };
+    const managerClockAction = async (action: "time_in" | "time_out") => {
+        if (managerClockBusy) return;
+        setManagerClockBusy(true); setManagerClockError("");
+        try {
+            const response = await fetch("/api/manager-staff-overview", {
+                method: "POST", cache: "no-store",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${getSavedItem("token")}` },
+                body: JSON.stringify({ action }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || !payload.success) throw new Error(payload.error || "Unable to record attendance.");
+            setToast({ title: action === "time_in" ? "Time In recorded" : "Time Out recorded",
+                message: "Your manager attendance was saved successfully." });
+            await loadManagerDashboard({ silent: true });
+        } catch (error) { setManagerClockError(error instanceof Error ? error.message : "Attendance could not be recorded."); }
+        finally { setManagerClockBusy(false); }
+    };
+    const exportTeamAttendance = () => mdExportRows(
+        "Team Attendance Log", ["Employee", "Employee ID", "Date", "Time In", "Time Out", "Hours", "Status"],
+        visibleTeamAttendance.map(row => [row.employeeName, String(row.employeeId), mdDisplayDate(row.date),
+            mdClockTime(row.timeIn), mdClockTime(row.timeOut), mdHours(row.hoursWorked), row.status]),
+        "manager_team_attendance", assignedBranchName, today);
+    const exportMyAttendance = (rows: MDManagerAttendance[] = visibleMyAttendance) => mdExportRows(
+        "My Manager Attendance", ["Employee ID", "Date", "Time In", "Time Out", "Hours Worked", "Status"],
+        rows.map(row => [
+            String(getUserValue(user, "manager_id") || getUserValue(user, "id") || getSavedItem("manager_id")),
+            mdDisplayDate(row.date), mdClockTime(row.timeIn), mdClockTime(row.timeOut),
+            mdHours(row.hoursWorked), row.status]),
+        "manager_my_attendance", assignedBranchName, today);
     const exportStaffAttendance = () => {
         const rows = staffRecords.map(record => [
             String(record.employeeId), record.employeeName, record.status,
             record.timeIn || "—", record.timeOut || "—",
         ]);
-        mdExportRows("Daily Employee Attendance", ["Employee ID", "Employee Name", "Status", "Time In", "Time Out"], rows,
+        mdExportRows("Employee Attendance", ["Employee ID", "Employee Name", "Status", "Time In", "Time Out"], rows,
             `manager_attendance_${today}`, assignedBranchName, today);
     };
     const exportLeave = () => mdExportRows("Employee Requests", ["Employee", "Leave Type", "Date(s)", "Status", "Reason"],
-        leaveGroups.map(r => [r.employeeName, r.leaveType, mdLeaveDatesLabel(r), r.status, r.reason]),
+        filteredLeaveGroups.map(r => [r.employeeName, r.leaveType, mdLeaveDatesLabel(r), r.status, r.reason]),
         "manager_employee_requests", assignedBranchName, today);
     const exportPayables = () => mdExportRows("Supplier Payables", ["Purchase", "Supplier", "Due Date", "Outstanding"],
         openPayables.map(r => [r.purchaseNumber, r.supplier, r.paymentDueDate || "—", peso(Number(r.outstandingBalance))]),
         "manager_supplier_payables", assignedBranchName, today);
     const exportStock = () => mdExportRows("Stock Action Center", ["Product", "Variant", "Status", "Description"],
         attentionItems.map(r => [r.productName, r.variantName, r.status, r.detail]), "manager_stock_actions", assignedBranchName, today);
+    const exportFilteredStock = () => mdExportRows("Stock Action Center", ["Product", "SKU", "Current Stock", "Status", "Description"],
+        stockRows.map(r => [r.productName, r.sku, String(r.currentStock), r.status, r.detail]),
+        "manager_stock_actions_filtered", assignedBranchName, today);
 
     return <>
         <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
@@ -1554,36 +1693,113 @@ export default function ManagerDashboard() {
                         <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#EAF1FF] text-[#2563EB]"><MdWrenchIcon/></span>
                         <div><p className="text-[14px] font-semibold text-[#4B3E55]">Under Maintenance</p><p className="mt-1 text-[28px] font-bold text-[#1A1220]">{rentalMaintenance === null ? "—" : rentalMaintenance}</p><p className="mt-2 text-[11px] text-[#8A7D92]">{rentalMaintenance === null ? "Rental condition data not connected" : "Rental units requiring maintenance"}</p></div>
                     </div>
-                    <ManagerMetricCard title="Supplier Payables Due" value={duePayables} subtitle="Unpaid purchases due within 7 days" icon={<MDWalletIcon/>} tone="violet" onClick={() => document.getElementById("manager-supplier-payables")?.scrollIntoView({ behavior: "smooth" })}/>
+                    <ManagerMetricCard title="Employees Requesting Leave" value={pendingLeaveEmployeeCount} subtitle={`${pendingLeaveApplicationCount} pending leave application(s)`} icon={<MDBellIcon/>} tone="violet" onClick={() => router.push("/manager/staff-management#employee-requests")}/>
                 </div>
-                <div className="grid grid-cols-1 gap-3 xl:grid-cols-12">
-                    <div className="xl:col-span-4"><MDChartCard title="Inventory Health" subtitle="Current sales stock status across products" icon={<Box size={18}/>} segments={inventorySegments} total={inventoryHealth.total} centerLabel="Stock Lines" exportClick={() => exportStock()} badgeLabel="Live Stock"/></div>
-                    <div className="xl:col-span-4"><MDChartCard title="Daily Employee Attendance" subtitle="Today's recorded attendance for branch staff" icon={<MDPeopleIcon/>} segments={donutSegments} total={staffSummary?.total ?? null} centerLabel="Total Staff" exportClick={exportStaffAttendance} badgeLabel="Today" error={staffError}/></div>
-                    <div className="xl:col-span-4"><MDPanel title="Employee Requests" subtitle="Review staff leave and absence requests" icon={<MDBellIcon/>} onExport={exportLeave}>
-                        <div className="min-h-0 flex-1 overflow-auto"><table className="w-full table-fixed text-left text-[11px]"><colgroup><col className="w-[24%]"/><col className="w-[20%]"/><col className="w-[24%]"/><col className="w-[17%]"/><col className="w-[15%]"/></colgroup>
-                            <thead className="sticky top-0 z-10 bg-[#FFFCF7] text-[9px] font-semibold uppercase tracking-wide text-[#806A8C]"><tr>{["Employee", "Leave Type", "Date / Range", "Status", "Action"].map(h => <th className="px-2 py-2" key={h}>{h}</th>)}</tr></thead>
-                            <tbody>{leaveGroups.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={row.key}>
-                                <td className="px-2 py-2 font-semibold text-[#2B174C]" title={row.employeeName}>{row.employeeName}</td>
-                                <td className="px-2 py-2 text-[#665875]">{row.leaveType}</td><td className="px-2 py-2 text-[#665875]">{mdLeaveDatesLabel(row)}</td>
-                                <td className="px-2 py-2"><MDStatusBadge status={row.status}/></td>
-                                <td className="px-2 py-2"><button type="button" onClick={() => { setSelectedLeave(row); setDecisionReason(""); setDecisionError(""); }} className="rounded-lg border border-[#DCCCED] bg-[#F7F1FF] px-2.5 py-1.5 text-[10px] font-semibold text-[#5D2DAB] hover:bg-[#EDE4FA]">Review</button></td>
-                            </tr>)}{leaveGroups.length === 0 && <tr><td className="px-4 py-12 text-center text-[#8A7D92]" colSpan={5}>{staffError || "No leave requests recorded for this branch."}</td></tr>}</tbody>
-                        </table></div><p className="border-t border-[#EEE7F2] px-4 py-2 text-right text-[10px] text-[#8A7D92]">Showing {leaveGroups.length} requests</p>
-                    </MDPanel></div>
+                <div className="grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+                    <MDChartCard title="Inventory Health" subtitle="Current sales stock, including product variants"
+                                 icon={<Box size={18}/>} segments={inventorySegments} total={inventoryHealth.total}
+                                 centerLabel="Stock Lines" exportClick={exportStock}/>
+                    <div className="relative min-w-0">
+                        <MDChartCard title="Employee Attendance" subtitle="Today's attendance for your branch staff"
+                                     icon={<MDPeopleIcon/>} segments={donutSegments} total={staffSummary?.total ?? null}
+                                     centerLabel="Total Staff" exportClick={exportStaffAttendance} error={staffError} reserveFooter/>
+                        <button type="button" onClick={() => router.push("/manager/staff-management#employee-requests")}
+                                className="absolute bottom-2.5 left-4 right-4 flex items-center justify-between gap-2 rounded-lg border border-[#E9DDF4] bg-[#FAF7FE] px-3 py-2 text-[11px] font-semibold text-[#5D2DAB] hover:bg-[#F1E8FB]">
+                            <span className="truncate">Employees requesting leave</span>
+                            <span className="shrink-0 rounded-full bg-[#ECE0FC] px-2 py-0.5">{pendingLeaveEmployeeCount}</span>
+                        </button>
+                    </div>
+                    <section className="flex h-[360px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm lg:col-span-2 2xl:col-span-1" aria-label="My Attendance Log">
+                        {/* Same Attendance Log design language as the Staff Dashboard. */}
+                        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
+                            <div className="flex min-w-0 items-center gap-2.5">
+                                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><CalendarClock size={19}/></span>
+                                <div className="min-w-0"><h2 className="text-[15px] font-bold text-[#21132E]">Attendance Log</h2><p className="mt-0.5 text-[11px] text-[#86778F]">Your attendance and leave history</p></div>
+                            </div>
+                            <button type="button" onClick={() => exportMyAttendance(myAttendanceLogRows)}
+                                    className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-[#D9CDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
+                                <MdDownload size={14}/>Export
+                            </button>
+                        </div>
+                        <div className="mx-4 mt-3 grid shrink-0 grid-cols-3 gap-2 rounded-xl border border-[#E2EDE6] bg-[#F5FBF6] px-3 py-3">
+                            <div className="min-w-0"><p className="text-[10px] text-[#86778F]">Current Status</p>
+                                <p className={`mt-1 text-xs font-bold ${managerClockToday?.timeIn && !managerClockToday.timeOut ? "text-[#168449]" : "text-[#5A476A]"}`}>
+                                    {managerClockToday?.timeIn && !managerClockToday.timeOut ? "● On Duty" : managerClockToday?.timeOut ? "Completed" : "Not Clocked In"}
+                                </p>
+                            </div>
+                            <div className="min-w-0 border-l border-[#E0E7E0] pl-3"><p className="text-[10px] text-[#86778F]">Time In</p><p className="mt-1 text-xs font-bold text-[#21132E]">{mdClockTime(managerClockToday?.timeIn)}</p></div>
+                            <div className="min-w-0 border-l border-[#E0E7E0] pl-3"><p className="text-[10px] text-[#86778F]">Hours Worked</p><p className="mt-1 text-xs font-bold text-[#21132E]">{managerClockToday?.timeOut ? mdHours(managerClockToday.hoursWorked) : mdLiveHours(managerClockToday?.timeIn, currentDateTime)}</p></div>
+                        </div>
+                        <div className="grid shrink-0 grid-cols-3 gap-2 px-4 py-3">
+                            <button type="button" disabled={managerClockBusy || Boolean(managerClockToday?.timeIn)} onClick={() => void managerClockAction("time_in")}
+                                    className="inline-flex h-9 min-w-0 items-center justify-center gap-1 rounded-xl bg-[#E6F7EE] px-1 text-[11px] font-semibold text-[#148447] hover:bg-[#D7F0E1] disabled:cursor-not-allowed disabled:opacity-50"><LogIn size={15}/>Time In</button>
+                            <button type="button" disabled={managerClockBusy || !managerClockToday?.timeIn || Boolean(managerClockToday?.timeOut)} onClick={() => void managerClockAction("time_out")}
+                                    className="inline-flex h-9 min-w-0 items-center justify-center gap-1 rounded-xl bg-[#FDECEC] px-1 text-[11px] font-semibold text-[#B42318] hover:bg-[#FBE0E0] disabled:cursor-not-allowed disabled:opacity-50"><LogOut size={15}/>Time Out</button>
+                            <button type="button" onClick={() => { setManagerLeaveError(""); setManagerLeaveOpen(true); }}
+                                    className="inline-flex h-9 min-w-0 items-center justify-center gap-1 rounded-xl border border-[#D9CDF0] bg-[#F9F6FC] px-1 text-[11px] font-semibold text-[#5A35A5] hover:bg-[#F1EBFF]"><CalendarDays size={15}/>Request Leave</button>
+                        </div>
+                        {managerClockError && <p role="alert" className="mx-4 mb-2 rounded-lg bg-[#FFF0F0] px-3 py-2 text-[11px] text-[#B42318]">{managerClockError}</p>}
+                        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-[#EEE8F2] px-4 py-2">
+                            <div className="flex items-center gap-3 text-[11px]">
+                                <button type="button" aria-pressed={managerAttendanceTab === "worked"} onClick={() => setManagerAttendanceTab("worked")}
+                                        className={`pb-1 font-semibold ${managerAttendanceTab === "worked" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Attendance ({myWorkedAttendance.length})</button>
+                                <button type="button" aria-pressed={managerAttendanceTab === "exceptions"} onClick={() => setManagerAttendanceTab("exceptions")}
+                                        className={`pb-1 font-semibold ${managerAttendanceTab === "exceptions" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Absent / Leave ({myAttendanceExceptions.length})</button>
+                            </div>
+                            <select aria-label="Manager attendance date range" value={managerAttendanceRange}
+                                    onChange={e => setManagerAttendanceRange(e.target.value as "month" | "90" | "all" | "day" | "custom")}
+                                    className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[10px] font-semibold text-[#2B174C]">
+                                <option value="month">This Month</option><option value="90">Last 90 Days</option><option value="all">Available History</option>
+                                <option value="day">Specific Date</option><option value="custom">Date Range</option>
+                            </select>
+                        </div>
+                        {(managerAttendanceRange === "day" || managerAttendanceRange === "custom") && <div className="flex shrink-0 flex-wrap gap-2 border-t border-[#EEE8F2] px-4 py-2 text-[11px] text-[#5A476A]">
+                            <label className="flex items-center gap-2">{managerAttendanceRange === "day" ? "Date" : "From"}
+                                <input type="date" aria-label={managerAttendanceRange === "day" ? "Specific manager attendance date" : "Manager attendance start date"}
+                                       value={managerAttendanceRange === "day" ? managerAttendanceDay : managerAttendanceStart}
+                                       onChange={e => managerAttendanceRange === "day" ? setManagerAttendanceDay(e.target.value) : setManagerAttendanceStart(e.target.value)}
+                                       className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/>
+                            </label>
+                            {managerAttendanceRange === "custom" && <label className="flex items-center gap-2">To
+                                <input type="date" aria-label="Manager attendance end date" min={managerAttendanceStart} value={managerAttendanceEnd}
+                                       onChange={e => setManagerAttendanceEnd(e.target.value)} className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/>
+                            </label>}
+                        </div>}
+                        <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
+                            <table className="w-full min-w-[410px] text-left text-[10px]">
+                                <thead className="sticky top-0 z-10 border-y border-[#EEE8F2] bg-[#FBF9FC] uppercase tracking-[0.04em] text-[#806A8C]">
+                                {managerAttendanceTab === "worked" ?
+                                    <tr>{["Date", "Time In", "Time Out", "Hours", "Status"].map(label => <th key={label} className="px-3 py-2 font-semibold">{label}</th>)}</tr> :
+                                    <tr>{["Date", "Type", "Status"].map(label => <th key={label} className="px-3 py-2 font-semibold">{label}</th>)}</tr>}
+                                </thead>
+                                <tbody>
+                                {myAttendanceLogRows.length === 0 ?
+                                    <tr><td colSpan={managerAttendanceTab === "worked" ? 5 : 3} className="px-3 py-10 text-center text-[#86778F]">
+                                        {managerAttendanceTab === "worked" ? "No attendance records for this period." : "No absences or leave records for this period."}
+                                    </td></tr> :
+                                    myAttendanceLogRows.map(row => <tr key={`${row.id}-${row.date}`} className="border-b border-[#F1ECF4] last:border-0 hover:bg-[#FCFAFE]">
+                                        <td className="whitespace-nowrap px-3 py-2 text-[#5A476A]">{mdDisplayDate(row.date)}</td>
+                                        {managerAttendanceTab === "worked" ? <>
+                                            <td className="whitespace-nowrap px-3 py-2">{mdClockTime(row.timeIn)}</td>
+                                            <td className="whitespace-nowrap px-3 py-2">{mdClockTime(row.timeOut)}</td>
+                                            <td className="whitespace-nowrap px-3 py-2">{row.timeOut ? mdHours(row.hoursWorked) : "—"}</td>
+                                            <td className="px-3 py-2"><MDAttendanceBadge status={row.status}/></td>
+                                        </> : <>
+                                            <td className="px-3 py-2 font-semibold">{/absent/i.test(row.status) ? "Absent" : (row.leaveType || "Leave")}</td>
+                                            <td className="px-3 py-2">{row.approvalStatus ? <MDStatusBadge status={row.approvalStatus}/> : <MDAttendanceBadge status={row.status}/>}</td>
+                                        </>}
+                                    </tr>)}
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
                 </div>
-                <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                    <div id="manager-supplier-payables"><MDPanel title="Supplier Payables" subtitle="Purchase orders with outstanding balances" icon={<MDWalletIcon/>} onExport={exportPayables} search={payableSearch} setSearch={setPayableSearch} searchPlaceholder="Search purchase orders...">
-                        <div className="min-h-0 flex-1 overflow-auto"><table className="w-full table-fixed text-left text-[11px]"><colgroup><col className="w-[21%]"/><col className="w-[29%]"/><col className="w-[17%]"/><col className="w-[16%]"/><col className="w-[17%]"/></colgroup>
-                            <thead className="sticky top-0 bg-[#FFFCF7] text-[9px] uppercase text-[#806A8C]"><tr>{["Purchase ID", "Supplier", "Due Date", "Balance", "Action"].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr></thead>
-                            <tbody>{filteredPayables.map(row => <tr key={row.purchaseId} className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]">
-                                <td className="break-all px-3 py-2 font-semibold text-[#2B174C]">{row.purchaseNumber}</td><td className="px-3 py-2 text-[#5F4E75]">{row.supplier}</td>
-                                <td className="px-3 py-2"><span className={row.paymentDueDate && row.paymentDueDate < today ? "text-[#C32F2F]" : "text-[#806A8C]"}>{row.paymentDueDate || "No due date"}</span></td>
-                                <td className="px-3 py-2 font-semibold text-[#2B174C]">{peso(Number(row.outstandingBalance))}</td>
-                                <td className="px-3 py-2"><button type="button" className="rounded-lg bg-[#2B174C] px-3 py-1.5 text-[10px] font-semibold text-white hover:bg-[#442569]" onClick={() => { setSelectedPayable(row); setPaymentAmount(""); setPaymentError(""); paymentKeyRef.current = window.crypto.randomUUID(); }}>Pay</button></td>
-                            </tr>)}{filteredPayables.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-[#8A7D92]">{payablesError || "No outstanding supplier purchases."}</td></tr>}</tbody>
-                        </table></div><p className="border-t border-[#EEE7F2] px-4 py-2 text-right text-[10px] text-[#8A7D92]">Showing {filteredPayables.length} of {openPayables.length} unpaid purchases</p>
-                    </MDPanel></div>
-                    <MDPanel title="Stock Action Center" subtitle="Stock items needing immediate action" icon={<TriangleAlert size={19}/>} onExport={exportStock} search={stockSearch} setSearch={setStockSearch} searchPlaceholder="Search products...">
+                <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
+                    <MDPanel title="Stock Action Center" subtitle="Stock items needing immediate action" tall icon={<TriangleAlert size={19}/>} onExport={exportFilteredStock} search={stockSearch} setSearch={setStockSearch} searchPlaceholder="Search products..." headerActions={
+                        <select aria-label="Filter stock actions by status" value={stockStatusFilter} onChange={e => setStockStatusFilter(e.target.value)} className="h-8 w-[136px] rounded-lg border border-[#E6DDF0] bg-white px-2 text-[10px] font-semibold text-[#5F4E75] outline-none focus:border-[#8B65B9]">
+                            <option value="all">All Statuses</option><option value="Expired">Expired</option><option value="Expiring Soon">Expiring Soon</option>
+                            <option value="Out of Stock">Out of Stock</option><option value="Very Low Stock">Very Low Stock</option><option value="Low Stock">Low Stock</option>
+                        </select>}>
                         <div className="min-h-0 flex-1 overflow-auto"><table className="w-full table-fixed text-left text-[11px]"><colgroup><col className="w-[30%]"/><col className="w-[20%]"/><col className="w-[15%]"/><col className="w-[19%]"/><col className="w-[16%]"/></colgroup>
                             <thead className="sticky top-0 bg-[#FFFCF7] text-[9px] uppercase text-[#806A8C]"><tr>{["Product", "SKU", "Current Stock", "Status", "Action"].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr></thead>
                             <tbody>{stockRows.map(row => <tr key={row.key} className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]">
@@ -1593,35 +1809,97 @@ export default function ManagerDashboard() {
                             </tr>)}{stockRows.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-[#8A7D92]">No matching stock alerts.</td></tr>}</tbody>
                         </table></div><p className="border-t border-[#EEE7F2] px-4 py-2 text-right text-[10px] text-[#8A7D92]">Showing {stockRows.length} of {attentionItems.length} items</p>
                     </MDPanel>
+                    <MDPanel title="Team Attendance" subtitle="Recorded staff attendance and approved leave" tall icon={<MDPeopleIcon/>}
+                             onExport={exportTeamAttendance} search={teamAttendanceSearch} setSearch={setTeamAttendanceSearch}
+                             searchPlaceholder="Search employees..." headerActions={
+                        <select aria-label="Filter team attendance by date" value={teamAttendanceFilter} onChange={e => setTeamAttendanceFilter(e.target.value)}
+                                className="h-8 w-[113px] rounded-lg border border-[#E6DDF0] bg-white px-2 text-[10px] font-semibold text-[#5F4E75] outline-none focus:border-[#8B65B9]">
+                            <option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Available History</option>
+                        </select>}>
+                        <div className="min-h-0 flex-1 overflow-auto">
+                            <table className="w-full min-w-[610px] text-left text-[11px]">
+                                <thead className="sticky top-0 bg-[#FFFCF7] text-[9px] uppercase text-[#806A8C]"><tr>{["Employee", "Date", "Time In", "Time Out", "Hours", "Status"].map(label => <th key={label} className="px-3 py-2">{label}</th>)}</tr></thead>
+                                <tbody>{visibleTeamAttendance.map(row => <tr key={`${row.employeeId}-${row.id}-${row.date}`} className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]">
+                                    <td className="px-3 py-2 font-semibold text-[#2B174C]">{row.employeeName}</td>
+                                    <td className="whitespace-nowrap px-3 py-2 text-[#5F4E75]">{mdDisplayDate(row.date)}</td>
+                                    <td className="whitespace-nowrap px-3 py-2 text-[#5F4E75]">{mdClockTime(row.timeIn)}</td>
+                                    <td className="whitespace-nowrap px-3 py-2 text-[#5F4E75]">{mdClockTime(row.timeOut)}</td>
+                                    <td className="whitespace-nowrap px-3 py-2 text-[#5F4E75]">{mdHours(row.hoursWorked)}</td>
+                                    <td className="px-3 py-2"><MDAttendanceBadge status={row.status}/></td>
+                                </tr>)}{visibleTeamAttendance.length === 0 && <tr><td colSpan={6} className="px-4 py-12 text-center text-[#8A7D92]">No recorded attendance or approved leave for this period.</td></tr>}</tbody>
+                            </table>
+                        </div>
+                        <p className="border-t border-[#EEE7F2] px-4 py-2 text-right text-[10px] text-[#8A7D92]">Showing {visibleTeamAttendance.length} records</p>
+                    </MDPanel>
                 </div>
             </div>}
         </section>
+        {managerLeaveOpen && <div role="presentation" className="fixed inset-0 z-[90] flex items-center justify-center bg-[#160C24]/50 p-4 font-sans" onMouseDown={event => { if (event.target === event.currentTarget && !managerLeaveBusy) setManagerLeaveOpen(false); }}>
+            <form onSubmit={event => { event.preventDefault(); void submitManagerLeave(); }}
+                  className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5 shadow-xl">
+                <div>
+                    <h2 className="text-base font-bold text-[#21132E]">Request Manager Leave</h2>
+                    <p className="mt-1 text-xs text-[#86778F]">Your request will be marked Pending. Managers cannot approve their own leave.</p>
+                </div>
+                <div className="flex gap-2 rounded-xl bg-[#F7F1FF] p-1 text-xs font-semibold">
+                    <button type="button" onClick={() => setManagerLeaveMode("single")}
+                            className={`flex-1 rounded-lg px-3 py-2 ${managerLeaveMode === "single" ? "bg-[#2B174C] text-white" : "text-[#5A476A]"}`}>Specific Date</button>
+                    <button type="button" onClick={() => setManagerLeaveMode("range")}
+                            className={`flex-1 rounded-lg px-3 py-2 ${managerLeaveMode === "range" ? "bg-[#2B174C] text-white" : "text-[#5A476A]"}`}>Date Range</button>
+                </div>
+                <div className={`grid gap-3 ${managerLeaveMode === "range" ? "sm:grid-cols-2" : ""}`}>
+                    <label className="block text-xs font-semibold text-[#5A476A]">{managerLeaveMode === "range" ? "From" : "Leave Date"}
+                        <input required type="date" min={today} value={managerLeaveDate}
+                               onChange={event => setManagerLeaveDate(event.target.value)}
+                               className="mt-1 h-10 w-full rounded-xl border border-[#E3D8EA] px-3 text-sm"/>
+                    </label>
+                    {managerLeaveMode === "range" && <label className="block text-xs font-semibold text-[#5A476A]">To
+                        <input required type="date" min={managerLeaveDate || today} value={managerLeaveEndDate}
+                               onChange={event => setManagerLeaveEndDate(event.target.value)}
+                               className="mt-1 h-10 w-full rounded-xl border border-[#E3D8EA] px-3 text-sm"/>
+                    </label>}
+                </div>
+                <label className="block text-xs font-semibold text-[#5A476A]">Leave Type
+                    <select value={managerLeaveType} onChange={event => setManagerLeaveType(event.target.value)}
+                            className="mt-1 h-10 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm">
+                        {['Personal','Sick','Emergency','Vacation','Other'].map(type => <option key={type}>{type}</option>)}
+                    </select>
+                </label>
+                <label className="block text-xs font-semibold text-[#5A476A]">Reason
+                    <textarea required minLength={3} maxLength={1000} rows={3} value={managerLeaveReason}
+                              onChange={event => setManagerLeaveReason(event.target.value)}
+                              placeholder="State the reason for your leave"
+                              className="mt-1 w-full rounded-xl border border-[#E3D8EA] p-3 text-sm"/>
+                </label>
+                {managerLeaveError && <p role="alert" className="rounded-lg bg-[#FFF0F0] px-3 py-2 text-xs text-[#B42318]">{managerLeaveError}</p>}
+                <div className="flex justify-end gap-2">
+                    <button type="button" disabled={managerLeaveBusy} onClick={() => setManagerLeaveOpen(false)}
+                            className="rounded-xl border border-[#E3D8EA] px-4 py-2 text-xs font-semibold text-[#2B174C]">Cancel</button>
+                    <button type="submit" disabled={managerLeaveBusy || !managerLeaveDate || (managerLeaveMode === "range" && (!managerLeaveEndDate || managerLeaveEndDate < managerLeaveDate)) || managerLeaveReason.trim().length < 3}
+                            className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">{managerLeaveBusy ? "Submitting..." : "Submit Request"}</button>
+                </div>
+            </form>
+        </div>}
+        {myLogsOpen && <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/45 px-4 py-6 font-sans" onMouseDown={() => setMyLogsOpen(false)}>
+            <section role="dialog" aria-modal="true" aria-label="My Attendance Logs" onMouseDown={event => event.stopPropagation()}
+                     className="flex max-h-[80vh] w-full max-w-[900px] flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#EEE7F2] px-5 py-4">
+                    <div className="flex items-center gap-3"><span className="rounded-lg bg-[#F1EBFF] p-2 text-[#6D35D4]"><CalendarClock size={19}/></span>
+                        <div><h2 className="text-[17px] font-bold text-[#1A1220]">My Attendance Logs</h2><p className="text-xs text-[#806A8C]">Your saved manager attendance history</p></div></div>
+                    <div className="flex items-center gap-2"><select aria-label="Filter my attendance logs" value={managerClockFilter} onChange={e => setManagerClockFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                        <option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Available History</option>
+                    </select><button type="button" onClick={() => exportMyAttendance()} className="inline-flex h-9 items-center gap-1 rounded-lg border border-[#E6DDF0] px-3 text-xs font-semibold text-[#6D35D4] hover:bg-[#F7F1FF]"><MdDownload size={15}/>Export PDF</button>
+                        <button type="button" onClick={() => setMyLogsOpen(false)} aria-label="Close my attendance logs" className="rounded-lg border border-[#E6DDF0] p-2 text-[#806A8C] hover:bg-[#F7F1FF]"><MdX size={17}/></button></div>
+                </div>
+                <div className="min-h-0 overflow-auto"><table className="w-full min-w-[570px] text-left text-[12px]"><thead className="sticky top-0 bg-[#FFFCF7] text-[10px] uppercase text-[#806A8C]"><tr>{["Date", "Time In", "Time Out", "Hours Worked", "Status"].map(x => <th className="px-4 py-3" key={x}>{x}</th>)}</tr></thead>
+                    <tbody>{visibleMyAttendance.map(row => <tr key={row.id} className="border-t border-[#EEE7F2]"><td className="px-4 py-3">{mdDisplayDate(row.date)}</td><td className="px-4 py-3">{mdClockTime(row.timeIn)}</td><td className="px-4 py-3">{mdClockTime(row.timeOut)}</td><td className="px-4 py-3">{row.timeOut ? mdHours(row.hoursWorked) : "—"}</td><td className="px-4 py-3"><MDAttendanceBadge status={row.status}/></td></tr>)}
+                    {visibleMyAttendance.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-[#8A7D92]">No attendance records for this period.</td></tr>}</tbody></table></div>
+                <div className="border-t border-[#EEE7F2] px-5 py-3 text-right text-xs text-[#806A8C]">Showing {visibleMyAttendance.length} records</div>
+            </section>
+        </div>}
         {showStockAlertsModal && <ManagerStockAlertsModal items={activeStockAlerts} activeFilter={stockAlertFilter}
                                                           totalCount={stockAlerts.length} lowStockCount={lowCount} outOfStockCount={outCount}
                                                           onChangeFilter={setStockAlertFilter} onClose={() => setShowStockAlertsModal(false)}/>}
-        {selectedLeave && <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/50 p-4 font-sans" onMouseDown={e => { if (e.target === e.currentTarget && !decisionBusy) setSelectedLeave(null); }}>
-            <div role="dialog" aria-modal="true" aria-labelledby="manager-leave-review-title" className="flex max-h-[90vh] w-full max-w-xl flex-col rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl">
-                <div className="flex items-start justify-between border-b border-[#EEE7F2] px-6 py-4"><div><h2 id="manager-leave-review-title" className="text-lg font-bold text-[#1A1220]">Review Employee Leave Request</h2><p className="mt-1 text-xs text-[#806A8C]">Review the reason before approving or disapproving.</p></div><button disabled={decisionBusy} onClick={() => setSelectedLeave(null)} aria-label="Close" className="text-[#806A8C]"><MdCloseIcon/></button></div>
-                <div className="space-y-4 overflow-y-auto px-6 py-5 text-sm">
-                    <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#FBF8FE] p-4 text-[#2B174C]"><div><p className="text-[11px] text-[#806A8C]">Employee</p><p className="font-semibold">{selectedLeave.employeeName}</p></div><div><p className="text-[11px] text-[#806A8C]">Employee ID</p><p className="font-semibold">{selectedLeave.employeeNumber}</p></div><div><p className="text-[11px] text-[#806A8C]">Leave Type</p><p className="font-semibold">{selectedLeave.leaveType}</p></div><div><p className="text-[11px] text-[#806A8C]">Status</p><MDStatusBadge status={selectedLeave.status}/></div><div className="col-span-2"><p className="text-[11px] text-[#806A8C]">Date / Date Range</p><p className="font-semibold">{mdLeaveDatesLabel(selectedLeave)} ({selectedLeave.ids.length} day(s))</p></div></div>
-                    <div><p className="mb-1 text-xs font-semibold text-[#5F4E75]">Employee's Reason</p><p className="whitespace-pre-wrap rounded-xl border border-[#E6DDF0] bg-white p-3 text-sm leading-6 text-[#2B174C]">{selectedLeave.reason}</p></div>
-                    {!selectedLeaveIsPending && selectedLeave.decisionReason && <div><p className="text-xs font-semibold text-[#5F4E75]">Manager Decision Note</p><p className="mt-1 rounded-xl bg-[#FAF7FE] p-3 text-xs">{selectedLeave.decisionReason}</p></div>}
-                    {selectedLeaveIsPending && <div><label htmlFor="md-decision-note" className="mb-1 block text-xs font-semibold text-[#5F4E75]">Decision Note (required when disapproving)</label><textarea id="md-decision-note" rows={3} maxLength={500} value={decisionReason} onChange={e => setDecisionReason(e.target.value)} placeholder="Explain your decision to the employee" className="w-full resize-y rounded-xl border border-[#E6DDF0] p-3 text-sm outline-none focus:border-[#8058BA]"/></div>}
-                    {decisionError && <p role="alert" className="rounded-lg bg-[#FFF0F0] px-3 py-2 text-xs text-[#C32F2F]">{decisionError}</p>}
-                    {!mayReviewLeave && <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">Your manager account needs Staff Management access to approve or disapprove leave requests.</p>}
-                    <p className="text-[11px] text-[#806A8C]">Only pending requests from your assigned branch may be reviewed. Approved leave cannot overlap recorded attendance. Decisions are saved to MySQL with your manager ID and review time.</p>
-                </div>
-                <div className="flex justify-end gap-2 border-t border-[#EEE7F2] px-6 py-4"><button type="button" disabled={decisionBusy} onClick={() => setSelectedLeave(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2.5 text-xs font-semibold text-[#2B174C]">Close</button>
-                    {selectedLeaveIsPending && mayReviewLeave && <><button disabled={decisionBusy || decisionReason.trim().length < 3} type="button" onClick={() => void decideLeave("Rejected")} className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-2.5 text-xs font-semibold text-[#C32F2F] disabled:opacity-50">Disapprove</button><button disabled={decisionBusy} type="button" onClick={() => void decideLeave("Approved")} className="rounded-xl bg-[#2B174C] px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-50">{decisionBusy ? "Saving..." : "Approve"}</button></>}
-                </div>
-            </div>
-        </div>}
-        {selectedPayable && <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/50 p-4 font-sans"><div role="dialog" aria-modal="true" aria-labelledby="manager-payable-title" className="w-full max-w-md rounded-2xl bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-[#E6DDF0] px-5 py-4"><h2 id="manager-payable-title" className="text-lg font-bold text-[#2B174C]">Record Supplier Payment</h2><button aria-label="Close" disabled={paymentBusy} onClick={() => setSelectedPayable(null)}><MdCloseIcon/></button></div>
-            <div className="space-y-3 p-5 text-sm"><p><b>Purchase:</b> {selectedPayable.purchaseNumber}</p><p><b>Supplier:</b> {selectedPayable.supplier}</p><p><b>Outstanding:</b> {peso(Number(selectedPayable.outstandingBalance))}</p><label className="block text-xs font-semibold text-[#806A8C]" htmlFor="manager-payment-amount">Amount to Pay (₱)</label><input id="manager-payment-amount" type="number" min="0.01" step="0.01" max={selectedPayable.outstandingBalance} value={paymentAmount} onChange={e => setPaymentAmount(e.target.value)} className="w-full rounded-xl border border-[#E6DDF0] p-3" placeholder="Enter payment amount"/>
-                <p className="text-[11px] text-[#806A8C]">Payment date: {today}. This records a supplier payment without changing stock.</p>{paymentError && <p role="alert" className="rounded-lg bg-red-50 p-2 text-xs text-red-700">{paymentError}</p>}</div>
-            <div className="flex justify-end gap-2 border-t border-[#E6DDF0] p-4"><button disabled={paymentBusy} onClick={() => setSelectedPayable(null)} className="rounded-xl border px-4 py-2 text-xs">Cancel</button><button disabled={paymentBusy || !paymentAmount} onClick={() => void paySupplier()} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">{paymentBusy ? "Saving..." : "Confirm Payment"}</button></div>
-        </div></div>}
         {toast && <div role="status" aria-live="polite" className={`fixed bottom-5 right-5 z-[180] flex w-[min(360px,calc(100vw-2rem))] items-center gap-3 rounded-2xl border bg-white p-4 shadow-xl ${toast.error ? "border-[#F4BFC5]" : "border-[#BCE8CA]"}`}><span className={`rounded-full p-2 ${toast.error ? "bg-red-50 text-red-700" : "bg-green-50 text-green-700"}`}>{toast.error ? <AlertTriangle size={19}/> : <MdCheckIcon/>}</span><div className="flex-1"><p className="text-sm font-bold text-[#1A1220]">{toast.title}</p><p className="mt-0.5 text-xs text-[#806A8C]">{toast.message}</p></div><button onClick={() => setToast(null)} aria-label="Dismiss"><MdCloseIcon/></button></div>}
     </>;
 }
@@ -1629,8 +1907,28 @@ export default function ManagerDashboard() {
 /* Dashboard overview panels and staff leave workflow. Manager Inventory is unchanged. */
 type MDStaffSummary = { total: number; present: number; absent: number; onLeave: number; notRecorded: number };
 type MDStaffAttendance = { employeeId: number; employeeName: string; status: string; timeIn: string | null; timeOut: string | null };
+type MDManagerAttendance = { id: number; date: string; timeIn: string | null; timeOut: string | null; hoursWorked: number | null; status: string; leaveType?: string; approvalStatus?: string; reason?: string };
+type MDTeamAttendance = MDManagerAttendance & { employeeId: number; employeeName: string };
+function mdClockTime(value?: string | null): string {
+    if (!value) return "—";
+    const match = value.match(/T(\d{2}):(\d{2})/);
+    if (!match) return "—";
+    const h = Number(match[1]);
+    return `${h % 12 || 12}:${match[2]} ${h < 12 ? "AM" : "PM"}`;
+}
+function mdLiveHours(timeIn: string | null | undefined, now: Date): string {
+    if (!timeIn) return "—";
+    const parsed = new Date(`${timeIn}+08:00`);
+    if (Number.isNaN(parsed.getTime())) return "—";
+    return mdHours(Math.max(0, (now.getTime() - parsed.getTime()) / 3600000));
+}
+function mdHours(value?: number | null): string {
+    if (value === undefined || value === null) return "—";
+    const total = Math.max(0, Math.round(Number(value) * 60));
+    return `${Math.floor(total / 60)}h ${total % 60}m`;
+}
 type MDLeaveRow = { id: number; employeeId: number; employeeName: string; employeeNumber: string;
-    leaveDate: string; leaveType: string; reason: string; approvalStatus: string;
+    leaveDate: string; leaveEndDate?: string; leaveType: string; reason: string; approvalStatus: string;
     decisionReason: string | null; createdAt: string; reviewedAt?: string | null };
 type MDLeaveGroup = { key: string; ids: number[]; employeeName: string; employeeNumber: string;
     leaveType: string; dates: string[]; reason: string; status: string; decisionReason: string | null; createdAt: string };
@@ -1659,15 +1957,18 @@ function mdGroupLeaveRequests(rows: MDLeaveRow[]): MDLeaveGroup[] {
         const sameRequest = last && last.employeeNumber === String(row.employeeNumber) &&
             last.leaveType === row.leaveType && last.reason === row.reason &&
             last.createdAt === row.createdAt && last.status === row.approvalStatus;
+        const rangeEnd = row.leaveEndDate && row.leaveEndDate >= row.leaveDate
+            ? row.leaveEndDate : row.leaveDate;
         const previous = sameRequest ? last.dates[last.dates.length - 1] : undefined;
         const contiguous = previous && mdDatePlusOne(previous) === row.leaveDate;
         if (sameRequest && contiguous) {
             last.ids.push(row.id);
-            last.dates.push(row.leaveDate);
+            last.dates.push(rangeEnd);
         } else {
             groups.push({ key: String(row.id), ids: [row.id], employeeName: row.employeeName,
                 employeeNumber: String(row.employeeNumber), leaveType: row.leaveType,
-                dates: [row.leaveDate], reason: row.reason, status: row.approvalStatus,
+                dates: row.leaveDate === rangeEnd ? [row.leaveDate] : [row.leaveDate, rangeEnd],
+                reason: row.reason, status: row.approvalStatus,
                 decisionReason: row.decisionReason, createdAt: row.createdAt });
         }
     }
@@ -1679,6 +1980,22 @@ function mdDatePlusOne(value: string) {
     const d = new Date(`${value}T00:00:00.000Z`);
     d.setUTCDate(d.getUTCDate() + 1);
     return d.toISOString().slice(0, 10);
+}
+function mdDatePlusDays(value: string, days: number) {
+    const result = new Date(value + "T00:00:00.000Z");
+    result.setUTCDate(result.getUTCDate() + days);
+    return result.toISOString().slice(0, 10);
+}
+function mdAttendanceInPeriod(day: string, period: string, today: string) {
+    if (period === "all") return true;
+    if (period === "today") return day === today;
+    if (period === "month") return day.slice(0,7) === today.slice(0,7);
+    if (period === "previous") {
+        const [year, month] = today.slice(0,7).split("-").map(Number);
+        const lastMonth = new Date(Date.UTC(year, month - 2, 1)).toISOString().slice(0,7);
+        return day.slice(0,7) === lastMonth;
+    }
+    return false;
 }
 function mdDisplayDate(value: string) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
@@ -1710,27 +2027,37 @@ function MDStatusBadge({ status }: { status: string }) {
         key === "rejected" ? "bg-[#FFF0F0] text-[#D52B2B]" : "bg-[#FFF3D8] text-[#B66A00]";
     return <span className={`inline-flex max-w-full rounded-full px-2 py-1 text-[9px] font-bold uppercase ${colors}`}>{status}</span>;
 }
+function MDAttendanceBadge({ status }: { status: string }) {
+    const label = String(status || "Not Recorded");
+    const classes = label === "On Duty" || label === "Completed" || label === "Present"
+        ? "bg-[#E6F7EE] text-[#16834A]"
+        : label === "On Leave" ? "bg-[#FFF3D8] text-[#A56607]"
+            : label === "Absent" ? "bg-[#FFF0F0] text-[#D52B2B]" : "bg-[#F2EFF5] text-[#806A8C]";
+    return <span className={`inline-flex max-w-full whitespace-nowrap rounded-full px-2 py-1 text-[9px] font-semibold ${classes}`}>{label}</span>;
+}
 function MDStockBadge({ status }: { status: string }) {
     const colors = status === "Expired" || status === "Out of Stock" ? "bg-[#FFF0F0] text-[#D52B2B]" :
         status.includes("Low") ? "bg-[#FFF3D8] text-[#B66A00]" : "bg-[#F1EBFF] text-[#6D35D4]";
     return <span className={`inline-flex rounded-full px-2 py-1 text-[9px] font-bold uppercase ${colors}`}>{status}</span>;
 }
-function MDPanel({ title, subtitle, icon, children, onExport, search, setSearch, searchPlaceholder }: {
+function MDPanel({ title, subtitle, icon, children, onExport, search, setSearch, searchPlaceholder, headerActions, tall = false }: {
     title: string; subtitle: string; icon: React.ReactNode; children: React.ReactNode;
     onExport: () => void; search?: string; setSearch?: (value: string) => void; searchPlaceholder?: string;
+    headerActions?: React.ReactNode; tall?: boolean;
 }) {
-    return <section className="flex h-[320px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
-        <div className="flex items-start justify-between gap-2 border-b border-[#EEE7F2] px-4 py-3.5">
+    return <section className={`flex min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm ${tall ? "h-[380px]" : "h-[320px]"}`}>
+        <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[#EEE7F2] px-4 py-3.5">
             <div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><div className="min-w-0"><h2 className="text-[15px] font-bold text-[#1A1220]">{title}</h2><p className="mt-0.5 text-[11px] text-[#9A8DA8]">{subtitle}</p></div></div>
-            <div className="flex shrink-0 gap-2">{setSearch && <div className="relative hidden sm:block"><MdSearch size={13} className="absolute left-2 top-2.5 text-[#806A8C]"/><input aria-label={`Search ${title}`} value={search || ""} onChange={e => setSearch(e.target.value)} className="h-8 w-40 rounded-lg border border-[#E6DDF0] pl-7 pr-2 text-[10px] outline-none focus:border-[#8B65B9]" placeholder={searchPlaceholder}/></div>}
+            <div className="flex flex-wrap items-center gap-2">{setSearch && <div className="relative hidden sm:block"><MdSearch size={13} className="absolute left-2 top-2.5 text-[#806A8C]"/><input aria-label={`Search ${title}`} value={search || ""} onChange={e => setSearch(e.target.value)} className="h-8 w-40 rounded-lg border border-[#E6DDF0] pl-7 pr-2 text-[10px] outline-none focus:border-[#8B65B9]" placeholder={searchPlaceholder}/></div>}
+                {headerActions}
                 <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={onExport} className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
             </div>
         </div>{children}
     </section>;
 }
-function MDChartCard({title, subtitle, icon, total, centerLabel, segments, exportClick, badgeLabel, error}: {
+function MDChartCard({title, subtitle, icon, total, centerLabel, segments, exportClick, error, reserveFooter = false}: {
     title: string; subtitle: string; icon: React.ReactNode; total: number | null; centerLabel: string;
-    segments: ManagerSegment[]; exportClick: () => void; badgeLabel: string; error?: string;
+    segments: ManagerSegment[]; exportClick: () => void; error?: string; reserveFooter?: boolean;
 }) {
     const sum = segments.reduce((a, b) => a + b.value, 0);
     let cursor = 0;
@@ -1741,18 +2068,17 @@ function MDChartCard({title, subtitle, icon, total, centerLabel, segments, expor
         return `${seg.color} ${start}% ${end}%`;
     });
     const background = sum ? `conic-gradient(${stops.join(",")})` : "#F2EDF6";
-    return <section className="flex h-[320px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
-        <div className="flex items-start justify-between gap-2 px-4 py-3.5"><div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><div className="min-w-0"><h2 className="text-[15px] font-bold text-[#1A1220]">{title}</h2><p className="mt-0.5 text-[11px] text-[#9A8DA8]">{subtitle}</p></div></div>
-            <div className="flex shrink-0 gap-1.5"><span className="inline-flex h-8 items-center rounded-lg border border-[#E6DDF0] px-2 text-[10px] font-semibold text-[#5F4E75]">{badgeLabel}</span>
-                <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={exportClick} className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
-            </div>
+    return <section className="flex h-[360px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
+        <div className="flex items-start justify-between gap-2 px-4 py-3.5">
+            <div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><div className="min-w-0"><h2 className="text-[15px] font-bold text-[#1A1220]">{title}</h2><p className="mt-0.5 text-[11px] text-[#9A8DA8]">{subtitle}</p></div></div>
+            <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={exportClick} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
         </div>
         {error ? <p role="alert" className="mx-4 rounded-lg bg-red-50 p-2 text-xs text-red-700">{error}</p> : null}
-        <div className="grid min-h-0 flex-1 grid-cols-[minmax(110px,1fr)_minmax(0,1.2fr)] items-center gap-2 px-4 pb-4">
-            <div className="relative mx-auto flex aspect-square w-full max-w-[178px] items-center justify-center rounded-full" style={{ background }} role="img" aria-label={`${title}: ${segments.map(s => `${s.label} ${s.value}`).join(", ")}`}>
+        <div className={`flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-4 sm:flex-row sm:gap-4 ${reserveFooter ? "pb-12" : "pb-4"}`}>
+            <div className="relative flex h-[158px] w-[158px] shrink-0 items-center justify-center rounded-full" style={{ background }} role="img" aria-label={`${title}: ${segments.map(s => `${s.label} ${s.value}`).join(", ")}`}>
                 <div className="absolute inset-[23%] flex flex-col items-center justify-center rounded-full bg-white text-center"><span className="text-[25px] font-bold leading-none text-[#1A1220]">{total === null ? "—" : total.toLocaleString("en-PH")}</span><span className="mt-1 text-[10px] text-[#806A8C]">{centerLabel}</span></div>
             </div>
-            <div className="min-w-0 space-y-3">{segments.map(seg => <div key={seg.label} className="grid grid-cols-[minmax(0,1fr)_30px_40px] items-center gap-1.5 text-[10px]"><span className="flex min-w-0 items-center gap-1.5 font-semibold text-[#4B3E55]"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{backgroundColor:seg.color}}/><span className="truncate">{seg.label}</span></span><span className="text-right font-bold text-[#2B174C]">{seg.value}</span><span className="text-right text-[#8A7D92]">{sum ? (seg.value / sum * 100).toFixed(1) : "0.0"}%</span></div>)}</div>
+            <div className="grid w-full min-w-0 max-w-[235px] grid-cols-1 gap-3">{segments.map(seg => <div key={seg.label} className="flex min-w-0 items-center justify-between gap-2 text-[10px]"><span className="flex min-w-0 items-center gap-1.5 font-semibold text-[#4B3E55]"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{backgroundColor:seg.color}}/><span className="truncate">{seg.label}</span></span><span className="shrink-0 font-bold text-[#2B174C]">{seg.value}</span></div>)}</div>
         </div>
     </section>;
 }

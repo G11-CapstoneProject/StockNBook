@@ -13,6 +13,17 @@ const dbConfig = {
     ssl: { rejectUnauthorized: false },
 };
 
+// Reuse MySQL connections across requests instead of opening a new TCP/TLS
+// connection for every product or dashboard load.
+const dbPool = mysql.createPool({
+    ...dbConfig,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+});
+
 function jsonResponse(statusCode, headers, body) {
     return {
         statusCode,
@@ -2477,7 +2488,7 @@ async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}
                                                         p.alert_level AS alertLevel,DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS expiresAt,p.has_variants AS hasVariants,
                                                         DATE_FORMAT(p.created_at,'%Y-%m-%d') AS createdDate,
                                                         ${hasVariants ? "v.id AS variantId,v.stock AS variantStock,v.alert_level AS variantAlert,DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS variantExpiry" :
-            'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
+                                                                'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
                                                  FROM products p ${hasVariants ? 'LEFT JOIN product_variants v ON v.product_id=p.id AND v.deleted_at IS NULL' : ''}
                                                  WHERE p.store_id=? AND p.deleted_at IS NULL ${branchId ? 'AND p.branch_id=?' : ''}
                                                  ORDER BY p.id`, args);
@@ -2849,7 +2860,35 @@ exports.handler = async (event) => {
     let connection;
 
     try {
-        connection = await mysql.createConnection(dbConfig);
+        connection = await dbPool.getConnection();
+
+        // Only this catalog action is public. Every other operation still uses
+        // authenticated Owner/Manager/Staff permissions below.
+        if (action === "get_public_products") {
+            const sid = Number(body.store_id ?? body.storeId);
+            const bid = Number(body.branch_id ?? body.branchId);
+            if (!Number.isSafeInteger(sid) || sid <= 0 || !Number.isSafeInteger(bid) || bid <= 0)
+                return badRequest(headers,"Choose a valid branch to browse products.");
+            const [matchingBranches] = await connection.execute(
+                'SELECT id FROM branches WHERE store_id=? AND id=? LIMIT 1',[sid,bid]);
+            if (!matchingBranches.length) return notFound(headers,"Branch not found for this store.");
+            const products = await getProducts(connection,sid,bid);
+            const now = new Intl.DateTimeFormat('en-CA', {
+                timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'
+            }).format(new Date());
+            const validDate = d => !d || String(d instanceof Date ? d.toISOString().slice(0,10) : d).slice(0,10) >= now;
+            // Rebuild a public response rather than leaking cost price or stock ledgers.
+            const safeProducts = products.filter(p => validDate(p.expirationDate) &&
+                (!p.hasVariants || (Array.isArray(p.variants) && p.variants.some(v=>validDate(v.expirationDate))))).map(p => ({
+                id:Number(p.id),branchId:bid,name:String(p.name),category:String(p.category||'Other'),
+                stock:Number(p.stock||0),salesPrice:Number(p.salesPrice||0),
+                hasVariants:Boolean(p.hasVariants),
+                variants:(Array.isArray(p.variants)?p.variants:[])
+                    .filter(v=>validDate(v.expirationDate))
+                    .map(v=>({id:Number(v.id),stock:Number(v.stock||0),salesPrice:Number(v.salesPrice||0),variantValues:v.variantValues||{}}))
+            }));
+            return jsonResponse(200,headers,{products:safeProducts});
+        }
 
         const authHeader =
             event?.headers?.authorization ||
@@ -5009,7 +5048,7 @@ exports.handler = async (event) => {
         return serverError(headers, err);
     } finally {
         if (connection) {
-            await connection.end();
+            connection.release();
         }
     }
 };

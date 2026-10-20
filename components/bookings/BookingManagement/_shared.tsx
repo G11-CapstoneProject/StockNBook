@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import BookingFinancialPanel from "./BookingFinancialPanel";
 
-export type BookingAccess = "none" | "view" | "full";
+export type BookingAccess = "none" | "view" | "standard" | "full";
 
 export type FilterType =
     | "All"
@@ -71,6 +71,8 @@ export type Booking = {
     notes?: string;
 
     status: string;
+    approvalStatus?: "pending" | "approved" | "rejected" | null;
+    approvalReason?: string | null;
 
     agreed_price?: number | string | null;
     agreedPrice?: number | string | null;
@@ -94,6 +96,17 @@ export type Booking = {
 
     createdAt?: string;
     created_at?: string;
+};
+
+type BookingRentalItem = {
+    id: number;
+    equipment_id: number;
+    equipment_name: string;
+    quantity: number | string;
+    start_date: string;
+    end_date: string;
+    billable_days: number | string;
+    allocation_status: string;
 };
 
 type BookingInventoryItem = {
@@ -372,6 +385,8 @@ export function normalizeBooking(
         customOrder:
             rawString(raw, "customOrder") || rawString(raw, "custom_order"),
         status: normalizeBookingStatus(rawString(raw, "status")),
+        approvalStatus: (rawValue(raw, "approvalStatus") || null) as Booking["approvalStatus"],
+        approvalReason: String(rawValue(raw,"approvalReason") || "") || null,
         agreed_price: rawValue(raw, "agreed_price") ?? rawValue(raw, "agreedPrice") ?? null,
         package_price: rawValue(raw, "package_price") ?? rawValue(raw, "packagePrice") ?? null,
         required_down_payment:
@@ -397,18 +412,27 @@ export function getSavedBookingAccess(role: "staff" | "manager" = "staff"): Book
             "{}"
         ) as Record<string, unknown>;
 
-        // Prefer the canonical key; old account invitations may use these aliases.
-        const access = permissions.bookings ??
+        // The manager's editor saves both a legacy `bookings` boolean and
+        // `bookings_access`. Read the granular access value first so `true`
+        // cannot incorrectly override `"full"` or `"standard"`.
+        const access = permissions.bookings_access ??
             permissions.booking_access ??
-            permissions.bookings_access;
+            permissions.bookings;
 
         if (access === undefined || access === null) {
             return role === "manager" ? "full" : "none";
         }
-        if (access === "full" || (role === "manager" && access === true)) return "full";
-        // Legacy Staff boolean permissions were view-only in this component.
-        if (access === "view" || access === "view_only" || access === "viewOnly" ||
-            (role === "staff" && access === true)) return "view";
+        if (role === "staff") {
+            // Staff "full" in the access editor means standard-confirm only;
+            // Manager-only pricing and cancellation actions stay unavailable.
+            if (access === "full" || access === "standard" || access === "confirm_standard") return "standard";
+            // Preserve legacy boolean grants as read-only, not write access.
+            if (access === true || access === "true" || access === "view" ||
+                access === "view_only" || access === "viewOnly") return "view";
+            return "none";
+        }
+        if (access === "full" || access === true) return "full";
+        if (access === "view" || access === "view_only" || access === "viewOnly") return "view";
         return "none";
     } catch {
         return role === "manager" ? "full" : "none";
@@ -817,16 +841,9 @@ export function getNextStatusConfig(displayStatus: string, downPaymentPaid: bool
     }
 }
 
-export function BookingRow({
-                               b,
-                               ownerView = false,
-                               canManage = true,
-                               onUpdateStatus,
-                               onSetPrice,
-                               onRecordDownPayment,
-                               onMarkFullyPaid,
-                               onCancelBooking,
-                           }: {
+export type BookingDetailTab = "Overview" | "Billing" | "Items" | "Notes";
+
+type BookingRowProps = {
     b: Booking;
     ownerView?: boolean;
     canManage?: boolean;
@@ -835,12 +852,47 @@ export function BookingRow({
     onRecordDownPayment?: (b: Booking) => void;
     onMarkFullyPaid?: (b: Booking) => void;
     onCancelBooking?: (b: Booking) => void;
-}) {
+    canConfirmStandard?: boolean;
+    onConfirmStandard?: (b: Booking) => void;
+    onRequestApproval?: (b: Booking) => void;
+    canOperateBookings?: boolean;
+    onOperateBooking?: (id: number, status: "Preparing" | "Completed") => void;
+    operationsBusy?: boolean;
+    // Only used by the non-paginated selectable booking workspace.
+    hideSummaryRow?: boolean;
+    expandedByDefault?: boolean;
+    detailTab?: BookingDetailTab;
+};
+
+export function BookingRow({
+                               b,
+                               hideSummaryRow = false,
+                               expandedByDefault = false,
+                               detailTab = "Overview",
+                               ownerView = false,
+                               canManage = true,
+                               onUpdateStatus,
+                               onSetPrice,
+                               onRecordDownPayment,
+                               onMarkFullyPaid,
+                               onCancelBooking,
+                               canConfirmStandard = false,
+                               onConfirmStandard,
+                               onRequestApproval,
+                               canOperateBookings = false,
+                               onOperateBooking,
+                               operationsBusy = false,
+                           }: BookingRowProps) {
     const [bookingItems, setBookingItems] = useState<BookingInventoryItem[]>([]);
+    const [bookingRentalItems, setBookingRentalItems] = useState<BookingRentalItem[]>([]);
     const [itemsLoading, setItemsLoading] = useState(false);
     const [itemsLoaded, setItemsLoaded] = useState(false);
     const [itemsError, setItemsError] = useState("");
-    const [open, setOpen] = useState(false);
+    const [open, setOpen] = useState(expandedByDefault);
+
+    // Status transitions change rental allocations; reload the displayed
+    // inventory lines when a booking moves to its next operational step.
+    useEffect(() => { setItemsLoaded(false); }, [b.status]);
 
     const isCustom = isCustomBooking(b);
     const total = getTotalPrice(b);
@@ -850,7 +902,7 @@ export function BookingRow({
     const paymentStatus = getPaymentStatus(b);
     const displayStatus = normalizeBookingStatus(b.status);
 
-    const customNeedsTerms = isCustom && (total <= 0 || requiredDp <= 0);
+    const customNeedsTerms = isCustom && total <= 0;
     const canRecordPayment = total > 0 && requiredDp > 0;
     const downPaymentPaid = requiredDp > 0 && paid >= requiredDp;
     const fullyPaid = total > 0 && balance <= 0;
@@ -871,7 +923,7 @@ export function BookingRow({
     } = getNextStatusConfig(displayStatus, downPaymentPaid);
 
     useEffect(() => {
-        if (!open || itemsLoaded) return;
+        if (!open || itemsLoaded || (hideSummaryRow && detailTab !== "Items")) return;
 
         const token = sessionStorage.getItem("token");
         const branchId =
@@ -919,6 +971,8 @@ export function BookingRow({
                             ? (data.items as BookingInventoryItem[])
                             : []
                     );
+                    setBookingRentalItems(Array.isArray(data.rentalItems)
+                        ? (data.rentalItems as BookingRentalItem[]) : []);
                     setItemsLoaded(true);
                 }
             } catch (err) {
@@ -947,6 +1001,8 @@ export function BookingRow({
     }, [
         open,
         itemsLoaded,
+        hideSummaryRow,
+        detailTab,
         b.id,
         b.branchId,
         b.branch_id,
@@ -954,7 +1010,7 @@ export function BookingRow({
 
     return (
         <>
-            <tr
+            {!hideSummaryRow && (<tr
                 onClick={() => setOpen((v) => !v)}
                 className={`cursor-pointer border-b border-[#EFE7F4] transition hover:bg-[#FFFCF7] ${
                     open ? "bg-[#F9F4FF]" : "bg-white"
@@ -1068,67 +1124,75 @@ export function BookingRow({
                         <span className="text-xs text-[#9B8AAA]">Open row</span>
                     )}
                 </td>
-            </tr>
+            </tr>)}
 
             {open && (
                 <tr className="border-b border-[#EFE7F4] bg-[#F9F4FF]">
-                    <td colSpan={6} className="px-4 pb-4">
-                        <div className="flex w-full flex-col gap-4 rounded-[14px] border border-[#E6DDF0] bg-white p-4 xl:flex-row">
+                    <td colSpan={6} className={hideSummaryRow ? "p-0" : "px-4 pb-4"}>
+                        <div className={hideSummaryRow
+                            ? "flex w-full min-w-0 flex-col gap-3 bg-white"
+                            : "flex w-full flex-col gap-4 rounded-[14px] border border-[#E6DDF0] bg-white p-4 xl:flex-row"}>
                             {/* LEFT SIDE */}
                             <div className="min-w-0 flex-1 space-y-4">
-                                <div className="rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
-                                    <div className="mb-4 flex items-center gap-2">
-                                        <CreditCard
-                                            size={15}
-                                            className="text-[#6C3AD6]"
-                                        />
-
-                                        <p className="text-[16px] font-bold text-[#1A1220]">
-                                            Payment Summary
-                                        </p>
-                                    </div>
-
-                                    <div className="space-y-3 text-sm">
-                                        <SummaryLine
-                                            label={isCustom ? "Agreed Price" : "Package Price"}
-                                            value={total > 0 ? peso(total) : "Not set"}
-                                        />
-
-                                        <SummaryLine
-                                            label="Required Down Payment"
-                                            value={requiredDp > 0 ? peso(requiredDp) : "Not set"}
-                                        />
-
-                                        <SummaryLine
-                                            label="Amount Paid"
-                                            value={peso(paid)}
-                                        />
-
-                                        <div className="border-t border-[#EFE7F4] pt-4">
-                                            <SummaryLine
-                                                label="Balance"
-                                                value={peso(balance)}
-                                                strong
+                                {(!hideSummaryRow || detailTab === "Overview") && (
+                                    <div className="rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                        <div className="mb-4 flex items-center gap-2">
+                                            <CreditCard
+                                                size={15}
+                                                className="text-[#6C3AD6]"
                                             />
+
+                                            <p className="text-[16px] font-bold text-[#1A1220]">
+                                                Payment Summary
+                                            </p>
                                         </div>
+
+                                        <div className="space-y-3 text-sm">
+                                            <SummaryLine
+                                                label={isCustom ? "Agreed Price" : "Package Price"}
+                                                value={total > 0 ? peso(total) : "Not set"}
+                                            />
+
+                                            <SummaryLine
+                                                label="Required Down Payment"
+                                                value={requiredDp > 0 ? peso(requiredDp) : "No down payment required"}
+                                            />
+
+                                            <SummaryLine
+                                                label="Amount Paid"
+                                                value={peso(paid)}
+                                            />
+
+                                            <div className="border-t border-[#EFE7F4] pt-4">
+                                                <SummaryLine
+                                                    label="Balance"
+                                                    value={peso(balance)}
+                                                    strong
+                                                />
+                                            </div>
+                                        </div>
+
+                                        {!hideSummaryRow && <BookingFinancialPanel bookingId={b.id} branchId={Number(b.branchId||b.branch_id||0)} ownerView={ownerView} editable={canManage}/>}
+
+                                        {customNeedsTerms && (
+                                            <p className="mt-3 rounded-xl bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700">
+                                                This custom booking needs an agreed price and required down payment before payment can be recorded.
+                                            </p>
+                                        )}
+
+                                        {!isCustom && total <= 0 && (
+                                            <p className="mt-3 rounded-xl bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700">
+                                                Package price is missing. Check if the booking API includes package price.
+                                            </p>
+                                        )}
                                     </div>
+                                )}
 
+                                {hideSummaryRow && detailTab === "Billing" && (
                                     <BookingFinancialPanel bookingId={b.id} branchId={Number(b.branchId||b.branch_id||0)} ownerView={ownerView} editable={canManage}/>
+                                )}
 
-                                    {customNeedsTerms && (
-                                        <p className="mt-3 rounded-xl bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700">
-                                            This custom booking needs an agreed price and required down payment before payment can be recorded.
-                                        </p>
-                                    )}
-
-                                    {!isCustom && total <= 0 && (
-                                        <p className="mt-3 rounded-xl bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700">
-                                            Package price is missing. Check if the booking API includes package price.
-                                        </p>
-                                    )}
-                                </div>
-
-                                {isCustom && (
+                                {(!hideSummaryRow || detailTab === "Items") && (
                                     <div className="flex h-[290px] flex-col rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
                                         <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
                                             <div className="flex items-center gap-2">
@@ -1138,13 +1202,13 @@ export function BookingRow({
                                                 />
 
                                                 <p className="text-[16px] font-bold text-[#1A1220]">
-                                                    Selected Items
+                                                    Booking Inventory Items
                                                 </p>
                                             </div>
 
-                                            {bookingItems.length > 0 && (
+                                            {(bookingItems.length + bookingRentalItems.length) > 0 && (
                                                 <span className="shrink-0 rounded-full bg-[#F0E9FF] px-2.5 py-1 text-[11px] font-bold text-[#5A35A5]">
-                                                    {bookingItems.length} {bookingItems.length === 1 ? "item" : "items"}
+                                                    {bookingItems.length + bookingRentalItems.length} lines
                                                 </span>
                                             )}
                                         </div>
@@ -1160,7 +1224,7 @@ export function BookingRow({
                                                 <p className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-3 py-2 text-xs font-semibold text-[#C32F2F]">
                                                     {itemsError}
                                                 </p>
-                                            ) : bookingItems.length === 0 ? (
+                                            ) : (bookingItems.length + bookingRentalItems.length) === 0 ? (
                                                 <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-[#E6DDF0] bg-white px-4 text-center">
                                                     <p className="text-sm text-[#7A6A84]">
                                                         No saved items found for this booking.
@@ -1189,11 +1253,10 @@ export function BookingRow({
                                                                         {itemLabel}
                                                                     </p>
 
-                                                                    {item.inventory_status && (
-                                                                        <p className="mt-0.5 text-[11px] text-[#806A8C]">
-                                                                            Status: {item.inventory_status}
-                                                                        </p>
-                                                                    )}
+                                                                    <p className="mt-0.5 text-[11px] text-[#806A8C]">
+                                                                        {item.source_type === 'package' ? 'Package inclusion · Sales inventory' : 'Sales inventory'}
+                                                                        {item.inventory_status ? ` · ${item.inventory_status}` : ''}
+                                                                    </p>
                                                                 </div>
 
                                                                 <span className="shrink-0 rounded-full bg-[#F7F1FF] px-2.5 py-1 text-xs font-bold text-[#4E2C66]">
@@ -1202,167 +1265,341 @@ export function BookingRow({
                                                             </div>
                                                         );
                                                     })}
+                                                    {bookingRentalItems.map(item => (
+                                                        <div key={`rental-${item.id}`}
+                                                             className="flex items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
+                                                            <div className="min-w-0">
+                                                                <p className="truncate text-sm font-semibold text-[#1A1220]">{item.equipment_name}</p>
+                                                                <p className="mt-0.5 text-[11px] text-[#806A8C]">
+                                                                    Rental equipment · {item.allocation_status.replace(/_/g, ' ')}
+                                                                    {' · '}{item.start_date === item.end_date ? item.start_date : `${item.start_date} – ${item.end_date}`}
+                                                                </p>
+                                                            </div>
+                                                            <span className="shrink-0 rounded-full bg-[#F7F1FF] px-2.5 py-1 text-xs font-bold text-[#4E2C66]">
+                                                                x{Number(item.quantity)}
+                                                            </span>
+                                                        </div>
+                                                    ))}
                                                 </div>
                                             )}
                                         </div>
                                     </div>
                                 )}
 
-                                <div className="min-h-[96px] rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
-                                    <div className="mb-2 flex items-center gap-2">
-                                        <StickyNote
-                                            size={14}
-                                            className="text-[#806A8C]"
-                                        />
+                                {(!hideSummaryRow || detailTab === "Notes") && (
+                                    <div className="min-h-[96px] rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                        <div className="mb-2 flex items-center gap-2">
+                                            <StickyNote
+                                                size={14}
+                                                className="text-[#806A8C]"
+                                            />
 
-                                        <p className="text-[16px] font-bold text-[#1A1220]">
-                                            Notes
+                                            <p className="text-[16px] font-bold text-[#1A1220]">
+                                                Notes
+                                            </p>
+                                        </div>
+
+                                        <p className="text-sm leading-6 text-[#7A6A84]">
+                                            {b.notes || "No notes provided."}
                                         </p>
                                     </div>
-
-                                    <p className="text-sm leading-6 text-[#7A6A84]">
-                                        {b.notes || "No notes provided."}
-                                    </p>
-                                </div>
+                                )}
                             </div>
 
                             {/* RIGHT SIDE */}
-                            <div className="min-w-0 flex-1 space-y-4">
-                                <div className="rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
-                                    <p className="mb-3 text-[16px] font-bold text-[#1A1220]">
-                                        Payment Action
-                                    </p>
+                            {(!hideSummaryRow || detailTab === "Overview") && (
+                                <div className="min-w-0 flex-1 space-y-4">
+                                    <div className="rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                        <p className="mb-3 text-[16px] font-bold text-[#1A1220]">
+                                            Payment Action
+                                        </p>
 
-                                    {ownerView || !canManage ? (
-                                        <div className="rounded-xl border border-[#E6DDF0] bg-white px-3 py-3 text-center text-xs font-semibold text-[#7A6A84]">
-                                            View-only booking record.
-                                        </div>
-                                    ) : isCustom && customNeedsTerms ? (
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                onSetPrice?.(b);
-                                            }}
-                                            type="button"
-                                            className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                                        >
-                                            Set Price & Down Payment
-                                        </button>
-                                    ) : total <= 0 || requiredDp <= 0 ? (
-                                        <div
-                                            className="flex min-h-[42px] w-full items-center justify-center rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-4 text-center text-sm font-semibold text-[#A56607]"
-                                        >
-                                            Payment terms missing
-                                        </div>
-                                    ) : balance <= 0 ? (
-                                        <div
-                                            className="flex min-h-[42px] w-full items-center justify-center rounded-xl border border-[#B7E9C8] bg-[#EDFBF1] px-4 text-center text-sm font-semibold text-[#138342]"
-                                        >
-                                            Payment completed
-                                        </div>
-                                    ) : paid <= 0 || paid < requiredDp ? (
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                onRecordDownPayment?.(b);
-                                            }}
-                                            type="button"
-                                            className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                                        >
-                                            Mark Down Payment Paid
-                                        </button>
-                                    ) : (
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                onMarkFullyPaid?.(b);
-                                            }}
-                                            type="button"
-                                            className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                                        >
-                                            Mark as Fully Paid
-                                        </button>
-                                    )}
+                                        {ownerView || !canManage ? (
+                                            <div className="rounded-xl border border-[#E6DDF0] bg-white px-3 py-3 text-center text-xs font-semibold text-[#7A6A84]">
+                                                View-only booking record.
+                                            </div>
+                                        ) : isCustom && customNeedsTerms ? (
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    onSetPrice?.(b);
+                                                }}
+                                                type="button"
+                                                className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                            >
+                                                Set Price & Down Payment
+                                            </button>
+                                        ) : total <= 0 ? (
+                                            <div
+                                                className="flex min-h-[42px] w-full items-center justify-center rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-4 text-center text-sm font-semibold text-[#A56607]"
+                                            >
+                                                Payment terms missing
+                                            </div>
+                                        ) : balance <= 0 ? (
+                                            <div
+                                                className="flex min-h-[42px] w-full items-center justify-center rounded-xl border border-[#B7E9C8] bg-[#EDFBF1] px-4 text-center text-sm font-semibold text-[#138342]"
+                                            >
+                                                Payment completed
+                                            </div>
+                                        ) : requiredDp === 0 ? (
+                                            <button type="button" onClick={(e) => {e.stopPropagation();onMarkFullyPaid?.(b)}}
+                                                    className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white hover:bg-[#1B0D31]">
+                                                Mark as Fully Paid
+                                            </button>
+                                        ) : paid <= 0 || paid < requiredDp ? (
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    onRecordDownPayment?.(b);
+                                                }}
+                                                type="button"
+                                                className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                            >
+                                                Mark Down Payment Paid
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    onMarkFullyPaid?.(b);
+                                                }}
+                                                type="button"
+                                                className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                            >
+                                                Mark as Fully Paid
+                                            </button>
+                                        )}
 
-                                    {isCustom && !customNeedsTerms && canManage && !ownerView && (
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                onSetPrice?.(b);
-                                            }}
-                                            type="button"
-                                            className="mt-3 inline-flex h-[42px] w-full items-center justify-center rounded-xl border border-[#E6DDF0] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
-                                        >
-                                            Edit Custom Price & DP
-                                        </button>
-                                    )}
-                                </div>
-
-                                <div className="rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
-                                    <p className="mb-4 text-[16px] font-bold text-[#1A1220]">
-                                        Booking Status
-                                    </p>
-
-                                    <div className="space-y-3 text-sm">
-                                        <SummaryLine
-                                            label="Current Status"
-                                            value={displayStatus}
-                                            badgeClass={statusClass}
-                                        />
-
-                                        <SummaryLine
-                                            label="Next Step"
-                                            value={nextStatusLabel}
-                                        />
+                                        {isCustom && !customNeedsTerms && canManage && !ownerView && (
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    onSetPrice?.(b);
+                                                }}
+                                                type="button"
+                                                className="mt-3 inline-flex h-[42px] w-full items-center justify-center rounded-xl border border-[#E6DDF0] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
+                                            >
+                                                Edit Custom Price & DP
+                                            </button>
+                                        )}
                                     </div>
 
-                                    {ownerView || !canManage ? (
-                                        <div className="rounded-xl border border-[#E6DDF0] bg-white px-3 py-3 text-center text-xs font-semibold text-[#7A6A84]">
-                                            View-only booking record.
+                                    <div className="rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                        <p className="mb-4 text-[16px] font-bold text-[#1A1220]">
+                                            Booking Status
+                                        </p>
+
+                                        <div className="space-y-3 text-sm">
+                                            <SummaryLine
+                                                label="Current Status"
+                                                value={displayStatus}
+                                                badgeClass={statusClass}
+                                            />
+
+                                            <SummaryLine
+                                                label="Next Step"
+                                                value={nextStatusLabel}
+                                            />
                                         </div>
-                                    ) : (
-                                        <>
-                                            {/* Next Step Button */}
+
+                                        {ownerView || (!canManage && !(canOperateBookings && (displayStatus === "Confirmed" || displayStatus === "Preparing"))) ? (
+                                            <div className="rounded-xl border border-[#E6DDF0] bg-white px-3 py-3 text-center text-xs font-semibold text-[#7A6A84]">
+                                                {canConfirmStandard && displayStatus === "Pending Review"
+                                                    ? "Staff may confirm a catalog-priced booking below or request Manager review."
+                                                    : "View-only booking status."}
+                                            </div>
+                                        ) : !canManage ? (
                                             <button
-                                                onClick={(e) => { e.stopPropagation(); if (!statusActionDisabled) onUpdateStatus?.(b.id, nextStatus); }}
-                                                disabled={statusActionDisabled}
-                                                className="mb-2 inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:bg-[#D8CBE7] disabled:text-[#806A8C]"
+                                                type="button"
+                                                disabled={operationsBusy || !onOperateBooking}
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    if (displayStatus === "Confirmed" || displayStatus === "Preparing") {
+                                                        onOperateBooking?.(b.id, displayStatus === "Confirmed" ? "Preparing" : "Completed");
+                                                    }
+                                                }}
+                                                className="inline-flex min-h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-50"
                                             >
-                                                {nextStatusLabel}
+                                                {operationsBusy ? "Processing..." : nextStatusLabel}
                                             </button>
-
-                                            {/* Cancel Button */}
-                                            {!["Completed", "Cancelled"].includes(displayStatus) && onUpdateStatus && (
+                                        ) : (
+                                            <>
+                                                {/* Next Step Button */}
                                                 <button
-                                                    type="button"
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-
-                                                        if (onCancelBooking) {
-                                                            onCancelBooking(b);
-                                                            return;
-                                                        }
-
-                                                        onUpdateStatus?.(b.id, "Cancelled");
-                                                    }}
-                                                    className="mt-3 inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#A33E20] px-4 text-sm font-semibold text-white transition hover:bg-[#883117]"
+                                                    onClick={(e) => { e.stopPropagation(); if (!statusActionDisabled) onUpdateStatus?.(b.id, nextStatus); }}
+                                                    disabled={statusActionDisabled}
+                                                    className="mb-2 inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:bg-[#D8CBE7] disabled:text-[#806A8C]"
                                                 >
-                                                    Cancel Booking
+                                                    {b.approvalStatus === "pending" && nextStatus === "Confirmed" ? "Approve & Confirm Booking" : nextStatusLabel}
                                                 </button>
-                                            )}
-                                        </>
-                                    )}
 
-                                    <p className="mt-3 text-center text-xs text-[#7A6A84]">
-                                        {statusHelper}
-                                    </p>
+                                                {/* Cancel Button */}
+                                                {!["Completed", "Cancelled"].includes(displayStatus) && onUpdateStatus && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+
+                                                            if (onCancelBooking) {
+                                                                onCancelBooking(b);
+                                                                return;
+                                                            }
+
+                                                            onUpdateStatus?.(b.id, "Cancelled");
+                                                        }}
+                                                        className="mt-3 inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#A33E20] px-4 text-sm font-semibold text-white transition hover:bg-[#883117]"
+                                                    >
+                                                        Cancel Booking
+                                                    </button>
+                                                )}
+                                            </>
+                                        )}
+
+                                        {b.approvalStatus === "pending" && (
+                                            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-900">
+                                                <strong>Manager approval requested</strong>
+                                                <p className="mt-1">{b.approvalReason || "Awaiting review of this booking exception."}</p>
+                                            </div>
+                                        )}
+                                        {canConfirmStandard && displayStatus === "Pending Review" && (
+                                            <div className="mt-3 flex flex-col gap-2">
+                                                {b.approvalStatus !== "pending" ? (
+                                                    <button type="button" onClick={(e)=>{e.stopPropagation(); onConfirmStandard?.(b)}}
+                                                            className="min-h-[42px] rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white hover:bg-[#1B0D31]">
+                                                        Confirm Standard Booking
+                                                    </button>
+                                                ) : null}
+                                                <button type="button" onClick={(e)=>{e.stopPropagation(); onRequestApproval?.(b)}}
+                                                        className="min-h-[42px] rounded-xl border border-[#D8CBE7] bg-white px-4 text-sm font-semibold text-[#2B174C] hover:bg-[#F7F1FF]">
+                                                    {b.approvalStatus === "pending" ? "Update Approval Request" : "Request Manager Approval"}
+                                                </button>
+                                            </div>
+                                        )}
+                                        {canManage && !ownerView && displayStatus === "Pending Review" && b.approvalStatus === "pending" && (
+                                            <p className="mt-2 text-center text-xs font-semibold text-amber-900">
+                                                Confirm Booking will record Manager approval and reserve the equipment.
+                                            </p>
+                                        )}
+                                        <p className="mt-3 text-center text-xs text-[#7A6A84]">
+                                            {statusHelper}
+                                        </p>
+                                    </div>
                                 </div>
-                            </div>
+                            )}
                         </div>
                     </td>
                 </tr>
             )}
         </>
+    );
+}
+
+
+// One selected booking at a time: no row checkboxes or pagination.
+// BookingRow remains the single source of truth for all existing booking actions.
+export function BookingWorkspace({ bookings, ownerView = false, ...bookingActions }: Omit<BookingRowProps,
+    "b" | "hideSummaryRow" | "expandedByDefault" | "detailTab"> & { bookings: Booking[] }) {
+    const [selectedId, setSelectedId] = useState<number | null>(null);
+    const [detailTab, setDetailTab] = useState<BookingDetailTab>("Overview");
+    const selectedBooking = bookings.find(booking => booking.id === selectedId) ?? bookings[0];
+
+    if (!selectedBooking) {
+        return <div className="rounded-2xl border border-[#E6DDF0] bg-white p-8 text-center text-sm text-[#806A8C]">No bookings found.</div>;
+    }
+
+    const tabs: BookingDetailTab[] = ["Overview", "Billing", "Items", "Notes"];
+    return (
+        <div className="grid min-w-0 gap-3 2xl:grid-cols-[minmax(0,1.12fr)_minmax(0,0.88fr)]">
+            <section aria-label="Booking list" className="min-w-0 overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm">
+                <div className="max-h-[640px] overflow-auto overscroll-contain">
+                    <table role="grid" aria-label="Bookings" className="w-full min-w-[650px] border-collapse">
+                        <thead className="sticky top-0 z-10 bg-[#FFFDF8]">
+                        <tr className="border-b border-[#E6DDF0] text-left text-[11px] font-semibold text-[#806A8C]">
+                            <th className="px-3 py-3">Client / Booking Ref</th>
+                            <th className="px-3 py-3">Schedule</th>
+                            <th className="px-3 py-3">Booking Type</th>
+                            <th className="px-3 py-3">Payment</th>
+                            <th className="px-3 py-3">Status</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {bookings.map(booking => {
+                            const selected = booking.id === selectedBooking.id;
+                            const total = getTotalPrice(booking);
+                            const paid = getAmountPaid(booking);
+                            const payment = getPaymentStatus(booking);
+                            const status = normalizeBookingStatus(booking.status);
+                            return (
+                                <tr key={booking.id}
+                                    onClick={() => {setSelectedId(booking.id); setDetailTab("Overview");}}
+                                    onKeyDown={event => {
+                                        if (event.key === "Enter" || event.key === " ") {
+                                            event.preventDefault(); setSelectedId(booking.id); setDetailTab("Overview");
+                                        }
+                                    }}
+                                    tabIndex={0} aria-selected={selected}
+                                    className={`cursor-pointer border-b border-[#EFE7F4] text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6C3AD6] ${
+                                        selected ? "bg-[#F1E9FF] shadow-[inset_4px_0_0_#6C3AD6]" : "bg-white hover:bg-[#FAF6FF]"
+                                    }`}>
+                                    <td className="max-w-[190px] px-3 py-3 align-top">
+                                        <p className="truncate font-bold text-[#1A1220]" title={booking.name}>{booking.name}</p>
+                                        <p className="mt-1 truncate text-[11px] text-[#806A8C]">{booking.bookingReference || `#${booking.id}`}</p>
+                                        {ownerView && <p className="mt-1 truncate text-[11px] text-[#806A8C]">{getBranchGroupName(booking)}</p>}
+                                    </td>
+                                    <td className="whitespace-nowrap px-3 py-3 align-top text-xs text-[#1A1220]">
+                                        <p className="font-semibold">{formatDate(booking.date)}</p>
+                                        {booking.eventTime && <p className="mt-1 text-[#806A8C]">{booking.eventTime}</p>}
+                                    </td>
+                                    <td className="max-w-[145px] px-3 py-3 align-top">
+                                        <p className="line-clamp-2 text-xs font-semibold text-[#1A1220]" title={getBookingItemLabel(booking)}>{getBookingItemLabel(booking)}</p>
+                                    </td>
+                                    <td className="whitespace-nowrap px-3 py-3 align-top">
+                                        <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${PAYMENT_STYLE[payment] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{payment}</span>
+                                        <p className="mt-1 text-[11px] text-[#806A8C]">{peso(paid)} / {total > 0 ? peso(total) : "Not set"}</p>
+                                    </td>
+                                    <td className="px-3 py-3 align-top">
+                                        <span className={`inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-[11px] font-semibold ${STATUS_STYLE[status] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{status}</span>
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section aria-label="Selected booking details" className="flex min-w-0 max-h-[640px] flex-col overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm">
+                <div className="shrink-0 border-b border-[#EFE7F4] px-4 py-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                            <h2 className="truncate text-[18px] font-bold text-[#1A1220]">{selectedBooking.name}</h2>
+                            <p className="mt-0.5 text-xs font-semibold text-[#806A8C]">{selectedBooking.bookingReference || `Booking #${selectedBooking.id}`}</p>
+                        </div>
+                        <span className={`inline-flex shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${STATUS_STYLE[normalizeBookingStatus(selectedBooking.status)] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{normalizeBookingStatus(selectedBooking.status)}</span>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#5F4E75]">
+                        <span>{formatDate(selectedBooking.date)}{selectedBooking.eventTime ? ` · ${selectedBooking.eventTime}` : ""}</span>
+                        <span className="max-w-full truncate">{getBranchGroupName(selectedBooking)}</span>
+                        <span className="max-w-full truncate" title={getBookingItemLabel(selectedBooking)}>{getBookingItemLabel(selectedBooking)}</span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-4 gap-1 rounded-xl bg-[#F7F1FF] p-1" role="tablist" aria-label="Booking detail sections">
+                        {tabs.map(tab => (
+                            <button key={tab} type="button" role="tab" aria-selected={tab === detailTab}
+                                    onClick={() => setDetailTab(tab)}
+                                    className={`min-w-0 rounded-lg px-1.5 py-2 text-[11px] font-semibold transition ${tab === detailTab ? "bg-white text-[#2B174C] shadow-sm" : "text-[#806A8C] hover:bg-white/60"}`}>
+                                {tab}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+                <div role="tabpanel" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
+                    <table className="w-full table-fixed border-collapse"><tbody>
+                    <BookingRow key={selectedBooking.id} b={selectedBooking} ownerView={ownerView}
+                                {...bookingActions} hideSummaryRow expandedByDefault detailTab={detailTab}/>
+                    </tbody></table>
+                </div>
+            </section>
+        </div>
     );
 }
 

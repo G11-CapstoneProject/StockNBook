@@ -14,6 +14,21 @@ const dbConfig = {
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
+
+// Reuse a small number of MySQL connections across requests handled by this module.
+// Keep the existing connection settings and all rental operations unchanged.
+const dbPool = mysql.createPool({
+    ...dbConfig,
+    timezone: "+08:00",
+    dateStrings: true,
+    connectTimeout: 10000,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 50,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+});
+
 const ALL_ACTIVITIES = new Set(["received", "rented_out", "returned", "maintenance_started",
     "maintenance_completed", "missing_reported", "missing_resolved", "adjustment", "prepared", "inspected", "cleaned", "damage_reported"]);
 
@@ -994,6 +1009,7 @@ exports.handler = async (event) => {
     if((event?.requestContext?.http?.method||event?.httpMethod)==="OPTIONS")return reply(204,{});
     if((event?.requestContext?.http?.method||event?.httpMethod||"POST")!=="POST")return reply(405,{error:"Use POST."});
     let db;
+    let transactionOpen = false;
     try {
         const auth = event?.headers?.authorization||event?.headers?.Authorization||"";
         const match = /^Bearer\s+(.+)$/i.exec(auth);
@@ -1020,12 +1036,7 @@ exports.handler = async (event) => {
         // not from the browser's branch_id. Owner must select a store-owned branch.
         let branchId = role==="owner" ? id(body.branch_id||body.branchId,"Branch ID") : null;
         let actor=trim(session.email,150)||role;
-        db = await mysql.createConnection({
-            ...dbConfig,
-            timezone: "+08:00",
-            dateStrings: true,
-            connectTimeout: 10000,
-        });
+        db = await dbPool.getConnection();
         if(role==="manager") {
             const managerId=id(session.manager_id,"Manager ID");
             const [managers]=await db.execute(`SELECT branch_id AS branchId,manager_name AS managerName,status,permissions
@@ -1071,6 +1082,7 @@ exports.handler = async (event) => {
         const requestKey=requiredText(body.requestKey,90,"Request key");
         scope.requestKey=requestKey;
         await db.beginTransaction();
+        transactionOpen = true;
         await lockBranch(db,scope);
         // One database-enforced idempotency key, shared across every rental write action.
         const [claimed]=await db.execute(`INSERT IGNORE INTO rental_api_requests
@@ -1081,6 +1093,7 @@ exports.handler = async (event) => {
             if(existing[0]?.action!==action)fail(409,"This request key belongs to a different action.");
             if(!existing[0]?.response_json)fail(409,"The same operation is still being processed.");
             await db.commit();
+            transactionOpen = false;
             return reply(200,JSON.parse(existing[0].response_json));
         }
         const result=STAFF_WRITE_ACTIONS.has(action)
@@ -1092,14 +1105,19 @@ exports.handler = async (event) => {
         await db.execute(`UPDATE rental_api_requests SET response_json=? WHERE store_id=? AND branch_id=? AND request_key=?`,
             [JSON.stringify(output),storeId,branchId,requestKey]);
         await db.commit();
+        transactionOpen = false;
         return reply(action==="create_equipment"||action==="import_equipment"?201:200,output);
     } catch(err) {
-        if(db)try{await db.rollback();}catch{}
+        // A pooled connection must never be returned with an open transaction.
+        if(db && transactionOpen) {
+            try { await db.rollback(); }
+            catch { db.destroy(); db = null; }
+        }
         // Never expose internal SQL or connection errors to the caller.
         if(!err?.statusCode)console.error("Rental inventory backend:",err);
         const duplicate=err?.code==="ER_DUP_ENTRY";
         const status=err?.statusCode|| (duplicate?409:500);
         return reply(status,{success:false,error:err?.statusCode?err.message:
                 duplicate?"A rental record with that name, number, or request key already exists.":"Unable to process rental request. Check server logs."});
-    } finally { if(db)await db.end().catch(()=>{}); }
+    } finally { if(db)db.release(); }
 };

@@ -5,10 +5,11 @@ import { useCallback, useEffect, useState } from "react";
 type ClaimSource = {id:number;equipmentId:number;quantity:number;reason:string};
 type Statement = {
     booking:{reference:string;name:string;bookingType:string;packageName:string;status:string;agreedPrice:number|null;downPayment:number;bookingPayments:number;balance:number};
-    packageBase:number;rentalSubtotal:number;deliveryFee:number;setupFee:number;
+    packageBase:number;salesSubtotal?:number;rentalSubtotal:number;deliveryFee:number;setupFee:number;
     depositRequired:number;depositCollected:number;depositApplied:number;depositRefunded:number;depositHeld:number;
     claimBalance:number;agreedCharges:number;
     rentalItems:{name:string;quantity:number;days:number;dailyRate:number;amount:number}[];
+    salesItems?:{name:string;variantName?:string;quantity:number;unitPrice:number;amount:number}[];
     claims:{id:number;sourceType:string;sourceId:number;quantity:number;reason:string;amount:number;amountPaid:number;depositApplied:number;status:string}[];
 };
 const money=(n:number)=>`₱${Number(n||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
@@ -61,6 +62,7 @@ export default function BookingFinancialPanel({bookingId,branchId,ownerView=fals
         <p className="my-2 text-[#806A8C]">Agreed booking amounts remain separate from refundable deposits and loss/damage claims.</p>
         <div className="space-y-1 border-b pb-2">
             <div className="flex justify-between"><span>Package base</span><strong>{money(v.packageBase)}</strong></div>
+            {(v.salesItems||[]).map((i,index)=><div key={`sale-${index}`} className="flex justify-between gap-2"><span>{i.name}{i.variantName ? ` (${i.variantName})` : ""} · {i.quantity} × {money(i.unitPrice)}</span><strong>{money(i.amount)}</strong></div>)}
             {v.rentalItems.map((i,index)=><div key={index} className="flex justify-between gap-2"><span>{i.name} · {i.quantity} × {i.days} days</span><strong>{money(i.amount)}</strong></div>)}
             <div className="flex justify-between"><span>Delivery/pickup</span><strong>{money(v.deliveryFee)}</strong></div>
             <div className="flex justify-between"><span>Setup</span><strong>{money(v.setupFee)}</strong></div>

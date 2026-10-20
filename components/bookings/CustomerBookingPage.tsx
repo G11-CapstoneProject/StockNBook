@@ -411,7 +411,8 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
     const [error, setError] = useState("");
     const [statementPhone,setStatementPhone] = useState("");
     const [statement,setStatement] = useState<null | {
-        packageBase:number;rentalItems:{name:string;quantity:number;days:number;dailyRate:number;amount:number}[];
+        packageBase:number;salesSubtotal?:number;salesItems?:{name:string;variantName?:string;quantity:number;unitPrice:number;amount:number}[];
+        rentalItems:{name:string;quantity:number;days:number;dailyRate:number;amount:number}[];
         deliveryFee:number;setupFee:number;agreedCharges:number;depositRequired:number;depositCollected:number;
         depositApplied:number;depositRefunded:number;depositHeld:number;claimBalance:number;
         booking:{agreedPrice:number|null;bookingPayments:number;balance:number};
@@ -811,6 +812,7 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
                             {statementError&&<p role="alert" className="mt-2 text-xs text-red-600">{statementError}</p>}
                             {statement&&<div className="mt-3 space-y-2 border-t pt-3 text-xs text-[#2B174C]">
                                 <div className="flex justify-between"><span>Package</span><strong>₱{Number(statement.packageBase).toFixed(2)}</strong></div>
+                                {(statement.salesItems||[]).map((item,i)=><div key={`sale-${i}`} className="flex justify-between gap-2"><span>{item.name}{item.variantName?` (${item.variantName})`:""} · {item.quantity} × ₱{Number(item.unitPrice).toFixed(2)}</span><strong>₱{Number(item.amount).toFixed(2)}</strong></div>)}
                                 {statement.rentalItems.map((item,i)=><div key={i} className="flex justify-between gap-2"><span>{item.name} · {item.quantity} × {item.days} day(s)</span><strong>₱{Number(item.amount).toFixed(2)}</strong></div>)}
                                 <div className="flex justify-between"><span>Delivery / pickup</span><strong>₱{Number(statement.deliveryFee).toFixed(2)}</strong></div>
                                 <div className="flex justify-between"><span>Setup</span><strong>₱{Number(statement.setupFee).toFixed(2)}</strong></div>
@@ -897,6 +899,51 @@ function DetailItem({ label, value, icon }: { label: string; value: string; icon
     );
 }
 
+// Keep loading layouts the same size as the content to reduce layout shifts.
+function PackageCardsSkeleton({ count = 6 }: { count?: number }) {
+    return (
+        <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3" role="status" aria-label="Loading packages">
+            {Array.from({ length: count }, (_, index) => (
+                <div key={index} className="animate-pulse overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white">
+                    <div className="h-44 bg-[#EEE8F3]" />
+                    <div className="space-y-3 p-4 sm:p-5">
+                        <div className="h-5 w-3/4 rounded bg-[#EEE8F3]" />
+                        <div className="h-4 w-1/2 rounded bg-[#F1EBF5]" />
+                        <div className="h-3 w-full rounded bg-[#F1EBF5]" />
+                        <div className="h-3 w-5/6 rounded bg-[#F1EBF5]" />
+                        <div className="h-9 w-1/2 rounded bg-[#EEE8F3]" />
+                        <div className="flex gap-2 pt-2">
+                            <div className="h-10 flex-1 rounded-xl bg-[#F1EBF5]" />
+                            <div className="h-10 flex-1 rounded-xl bg-[#EEE8F3]" />
+                        </div>
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+}
+
+function CustomerPortalSkeleton() {
+    return (
+        <div className="min-h-screen bg-[#FDFAF4] font-sans" role="status" aria-label="Loading customer booking portal">
+            <div className="border-b border-[#E6DDF0] bg-white px-6 py-4">
+                <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 animate-pulse">
+                    <div className="space-y-3"><div className="h-7 w-52 rounded bg-[#EEE8F3]" /><div className="h-4 w-36 rounded bg-[#EEE8F3]" /></div>
+                    <div className="h-10 w-36 rounded-xl bg-[#EEE8F3]" />
+                </div>
+            </div>
+            <div className="mx-auto max-w-7xl space-y-4 px-6 py-5">
+                <div className="h-16 animate-pulse rounded-xl border border-[#E6DDF0] bg-[#EEE8F3]" />
+                <div className="rounded-xl border border-[#E6DDF0] bg-white p-4">
+                    <div className="mb-4 h-10 w-full max-w-md animate-pulse rounded-xl bg-[#EEE8F3]" />
+                    <PackageCardsSkeleton />
+                </div>
+                <div className="h-40 animate-pulse rounded-xl border border-[#E6DDF0] bg-[#EEE8F3]" />
+            </div>
+        </div>
+    );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function CustomerBookingPage() {
@@ -911,6 +958,15 @@ export default function CustomerBookingPage() {
 
     const [store, setStore] = useState<Store | null>(null);
     const [packages, setPackages] = useState<PackageItem[]>([]);
+    const [packagesLoading, setPackagesLoading] = useState(true);
+    const [packagesError, setPackagesError] = useState("");
+    const [packageBranchFilter, setPackageBranchFilter] = useState("all");
+    const [packageSearch, setPackageSearch] = useState("");
+    const [visiblePackageCount, setVisiblePackageCount] = useState(12);
+    const [branches, setBranches] = useState<{id:number;name:string}[]>([]);
+    const [branchesLoading, setBranchesLoading] = useState(false);
+    const [selectedCustomBranchId, setSelectedCustomBranchId] = useState<number | null>(null);
+    const [branchesError, setBranchesError] = useState("");
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
 
@@ -931,7 +987,7 @@ export default function CustomerBookingPage() {
     const [selectedCustomItems, setSelectedCustomItems] = useState<SelectedCustomItem[]>([]);
     const [customItemQty, setCustomItemQty] = useState<Record<string, number>>({});
     const [rentalCatalog, setRentalCatalog] = useState<RentalCatalogItem[]>([]);
-    const [rentalBranchId, setRentalBranchId] = useState<number | null>(null);
+    const [rentalCatalogLoading, setRentalCatalogLoading] = useState(false);
     const [rentalCatalogError, setRentalCatalogError] = useState("");
     const [rentalSearch, setRentalSearch] = useState("");
     const [selectedRentalItems, setSelectedRentalItems] = useState<SelectedRentalItem[]>([]);
@@ -957,17 +1013,16 @@ export default function CustomerBookingPage() {
     const [bookingReference, setBookingReference] = useState("");
     const [submitting, setSubmitting] = useState(false);
     const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-    // Default branch for custom bookings
-    const defaultBranchId = useMemo(() => {
-        if (!store || packages.length === 0) return null;
-        const chosenPackage = bookingType==='package' && selectedPackage
-            ? packages.find(pkg=>`${pkg.name} - ₱${Number(pkg.package_price||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2})}`===selectedPackage)
-            : null;
-        const pkgWithBranch = chosenPackage || packages.find((p) => p.branch_id || p.branchId);
-        return pkgWithBranch?.branch_id || pkgWithBranch?.branchId || null;
-    }, [store, packages, selectedPackage, bookingType]);
-
-    const customBranchId = branchIdFromUrl ? Number(branchIdFromUrl) : (defaultBranchId || rentalBranchId);
+    // Package identity and checkout branch must never be inferred from catalog order.
+    const selectedPackageData = useMemo(() =>
+            packages.find(p => String(p.id) === selectedPackage) || null,
+        [packages, selectedPackage]);
+    const urlBranchId = branchIdFromUrl && Number.isSafeInteger(Number(branchIdFromUrl)) && Number(branchIdFromUrl)>0
+        ? Number(branchIdFromUrl) : null;
+    const packageBranchId = selectedPackageData
+        ? Number(selectedPackageData.branch_id ?? selectedPackageData.branchId ?? 0) || null : null;
+    const customBranchId = bookingType === "package" ? packageBranchId : selectedCustomBranchId;
+    const selectedBranchName = branches.find(b => b.id === customBranchId)?.name || "";
     const eventEndDate = eventDurationType === "multiple" ? rentalEndDate : date;
     const requestedEventDays = date && eventEndDate && eventEndDate >= date
         ? Math.round((Date.parse(`${eventEndDate}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`)) / 86400000) + 1
@@ -982,7 +1037,7 @@ export default function CustomerBookingPage() {
     })();
     const estimatedDelivery = serviceDelivery && !(bookingType === "package" && feePolicy.deliveryIncludedPackage) ? feePolicy.deliveryFee : 0;
     const estimatedSetup = serviceSetup && !(bookingType === "package" && feePolicy.setupIncludedPackage) ? feePolicy.setupFee : 0;
-    const estimatedBase = bookingType === "package" ? (packages.find(pkg => `${pkg.name} - ₱${Number(pkg.package_price || 0).toLocaleString("en-PH",{minimumFractionDigits:2,maximumFractionDigits:2})}` === selectedPackage)?.package_price || 0) : 0;
+    const estimatedBase = bookingType === "package" ? Number(selectedPackageData?.package_price || 0) : 0;
     // The custom product subtotal is a request estimate; Manager confirms its agreed price.
     const selectedRentalTotal = selectedRentalItems.reduce(
         (sum, item) => sum + item.dailyRate * item.quantity * rentalDuration, 0
@@ -1052,6 +1107,8 @@ export default function CustomerBookingPage() {
 
 
     useEffect(() => {
+        setFeePolicy({deliveryFee:0,setupFee:0,refundableDeposit:0,
+            deliveryIncludedPackage:false,setupIncludedPackage:false});
         if (!store || !customBranchId) return;
         let cancelled=false;
         void (async()=>{
@@ -1059,7 +1116,8 @@ export default function CustomerBookingPage() {
                 const res=await fetch('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json'},
                     body:JSON.stringify({action:'get_public_booking_fees',storeId:store.id,branchId:customBranchId})});
                 const data=await res.json();
-                if(!cancelled && res.ok && data.policy)setFeePolicy(data.policy);
+                if(!res.ok)throw new Error(data.error||'Unable to load branch fees.');
+                if(!cancelled && data.policy)setFeePolicy(data.policy);
             } catch { if(!cancelled)setFeePolicy({deliveryFee:0,setupFee:0,refundableDeposit:0,
                 deliveryIncludedPackage:false,setupIncludedPackage:false}); }
         })();
@@ -1144,8 +1202,10 @@ export default function CustomerBookingPage() {
         }
 
         if (bookingType === "custom" && !eventType.trim()) errors.eventType = "Event type is required.";
-        if (selectedRentalItems.length && !customBranchId)
-            errors.selection = "Select a rental branch before booking equipment.";
+        if (!customBranchId || !branches.some(b => b.id === customBranchId))
+            errors.selection = "Select a valid branch before booking.";
+        if (bookingType === "package" && selectedPackage && !selectedPackageData)
+            errors.selection = "Please select a current package.";
         if (eventDurationType === "multiple") {
             if (!date || !rentalEndDate) errors.rentalEndDate = "Choose both event dates.";
             else if (rentalEndDate <= date) errors.rentalEndDate = "End date must be after the event start date.";
@@ -1178,16 +1238,44 @@ export default function CustomerBookingPage() {
         return errors;
     }
 
+    // General store URLs can browse packages across branches. Branch-specific links
+    // stay scoped to their URL branch, including the package dropdown at checkout.
+    const effectivePackageBranchFilter = urlBranchId ? String(urlBranchId) : packageBranchFilter;
+    const packageCountsByBranch = useMemo(() => {
+        const counts = new Map<number, number>();
+        for (const pkg of packages) {
+            const branchId = Number(pkg.branch_id ?? pkg.branchId ?? 0);
+            if (branchId > 0) counts.set(branchId, (counts.get(branchId) || 0) + 1);
+        }
+        return counts;
+    }, [packages]);
+
     const filteredPackages = useMemo(() => {
-        if (activeCategory === "All") return packages;
+        const search = packageSearch.trim().toLowerCase();
         return packages.filter((pkg) => {
-            const category = pkg.category || "";
-            return (
-                category.toLowerCase() === activeCategory.toLowerCase() ||
-                pkg.name.toLowerCase().includes(activeCategory.toLowerCase())
-            );
+            const packageBranch = Number(pkg.branch_id ?? pkg.branchId ?? 0);
+            if (effectivePackageBranchFilter !== "all" && packageBranch !== Number(effectivePackageBranchFilter)) return false;
+            if (activeCategory !== "All" &&
+                (pkg.category || "").toLowerCase() !== activeCategory.toLowerCase() &&
+                !pkg.name.toLowerCase().includes(activeCategory.toLowerCase())) return false;
+            return !search || `${pkg.name} ${pkg.category || ""} ${pkg.description || ""}`.toLowerCase().includes(search);
         });
-    }, [packages, activeCategory]);
+    }, [packages, activeCategory, effectivePackageBranchFilter, packageSearch]);
+
+    useEffect(() => {
+        setVisiblePackageCount(12);
+    }, [activeCategory, effectivePackageBranchFilter, packageSearch]);
+
+    function changePackageBranchFilter(next: string) {
+        if (urlBranchId) return;
+        setPackageBranchFilter(next);
+        // Do not keep a package booked for Branch A when a customer switches to Branch B.
+        if (next !== "all" && selectedPackageData && packageBranchId !== Number(next)) {
+            setSelectedPackage("");
+            setSelectedRentalItems([]);
+        }
+        clearError("selection");
+    }
 
     useEffect(() => {
         if (!slug) return;
@@ -1212,114 +1300,130 @@ export default function CustomerBookingPage() {
 
     useEffect(() => {
         if (!store) return;
+        let cancelled=false;
+        setBranches([]);
+        setBranchesError("");
+        setBranchesLoading(true);
+        void (async()=>{
+            try {
+                const response=await fetch('/api/bookings',{
+                    method:'POST',headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({action:'get_public_branches',storeId:store.id})});
+                const data=await response.json();
+                if(!response.ok)throw new Error(data.error||'Unable to load branches.');
+                if(cancelled)return;
+                const available=(data.branches||[]).map((b:{id:number;name:string})=>({id:Number(b.id),name:String(b.name)}));
+                setBranches(available);
+                if(urlBranchId && !available.some((b:{id:number})=>b.id===urlBranchId))
+                    setBranchesError('This booking link specifies a branch that is not available for this store.');
+            } catch(err){if(!cancelled)setBranchesError(err instanceof Error?err.message:'Unable to load branches.');}
+            finally { if (!cancelled) setBranchesLoading(false); }
+        })();
+        return ()=>{cancelled=true;};
+    },[store,urlBranchId]);
+
+    useEffect(() => {
+        // A branch-specific booking link locks Custom Booking to the specified branch.
+        setSelectedCustomBranchId(urlBranchId);
+        setPackageBranchFilter("all");
+        setPackageSearch("");
+        setSelectedCustomItems([]);
+        setSelectedRentalItems([]);
+    },[urlBranchId,store?.id]);
+
+    useEffect(() => {
+        if (!store) return;
+        const controller = new AbortController();
+        setPackagesLoading(true);
+        setPackagesError("");
+        setPackages([]);
 
         const fetchPackages = async () => {
             try {
                 const res = await fetch("/api/packages", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
+                    signal: controller.signal,
                     body: JSON.stringify({
                         action: "get_packages",
                         store_id: store.id,
-                        ...(branchIdFromUrl ? { branch_id: Number(branchIdFromUrl) } : {}),
+                        ...(urlBranchId ? { branch_id: urlBranchId } : {}),
                     }),
                 });
-
+                if (!res.ok) throw new Error("Unable to load packages. Please try again.");
                 const data = await res.json();
-
-
+                if (controller.signal.aborted) return;
+                if (data?.error) throw new Error("Unable to load packages. Please try again.");
                 setPackages(
-                    (data.packages || []).filter(
-                        (p: PackageItem) => p.status === "Active"
+                    (Array.isArray(data.packages) ? data.packages : []).filter(
+                        (p: PackageItem) => p.status === "Active" &&
+                            (!urlBranchId || Number(p.branch_id ?? p.branchId) === urlBranchId)
                     )
                 );
             } catch (err) {
-                console.error("Error loading plans:", err);
+                if (controller.signal.aborted) return;
+                console.error("Error loading packages:", err);
+                setPackagesError(err instanceof Error ? err.message : "Unable to load packages.");
                 setPackages([]);
             } finally {
-                setLoading(false);
+                if (!controller.signal.aborted) setPackagesLoading(false);
             }
         };
 
-        fetchPackages();
-    }, [store, branchIdFromUrl]);
+        void fetchPackages();
+        return () => controller.abort();
+    }, [store?.id, urlBranchId]);
 
     useEffect(() => {
-        if (!store) return;
+        setRentalCatalog([]); setSelectedRentalItems([]); setRentalCatalogError("");
+        setRentalCatalogLoading(false);
+        if (!store || !customBranchId || !branches.some(b=>b.id===customBranchId)) return;
         let cancelled=false;
+        setRentalCatalogLoading(true);
         (async () => {
             try {
-                const response=await fetch("/api/bookings",{
-                    method:"POST",headers:{"Content-Type":"application/json"},
-                    body:JSON.stringify({action:"get_public_rental_catalog",storeId:store.id,
-                        ...(branchIdFromUrl ? {branchId:Number(branchIdFromUrl)} :
-                            defaultBranchId ? {branchId:defaultBranchId} : {})})
+                const response=await fetch('/api/bookings',{
+                    method:'POST',headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({action:'get_public_rental_catalog',storeId:store.id,branchId:customBranchId})
                 });
                 const data=await response.json();
-                if(!response.ok)throw new Error(data.error||"Unable to load rental equipment.");
+                if(!response.ok)throw new Error(data.error||'Unable to load rental equipment.');
                 if(cancelled)return;
+                if(Number(data.branchId)!==customBranchId)throw new Error('Rental catalog branch mismatch.');
                 setRentalCatalog(data.equipment||[]);
-                setRentalBranchId(Number(data.branchId));
-                setSelectedRentalItems([]);
-                setRentalCatalogError("");
-            }catch(error){if(!cancelled){setRentalCatalog([]);setSelectedRentalItems([]);
-                setRentalCatalogError(error instanceof Error ? error.message : "Rental equipment unavailable.");}}
+            }catch(error){if(!cancelled){setRentalCatalog([]);
+                setRentalCatalogError(error instanceof Error ? error.message : 'Rental equipment unavailable.');}}
+            finally { if (!cancelled) setRentalCatalogLoading(false); }
         })();
         return ()=>{cancelled=true;};
-    },[store,branchIdFromUrl,defaultBranchId]);
+    },[store,customBranchId,branches]);
 
     useEffect(() => {
-        if (!store) return;
-
-        const storeId = store.id;
-
-        async function fetchInventoryItems() {
-            setLoadingInventory(true);
-
-            try {
-                const response = await fetch("/api/products", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        action: "get_public_products",
-                        store_id: storeId,
-                        ...(branchIdFromUrl
-                            ? { branch_id: Number(branchIdFromUrl) }
-                            : {}),
-                    }),
-                });
-
-                const data = await response.json();
-                const products = Array.isArray(data.products) ? data.products : [];
-
-                setInventoryItems(
-                    buildCustomInventoryItems(
-                        products,
-                        branchIdFromUrl ? Number(branchIdFromUrl) : null
-                    )
-                );
-            } catch (err) {
-                console.error("Error loading public inventory:", err);
-                setInventoryItems([]);
-            } finally {
-                setLoadingInventory(false);
-            }
+        setInventoryItems([]); setSelectedCustomItems([]);setCustomItemQty({});
+        if (!store || !customBranchId || !branches.some(b=>b.id===customBranchId)) {
+            setLoadingInventory(false);
+            return;
         }
-
-        void fetchInventoryItems();
-    }, [store, branchIdFromUrl]);
+        let cancelled=false;
+        setLoadingInventory(true);
+        void (async()=>{
+            try {
+                const response=await fetch('/api/products',{
+                    method:'POST',headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({action:'get_public_products',store_id:store.id,branch_id:customBranchId})});
+                const data=await response.json();
+                if(!response.ok)throw new Error(data.error||'Unable to load public inventory.');
+                if(!cancelled)setInventoryItems(buildCustomInventoryItems(
+                    Array.isArray(data.products)?data.products:[],customBranchId));
+            }catch(err){if(!cancelled){console.error('Public inventory:',err);setInventoryItems([]);}}
+            finally{if(!cancelled)setLoadingInventory(false);}
+        })();
+        return ()=>{cancelled=true;};
+    },[store,customBranchId,branches]);
 
     function peso(n: number) {
         return `₱${Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     }
-
-    const selectedPackageData = useMemo(() => {
-        if (!selectedPackage) return null;
-
-        return packages.find(
-            (pkg) => `${pkg.name} - ${peso(pkg.package_price)}` === selectedPackage
-        ) || null;
-    }, [packages, selectedPackage]);
 
     function generateBookingReference() {
         const storePrefix = (store?.slug || "STORE").replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
@@ -1331,7 +1435,7 @@ export default function CustomerBookingPage() {
 
     function handleSelectPackage(pkg: PackageItem) {
         setBookingType("package");
-        setSelectedPackage(`${pkg.name} - ${peso(pkg.package_price)}`);
+        setSelectedPackage(String(pkg.id));
         clearError("selection");
         formRef.current?.scrollIntoView({ behavior: "smooth" });
     }
@@ -1357,10 +1461,10 @@ export default function CustomerBookingPage() {
         const reference = generateBookingReference();
 
         // assign branchId correctly for both package and custom bookings
-        const selectedBranchId =
-            bookingType === "package"
-                ? selectedPackageData?.branch_id || selectedPackageData?.branchId || null
-                : customBranchId; // same branch as selected rental equipment
+        const selectedBranchId = customBranchId;
+        if (!selectedBranchId || !branches.some(b=>b.id===selectedBranchId)) {
+            alert('Please choose a valid booking branch.'); return;
+        }
 
         const newBooking = {
             bookingReference: reference,
@@ -1374,7 +1478,7 @@ export default function CustomerBookingPage() {
             eventType: bookingType === "package" ? "Based on selected package" : eventType.trim(),
             theme: theme.trim(),
             venue: venue.trim(),
-            package: bookingType === "package" ? selectedPackage : "",
+            package: bookingType === "package" ? selectedPackageData?.name || "" : "",
             customOrder: bookingType === "custom" ? customOrderForSubmit : "",
             notes: notes.trim(),
             status: "Pending Review",
@@ -1390,6 +1494,7 @@ export default function CustomerBookingPage() {
                     storeId: store.id,
                     branchId: selectedBranchId,
                     ...newBooking,
+                    ...(bookingType === 'package' ? {packageId:Number(selectedPackageData?.id)} : {}),
                     rentalItems: selectedRentalItems.map(item => ({equipmentId:item.id,quantity:item.quantity,expectedDailyRate:item.dailyRate})),
                     eventEndDate: eventEndDate || undefined,
                     rentalEndDate: selectedRentalItems.length ? eventEndDate : undefined,
@@ -1455,13 +1560,7 @@ export default function CustomerBookingPage() {
             : peso(detailsPackage.discount_value || 0)
         : "";
 
-    if (loading) {
-        return (
-            <div className="flex min-h-screen items-center justify-center bg-[#FDFAF4] font-sans">
-                <div className="rounded-[14px] border border-[#E6DDF0] bg-white px-5 py-4 text-sm font-semibold text-[#5F4E75] shadow-sm">Loading store...</div>
-            </div>
-        );
-    }
+    if (loading) return <CustomerPortalSkeleton />;
 
     if (error) {
         return (
@@ -1517,158 +1616,223 @@ export default function CustomerBookingPage() {
                     </div>
                 )}
 
-                <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-                    <div className="mb-2 flex items-center justify-between gap-3">
-                        <h2 className="text-sm font-bold text-[#1A1220]">
-                            Categories
-                        </h2>
-
-                        <span className="shrink-0 text-xs font-semibold text-[#806A8C]">
-                            {categories.length - 1} categories
+                {/* Occasion filters stay separate from package selection and checkout. */}
+                <div className="rounded-[20px] border border-[#E6DDF0] bg-white px-4 py-4 shadow-sm sm:px-5">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                            <h2 className="text-[15px] font-bold text-[#1A1220]">Browse by occasion</h2>
+                            <p className="mt-0.5 text-xs text-[#806A8C]">Find packages that match your celebration.</p>
+                        </div>
+                        <span className="rounded-full bg-[#F7F1FF] px-3 py-1 text-[11px] font-semibold text-[#5F4E75]">
+                            {categories.length - 1} occasions
                         </span>
                     </div>
-
-                    <div className="overflow-x-auto pb-1">
-                        <div className="flex min-w-max gap-2">
-                            {categories.map((category) => {
-                                const active = activeCategory === category;
-
-                                return (
-                                    <button
-                                        key={category}
-                                        type="button"
-                                        onClick={() => setActiveCategory(category)}
-                                        className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-                                            active
-                                                ? "bg-[#2B174C] text-white shadow-sm"
-                                                : "border border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#F7F1FF]"
-                                        }`}
-                                    >
-                                        {category}
-                                    </button>
-                                );
-                            })}
-                        </div>
+                    <div className="flex gap-2 overflow-x-auto pb-1" role="group" aria-label="Filter packages by occasion">
+                        {categories.map((category) => {
+                            const active = activeCategory === category;
+                            return (
+                                <button
+                                    key={category}
+                                    type="button"
+                                    aria-pressed={active}
+                                    onClick={() => setActiveCategory(category)}
+                                    className={`shrink-0 rounded-full border px-4 py-2 text-[13px] font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B2FC6] ${
+                                        active
+                                            ? "border-[#2B174C] bg-[#2B174C] text-white shadow-sm"
+                                            : "border-[#E6DDF0] bg-white text-[#5F4E75] hover:border-[#BDA9D2] hover:bg-[#F7F1FF]"
+                                    }`}
+                                >
+                                    {category}
+                                </button>
+                            );
+                        })}
                     </div>
                 </div>
 
-                <div className="mt-3 rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                        <div>
-                            <h2 className="text-[16px] font-bold text-[#1A1220]">
-                                Available Packages
-                            </h2>
-                            <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                Choose a package and customize the theme, color motif, or event details.
-                            </p>
-                        </div>
-
-                        <span className="shrink-0 text-xs font-semibold text-[#806A8C]">
-                            {filteredPackages.length} package{filteredPackages.length === 1 ? "" : "s"}
-                        </span>
-                    </div>
-
-                    {filteredPackages.length === 0 ? (
-                        <div className="flex min-h-[280px] items-center justify-center rounded-[14px] border border-dashed border-[#E6DDF0] bg-[#FFFCF7] px-5 text-center">
+                <div className="mt-4 rounded-[22px] border border-[#E6DDF0] bg-white p-4 shadow-sm sm:p-5">
+                    <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+                        <div className="flex items-start gap-3">
+                            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F0EAFE] text-[#4E2C66]">
+                                <Package2 size={20} />
+                            </span>
                             <div>
-                                <div className="mb-3 flex justify-center">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EFE8F8] text-[#4E2C66]">
-                                        <Sparkles size={18} />
-                                    </div>
-                                </div>
-                                <h3 className="text-sm font-semibold text-[#1A1220]">
-                                    No packages found
-                                </h3>
+                                <h2 className="text-[19px] font-bold tracking-tight text-[#1A1220]">Available packages</h2>
                                 <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                    Try another category or send a custom booking request below.
+                                    Explore packages from this store&apos;s branches and choose the right one for your event.
                                 </p>
                             </div>
                         </div>
-                    ) : (
-                        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                            {filteredPackages.map((pkg, index) => {
-                                const featured = index === 1;
+                        <span className="rounded-full border border-[#E6DDF0] bg-[#F7F1FF] px-3 py-1.5 text-xs font-bold text-[#4E2C66]" aria-live="polite">
+                            {packagesLoading ? "Loading..." : `${filteredPackages.length} ${filteredPackages.length === 1 ? "package" : "packages"}`}
+                        </span>
+                    </div>
 
+                    <div className="mb-4 grid gap-3 rounded-2xl border border-[#EAE2F1] bg-[#FBF8FD] p-3 sm:grid-cols-[minmax(0,1fr)_minmax(220px,290px)] sm:items-end sm:p-4">
+                        <div className="min-w-0">
+                            <label htmlFor="public-package-search" className="mb-2 block text-xs font-bold text-[#4E2C66]">Search packages</label>
+                            <div className="relative">
+                                <Search size={17} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]" />
+                                <input
+                                    id="public-package-search"
+                                    type="search"
+                                    value={packageSearch}
+                                    onChange={e => setPackageSearch(e.target.value)}
+                                    placeholder="Search by name, category or description"
+                                    className="h-11 w-full min-w-0 rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-3 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                />
+                            </div>
+                        </div>
+                        <div className="min-w-0">
+                            <label htmlFor="package-branch-filter" className="mb-2 flex items-center gap-1.5 text-xs font-bold text-[#4E2C66]">
+                                <MapPin size={14} /> Branch location
+                            </label>
+                            <select
+                                id="package-branch-filter"
+                                value={effectivePackageBranchFilter}
+                                disabled={branchesLoading || !!urlBranchId || !!branchesError}
+                                onChange={e => changePackageBranchFilter(e.target.value)}
+                                className="h-11 w-full min-w-0 rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm font-medium text-[#2B174C] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F1FF]"
+                            >
+                                {!urlBranchId && <option value="all">All branches ({packages.length})</option>}
+                                {branches.filter(b => !urlBranchId || b.id === urlBranchId).map(branch => (
+                                    <option key={branch.id} value={String(branch.id)}>
+                                        {branch.name} ({packageCountsByBranch.get(branch.id) || 0})
+                                    </option>
+                                ))}
+                                {urlBranchId && !branches.some(b => b.id === urlBranchId) &&
+                                    <option value={String(urlBranchId)}>Branch #{urlBranchId}</option>}
+                            </select>
+                        </div>
+                    </div>
+
+                    <div className="mb-4 flex min-h-7 flex-wrap items-center justify-between gap-2">
+                        <p className="flex items-center gap-1.5 text-xs text-[#806A8C]" aria-live="polite">
+                            <MapPin size={13} className="shrink-0" />
+                            {urlBranchId || effectivePackageBranchFilter !== "all"
+                                ? `Viewing ${branches.find(b => b.id === Number(effectivePackageBranchFilter))?.name || `Branch #${effectivePackageBranchFilter}`}`
+                                : "Viewing packages across all branches"}
+                            {!packagesLoading && ` · ${filteredPackages.length} results`}
+                        </p>
+                        {(activeCategory !== "All" || packageSearch.trim() || (!urlBranchId && effectivePackageBranchFilter !== "all")) && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setActiveCategory("All");
+                                    setPackageSearch("");
+                                    if (!urlBranchId) changePackageBranchFilter("all");
+                                }}
+                                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-bold text-[#4E2C66] hover:bg-[#F0EAFE] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#5B2FC6]"
+                            >
+                                <X size={13} /> Clear filters
+                            </button>
+                        )}
+                    </div>
+                    {urlBranchId && <p className="mb-3 rounded-lg bg-[#F7F1FF] px-3 py-2 text-xs text-[#5F4E75]">This booking link is assigned to a specific branch. Only its packages can be selected.</p>}
+                    {branchesError && <p role="alert" className="mb-3 text-xs text-red-600">{branchesError}</p>}
+
+                    {packagesLoading ? (
+                        <PackageCardsSkeleton />
+                    ) : packagesError ? (
+                        <div role="alert" className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-6 text-sm text-[#C32F2F]">{packagesError}</div>
+                    ) : filteredPackages.length === 0 ? (
+                        <div className="flex min-h-[260px] flex-col items-center justify-center rounded-[18px] border border-dashed border-[#D8CBE7] bg-[#FFFCF8] px-5 text-center">
+                            <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-[#F0EAFE] text-[#4E2C66]">
+                                <Search size={20} />
+                            </div>
+                            <h3 className="text-base font-bold text-[#1A1220]">No matching packages</h3>
+                            <p className="mt-1 max-w-sm text-xs leading-5 text-[#806A8C]">
+                                Try another branch, category or search term. You can also send a custom booking request below.
+                            </p>
+                        </div>
+                    ) : (
+                        <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+                            {filteredPackages.slice(0, visiblePackageCount).map((pkg) => {
+                                const chosen = selectedPackage === String(pkg.id);
+                                const branchName = branches.find(b => b.id === Number(pkg.branch_id ?? pkg.branchId))?.name || `Branch #${pkg.branch_id ?? pkg.branchId}`;
+                                const inclusionCount = pkg.inclusions?.length || 0;
                                 return (
                                     <article
                                         key={pkg.id}
-                                        className="group overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm transition duration-200 hover:-translate-y-1 hover:border-[#D4C1E7] hover:shadow-md"
+                                        className={`group flex h-full flex-col overflow-hidden rounded-[20px] border bg-white shadow-[0_2px_12px_rgba(43,23,76,0.05)] transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_9px_26px_rgba(43,23,76,0.11)] ${
+                                            chosen ? "border-[#6B43A1] ring-2 ring-[#E9DDF7]" : "border-[#E6DDF0] hover:border-[#CBB6DF]"
+                                        }`}
                                     >
-                                        <div className="h-36 overflow-hidden bg-[#F5EEF6]">
+                                        <div className="relative h-44 overflow-hidden bg-[#F5EEF6]">
                                             {/* eslint-disable-next-line @next/next/no-img-element */}
                                             <img
                                                 src={getPackageCoverImage(pkg)}
                                                 alt={`${pkg.name} package`}
-                                                className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
+                                                loading="lazy"
+                                                decoding="async"
+                                                className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
                                             />
+                                            <span className="absolute left-3 top-3 max-w-[calc(100%-1.5rem)] truncate rounded-full border border-white/70 bg-white/95 px-3 py-1.5 text-[11px] font-bold text-[#4E2C66] shadow-sm">
+                                                {pkg.category || "Event"}
+                                            </span>
+                                            {chosen && (
+                                                <span className="absolute bottom-3 right-3 inline-flex items-center gap-1 rounded-full bg-[#2B174C] px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm">
+                                                    <Check size={12} /> Selected
+                                                </span>
+                                            )}
                                         </div>
 
-                                        <div
-                                            className={`px-4 py-4 text-white ${
-                                                featured
-                                                    ? "bg-[#C9951A]"
-                                                    : "bg-[#2D1B4E]"
-                                            }`}
-                                        >
-                                            <div className="min-w-0">
-                                                <p className="min-h-[40px] text-[16px] font-semibold leading-5">
-                                                    {pkg.name}
-                                                </p>
-
-                                                <p className="mt-1 text-[22px] font-bold leading-tight">
-                                                    {peso(pkg.package_price)}
-                                                </p>
-
-                                                <p className="mt-1 text-xs leading-none text-white/80">
-                                                    {pkg.category || "Event"} package
-                                                </p>
-                                            </div>
-                                        </div>
-
-                                        <div className="p-4">
-                                            <p className="line-clamp-2 min-h-11 text-[13px] leading-5 text-[#7A6A84]">
-                                                {pkg.description ||
-                                                    "Event setup designed for a memorable celebration."}
+                                        <div className="flex flex-1 flex-col p-4 sm:p-5">
+                                            <h3 className="line-clamp-2 min-h-[48px] text-[17px] font-bold leading-6 text-[#24153B]">
+                                                {pkg.name}
+                                            </h3>
+                                            <p className="mt-2 flex min-w-0 items-center gap-1.5 text-xs font-semibold text-[#6B4E87]">
+                                                <MapPin size={14} className="shrink-0" />
+                                                <span className="truncate" title={branchName}>{branchName}</span>
                                             </p>
-
-                                            <div className="mt-4 flex items-center gap-4 border-t border-[#EFE7F4] pt-3">
-                                                <div className="flex items-center gap-1.5 text-xs text-[#7A6A84]">
-                                                    <Package2 size={14} />
-                                                    <span>
-                                                        {pkg.inclusions.length}{" "}
-                                                        {pkg.inclusions.length === 1
-                                                            ? "Item"
-                                                            : "Items"}
-                                                    </span>
-                                                </div>
-
-                                                <div className="flex items-center gap-1.5 text-xs text-[#7A6A84]">
-                                                    <Clock3 size={14} />
-                                                    <span>{pkg.duration || "Flexible"}</span>
-                                                </div>
+                                            <p className="mt-3 line-clamp-2 min-h-[40px] text-[13px] leading-5 text-[#7A6A84]">
+                                                {pkg.description || "Event setup designed for a memorable celebration."}
+                                            </p>
+                                            <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[#EFE7F4] pt-3 text-xs text-[#806A8C]">
+                                                <span className="inline-flex items-center gap-1.5">
+                                                    <Package2 size={14} /> {inclusionCount} {inclusionCount === 1 ? "included item" : "included items"}
+                                                </span>
+                                                <span className="inline-flex items-center gap-1.5">
+                                                    <Clock3 size={14} /> {pkg.duration || "Flexible"}
+                                                </span>
                                             </div>
-
-                                            <div className="mt-3 flex items-center justify-between border-t border-[#EFE7F4] pt-3">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setDetailsPackage(pkg)}
-                                                    className="text-xs font-semibold text-[#2B174C] transition hover:text-[#5B2FC6]"
-                                                >
-                                                    View details →
-                                                </button>
-
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleSelectPackage(pkg)}
-                                                    className="text-xs font-semibold text-[#2B174C] transition hover:text-[#5B2FC6]"
-                                                >
-                                                    Select
-                                                </button>
+                                            <div className="mt-auto pt-4">
+                                                <div className="mb-4 rounded-xl bg-[#F8F4FC] px-3.5 py-3">
+                                                    <p className="text-[11px] font-semibold text-[#806A8C]">Package price</p>
+                                                    <p className="mt-0.5 text-[23px] font-bold tracking-tight text-[#2B174C]">{peso(pkg.package_price)}</p>
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setDetailsPackage(pkg)}
+                                                        className="min-h-10 rounded-xl border border-[#D8CBE7] bg-white px-2.5 py-2 text-xs font-bold text-[#4E2C66] transition hover:bg-[#F7F1FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B2FC6]"
+                                                    >
+                                                        View details
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleSelectPackage(pkg)}
+                                                        className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-xl bg-[#2B174C] px-2.5 py-2 text-xs font-bold text-white shadow-sm transition hover:bg-[#45246F] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B2FC6]"
+                                                    >
+                                                        {chosen ? <><Check size={14} /> Chosen</> : "Choose package"}
+                                                    </button>
+                                                </div>
                                             </div>
                                         </div>
                                     </article>
                                 );
                             })}
+                        </div>
+                    )}
+                    {!packagesLoading && !packagesError && filteredPackages.length > visiblePackageCount && (
+                        <div className="mt-6 flex flex-col items-center gap-2 border-t border-[#F0EAF5] pt-5">
+                            <p className="text-xs text-[#806A8C]">Showing {visiblePackageCount} of {filteredPackages.length} matching packages</p>
+                            <button
+                                type="button"
+                                onClick={() => setVisiblePackageCount(count => count + 12)}
+                                className="rounded-xl border border-[#D8CBE7] bg-[#F7F1FF] px-6 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F0EAFE]"
+                            >
+                                Show more packages ({filteredPackages.length - visiblePackageCount} remaining)
+                            </button>
                         </div>
                     )}
                 </div>
@@ -1832,12 +1996,17 @@ export default function CustomerBookingPage() {
                                                 }`}
                                             >
                                                 <option value="">Choose a package</option>
-                                                {packages.map((pkg) => (
-                                                    <option key={pkg.id} value={`${pkg.name} - ${peso(pkg.package_price)}`}>
-                                                        {pkg.name} - {peso(pkg.package_price)}
+                                                {packages.filter(pkg => effectivePackageBranchFilter === "all" ||
+                                                    Number(pkg.branch_id ?? pkg.branchId) === Number(effectivePackageBranchFilter)).map((pkg) => (
+                                                    <option key={pkg.id} value={String(pkg.id)}>
+                                                        {pkg.name} - {peso(pkg.package_price)} · {branches.find(b=>b.id===Number(pkg.branch_id??pkg.branchId))?.name||`Branch #${pkg.branch_id??pkg.branchId}`}
                                                     </option>
                                                 ))}
                                             </select>
+                                            {packagesLoading && <p className="mt-2 text-xs text-[#806A8C]">Loading package options...</p>}
+                                            {selectedPackageData && (
+                                                <p className="mt-2 text-xs text-[#806A8C]">Handled by: <strong>{selectedBranchName || `Branch #${packageBranchId}`}</strong></p>
+                                            )}
                                             {fieldErrors.selection && (
                                                 <p className="mt-1.5 text-xs font-medium text-red-500">{fieldErrors.selection}</p>
                                             )}
@@ -1845,6 +2014,24 @@ export default function CustomerBookingPage() {
                                         </>
                                     ) : (
                                         <>
+                                            <div className="mb-4 rounded-2xl border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                                <label htmlFor="public-booking-branch" className="mb-2 block text-sm font-semibold text-[#1A1220]">Select booking branch</label>
+                                                <p className="mb-3 text-xs text-[#806A8C]">Sales products, rental equipment, services and booking assignment will use this branch.</p>
+                                                <select id="public-booking-branch" value={selectedCustomBranchId||''}
+                                                        disabled={!!urlBranchId} onChange={e=>{
+                                                    const next=e.target.value?Number(e.target.value):null;
+                                                    setSelectedCustomBranchId(next);
+                                                    setSelectedCustomItems([]);setSelectedRentalItems([]);
+                                                    clearError('selection');
+                                                }}
+                                                        className="h-12 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm text-[#1A1220] disabled:bg-[#F7F1FF]">
+                                                    <option value="">Choose a branch</option>
+                                                    {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
+                                                </select>
+                                                {branchesError && <p className="mt-2 text-xs text-red-600">{branchesError}</p>}
+                                                {branchesLoading && <div role="status" aria-label="Loading branches" className="mt-3 h-3 w-44 animate-pulse rounded bg-[#EEE8F3]" />}
+                                                {!branchesLoading && !branches.length && !branchesError && <p className="mt-2 text-xs text-[#806A8C]">No booking branches available.</p>}
+                                            </div>
                                             <div className="rounded-[16px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
                                                 <div className="mb-3">
                                                     <label className="block text-sm font-bold text-[#1A1220]">
@@ -1893,12 +2080,12 @@ export default function CustomerBookingPage() {
 
                                                 <div className="mt-3">
                                                     {loadingInventory ? (
-                                                        <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFDF8] px-4 py-6 text-center text-sm text-[#7A6A84]">
-                                                            Loading inventory items...
+                                                        <div role="status" aria-label="Loading inventory items" className="space-y-2 rounded-xl border border-[#E6DDF0] bg-white p-3">
+                                                            {[0, 1, 2, 3].map(index => <div key={index} className="h-12 animate-pulse rounded-lg bg-[#EEE8F3]" />)}
                                                         </div>
                                                     ) : filteredInventoryItems.length === 0 ? (
                                                         <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFDF8] px-4 py-6 text-center text-sm text-[#7A6A84]">
-                                                            No inventory items found.
+                                                            {customBranchId ? "No inventory items found for this branch." : "Select a branch to view available products."}
                                                         </div>
                                                     ) : (
                                                         <div className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
@@ -2321,8 +2508,11 @@ export default function CustomerBookingPage() {
                                            placeholder="Search rental equipment..." aria-label="Search rental equipment"
                                            className="mt-3 h-11 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm outline-none focus:border-[#2B174C]" />
                                     {rentalCatalogError && <p className="mt-2 text-xs text-red-600">{rentalCatalogError}</p>}
-                                    <div className="mt-2 max-h-52 space-y-2 overflow-y-auto">
-                                        {rentalCatalog.filter(item => item.name.toLowerCase().includes(rentalSearch.toLowerCase())).map(item => {
+                                    <div className="mt-2 max-h-52 space-y-2 overflow-y-auto" aria-busy={rentalCatalogLoading}>
+                                        {rentalCatalogLoading && <div role="status" aria-label="Loading rental equipment" className="space-y-2">
+                                            {[0, 1, 2].map(index => <div key={index} className="h-14 animate-pulse rounded-lg bg-[#EEE8F3]" />)}
+                                        </div>}
+                                        {!rentalCatalogLoading && rentalCatalog.filter(item => item.name.toLowerCase().includes(rentalSearch.toLowerCase())).map(item => {
                                             const chosen = selectedRentalItems.find(x => x.id === item.id);
                                             return <div key={item.id} className="flex items-center justify-between gap-2 rounded-lg border border-[#E6DDF0] bg-white p-2">
                                                 <div className="min-w-0 text-xs">
@@ -2345,7 +2535,7 @@ export default function CustomerBookingPage() {
                                                 </div>
                                             </div>;
                                         })}
-                                        {!rentalCatalog.length && !rentalCatalogError && <p className="py-2 text-xs text-[#806A8C]">No priced rental equipment in this branch yet.</p>}
+                                        {!rentalCatalogLoading && !rentalCatalog.length && !rentalCatalogError && <p className="py-2 text-xs text-[#806A8C]">{!customBranchId ? "Choose a package or booking branch to view rental equipment." : "No priced rental equipment in this branch yet."}</p>}
                                     </div>
                                     {selectedRentalItems.length > 0 && <div className="mt-3 border-t border-[#E6DDF0] pt-3 text-sm text-[#2B174C]">
                                         <p className="font-semibold">Rental subtotal: {peso(selectedRentalTotal)}</p>
@@ -2422,7 +2612,7 @@ export default function CustomerBookingPage() {
                                             {selectedPackage && (
                                                 <SummaryItem
                                                     label="Package"
-                                                    value={selectedPackage}
+                                                    value={selectedPackageData?.name || ""}
                                                 />
                                             )}
                                             {bookingType === "custom" && selectedCustomItems.length > 0 && (

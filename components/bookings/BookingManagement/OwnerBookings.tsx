@@ -11,7 +11,7 @@ import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import BookingFeePolicySettings from "./BookingFeePolicySettings";
 import {
     Booking,
-    BookingRow,
+    BookingWorkspace,
     dateKey,
     formatDate,
     getAmountPaid,
@@ -852,42 +852,8 @@ function BranchOverviewRow({
                                 </p>
                             </div>
 
-                            <div className="max-h-[500px] overflow-y-auto overflow-x-auto">
-                                <table className="w-full min-w-[920px] border-collapse">
-                                    <thead className="sticky top-0 z-10">
-                                    <tr className="border-b border-[#E6DDF0] bg-white">
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                            Client
-                                        </th>
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                            Schedule
-                                        </th>
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                            Package
-                                        </th>
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                            Payment
-                                        </th>
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                            Status
-                                        </th>
-                                        <th className="px-4 py-3 text-right text-xs font-semibold text-[#806A8C]">
-                                            Details
-                                        </th>
-                                    </tr>
-                                    </thead>
-
-                                    <tbody>
-                                    {branch.bookings.map((b) => (
-                                        <BookingRow
-                                            key={b.id}
-                                            b={b}
-                                            ownerView
-                                            canManage={false}
-                                        />
-                                    ))}
-                                    </tbody>
-                                </table>
+                            <div className="p-3">
+                                <BookingWorkspace bookings={branch.bookings} ownerView canManage={false} />
                             </div>
                         </div>
                     </td>

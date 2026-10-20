@@ -16,7 +16,7 @@ import {
     CalendarDropdown,
     FilterType,
     TABS,
-    BookingRow,
+    BookingWorkspace,
     PriceModal,
     dateKey,
     formatDate,
@@ -90,8 +90,17 @@ export default function StaffBookings() {
     const [cancelSubmitting, setCancelSubmitting] = useState(false);
     const [cancelError, setCancelError] = useState("");
 
-    const canView = access === "view" || access === "full";
-    const canManage = access === "full";
+    const canView = access === "view" || access === "standard" || access === "full";
+    // A Staff "full" legacy flag does not grant Manager price/cancellation controls.
+    const canManage = false;
+    const canConfirmStandard = access === "standard" || access === "full";
+    const canOperateBookings = canConfirmStandard;
+    const [approvalModal, setApprovalModal] = useState<Booking | null>(null);
+    const [confirmModal, setConfirmModal] = useState<Booking | null>(null);
+    const [reviewAcknowledged, setReviewAcknowledged] = useState(false);
+    const [approvalReason, setApprovalReason] = useState("");
+    const [actionBusy, setActionBusy] = useState(false);
+    const [actionMessage, setActionMessage] = useState("");
 
     function getToken() {
         return sessionStorage.getItem("token");
@@ -266,6 +275,66 @@ export default function StaffBookings() {
         } catch (err) {
             console.error("Failed to update booking status:", err);
             throw err;
+        }
+    }
+
+    async function staffBookingAction(booking: Booking, action: "confirm_standard_booking" | "request_booking_approval", reason?: string) {
+        if (!canConfirmStandard || actionBusy) return;
+        const token=getToken();
+        const branchId=getBranchId();
+        if(!token||!branchId)return;
+        setActionBusy(true);
+        setActionMessage("");
+        try {
+            const res=await fetch("/api/bookings",{
+                method:"POST",
+                headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
+                body:JSON.stringify({action,booking_id:booking.id,branch_id:Number(branchId),
+                    ...(action==="confirm_standard_booking" ? {reviewAcknowledged:true} : {}),
+                    ...(reason ? {reason}:{})}),
+            });
+            const data=await res.json();
+            if(!res.ok||data.success===false)throw new Error(data.error||data.message||"Booking action could not be completed.");
+            setApprovalModal(null);
+            setConfirmModal(null);
+            setReviewAcknowledged(false);
+            setApprovalReason("");
+            setActionMessage(action==="confirm_standard_booking" ? "Catalog-priced booking confirmed and allocated." : "Manager approval requested.");
+            await loadBookings();
+        }catch(error){
+            setActionMessage(error instanceof Error ? error.message : "Could not complete booking action.");
+        }finally{setActionBusy(false)}
+    }
+
+    // Staff can carry out routine workflow transitions, not arbitrary status edits.
+    // The server independently checks branch, employee permissions, reserved inventory,
+    // required payment and physical rental returns before any status is committed.
+    async function advanceStaffBooking(bookingId: number, status: "Preparing" | "Completed") {
+        if (!canOperateBookings || actionBusy) return;
+        const token = getToken();
+        const branchId = getBranchId();
+        if (!token || !branchId) return;
+        setActionBusy(true);
+        setActionMessage("");
+        try {
+            const res = await fetch("/api/bookings", {
+                method: "POST",
+                headers: {"Content-Type": "application/json", Authorization: `Bearer ${token}`},
+                body: JSON.stringify({action: "advance_staff_booking", booking_id: bookingId,
+                    branch_id: Number(branchId), status}),
+            });
+            const data = await res.json();
+            if (!res.ok || data.success === false) {
+                throw new Error(data.error || data.message || "Unable to advance booking.");
+            }
+            setActionMessage(status === "Preparing"
+                ? "Booking moved to Preparing. Staff may now carry out the scheduled fulfillment work."
+                : "Booking completed after inventory, rental-return, and payment checks.");
+            await loadBookings();
+        } catch (error) {
+            setActionMessage(error instanceof Error ? error.message : "Unable to advance booking.");
+        } finally {
+            setActionBusy(false);
         }
     }
 
@@ -650,6 +719,11 @@ export default function StaffBookings() {
                             {branchName}
                         </span>
 
+                        {canConfirmStandard && (
+                            <span className="rounded-lg border border-[#E6DDF0] bg-white px-3.5 py-1.5 text-xs font-semibold text-[#5F4E75]">
+                                Standard confirmation & operations
+                            </span>
+                        )}
                         {access === "view" && (
                             <span className="rounded-lg border border-[#E6DDF0] bg-white px-3.5 py-1.5 text-xs font-semibold text-[#5F4E75]">
                                 View only
@@ -683,6 +757,11 @@ export default function StaffBookings() {
             </header>
 
             <section className="px-6 py-4">
+                {actionMessage && (
+                    <div role="status" className="mb-3 rounded-xl border border-[#D8CBE7] bg-[#F7F1FF] p-3 text-sm text-[#2B174C]">
+                        {actionMessage}
+                    </div>
+                )}
                 {loading && bookings.length === 0 ? (
                     <ModuleSkeleton variant="bookings" />
                 ) : !canView ? (
@@ -818,57 +897,70 @@ export default function StaffBookings() {
                                 No bookings found.
                             </div>
                         ) : (
-                            <div className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
-                                <div className="max-h-[600px] overflow-y-auto overflow-x-auto">
-                                    <table className="w-full min-w-[930px] border-collapse">
-                                        <thead className="sticky top-0 z-10">
-                                        <tr className="border-b border-[#E6DDF0] bg-white">
-                                            <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                                Client
-                                            </th>
-                                            <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                                Schedule
-                                            </th>
-                                            <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                                Booking Selection
-                                            </th>
-                                            <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                                Payment
-                                            </th>
-                                            <th className="px-3 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                                                Status
-                                            </th>
-                                            <th className="px-3 py-3 text-right text-xs font-semibold text-[#806A8C]">
-                                                Details
-                                            </th>
-                                        </tr>
-                                        </thead>
-
-                                        <tbody>
-                                        {filtered.map((b) => (
-                                            <BookingRow
-                                                key={b.id}
-                                                b={b}
-                                                canManage={canManage}
-                                                onUpdateStatus={canManage ? updateStatus : undefined}
-                                                onSetPrice={canManage ? setPriceModal : undefined}
-                                                onRecordDownPayment={
-                                                    canManage ? recordDownPayment : undefined
-                                                }
-                                                onMarkFullyPaid={
-                                                    canManage ? markFullyPaid : undefined
-                                                }
-                                                onCancelBooking={canManage ? openCancelModal : undefined}
-                                            />
-                                        ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
+                            <BookingWorkspace bookings={filtered} canManage={canManage}
+                                              canConfirmStandard={canConfirmStandard}
+                                              canOperateBookings={canOperateBookings}
+                                              onOperateBooking={(id, status) => void advanceStaffBooking(id, status)}
+                                              operationsBusy={actionBusy}
+                                              onConfirmStandard={(b)=>{setConfirmModal(b);setReviewAcknowledged(false);setActionMessage("")}}
+                                              onRequestApproval={(b)=>{setApprovalModal(b);setApprovalReason("");setActionMessage("")}}
+                                              onUpdateStatus={canManage ? updateStatus : undefined}
+                                              onSetPrice={canManage ? setPriceModal : undefined}
+                                              onRecordDownPayment={
+                                                  canManage ? recordDownPayment : undefined
+                                              }
+                                              onMarkFullyPaid={
+                                                  canManage ? markFullyPaid : undefined
+                                              }
+                                              onCancelBooking={canManage ? openCancelModal : undefined} />
                         )}
                     </>
                 )}
             </section>
+
+            {confirmModal && canConfirmStandard && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4" role="dialog" aria-modal="true" aria-label="Confirm Eligible Booking">
+                    <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
+                        <h2 className="text-lg font-bold text-[#2B174C]">Confirm Eligible Booking</h2>
+                        <p className="mt-2 text-sm text-[#7A6A84]">{confirmModal.bookingReference || `Booking #${confirmModal.id}`}</p>
+                        <p className="mt-3 text-sm text-[#5F4E75]">Confirm only catalog-priced items and routine package inclusions. Any special service, requested discount, changed scope, or negotiated terms must go to Manager.</p>
+                        <label className="mt-4 flex items-start gap-2 text-sm text-[#2B174C]">
+                            <input type="checkbox" className="mt-1" checked={reviewAcknowledged} onChange={e=>setReviewAcknowledged(e.target.checked)}/>
+                            I have reviewed the request, dates, branch, price, inventory and notes. There are no unpriced special services or exceptions.
+                        </label>
+                        <div className="mt-5 flex justify-end gap-2">
+                            <button type="button" disabled={actionBusy} onClick={()=>setConfirmModal(null)}
+                                    className="rounded-xl border border-[#D8CBE7] px-4 py-2 text-sm">Back</button>
+                            <button type="button" disabled={!reviewAcknowledged||actionBusy}
+                                    onClick={()=>void staffBookingAction(confirmModal,"confirm_standard_booking")}
+                                    className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
+                                {actionBusy ? "Checking..." : "Confirm & Reserve"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {approvalModal && canConfirmStandard && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4" role="dialog" aria-modal="true" aria-label="Request Manager Approval">
+                    <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
+                        <h2 className="text-lg font-bold text-[#2B174C]">Request Manager Approval</h2>
+                        <p className="mt-2 text-sm text-[#7A6A84]">{approvalModal.bookingReference || `Booking #${approvalModal.id}`}</p>
+                        <p className="mt-2 text-sm text-[#5F4E75]">Explain what needs Manager review (e.g. customized service, negotiated price, or other exception).</p>
+                        <textarea className="mt-3 min-h-28 w-full rounded-xl border border-[#D8CBE7] p-3 text-sm" maxLength={500}
+                                  value={approvalReason} onChange={e=>setApprovalReason(e.target.value)} />
+                        <div className="mt-4 flex justify-end gap-2">
+                            <button type="button" disabled={actionBusy} onClick={()=>setApprovalModal(null)}
+                                    className="rounded-xl border border-[#D8CBE7] px-4 py-2 text-sm">Cancel</button>
+                            <button type="button" disabled={actionBusy||approvalReason.trim().length<10}
+                                    onClick={()=>void staffBookingAction(approvalModal,"request_booking_approval",approvalReason)}
+                                    className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
+                                {actionBusy ? "Submitting..." : "Send to Manager"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {priceModal && canManage && (
                 <PriceModal

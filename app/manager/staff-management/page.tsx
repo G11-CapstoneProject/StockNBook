@@ -20,6 +20,7 @@ import {
     UserPlus,
     UsersRound,
     UserX,
+    Bell, CalendarDays, Download,
     X,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
@@ -145,6 +146,16 @@ export default function ManagerStaffManagementPage() {
     const [pageLoading, setPageLoading] = useState(true);
 
     const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
+    const [employeeRequests, setEmployeeRequests] = useState<SMLeaveRow[]>([]);
+    const [requestError, setRequestError] = useState("");
+    const [requestLoading, setRequestLoading] = useState(false);
+    const [requestStatusFilter, setRequestStatusFilter] = useState("all");
+    const [requestTypeFilter, setRequestTypeFilter] = useState("all");
+    const [reviewingRequest, setReviewingRequest] = useState<SMLeaveGroup | null>(null);
+    const [requestDecisionNote, setRequestDecisionNote] = useState("");
+    const [requestDecisionError, setRequestDecisionError] = useState("");
+    const [savingDecision, setSavingDecision] = useState(false);
+    const [canApproveRequests, setCanApproveRequests] = useState(false);
     const [staffList, setStaffList] = useState<StaffMember[]>([]);
     const [staffSearch, setStaffSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState<StaffStatusFilter>("all");
@@ -157,9 +168,15 @@ export default function ManagerStaffManagementPage() {
     const [editingStaff, setEditingStaff] = useState<StaffMember | null>(null);
     const [editPermissions, setEditPermissions] = useState<StaffPermissions>(defaultPermissions);
     const [savingEdit, setSavingEdit] = useState(false);
-    const [deletingStaffId, setDeletingStaffId] = useState<
+    const [updatingStaffStatusId, setUpdatingStaffStatusId] = useState<
         number | string | null
     >(null);
+    const [staffStatusTarget, setStaffStatusTarget] = useState<StaffMember | null>(null);
+    const [staffStatusToast, setStaffStatusToast] = useState<{
+        kind: "success" | "error";
+        title: string;
+        message: string;
+    } | null>(null);
 
     const getToken = () => sessionStorage.getItem("token") || "";
 
@@ -262,6 +279,59 @@ export default function ManagerStaffManagementPage() {
         }
     }, [router]);
 
+    const loadEmployeeRequests = useCallback(async () => {
+        const token = getToken();
+        if (!token) return;
+        setRequestLoading(true);
+        try {
+            const res = await fetch("/api/manager-staff-overview", {
+                headers: { Authorization: `Bearer ${token}` }, cache: "no-store",
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.success !== true) throw new Error(data.error || "Unable to load employee requests.");
+            setEmployeeRequests(Array.isArray(data.leaves) ? data.leaves : []);
+            setCanApproveRequests(data.mayReviewLeave === true);
+            setRequestError("");
+        } catch (error) {
+            setRequestError(error instanceof Error ? error.message : "Employee requests unavailable.");
+        } finally { setRequestLoading(false); }
+    }, []);
+
+    const leaveApplications = useMemo(() => smGroupLeaves(employeeRequests), [employeeRequests]);
+    const pendingApplications = leaveApplications.filter(request => request.status === "Pending").length;
+    const types = useMemo(() => [...new Set(leaveApplications.map(request => request.leaveType))].sort(), [leaveApplications]);
+    const filteredApplications = leaveApplications.filter(request =>
+        (requestStatusFilter === "all" || request.status.toLowerCase() === requestStatusFilter) &&
+        (requestTypeFilter === "all" || request.leaveType === requestTypeFilter));
+
+    const submitReview = async (decision: "Approved" | "Rejected") => {
+        if (!reviewingRequest || savingDecision) return;
+        setSavingDecision(true); setRequestDecisionError("");
+        try {
+            const res = await fetch("/api/manager-staff-overview", {
+                method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+                body: JSON.stringify({ action: "review_leave", decision,
+                    requestIds: reviewingRequest.ids, decisionReason: requestDecisionNote.trim() }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.success !== true) throw new Error(data.error || "Unable to review request.");
+            setReviewingRequest(null); setRequestDecisionNote("");
+            await loadEmployeeRequests();
+        } catch (error) { setRequestDecisionError(error instanceof Error ? error.message : "Review failed."); }
+        finally { setSavingDecision(false); }
+    };
+    const exportRequestsAsPdf = () => {
+        void import("@/components/dashboard/_shared")
+            .then(module => module.exportTableAsPdf({
+                title: "Employee Leave Requests",
+                headers: ["Employee", "Employee ID", "Leave Type", "Date Range", "Status", "Reason"],
+                rows: filteredApplications.map(request => [request.employeeName, request.employeeNumber,
+                    request.leaveType, smDatesLabel(request), request.status, request.reason]),
+            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook", branch: branchName,
+                dateRange: "All requests" }, "manager_employee_requests"))
+            .catch(() => setRequestError("PDF export could not be completed."));
+    };
+
     useEffect(() => {
         const token = sessionStorage.getItem("token");
         const role = sessionStorage.getItem("role");
@@ -287,8 +357,9 @@ export default function ManagerStaffManagementPage() {
 
         setBranchName(sessionStorage.getItem("branch_name") || "Assigned branch");
         loadStaff();
+        void loadEmployeeRequests();
         void loadPlanAccess();
-    }, [router, loadStaff, loadPlanAccess]);
+    }, [router, loadStaff, loadPlanAccess, loadEmployeeRequests]);
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -296,6 +367,12 @@ export default function ManagerStaffManagementPage() {
         const timer = window.setInterval(updateDateTime, 30_000);
         return () => window.clearInterval(timer);
     }, []);
+
+    useEffect(() => {
+        if (!staffStatusToast) return;
+        const timer = window.setTimeout(() => setStaffStatusToast(null), 5600);
+        return () => window.clearTimeout(timer);
+    }, [staffStatusToast]);
 
     const staffSummary = useMemo(() => {
         const active = staffList.filter((staff) => staff.status === "Accepted").length;
@@ -502,21 +579,17 @@ export default function ManagerStaffManagementPage() {
         }
     };
 
-    const handleDeleteStaff = async (staff: StaffMember) => {
+    const handleChangeStaffStatus = async (staff: StaffMember) => {
+        if (updatingStaffStatusId !== null) return;
         const token = getToken();
-
         if (!token) {
             router.push("/");
             return;
         }
 
-        const confirmed = window.confirm(
-            `Delete ${staff.name}'s staff account?\n\nThis will permanently remove the account and the staff member will no longer be able to log in. This action cannot be undone.`
-        );
-
-        if (!confirmed) return;
-
-        setDeletingStaffId(staff.id);
+        const deactivate = staff.status === "Accepted";
+        const action = deactivate ? "deactivate_staff" : "reactivate_staff";
+        setUpdatingStaffStatusId(staff.id);
 
         try {
             const res = await fetch("/api/staff-management", {
@@ -526,33 +599,39 @@ export default function ManagerStaffManagementPage() {
                     Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
-                    action: "delete_staff",
+                    action,
                     staff_id: staff.id,
                     staff_email: staff.email,
                 }),
             });
 
             const data = await res.json();
-
             if (!res.ok) {
-                alert(
-                    data.error ||
-                    data.message ||
-                    "Failed to delete staff account."
-                );
+                setStaffStatusToast({
+                    kind: "error",
+                    title: deactivate ? "Unable to deactivate access" : "Unable to reactivate access",
+                    message: String(data.error || data.message || "Please try again."),
+                });
                 return;
             }
 
-            if (editingStaff?.id === staff.id) {
-                setEditingStaff(null);
-            }
-
+            setStaffStatusTarget(null);
             await loadStaff();
-            alert("Staff account deleted successfully.");
+            setStaffStatusToast({
+                kind: "success",
+                title: deactivate ? "Staff access deactivated" : "Staff access reactivated",
+                message: deactivate
+                    ? `${staff.name} can no longer sign in with this staff account. Their employee record and history remain saved.`
+                    : `${staff.name} can sign in again using their existing staff account.`,
+            });
         } catch {
-            alert("Something went wrong while deleting the staff account.");
+            setStaffStatusToast({
+                kind: "error",
+                title: deactivate ? "Unable to deactivate access" : "Unable to reactivate access",
+                message: "The request could not be completed. Please try again.",
+            });
         } finally {
-            setDeletingStaffId(null);
+            setUpdatingStaffStatusId(null);
         }
     };
 
@@ -644,7 +723,7 @@ export default function ManagerStaffManagementPage() {
 
                                 <button
                                     type="button"
-                                    onClick={() => void loadStaff()}
+                                    onClick={() => { void loadStaff(); void loadEmployeeRequests(); }}
                                     disabled={pageLoading}
                                     aria-label="Refresh staff"
                                     className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
@@ -948,13 +1027,17 @@ export default function ManagerStaffManagementPage() {
 
                                                             <button
                                                                 type="button"
-                                                                disabled={deletingStaffId === staff.id}
-                                                                onClick={() => void handleDeleteStaff(staff)}
-                                                                className="inline-flex h-[34px] items-center justify-center rounded-lg bg-[#A33E20] px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
+                                                                disabled={updatingStaffStatusId !== null}
+                                                                onClick={() => setStaffStatusTarget(staff)}
+                                                                className={`inline-flex h-[34px] items-center justify-center rounded-lg px-3 text-xs font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                                                                    staff.status === "Accepted"
+                                                                        ? "bg-[#A33E20] text-white hover:bg-[#883117]"
+                                                                        : "border border-[#B7E9C8] bg-[#EDFBF1] text-[#138342] hover:bg-[#DDF5E5]"
+                                                                }`}
                                                             >
-                                                                {deletingStaffId === staff.id
-                                                                    ? "Deleting..."
-                                                                    : "Delete"}
+                                                                {updatingStaffStatusId === staff.id
+                                                                    ? "Updating..."
+                                                                    : staff.status === "Accepted" ? "Deactivate Access" : "Reactivate Access"}
                                                             </button>
                                                         </div>
                                                     </td>
@@ -972,6 +1055,29 @@ export default function ManagerStaffManagementPage() {
                                     </div>
                                 </div>
                             )}
+                        </section>
+
+                        <section id="employee-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span>
+                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Employee Requests</h2><p className="text-xs text-[#7A6A84]">Review staff leave and absence requests for {branchName}.</p></div>
+                                    <span className="rounded-full bg-[#FFF3D8] px-2.5 py-1 text-[10px] font-bold text-[#A56607]">{pendingApplications} pending</span>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <select aria-label="Filter leave requests by status" value={requestStatusFilter} onChange={e => setRequestStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] px-2 text-xs text-[#2B174C]"><option value="all">All Statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+                                    <select aria-label="Filter leave requests by type" value={requestTypeFilter} onChange={e => setRequestTypeFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] px-2 text-xs text-[#2B174C]"><option value="all">All Leave Types</option>{types.map(type => <option key={type} value={type}>{type}</option>)}</select>
+                                    <button type="button" onClick={exportRequestsAsPdf} title="Export employee requests to PDF" aria-label="Export employee requests to PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                </div>
+                            </div>
+                            {requestError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestError}</p>}
+                            <div className="max-h-[360px] overflow-auto"><table className="w-full min-w-[730px] text-left text-xs"><thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee", "Employee ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
+                                <tbody>{filteredApplications.map(request => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={request.key}>
+                                    <td className="px-4 py-3 font-semibold text-[#2B174C]">{request.employeeName}</td><td className="px-4 py-3">{request.employeeNumber}</td><td className="px-4 py-3">{request.leaveType}</td><td className="px-4 py-3">{smDatesLabel(request)}</td>
+                                    <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${request.status === "Approved" ? "bg-green-50 text-green-700" : request.status === "Rejected" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{request.status}</span></td>
+                                    <td className="px-4 py-3"><button type="button" onClick={() => { setReviewingRequest(request); setRequestDecisionNote(""); setRequestDecisionError(""); }} className="rounded-lg border border-[#D7C7E8] bg-[#F7F1FF] px-3 py-1.5 font-semibold text-[#5D2DAB] hover:bg-[#ECE3F8]">Review</button></td>
+                                </tr>)}{filteredApplications.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center text-[#8A7D92]">{requestLoading ? "Loading employee requests..." : "No matching leave requests."}</td></tr>}</tbody>
+                            </table></div>
+                            <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {filteredApplications.length} of {leaveApplications.length} requests</div>
                         </section>
 
                         <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
@@ -1081,6 +1187,89 @@ export default function ManagerStaffManagementPage() {
                     </section>
                 </main>
 
+                {staffStatusTarget && (
+                    <div
+                        className="fixed inset-0 z-[75] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]"
+                        onMouseDown={(event) => {
+                            if (event.target === event.currentTarget && updatingStaffStatusId === null) {
+                                setStaffStatusTarget(null);
+                            }
+                        }}
+                    >
+                        <div role="alertdialog" aria-modal="true" aria-labelledby="staff-status-title" aria-describedby="staff-status-description"
+                             className="w-full max-w-[500px] overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white shadow-2xl">
+                            <div className="flex items-start gap-3 border-b border-[#E9E1EE] px-5 py-5">
+                                <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${staffStatusTarget.status === "Accepted" ? "bg-[#FDEDED] text-[#C13333]" : "bg-[#E8F7EE] text-[#138342]"}`}>
+                                    {staffStatusTarget.status === "Accepted" ? <UserX size={21} /> : <CheckCircle2 size={21} />}
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                    <h2 id="staff-status-title" className="text-lg font-bold text-[#1A1220]">
+                                        {staffStatusTarget.status === "Accepted" ? "Deactivate Staff Access" : "Reactivate Staff Access"}
+                                    </h2>
+                                    <p className="mt-1 text-xs text-[#806A8C]">
+                                        {staffStatusTarget.status === "Accepted" ? "Temporarily remove login access without deleting the employee." : "Restore login access for this employee."}
+                                    </p>
+                                </div>
+                                <button type="button" aria-label="Close staff access dialog" disabled={updatingStaffStatusId !== null}
+                                        onClick={() => setStaffStatusTarget(null)} className="rounded-lg p-1 text-[#806A8C] hover:bg-[#F7F1FF] disabled:opacity-50">
+                                    <X size={19} />
+                                </button>
+                            </div>
+                            <div id="staff-status-description" className="space-y-3 px-5 py-5 text-sm text-[#4F3E5E]">
+                                <p>
+                                    {staffStatusTarget.status === "Accepted" ? "Deactivate" : "Reactivate"} <strong className="text-[#2B174C]">{staffStatusTarget.name}</strong>&apos;s staff access?
+                                </p>
+                                <div className="rounded-xl border border-[#E9E1EE] bg-[#FBF8FE] px-4 py-3 text-xs leading-6">
+                                    {staffStatusTarget.status === "Accepted"
+                                        ? "The employee will not be able to sign in again while inactive. Their name, email, account, attendance, and other existing records remain in the database. You can reactivate access later."
+                                        : "The employee can use their existing account again, subject to your store's available staff slots and current permissions. No new invitation is required."}
+                                </div>
+                            </div>
+                            <div className="flex justify-end gap-2 border-t border-[#E9E1EE] px-5 py-4">
+                                <button type="button" disabled={updatingStaffStatusId !== null} onClick={() => setStaffStatusTarget(null)}
+                                        className="rounded-xl border border-[#DCCFE8] bg-white px-4 py-2.5 text-xs font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50">
+                                    Cancel
+                                </button>
+                                <button type="button" disabled={updatingStaffStatusId !== null} onClick={() => void handleChangeStaffStatus(staffStatusTarget)}
+                                        className={`rounded-xl px-4 py-2.5 text-xs font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-50 ${staffStatusTarget.status === "Accepted" ? "bg-[#A33E20] hover:bg-[#883117]" : "bg-[#138342] hover:bg-[#0D6F34]"}`}>
+                                    {updatingStaffStatusId !== null ? "Updating..." : staffStatusTarget.status === "Accepted" ? "Deactivate Access" : "Reactivate Access"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {staffStatusToast && (
+                    <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[100] flex w-[min(395px,calc(100vw-40px))] items-start gap-3 rounded-2xl border border-[#E6DDF0] bg-white p-4 shadow-[0_10px_35px_rgba(30,14,47,0.18)]">
+                        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${staffStatusToast.kind === "success" ? "bg-[#E8F7EE] text-[#138342]" : "bg-[#FDEDED] text-[#C13333]"}`}>
+                            {staffStatusToast.kind === "success" ? <CheckCircle2 size={21} /> : <UserX size={21} />}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                            <p className="text-sm font-bold text-[#1A1220]">{staffStatusToast.title}</p>
+                            <p className="mt-1 text-xs leading-5 text-[#806A8C]">{staffStatusToast.message}</p>
+                        </div>
+                        <button type="button" aria-label="Dismiss staff access notification" onClick={() => setStaffStatusToast(null)}
+                                className="rounded-lg p-1 text-[#806A8C] hover:bg-[#F7F1FF]"><X size={16} /></button>
+                    </div>
+                )}
+
+                {reviewingRequest && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !savingDecision) setReviewingRequest(null); }}>
+                    <div role="dialog" aria-modal="true" aria-labelledby="staff-leave-review-title" className="flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white shadow-2xl">
+                        <div className="flex items-start justify-between border-b border-[#E6DDF0] p-5"><div><h2 id="staff-leave-review-title" className="text-lg font-bold text-[#1A1220]">Review Employee Request</h2><p className="text-xs text-[#7A6A84]">Review the reason and dates before deciding.</p></div><button type="button" disabled={savingDecision} onClick={() => setReviewingRequest(null)} className="text-[#7A6A84]" aria-label="Close review"><X size={20}/></button></div>
+                        <div className="space-y-4 overflow-y-auto p-5 text-sm">
+                            <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#FBF8FE] p-4"><div><span className="text-xs text-[#7A6A84]">Employee</span><p className="font-semibold">{reviewingRequest.employeeName}</p></div><div><span className="text-xs text-[#7A6A84]">Employee ID</span><p className="font-semibold">{reviewingRequest.employeeNumber}</p></div><div><span className="text-xs text-[#7A6A84]">Leave Type</span><p className="font-semibold">{reviewingRequest.leaveType}</p></div><div><span className="text-xs text-[#7A6A84]">Status</span><p className="font-semibold">{reviewingRequest.status}</p></div><div className="col-span-2"><span className="text-xs text-[#7A6A84]">Date / Range</span><p className="font-semibold">{smDatesLabel(reviewingRequest)}</p></div></div>
+                            <div><h3 className="text-xs font-bold text-[#5F4E75]">Employee's Reason</h3><p className="mt-1 whitespace-pre-wrap rounded-xl border border-[#E6DDF0] p-3">{reviewingRequest.reason}</p></div>
+                            {reviewingRequest.status !== "Pending" && reviewingRequest.decisionReason && <div><h3 className="text-xs font-bold">Decision Reason</h3><p className="mt-1 rounded-xl bg-[#FBF8FE] p-3">{reviewingRequest.decisionReason}</p></div>}
+                            {reviewingRequest.status === "Pending" && <div><label htmlFor="staff-decision-note" className="mb-1 block text-xs font-bold text-[#5F4E75]">Decision Note (required when disapproving)</label><textarea id="staff-decision-note" value={requestDecisionNote} onChange={e => setRequestDecisionNote(e.target.value)} rows={3} maxLength={500} className="w-full rounded-xl border border-[#E6DDF0] p-3 outline-none focus:border-[#8058BA]" placeholder="Explain the decision"/></div>}
+                            {requestDecisionError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestDecisionError}</p>}
+                            {!canApproveRequests && <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">Staff Management approval permission is required.</p>}
+                        </div>
+                        <div className="flex justify-end gap-2 border-t border-[#E6DDF0] p-4"><button type="button" onClick={() => setReviewingRequest(null)} disabled={savingDecision} className="rounded-xl border px-4 py-2 text-xs font-semibold">Close</button>
+                            {reviewingRequest.status === "Pending" && canApproveRequests && <><button type="button" disabled={savingDecision || requestDecisionNote.trim().length < 3} onClick={() => void submitReview("Rejected")} className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-red-700 disabled:opacity-50">Disapprove</button><button type="button" disabled={savingDecision} onClick={() => void submitReview("Approved")} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">{savingDecision ? "Saving..." : "Approve"}</button></>}
+                        </div>
+                    </div>
+                </div>}
+
                 {showAddDialog && (
                     <div
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm"
@@ -1169,6 +1358,8 @@ export default function ManagerStaffManagementPage() {
                                             <AccessModeRow
                                                 label="Bookings"
                                                 value={permissions.bookings_access}
+                                                allowView
+                                                fullLabel="Standard Confirmation & Operations"
                                                 onChange={(value) => updateFeatureAccess("bookings", value as AccessMode)}
                                             />
                                             <AccessModeRow
@@ -1269,6 +1460,8 @@ export default function ManagerStaffManagementPage() {
                                 <AccessModeRow
                                     label="Bookings"
                                     value={editPermissions.bookings_access}
+                                    allowView
+                                    fullLabel="Standard Confirmation & Operations"
                                     onChange={(value) => updateEditFeatureAccess("bookings", value as AccessMode)}
                                 />
                                 <AccessModeRow
@@ -1381,7 +1574,7 @@ function normalizePermissions(raw: any): StaffPermissions {
     parsed = parsed || {};
 
     const posAccess = getAccessValue(parsed.pos_access, parsed.pos);
-    const bookingsAccess = getAccessValue(parsed.bookings_access, parsed.bookings);
+    const bookingsAccess = getBookingAccessValue(parsed.bookings_access, parsed.bookings);
     const inventoryAccess = getAccessValue(parsed.inventory_access, parsed.inventory);
     const packageAccess = getAccessValue(parsed.package_access, parsed.packages);
     const reportsAccess = getReportsAccessValue(parsed.reports_access, parsed.reports);
@@ -1414,6 +1607,15 @@ function getAccessValue(value: any, legacyBoolean: any): AccessMode {
     if (value === "view") return "full";
     if (legacyBoolean === true) return "full";
     return "none";
+}
+
+// Booking read-only must remain read-only; other legacy feature access
+// normalization is intentionally left untouched.
+function getBookingAccessValue(value: any, legacyBoolean: any): AccessMode {
+    if (value === "full" || value === "standard" || value === "confirm_standard") return "full";
+    if (value === "view") return "view";
+    if (value === "none") return "none";
+    return legacyBoolean === true ? "view" : "none";
 }
 
 function getReportsAccessValue(value: any, legacyBoolean: any): ReportsAccessMode {
@@ -1533,6 +1735,7 @@ function AccessModeRow({
                            onChange,
                            allowFull = true,
                            allowView = false,
+                           fullLabel = "Full access",
                            locked = false,
                            lockText = "Not included in current plan",
                        }: {
@@ -1541,6 +1744,7 @@ function AccessModeRow({
     onChange: (value: AccessMode | ReportsAccessMode) => void;
     allowFull?: boolean;
     allowView?: boolean;
+    fullLabel?: string;
     locked?: boolean;
     lockText?: string;
 }) {
@@ -1587,7 +1791,7 @@ function AccessModeRow({
                 >
                     <option value="none">No access</option>
                     {allowView && <option value="view">View only</option>}
-                    {allowFull && <option value="full">Full access</option>}
+                    {allowFull && <option value="full">{fullLabel}</option>}
                 </select>
             )}
         </div>
@@ -1639,7 +1843,7 @@ function formatPermissions(permissions: StaffPermissions) {
     const list: string[] = [];
 
     if (permissions.pos_access !== "none") list.push(`POS / Sales: ${formatAccess(permissions.pos_access)}`);
-    if (permissions.bookings_access !== "none") list.push(`Bookings: ${formatAccess(permissions.bookings_access)}`);
+    if (permissions.bookings_access !== "none") list.push(`Bookings: ${permissions.bookings_access === "full" ? "Standard Confirmation & Operations" : "View only"}`);
     if (permissions.inventory_access !== "none") list.push(`Inventory: ${formatAccess(permissions.inventory_access)}`);
     if (permissions.inventory_stock_receive) list.push("Authorized Stock Receiver");
     if (permissions.package_access !== "none") list.push(`Packages: ${formatAccess(permissions.package_access)}`);
@@ -1674,4 +1878,40 @@ function getInitials(name: string) {
 
     const parts = cleaned.split(/\s+/).slice(0, 2);
     return parts.map((part) => part.charAt(0).toUpperCase()).join("");
+}
+
+// One leave request can span one day or a date range. Legacy daily rows from
+// one submission are grouped only when all identifying fields match.
+type SMLeaveRow = { id: number; employeeId: number; employeeName: string; employeeNumber: string;
+    leaveDate: string; leaveEndDate?: string; leaveType: string; reason: string; approvalStatus: string;
+    decisionReason: string | null; createdAt: string };
+type SMLeaveGroup = { key: string; ids: number[]; employeeName: string; employeeNumber: string;
+    leaveType: string; reason: string; status: string; decisionReason: string | null;
+    createdAt: string; start: string; end: string };
+function smAddDay(value: string) {
+    const date = new Date(value + "T00:00:00Z"); date.setUTCDate(date.getUTCDate()+1);
+    return date.toISOString().slice(0, 10);
+}
+function smGroupLeaves(rows: SMLeaveRow[]): SMLeaveGroup[] {
+    const result: SMLeaveGroup[] = [];
+    for (const row of [...rows].sort((a,b) => a.employeeId-b.employeeId || a.createdAt.localeCompare(b.createdAt) || a.leaveDate.localeCompare(b.leaveDate))) {
+        const end = row.leaveEndDate && row.leaveEndDate >= row.leaveDate ? row.leaveEndDate : row.leaveDate;
+        const last = result[result.length - 1];
+        if (last && last.employeeNumber === String(row.employeeNumber) && last.createdAt === row.createdAt &&
+            last.leaveType === row.leaveType && last.reason === row.reason && last.status === row.approvalStatus &&
+            smAddDay(last.end) === row.leaveDate) {
+            last.ids.push(row.id); last.end = end;
+        } else result.push({ key: String(row.id), ids: [row.id], employeeName: row.employeeName,
+            employeeNumber: String(row.employeeNumber), leaveType: row.leaveType, reason: row.reason,
+            status: row.approvalStatus, decisionReason: row.decisionReason, createdAt: row.createdAt,
+            start: row.leaveDate, end });
+    }
+    return result.sort((a,b) => Number(b.status === "Pending") - Number(a.status === "Pending") || b.createdAt.localeCompare(a.createdAt));
+}
+function smFormatDate(date: string) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
+    return new Date(date + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+function smDatesLabel(req: SMLeaveGroup) {
+    return req.start === req.end ? smFormatDate(req.start) : `${smFormatDate(req.start)} – ${smFormatDate(req.end)}`;
 }

@@ -13,6 +13,10 @@ import {
 import { useRouter } from "next/navigation";
 import {
     Building2,
+    Bell,
+    Clock3,
+    Download,
+    CheckCircle2,
     Copy,
     Filter,
     Mail,
@@ -38,6 +42,68 @@ type BranchManager = {
     branch: string;
     status: ManagerStatus;
 };
+
+type ManagerLeaveRow = {
+    id: number;
+    managerId: number;
+    managerName: string;
+    branchName: string;
+    branchId: number;
+    leaveDate: string;
+    leaveType: string;
+    reason: string;
+    approvalStatus: string;
+    decisionReason: string | null;
+    createdAt: string;
+};
+type ManagerLeaveGroup = {
+    key: string;
+    ids: number[];
+    managerId: number;
+    managerName: string;
+    branchName: string;
+    leaveType: string;
+    reason: string;
+    status: string;
+    decisionReason: string | null;
+    createdAt: string;
+    start: string;
+    end: string;
+};
+function dayAfter(value: string) {
+    const day = new Date(value + "T00:00:00Z");
+    day.setUTCDate(day.getUTCDate() + 1);
+    return day.toISOString().slice(0, 10);
+}
+function groupManagerLeaves(rows: ManagerLeaveRow[]): ManagerLeaveGroup[] {
+    const groups: ManagerLeaveGroup[] = [];
+    for (const row of [...rows].sort((a, b) => a.managerId - b.managerId ||
+        a.createdAt.localeCompare(b.createdAt) || a.leaveDate.localeCompare(b.leaveDate))) {
+        const last = groups[groups.length - 1];
+        if (last && last.managerId === row.managerId && last.branchName === row.branchName &&
+            last.createdAt === row.createdAt && last.leaveType === row.leaveType &&
+            last.reason === row.reason && last.status === row.approvalStatus &&
+            dayAfter(last.end) === row.leaveDate) {
+            last.ids.push(row.id);
+            last.end = row.leaveDate;
+        } else groups.push({ key: String(row.id), ids: [row.id], managerId: row.managerId,
+            managerName: row.managerName, branchName: row.branchName,
+            leaveType: row.leaveType, reason: row.reason, status: row.approvalStatus,
+            decisionReason: row.decisionReason, createdAt: row.createdAt,
+            start: row.leaveDate, end: row.leaveDate });
+    }
+    return groups.sort((a, b) => Number(b.status === "Pending") - Number(a.status === "Pending") ||
+        b.createdAt.localeCompare(a.createdAt));
+}
+function managerDateLabel(value: string) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+    return new Date(value + "T12:00:00Z").toLocaleDateString("en-US",
+        { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+function managerRangeLabel(group: ManagerLeaveGroup) {
+    return group.start === group.end ? managerDateLabel(group.start) :
+        `${managerDateLabel(group.start)} – ${managerDateLabel(group.end)}`;
+}
 
 type ManagerPermissions = {
     dashboard: boolean;
@@ -203,18 +269,6 @@ function getStatusClass(status: ManagerStatus) {
     return "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]";
 }
 
-function getManagerInitials(name: string) {
-    const parts = name
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean);
-
-    if (parts.length === 0) return "M";
-    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-
-    return `${parts[0][0] || ""}${parts[parts.length - 1][0] || ""}`.toUpperCase();
-}
-
 type SubscriptionPlan = "starter" | "growth" | "scale";
 
 type SubscriptionResponse = {
@@ -278,7 +332,19 @@ export default function BranchManagersPage() {
 
     const [managers, setManagers] = useState<BranchManager[]>([]);
     const [loading, setLoading] = useState(true);
-    const [deletingId, setDeletingId] = useState<number | null>(null);
+    const [updatingManagerId, setUpdatingManagerId] = useState<number | null>(null);
+    const [confirmAccessChange, setConfirmAccessChange] = useState<BranchManager | null>(null);
+    const [managerRequests, setManagerRequests] = useState<ManagerLeaveRow[]>([]);
+    const [requestsLoading, setRequestsLoading] = useState(false);
+    const [requestsError, setRequestsError] = useState("");
+    const [requestsStatusFilter, setRequestsStatusFilter] = useState("all");
+    const [requestsTypeFilter, setRequestsTypeFilter] = useState("all");
+    const [requestsBranchFilter, setRequestsBranchFilter] = useState("all");
+    const [reviewingManagerRequest, setReviewingManagerRequest] = useState<ManagerLeaveGroup | null>(null);
+    const [reviewReason, setReviewReason] = useState("");
+    const [reviewError, setReviewError] = useState("");
+    const [reviewSaving, setReviewSaving] = useState(false);
+    const [notice, setNotice] = useState<{ title: string; message: string; kind: "success" | "error" } | null>(null);
     const [search, setSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState<
         "all" | ManagerStatus
@@ -429,6 +495,28 @@ export default function BranchManagersPage() {
         }
     }, [router]);
 
+    const loadManagerRequests = useCallback(async () => {
+        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+        if (!token) return;
+        setRequestsLoading(true);
+        try {
+            const res = await fetch("/api/branch-managers?view=manager_requests", {
+                method: "GET", cache: "no-store",
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.success !== true) throw new Error(data.error || "Could not load manager requests.");
+            setManagerRequests(Array.isArray(data.requests) ? data.requests : []);
+            setRequestsError("");
+        } catch (error) {
+            setRequestsError(error instanceof Error ? error.message : "Could not load manager requests.");
+        } finally { setRequestsLoading(false); }
+    }, []);
+
+    useEffect(() => {
+        void loadManagerRequests();
+    }, [loadManagerRequests]);
+
     useEffect(() => {
         setSubscriptionPlan(getStoredSubscriptionPlan());
         void loadSubscriptionPlan();
@@ -437,6 +525,12 @@ export default function BranchManagersPage() {
     useEffect(() => {
         void loadManagers();
     }, [loadManagers]);
+
+    useEffect(() => {
+        if (!notice) return;
+        const timeout = window.setTimeout(() => setNotice(null), 5600);
+        return () => window.clearTimeout(timeout);
+    }, [notice]);
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -484,6 +578,56 @@ export default function BranchManagersPage() {
             return matchesSearch && matchesStatus;
         });
     }, [managers, search, statusFilter]);
+
+    const listedManagers = filteredManagers.filter(manager => manager.status !== "pending");
+    const pendingInvites = managers.filter(manager => manager.status === "pending" &&
+        (statusFilter === "all" || statusFilter === "pending") &&
+        (!search.trim() || `${manager.name} ${manager.email} ${manager.branch}`.toLowerCase().includes(search.trim().toLowerCase())));
+    const groupedManagerRequests = useMemo(() => groupManagerLeaves(managerRequests), [managerRequests]);
+    const pendingManagerRequests = groupedManagerRequests.filter(item => item.status === "Pending").length;
+    const managerLeaveTypes = [...new Set(groupedManagerRequests.map(item => item.leaveType))].sort();
+    const managerRequestBranches = [...new Set(groupedManagerRequests.map(item => item.branchName))].sort();
+    const filteredManagerRequests = groupedManagerRequests.filter(item =>
+        (requestsStatusFilter === "all" || item.status.toLowerCase() === requestsStatusFilter) &&
+        (requestsTypeFilter === "all" || item.leaveType === requestsTypeFilter) &&
+        (requestsBranchFilter === "all" || item.branchName === requestsBranchFilter));
+
+    const reviewManagerLeave = async (decision: "Approved" | "Rejected") => {
+        if (!reviewingManagerRequest || reviewSaving) return;
+        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+        if (!token) return router.push("/");
+        setReviewSaving(true);
+        setReviewError("");
+        try {
+            const res = await fetch("/api/branch-managers", {
+                method: "POST", headers: {
+                    "Content-Type": "application/json", Authorization: `Bearer ${token}`,
+                }, body: JSON.stringify({ action: "review_manager_leave", decision,
+                    requestIds: reviewingManagerRequest.ids, decisionReason: reviewReason.trim() }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.success !== true) throw new Error(data.error || "Could not review manager request.");
+            setReviewingManagerRequest(null);
+            setReviewReason("");
+            setNotice({ title: `Manager request ${decision.toLowerCase()}`,
+                message: "The decision has been saved.", kind: "success" });
+            await loadManagerRequests();
+        } catch (error) {
+            setReviewError(error instanceof Error ? error.message : "Review failed.");
+        } finally { setReviewSaving(false); }
+    };
+
+    const exportManagerRequests = () => {
+        void import("@/components/dashboard/_shared")
+            .then(module => module.exportTableAsPdf({
+                title: "Manager Leave Requests",
+                headers: ["Manager", "Branch", "Leave Type", "Date / Range", "Status", "Reason"],
+                rows: filteredManagerRequests.map(item => [item.managerName, item.branchName,
+                    item.leaveType, managerRangeLabel(item), item.status, item.reason]),
+            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
+                branch: "All branches", dateRange: "All requests" }, "owner_manager_requests"))
+            .catch(() => setNotice({ title: "Export unavailable", message: "Could not export manager requests.", kind: "error" }));
+    };
 
     const resetAddManagerForm = useCallback(() => {
         setSelectedBranchId("");
@@ -735,19 +879,13 @@ export default function BranchManagersPage() {
                     .trim()
                     .toLowerCase() === "sent";
 
-            if (emailWasSentForAlert) {
-                window.alert(
-                    "Manager added successfully. The account activation email was sent."
-                );
-            } else {
-                window.alert(
-                    `The manager invitation was created, but the activation email could not be sent.${
-                        data.email_error
-                            ? ` ${data.email_error}`
-                            : ""
-                    }`
-                );
-            }
+            setNotice({
+                title: emailWasSentForAlert ? "Manager invitation sent" : "Invitation created",
+                message: emailWasSentForAlert
+                    ? "The manager activation email was sent successfully."
+                    : `The invitation was created, but email delivery failed. ${data.email_error || "Copy the backup invitation link."}`,
+                kind: emailWasSentForAlert ? "success" : "error",
+            });
         } catch (requestError: unknown) {
             setAddManagerError(
                 requestError instanceof Error
@@ -787,11 +925,8 @@ export default function BranchManagersPage() {
             const data = await response.json();
 
             if (!response.ok) {
-                window.alert(
-                    data.error ||
-                    data.message ||
-                    "Unable to resend the manager invitation."
-                );
+                setNotice({ title: "Unable to resend invitation",
+                    message: data.error || data.message || "Please try again.", kind: "error" });
                 return;
             }
 
@@ -809,92 +944,49 @@ export default function BranchManagersPage() {
                 });
             }
 
-            window.alert(
-                emailWasSent
-                    ? `Invitation emailed to ${manager.email}.`
-                    : "The manager invitation link was refreshed, but the email could not be delivered. Copy the backup link shown on this page."
-            );
+            setNotice({
+                title: emailWasSent ? "Manager invitation resent" : "Invitation link refreshed",
+                message: emailWasSent
+                    ? `Activation email sent to ${manager.email}.`
+                    : "Email delivery failed. You can copy the backup invitation link.",
+                kind: emailWasSent ? "success" : "error",
+            });
         } catch (requestError) {
-            window.alert(
-                requestError instanceof Error
-                    ? requestError.message
-                    : "Unable to resend the manager invitation."
-            );
+            setNotice({ title: "Unable to resend invitation",
+                message: requestError instanceof Error ? requestError.message : "Please try again.",
+                kind: "error" });
         } finally {
             setResendingManagerId(null);
         }
     };
 
-    const deleteManager = async (manager: BranchManager) => {
-        const token =
-            sessionStorage.getItem("token") || localStorage.getItem("token");
-
-        if (!token) {
-            router.push("/");
-            return;
-        }
-
-        const confirmed = window.confirm(
-            `Delete ${manager.name}'s manager account?\n\nThis permanently removes the manager account and all staff accounts assigned to this manager. The branch itself will not be deleted. This action cannot be undone.`
-        );
-
-        if (!confirmed) return;
-
-        setDeletingId(manager.id);
+    const updateManagerAccess = async (manager: BranchManager) => {
+        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+        if (!token) return router.push("/");
+        const activate = manager.status === "inactive";
+        setUpdatingManagerId(manager.id);
         setError("");
-
         try {
             const response = await fetch("/api/branch-managers", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    action: "delete_manager",
+                method: "POST", headers: {
+                    "Content-Type": "application/json", Authorization: `Bearer ${token}`,
+                }, body: JSON.stringify({
+                    action: activate ? "reactivate_manager" : "deactivate_manager",
                     manager_id: manager.id,
                 }),
             });
-
-            const rawText = await response.text();
-
-            let data: { error?: string; message?: string } = {};
-
-            try {
-                data = rawText ? JSON.parse(rawText) : {};
-            } catch {
-                data = {
-                    error:
-                        rawText ||
-                        "The Branch Managers service returned an invalid response.",
-                };
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.success !== true) {
+                throw new Error(data.error || "Unable to change manager access.");
             }
-
-            if (!response.ok) {
-                setError(
-                    data.error ||
-                    data.message ||
-                    `Unable to delete manager (HTTP ${response.status}).`
-                );
-                return;
-            }
-
-            setManagers((currentManagers) =>
-                currentManagers.filter(
-                    (item) => item.id !== manager.id
-                )
-            );
-
-            window.alert("Manager account deleted successfully.");
-        } catch (requestError: unknown) {
-            setError(
-                requestError instanceof Error
-                    ? requestError.message
-                    : "Unable to delete this manager."
-            );
-        } finally {
-            setDeletingId(null);
-        }
+            setConfirmAccessChange(null);
+            await loadManagers();
+            setNotice({ title: activate ? "Manager access reactivated" : "Manager access deactivated",
+                message: `${manager.name}'s account record has been retained.`, kind: "success" });
+        } catch (error) {
+            setError(error instanceof Error ? error.message : "Unable to change manager access.");
+            setNotice({ title: "Unable to update access", message: error instanceof Error ? error.message : "Try again.", kind: "error" });
+        } finally { setUpdatingManagerId(null); }
     };
 
     return (
@@ -929,6 +1021,7 @@ export default function BranchManagersPage() {
                                     onClick={() => {
                                         void loadSubscriptionPlan();
                                         void loadManagers();
+                                        void loadManagerRequests();
                                     }}
                                     disabled={loading}
                                     aria-label="Refresh branch managers"
@@ -1149,8 +1242,8 @@ export default function BranchManagersPage() {
                                 </div>
 
                                 <span className="inline-flex items-center rounded-full bg-[#F5EEFF] px-3 py-1.5 text-xs font-semibold text-[#6D35D4]">
-                                {filteredManagers.length}{" "}
-                                    {filteredManagers.length === 1
+                                {listedManagers.length}{" "}
+                                    {listedManagers.length === 1
                                         ? "manager"
                                         : "managers"}
                             </span>
@@ -1158,7 +1251,7 @@ export default function BranchManagersPage() {
 
                             {loading && managers.length === 0 ? (
                                 <div className="p-4"><ModuleSkeleton variant="team" /></div>
-                            ) : filteredManagers.length === 0 ? (
+                            ) : listedManagers.length === 0 ? (
                                 <div className="flex min-h-[180px] flex-col items-center justify-center px-4 text-center">
                                 <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={22} />
@@ -1198,153 +1291,156 @@ export default function BranchManagersPage() {
                                             </thead>
 
                                             <tbody>
-                                            {filteredManagers.map(
-                                                (manager) => {
-                                                    const isDeleting =
-                                                        deletingId ===
-                                                        manager.id;
+                                            {listedManagers.map((manager) => {
+                                                const isUpdating = updatingManagerId === manager.id;
 
-                                                    return (
-                                                        <tr
-                                                            key={manager.id}
-                                                            className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
-                                                        >
-                                                            <td className="px-5 py-4">
-                                                                <div className="flex min-w-0 items-center gap-3">
-                                                                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-sm font-bold text-[#6D35D4]">
-                                                                        {getManagerInitials(
-                                                                            manager.name
-                                                                        )}
-                                                                    </span>
+                                                return (
+                                                    <tr
+                                                        key={manager.id}
+                                                        className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
+                                                    >
+                                                        <td className="px-5 py-3">
+                                                            <div className="min-w-0">
+                                                                <p className="truncate text-sm font-bold text-[#1A1220]">
+                                                                    {manager.name}
+                                                                </p>
+                                                                <p className="truncate text-xs text-[#7A6A84]">
+                                                                    {manager.email}
+                                                                </p>
+                                                            </div>
+                                                        </td>
 
-                                                                    <div className="min-w-0">
-                                                                        <p className="truncate text-sm font-bold text-[#1A1220]">
-                                                                            {
-                                                                                manager.name
-                                                                            }
-                                                                        </p>
-                                                                        <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-[#7A6A84]">
-                                                                            <Mail
-                                                                                size={
-                                                                                    12
-                                                                                }
-                                                                                className="shrink-0 text-[#806A8C]"
-                                                                            />
-                                                                            <span className="truncate">
-                                                                                {
-                                                                                    manager.email
-                                                                                }
-                                                                            </span>
-                                                                        </p>
-                                                                    </div>
-                                                                </div>
-                                                            </td>
+                                                        <td className="px-5 py-3">
+                                                            <span className="truncate text-sm font-semibold text-[#1A1220]">
+                                                                {manager.branch}
+                                                            </span>
+                                                        </td>
 
-                                                            <td className="px-5 py-4">
-                                                                <div className="flex min-w-0 items-center gap-2.5">
-                                                                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">
-                                                                        <Building2
-                                                                            size={
-                                                                                17
-                                                                            }
-                                                                            strokeWidth={
-                                                                                2
-                                                                            }
-                                                                        />
-                                                                    </span>
+                                                        <td className="px-5 py-3">
+                                                            <span
+                                                                className={`inline-flex rounded-full border px-4 py-1.5 text-sm font-semibold ${getStatusClass(manager.status)}`}
+                                                            >
+                                                                {getStatusLabel(manager.status)}
+                                                            </span>
+                                                        </td>
 
-                                                                    <span className="truncate text-sm font-semibold text-[#1A1220]">
-                                                                        {
-                                                                            manager.branch
-                                                                        }
-                                                                    </span>
-                                                                </div>
-                                                            </td>
-
-                                                            <td className="px-5 py-4">
-                                                                <span
-                                                                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold ${getStatusClass(
-                                                                        manager.status
-                                                                    )}`}
+                                                        <td className="px-5 py-3 text-right">
+                                                            <div className="flex justify-end gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={isUpdating}
+                                                                    onClick={() => setConfirmAccessChange(manager)}
+                                                                    className={`inline-flex h-[34px] items-center justify-center rounded-lg px-3 text-xs font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${manager.status === "inactive"
+                                                                        ? "border border-[#B7E9C8] bg-[#EDFBF1] text-[#138342] hover:bg-[#DDF5E5]"
+                                                                        : "bg-[#A33E20] text-white hover:bg-[#883117]"}`}
                                                                 >
-                                                                    <span
-                                                                        className={`h-1.5 w-1.5 rounded-full ${
-                                                                            manager.status ===
-                                                                            "active"
-                                                                                ? "bg-[#138342]"
-                                                                                : manager.status ===
-                                                                                "inactive"
-                                                                                    ? "bg-[#C13333]"
-                                                                                    : "bg-[#A56607]"
-                                                                        }`}
-                                                                    />
-                                                                    {getStatusLabel(
-                                                                        manager.status
-                                                                    )}
-                                                                </span>
-                                                            </td>
-
-                                                            <td className="px-5 py-4 text-right">
-                                                                <div className="flex justify-end gap-2">
-                                                                    {manager.status === "pending" && (
-                                                                        <button
-                                                                            type="button"
-                                                                            disabled={
-                                                                                resendingManagerId ===
-                                                                                manager.id
-                                                                            }
-                                                                            onClick={() =>
-                                                                                void resendManagerInvite(
-                                                                                    manager
-                                                                                )
-                                                                            }
-                                                                            className="inline-flex h-[38px] items-center justify-center gap-1.5 rounded-xl border border-[#DCCFE8] bg-white px-3 text-xs font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F8F3FF] disabled:cursor-not-allowed disabled:opacity-60"
-                                                                        >
-                                                                            <RefreshCw
-                                                                                size={14}
-                                                                                className={
-                                                                                    resendingManagerId ===
-                                                                                    manager.id
-                                                                                        ? "animate-spin"
-                                                                                        : ""
-                                                                                }
-                                                                            />
-                                                                            {resendingManagerId ===
-                                                                            manager.id
-                                                                                ? "Resending..."
-                                                                                : "Resend Invite"}
-                                                                        </button>
-                                                                    )}
-
-                                                                    <button
-                                                                        type="button"
-                                                                        disabled={
-                                                                            isDeleting
-                                                                        }
-                                                                        onClick={() =>
-                                                                            void deleteManager(
-                                                                                manager
-                                                                            )
-                                                                        }
-                                                                        className="inline-flex h-[38px] items-center justify-center rounded-xl bg-[#A33E20] px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
-                                                                    >
-                                                                        {isDeleting
-                                                                            ? "Deleting..."
-                                                                            : "Delete"}
-                                                                    </button>
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    );
-                                                }
-                                            )}
+                                                                    {isUpdating ? "Updating..." : manager.status === "inactive" ? "Reactivate Access" : "Deactivate Access"}
+                                                                </button>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
                                             </tbody>
                                         </table>
                                     </div>
                                 </div>
                             )}
                         </section>
+
+                        <section id="manager-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                <div className="flex items-center gap-3">
+                                    <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span>
+                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Manager Requests</h2>
+                                        <p className="mt-0.5 text-xs text-[#7A6A84]">Review branch manager leave requests across all branches.</p></div>
+                                    <span className="rounded-full bg-[#FFF3D8] px-2.5 py-1 text-[10px] font-bold text-[#A56607]">{pendingManagerRequests} pending</span>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <select aria-label="Filter manager requests by status" value={requestsStatusFilter} onChange={e => setRequestsStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                        <option value="all">All Statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option>
+                                    </select>
+                                    <select aria-label="Filter manager requests by branch" value={requestsBranchFilter} onChange={e => setRequestsBranchFilter(e.target.value)} className="h-9 max-w-40 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                        <option value="all">All Branches</option>{managerRequestBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
+                                    </select>
+                                    <select aria-label="Filter manager requests by leave type" value={requestsTypeFilter} onChange={e => setRequestsTypeFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                        <option value="all">All Leave Types</option>{managerLeaveTypes.map(type => <option key={type} value={type}>{type}</option>)}
+                                    </select>
+                                    <button type="button" onClick={exportManagerRequests} title="Export manager requests to PDF" aria-label="Export manager requests" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                </div>
+                            </div>
+                            {requestsError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestsError}</p>}
+                            <div className="max-h-[360px] overflow-auto">
+                                <table className="w-full min-w-[870px] text-left text-xs">
+                                    <thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Manager", "Branch", "Manager ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
+                                    <tbody>
+                                    {filteredManagerRequests.map(item => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={item.key}>
+                                        <td className="px-4 py-3 font-semibold text-[#2B174C]">{item.managerName}</td>
+                                        <td className="px-4 py-3">{item.branchName}</td>
+                                        <td className="px-4 py-3">{item.managerId}</td>
+                                        <td className="px-4 py-3">{item.leaveType}</td>
+                                        <td className="px-4 py-3">{managerRangeLabel(item)}</td>
+                                        <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${item.status === "Approved" ? "bg-green-50 text-green-700" : item.status === "Rejected" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{item.status}</span></td>
+                                        <td className="px-4 py-3"><button type="button" onClick={() => { setReviewingManagerRequest(item); setReviewReason(""); setReviewError(""); }} className="rounded-lg border border-[#D7C7E8] bg-[#F7F1FF] px-3 py-1.5 font-semibold text-[#5D2DAB] hover:bg-[#ECE3F8]">Review</button></td>
+                                    </tr>)}
+                                    {filteredManagerRequests.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-[#8A7D92]">{requestsLoading ? "Loading manager requests..." : requestsError ? "Requests unavailable." : "No manager requests found."}</td></tr>}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {filteredManagerRequests.length} of {groupedManagerRequests.length} requests</div>
+                        </section>
+
+                        <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span>
+                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Pending Invites</h2><p className="mt-0.5 text-xs text-[#7A6A84]">Managers waiting to activate their accounts.</p></div>
+                                </div>
+                                <span className="rounded-full bg-[#FFF7E8] px-3 py-1.5 text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
+                            </div>
+                            <div className="p-4">
+                                {loading && managers.length === 0 ? <div className="p-2"><ModuleSkeleton variant="team" /></div> : pendingInvites.length === 0 ?
+                                    <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFCF7] px-4 py-6 text-sm text-[#7A6A84]">No pending invites yet.</div> :
+                                    <div className="overflow-x-auto"><table className="w-full min-w-[780px] text-left text-xs">
+                                        <thead className="bg-[#FBF8FF] uppercase text-[#806A8C]"><tr>{["Manager", "Email", "Branch", "Status", "Action"].map(label => <th key={label} className="px-4 py-3">{label}</th>)}</tr></thead>
+                                        <tbody>{pendingInvites.map(manager => <tr key={manager.id} className="border-t border-[#EEE7F2]">
+                                            <td className="px-4 py-3 font-semibold text-[#2B174C]">{manager.name}</td>
+                                            <td className="px-4 py-3">{manager.email}</td>
+                                            <td className="px-4 py-3">{manager.branch}</td>
+                                            <td className="px-4 py-3"><span className="rounded-full border border-[#F4D79A] bg-[#FFF8E8] px-3 py-1.5 font-semibold text-[#A56607]">Pending</span></td>
+                                            <td className="px-4 py-3"><button type="button" onClick={() => void resendManagerInvite(manager)} disabled={resendingManagerId === manager.id} className="rounded-xl border border-[#D7C7E8] bg-white px-3 py-2 font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50">{resendingManagerId === manager.id ? "Resending..." : "Resend Invite"}</button></td>
+                                        </tr>)}</tbody>
+                                    </table></div>}
+                            </div>
+                        </section>
                     </section>
+
+                    {reviewingManagerRequest && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !reviewSaving) setReviewingManagerRequest(null); }}>
+                        <div role="dialog" aria-modal="true" aria-labelledby="manager-leave-review-title" className="flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white shadow-2xl">
+                            <div className="flex items-start justify-between border-b border-[#E6DDF0] p-5"><div><h2 id="manager-leave-review-title" className="text-lg font-bold text-[#1A1220]">Review Manager Request</h2><p className="text-xs text-[#7A6A84]">Review the request before making a decision.</p></div><button type="button" disabled={reviewSaving} onClick={() => setReviewingManagerRequest(null)} className="text-[#7A6A84]" aria-label="Close review"><X size={20}/></button></div>
+                            <div className="space-y-4 overflow-y-auto p-5 text-sm">
+                                <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#FBF8FE] p-4"><div><span className="text-xs text-[#7A6A84]">Manager</span><p className="font-semibold">{reviewingManagerRequest.managerName}</p></div><div><span className="text-xs text-[#7A6A84]">Branch</span><p className="font-semibold">{reviewingManagerRequest.branchName}</p></div><div><span className="text-xs text-[#7A6A84]">Leave Type</span><p className="font-semibold">{reviewingManagerRequest.leaveType}</p></div><div><span className="text-xs text-[#7A6A84]">Status</span><p className="font-semibold">{reviewingManagerRequest.status}</p></div><div className="col-span-2"><span className="text-xs text-[#7A6A84]">Date / Range</span><p className="font-semibold">{managerRangeLabel(reviewingManagerRequest)}</p></div></div>
+                                <div><h3 className="text-xs font-bold text-[#5F4E75]">Manager&apos;s Reason</h3><p className="mt-1 whitespace-pre-wrap rounded-xl border border-[#E6DDF0] p-3">{reviewingManagerRequest.reason}</p></div>
+                                {reviewingManagerRequest.status !== "Pending" && reviewingManagerRequest.decisionReason && <div><h3 className="text-xs font-bold">Decision Reason</h3><p className="mt-1 rounded-xl bg-[#FBF8FE] p-3">{reviewingManagerRequest.decisionReason}</p></div>}
+                                {reviewingManagerRequest.status === "Pending" && <div><label htmlFor="manager-review-note" className="mb-1 block text-xs font-bold text-[#5F4E75]">Decision note (required when disapproving)</label><textarea id="manager-review-note" value={reviewReason} onChange={e => setReviewReason(e.target.value)} rows={3} maxLength={500} className="w-full rounded-xl border border-[#E6DDF0] p-3 outline-none focus:border-[#8058BA]" placeholder="Explain the decision" /></div>}
+                                {reviewError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{reviewError}</p>}
+                            </div>
+                            <div className="flex justify-end gap-2 border-t border-[#E6DDF0] p-4"><button type="button" onClick={() => setReviewingManagerRequest(null)} disabled={reviewSaving} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-xs font-semibold">Close</button>
+                                {reviewingManagerRequest.status === "Pending" && <><button type="button" disabled={reviewSaving || reviewReason.trim().length < 3} onClick={() => void reviewManagerLeave("Rejected")} className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-red-700 disabled:opacity-50">Disapprove</button><button type="button" disabled={reviewSaving} onClick={() => void reviewManagerLeave("Approved")} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">{reviewSaving ? "Saving..." : "Approve"}</button></>}
+                            </div>
+                        </div>
+                    </div>}
+
+                    {confirmAccessChange && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !updatingManagerId) setConfirmAccessChange(null); }}>
+                        <div role="dialog" aria-modal="true" aria-labelledby="manager-status-dialog-title" className="w-full max-w-md rounded-[20px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">
+                            <div className="flex items-start justify-between gap-4"><div><h2 id="manager-status-dialog-title" className="text-lg font-bold text-[#1A1220]">{confirmAccessChange.status === "inactive" ? "Reactivate Manager Access" : "Deactivate Manager Access"}</h2><p className="mt-2 text-sm leading-6 text-[#7A6A84]">{confirmAccessChange.status === "inactive" ? `Restore ${confirmAccessChange.name}'s login access?` : `Disable ${confirmAccessChange.name}'s login access?`} Their name, account, branch assignment, and employee records will remain saved.</p></div><button type="button" aria-label="Close" disabled={!!updatingManagerId} onClick={() => setConfirmAccessChange(null)}><X size={18}/></button></div>
+                            <div className="mt-6 flex justify-end gap-2"><button type="button" disabled={!!updatingManagerId} onClick={() => setConfirmAccessChange(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm font-semibold text-[#2B174C]">Cancel</button><button type="button" disabled={!!updatingManagerId} onClick={() => void updateManagerAccess(confirmAccessChange)} className={`rounded-xl px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 ${confirmAccessChange.status === "inactive" ? "bg-[#138342]" : "bg-[#A33E20]"}`}>{updatingManagerId ? "Updating..." : confirmAccessChange.status === "inactive" ? "Reactivate Access" : "Deactivate Access"}</button></div>
+                        </div>
+                    </div>}
+
+                    {notice && <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[100] flex w-[min(390px,calc(100vw-32px))] items-start gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 shadow-xl">
+                        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${notice.kind === "success" ? "bg-[#E8F7EE] text-[#138342]" : "bg-[#FDEDED] text-[#C13333]"}`}>{notice.kind === "success" ? <CheckCircle2 size={20}/> : <UserX size={20}/>}</span>
+                        <div className="flex-1"><p className="text-sm font-bold text-[#1A1220]">{notice.title}</p><p className="mt-1 text-xs text-[#7A6A84]">{notice.message}</p></div><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification" className="text-[#7A6A84]"><X size={16}/></button>
+                    </div>}
 
                     {showPlanLimitDialog && (
                         <PlanLimitDialog

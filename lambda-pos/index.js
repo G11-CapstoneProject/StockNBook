@@ -3038,15 +3038,15 @@ exports.handler = async (event) => {
                         COALESCE((SELECT SUM(cc.amount)
                                   FROM credit_collections cc
                                   WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
-                    ) AS totalPaid,
+                        ) AS totalPaid,
                     GREATEST(
-                        0,
-                        o.total - (
-                            COALESCE(o.customer_payment, 0) +
-                            COALESCE((SELECT SUM(cc.amount)
-                                      FROM credit_collections cc
-                                      WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
-                        )
+                            0,
+                            o.total - (
+                                COALESCE(o.customer_payment, 0) +
+                                COALESCE((SELECT SUM(cc.amount)
+                                          FROM credit_collections cc
+                                          WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
+                                )
                     ) AS balance,
                     CASE
                         WHEN LOWER(TRIM(COALESCE(o.status, ''))) IN ('void', 'voided', 'cancelled', 'canceled', 'refunded')
@@ -3057,16 +3057,16 @@ exports.handler = async (event) => {
                             COALESCE((SELECT SUM(cc.amount)
                                       FROM credit_collections cc
                                       WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
-                        ) <= 0 THEN 'PAID'
+                            ) <= 0 THEN 'PAID'
                         WHEN o.credit_due_date IS NOT NULL AND DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')) > o.credit_due_date THEN 'OVERDUE'
-                        WHEN (
-                            COALESCE(o.customer_payment, 0) +
-                            COALESCE((SELECT SUM(cc.amount)
-                                      FROM credit_collections cc
-                                      WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
-                        ) > 0 THEN 'PARTIAL'
-                        ELSE 'PENDING'
-                    END AS collectionStatus,
+                    WHEN (
+                    COALESCE(o.customer_payment, 0) +
+                    COALESCE((SELECT SUM(cc.amount)
+                    FROM credit_collections cc
+                    WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
+                    ) > 0 THEN 'PARTIAL'
+                    ELSE 'PENDING'
+                END AS collectionStatus,
                     o.change_due AS changeDue,
                     o.cashier_id AS cashierId,
                     CASE
@@ -3079,18 +3079,18 @@ exports.handler = async (event) => {
                             WHERE st.id = o.cashier_id AND st.store_id = o.store_id LIMIT 1
                         )
                         ELSE NULL
-                    END AS cashierName,
+                END AS cashierName,
                     o.cashier_role AS cashierRole,
                     o.status AS status,
                     o.item,
                     o.total,
                     (SELECT s.tax_registration FROM stores s WHERE s.id = o.store_id LIMIT 1) AS taxRegistration,
-                    ${financialMetricsSelect}
-                    DATE_FORMAT(o.order_date, '%Y-%m-%d') AS orderDate,
-                    o.created_at AS createdAt
+                ${financialMetricsSelect}
+                DATE_FORMAT(o.order_date, '%Y-%m-%d') AS orderDate,
+                o.created_at AS createdAt
                 FROM orders o
                 LEFT JOIN branches b
-                  ON b.id = o.branch_id AND b.store_id = o.store_id
+                ON b.id = o.branch_id AND b.store_id = o.store_id
                 ${financialJoins}
                 WHERE ${whereSql}
             `;
@@ -3112,8 +3112,14 @@ exports.handler = async (event) => {
             const queryParams = [...scopeParams];
 
             if (paginationEnabled) {
-                query += " LIMIT ? OFFSET ?";
-                queryParams.push(pageSize, offset);
+                // mysql2 prepared statements can reject numeric LIMIT/OFFSET bind values
+                // with ER_WRONG_ARGUMENTS on MySQL 8. Ensure both are safe integers
+                // before appending them as SQL numeric literals (not user text).
+                if (!Number.isSafeInteger(pageSize) || pageSize <= 0 ||
+                    !Number.isSafeInteger(offset) || offset < 0) {
+                    return badRequest(headers, "Invalid pagination parameters.");
+                }
+                query += ` LIMIT ${pageSize} OFFSET ${offset}`;
             }
 
             const [rows] = await connection.execute(query, queryParams);

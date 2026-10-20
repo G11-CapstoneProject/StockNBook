@@ -6062,6 +6062,8 @@ type StaffAttendanceRecord = {
     employeeName: string;
     employeeNumber: string;
     date: string;
+    endDate?: string;
+    requestCreatedAt?: string;
     timeIn: string | null;
     timeOut: string | null;
     hoursWorked: number | null;
@@ -6085,6 +6087,8 @@ function formatAttendanceRecord(value: unknown): StaffAttendanceRecord {
         employeeName: get(["employeeName", "employee_name", "staff_name"]),
         employeeNumber: get(["employeeNumber", "employee_number", "staff_number"]),
         date: get(["date", "attendanceDate", "attendance_date", "leave_date"]),
+        endDate: get(["endDate", "end_date", "leave_end_date"]) || undefined,
+        requestCreatedAt: get(["requestCreatedAt", "createdAt", "created_at"]) || undefined,
         timeIn: timeIn || null, timeOut: timeOut || null,
         hoursWorked: hours !== null && Number.isFinite(hours) ? hours : null,
         status: get(["status", "attendance_status"]) || "Unknown",
@@ -6092,6 +6096,56 @@ function formatAttendanceRecord(value: unknown): StaffAttendanceRecord {
         leaveType: get(["leaveType", "leave_type"]),
         approvalStatus: get(["approvalStatus", "approval_status"]),
     };
+}
+
+
+// Older StockNBook versions saved one row per day for one leave application.
+// Collapse only contiguous daily rows from the same submission, matching the
+// manager's request grouping without deleting or editing historical SQL rows.
+function groupStaffLeaveHistory(records: StaffAttendanceRecord[]): StaffAttendanceRecord[] {
+    const attendance = records.filter((record) => !record.id.startsWith("L-"));
+    const leaves = records.filter((record) => record.id.startsWith("L-"))
+        .sort((a, b) =>
+            a.employeeNumber.localeCompare(b.employeeNumber) ||
+            String(a.requestCreatedAt || "").localeCompare(String(b.requestCreatedAt || "")) ||
+            a.date.localeCompare(b.date));
+    const groups: StaffAttendanceRecord[] = [];
+    for (const record of leaves) {
+        const last = groups[groups.length - 1];
+        const endOfLast = last?.endDate || last?.date || "";
+        const previous = new Date(`${endOfLast}T00:00:00.000Z`);
+        if (!Number.isNaN(previous.getTime())) previous.setUTCDate(previous.getUTCDate() + 1);
+        const consecutiveDay = !Number.isNaN(previous.getTime()) &&
+            previous.toISOString().slice(0, 10) === record.date;
+        const sameSubmission = last && Boolean(last.requestCreatedAt && record.requestCreatedAt) &&
+            last.requestCreatedAt === record.requestCreatedAt &&
+            last.employeeNumber === record.employeeNumber &&
+            last.leaveType === record.leaveType && last.reason === record.reason &&
+            last.approvalStatus === record.approvalStatus;
+        if (sameSubmission && consecutiveDay) {
+            last.endDate = record.endDate && record.endDate >= record.date
+                ? record.endDate : record.date;
+        } else {
+            groups.push({ ...record });
+        }
+    }
+    return [...attendance, ...groups].sort((a, b) =>
+        b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+}
+
+function staffLeaveStatus(record: StaffAttendanceRecord): string {
+    return record.approvalStatus ||
+        (record.status.toLowerCase() === "absent" ? "Absent" : "—");
+}
+
+function staffLeaveStatusStyle(status: string): string {
+    switch (status.toLowerCase()) {
+        case "approved": return "bg-[#E7F7ED] text-[#147D43]";
+        case "pending": return "bg-[#FFF4DF] text-[#A86905]";
+        case "rejected": case "disapproved": case "absent":
+            return "bg-[#FFE8E9] text-[#C72D36]";
+        default: return "bg-[#F2EDF7] text-[#5A476A]";
+    }
 }
 
 function staffAttendanceDay(raw: string) {
@@ -6140,6 +6194,7 @@ type StaffAttendancePdfRecord = {
     employeeName: string;
     employeeNumber: string;
     date: string;
+    endDate?: string;
     timeIn: string | null;
     timeOut: string | null;
     hoursWorked: number | null;
@@ -6245,7 +6300,8 @@ function sectionsFor(options: StaffAttendancePdfOptions): ReportSection[] {
         r.branchName || options.branchName,
         r.employeeName || options.staffName,
         r.employeeNumber || options.employeeNumber,
-        dateLabel(r.date), r.leaveType || "Leave", r.approvalStatus || "—", r.reason || "—",
+        dateLabel(r.date) + (r.endDate && r.endDate !== r.date ? ` – ${dateLabel(r.endDate)}` : ""),
+        r.leaveType || "Leave", r.approvalStatus || "—", r.reason || "—",
     ]);
     return [
         {
@@ -6458,7 +6514,7 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
             const data = await response.json().catch(() => ({}));
             const list = data.records ?? data.data?.records;
             if (!response.ok || data.success === false || !Array.isArray(list)) throw new Error(data.error || "Attendance service is unavailable.");
-            setRecords(list.map(formatAttendanceRecord));
+            setRecords(groupStaffLeaveHistory(list.map(formatAttendanceRecord)));
             setTodayAttendance(data.todayRecord ? formatAttendanceRecord(data.todayRecord) : null);
             setError("");
         } catch (caught) {
@@ -6519,6 +6575,7 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
         try {
             const { startDate, endDate } = getDates();
             if (startDate > endDate) throw new Error("Select a valid report date or range.");
+            // Attendance is limited to the chosen period; leave requests include full history.
             // Export the full server-scoped range, not only visible scroll rows.
             const response = await fetch(`/api/staff-attendance?${new URLSearchParams({ startDate, endDate, export: "1" })}`, {
                 headers: { Authorization: `Bearer ${token}` }, cache: "no-store",
@@ -6527,7 +6584,7 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
             const list = payload.records ?? payload.data?.records;
             if (!response.ok || payload.success === false || !Array.isArray(list))
                 throw new Error(payload.error || "Unable to fetch the complete attendance report.");
-            const allRecords = list.map(formatAttendanceRecord) as StaffAttendanceRecord[];
+            const allRecords = groupStaffLeaveHistory(list.map(formatAttendanceRecord) as StaffAttendanceRecord[]);
             await exportStaffAttendancePdf({
                 storeName, branchName, staffName, employeeNumber,
                 startDate, endDate, generatedAt: new Date(),
@@ -6570,10 +6627,12 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
                 <button type="button" onClick={() => setTab("worked")} aria-pressed={tab === "worked"} className={`pb-1 font-semibold ${tab === "worked" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Attendance ({worked.length})</button>
                 <button type="button" onClick={() => setTab("exceptions")} aria-pressed={tab === "exceptions"} className={`pb-1 font-semibold ${tab === "exceptions" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Absent / Leave ({exceptions.length})</button>
             </div>
-            <select aria-label="Attendance date range" value={range} onChange={(event) => setRange(event.target.value as "month" | "90" | "all" | "day" | "custom")}
-                    className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[10px] font-semibold text-[#2B174C]"><option value="month">This Month</option><option value="90">Last 90 Days</option><option value="all">All Records</option><option value="day">Specific Date</option><option value="custom">Date Range</option></select>
+            {tab === "exceptions" ?
+                <span className="rounded-lg border border-[#E3D8EA] bg-[#F8F5FC] px-2.5 py-2 text-[10px] font-semibold text-[#5A476A]" title="All leave applications, including past and upcoming requests">All Leave Requests</span> :
+                <select aria-label="Attendance date range" value={range} onChange={(event) => setRange(event.target.value as "month" | "90" | "all" | "day" | "custom")}
+                        className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[10px] font-semibold text-[#2B174C]"><option value="month">This Month</option><option value="90">Last 90 Days</option><option value="all">All Records</option><option value="day">Specific Date</option><option value="custom">Date Range</option></select>}
         </div>
-        {(range === "day" || range === "custom") && <div className="flex flex-wrap gap-2 border-t border-[#EEE8F2] px-4 py-2 text-[11px] text-[#5A476A]">
+        {tab === "worked" && (range === "day" || range === "custom") && <div className="flex flex-wrap gap-2 border-t border-[#EEE8F2] px-4 py-2 text-[11px] text-[#5A476A]">
             <label className="flex items-center gap-2">{range === "day" ? "Date" : "From"}<input aria-label={range === "day" ? "Specific attendance date" : "Attendance start date"} type="date" value={range === "day" ? filterDay : filterStart}
                                                                                                  onChange={(event) => range === "day" ? setFilterDay(event.target.value) : setFilterStart(event.target.value)} className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/></label>
             {range === "custom" && <label className="flex items-center gap-2">To<input aria-label="Attendance end date" type="date" min={filterStart} value={filterEnd} onChange={(event) => setFilterEnd(event.target.value)} className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/></label>}
@@ -6583,10 +6642,10 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
             <table className="w-full min-w-[410px] text-left text-[10px]">
                 <thead className="sticky top-0 z-10 border-y border-[#EEE8F2] bg-[#FBF9FC] uppercase tracking-[0.04em] text-[#806A8C]">
                 {tab === "worked" ? <tr><th className="px-3 py-2 font-semibold">Date</th><th className="px-3 py-2 font-semibold">Time In</th><th className="px-3 py-2 font-semibold">Time Out</th><th className="px-3 py-2 font-semibold">Hours</th><th className="px-3 py-2 font-semibold">Status</th></tr>
-                    : <tr><th className="px-3 py-2 font-semibold">Date</th><th className="px-3 py-2 font-semibold">Type</th><th className="px-3 py-2 font-semibold">Reason</th><th className="px-3 py-2 font-semibold">Approval</th></tr>}
+                    : <tr><th className="px-3 py-2 font-semibold">Date</th><th className="px-3 py-2 font-semibold">Type</th><th className="px-3 py-2 font-semibold">Reason</th><th className="px-3 py-2 font-semibold">Status</th></tr>}
                 </thead>
                 <tbody>
-                {loading ? <tr><td colSpan={5} className="px-3 py-10 text-center text-[#86778F]">Loading attendance...</td></tr> : filtered.length === 0 ? <tr><td colSpan={5} className="px-3 py-10 text-center text-[#86778F]">No {tab === "worked" ? "attendance records" : "absences or leave records"} for this period.</td></tr>
+                {loading ? <tr><td colSpan={5} className="px-3 py-10 text-center text-[#86778F]">Loading attendance...</td></tr> : filtered.length === 0 ? <tr><td colSpan={5} className="px-3 py-10 text-center text-[#86778F]">{tab === "worked" ? "No attendance records for this period." : "No absences or leave requests recorded."}</td></tr>
                     : filtered.map((record, index) => <tr key={`${record.id}-${record.date}-${index}`} className="border-b border-[#F1ECF4] last:border-0 hover:bg-[#FCFAFE]">
                         {tab === "worked" ? <>
                             <td className="whitespace-nowrap px-3 py-2 text-[#5A476A]">{staffAttendanceDay(record.date)}</td>
@@ -6595,10 +6654,10 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
                             <td className="px-3 py-2">{staffAttendanceDuration(record.hoursWorked)}</td>
                             <td className="px-3 py-2"><span className={`rounded-lg px-2 py-1 font-semibold ${record.timeOut ? "bg-[#E7F7ED] text-[#147D43]" : "bg-[#FFF4DF] text-[#A86905]"}`}>{staffAttendanceStatus(record)}</span></td>
                         </> : <>
-                            <td className="whitespace-nowrap px-3 py-2 text-[#5A476A]">{staffAttendanceDay(record.date)}</td>
+                            <td className="whitespace-nowrap px-3 py-2 text-[#5A476A]">{staffAttendanceDay(record.date)}{record.endDate && record.endDate !== record.date ? ` – ${staffAttendanceDay(record.endDate)}` : ""}</td>
                             <td className="px-3 py-2 font-semibold">{record.leaveType || staffAttendanceStatus(record)}</td>
                             <td className="max-w-[190px] break-words px-3 py-2" title={record.reason}>{record.reason || "—"}</td>
-                            <td className="px-3 py-2">{record.approvalStatus || "—"}</td>
+                            <td className="px-3 py-2"><span className={`inline-flex rounded-lg px-2 py-1 font-semibold ${staffLeaveStatusStyle(staffLeaveStatus(record))}`}>{staffLeaveStatus(record)}</span></td>
                         </>}
                     </tr>)}
                 </tbody>

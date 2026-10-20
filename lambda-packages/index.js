@@ -419,7 +419,7 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
     for (const inclusion of inclusions) {
         const params = [inclusion.productId, storeId, branchId];
         let query = `
-            SELECT p.id
+            SELECT p.id, p.has_variants
             FROM products p
             WHERE p.id = ?
               AND p.store_id = ?
@@ -446,6 +446,10 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
                 `Package inclusion references a product/variant that does not belong to this store branch (product ${inclusion.productId}).`
             );
         }
+        if (Number(rows[0].has_variants)===1 && !inclusion.variantId)
+            throw new Error(`Package product ${inclusion.productId} requires a specific variant.`);
+        if (Number(rows[0].has_variants)!==1 && inclusion.variantId)
+            throw new Error(`Package product ${inclusion.productId} is not variant-based.`);
     }
 
     await connection.execute(
@@ -514,7 +518,11 @@ function validatePackageInput(pkg) {
         return "Down payment cannot exceed package price.";
     }
 
+    const seenInclusions=new Set();
     for (const inclusion of pkg.inclusions) {
+        const inclusionKey=`${inclusion.productId}:${inclusion.variantId||0}`;
+        if(seenInclusions.has(inclusionKey))return 'Each product/variant may appear only once in a package.';
+        seenInclusions.add(inclusionKey);
         if (
             !Number.isInteger(inclusion.productId) ||
             inclusion.productId <= 0
@@ -522,8 +530,8 @@ function validatePackageInput(pkg) {
             return "Each package inclusion must contain a valid productId.";
         }
 
-        if (!Number.isFinite(inclusion.quantity) || inclusion.quantity <= 0) {
-            return "Each package inclusion must contain a valid quantity.";
+        if (!Number.isSafeInteger(inclusion.quantity) || inclusion.quantity <= 0 || inclusion.quantity > 100000) {
+            return "Each package inclusion must contain a positive whole-number quantity.";
         }
     }
 
@@ -547,7 +555,7 @@ async function getPackageAccess(connection, decoded, role, storeId) {
     const [rows] = await connection.execute(
         `SELECT permissions FROM ${table}
          WHERE id = ? AND store_id = ? AND branch_id = ? AND status = 'active'
-         LIMIT 1`,
+             LIMIT 1`,
         [accountId, storeId, branchId]
     );
     if (!rows.length) return "none";

@@ -310,7 +310,8 @@ type ActionCenterFilter =
     | "All"
     | "Low Stock Items"
     | "Out of Stock Items"
-    | "Expiring / Expired";
+    | "Expiring / Expired"
+    | "Slow Moving";
 
 /* -------------------------------------------------------------------------- */
 /*                               BASIC HELPERS                                */
@@ -2640,7 +2641,9 @@ export default function ManagerInventory() {
     );
 
     const recentStockMovements = React.useMemo(() => {
-        const today = new Date();
+        // Operational activity is today's movements only (Philippine business day).
+        // Historical movements stay available to the separate Reports module.
+        const todayKey = new Date().toLocaleDateString("en-PH", { timeZone: "Asia/Manila" });
 
         return buildRecentStockMovements({
             salesMovements: recentSales.movements,
@@ -2650,15 +2653,10 @@ export default function ManagerInventory() {
             branchId: managerBranchId,
             initialStockByProduct,
             purchaseReferences: stockPurchaseReferences,
-        }).filter((movement) => {
-            if (!movement.date) return false;
-
-            return (
-                movement.date.getFullYear() === today.getFullYear() &&
-                movement.date.getMonth() === today.getMonth() &&
-                movement.date.getDate() === today.getDate()
-            );
-        });
+        }).filter((movement) =>
+            Boolean(movement.date &&
+                movement.date.toLocaleDateString("en-PH", { timeZone: "Asia/Manila" }) === todayKey)
+        );
     }, [
         inventoryEmployeeActions,
         managerBranchId,
@@ -2760,7 +2758,7 @@ export default function ManagerInventory() {
                         </span>
                         <div className="min-w-0">
                             <h2 className="text-[25px] font-bold text-[#1A1220]">
-                                {inventoryTab === "sales" ? "Sales Inventory" : "Rentals Inventory"}
+                                {inventoryTab === "sales" ? "Sales Inventory" : "Rental Inventory"}
                             </h2>
                             <p className="mt-0.5 text-xs text-[#766983]">
                                 {inventoryTab === "sales"
@@ -2799,34 +2797,34 @@ export default function ManagerInventory() {
                             <ManagerMetricCard
                                 label="Low Stock Items"
                                 value={lowStockCount}
-                                helper="Items approaching shortage"
+                                helper="Positive stock at or below the reorder level"
                                 icon={<AlertTriangle size={20} />}
                                 tone="amber"
                             />
                             <ManagerMetricCard
                                 label="Out of Stock Items"
                                 value={outOfStockCount}
-                                helper="Items already unavailable"
+                                helper="Stock lines with zero available units"
                                 icon={<Boxes size={20} />}
                                 tone="red"
                             />
                             <ManagerMetricCard
                                 label="Expiring / Expired"
                                 value={expiringExpiredCount}
-                                helper="Inventory requiring immediate handling"
+                                helper="Expiry within 30 days or already expired"
                                 icon={<CalendarClock size={20} />}
                                 tone="purple"
                             />
                             <ManagerMetricCard
                                 label="Reorder Needed"
                                 value={reorderNeededCount}
-                                helper="Products that should potentially be purchased"
+                                helper="Low/out-of-stock lines; may overlap other alerts"
                                 icon={<ShoppingCart size={20} />}
                                 tone="blue"
                             />
                         </div>
 
-                        <div className="grid gap-4 xl:grid-cols-[1.15fr_1fr]">
+                        <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
                             <StockActionCenter
                                 rows={actionRows}
                                 onEdit={inv.handleEditProduct}
@@ -2873,6 +2871,9 @@ export default function ManagerInventory() {
                             </div>
                         </section>
 
+                        {/* Existing manager authorization / staff shortage workspace. */}
+                        <ManagerStaffReceiving products={managerProducts} />
+
                         <ManagerInventoryTable
                             inv={inv}
                             products={tableProducts}
@@ -2885,6 +2886,7 @@ export default function ManagerInventory() {
                             statusFilter={statusFilter}
                             onStatusFilterChange={setStatusFilter}
                             onEdit={inv.handleEditProduct}
+                            onRestock={(product) => setReceivingProduct(product)}
                             onDelete={inv.requestDeleteProduct}
                         />
                     </>
@@ -3442,12 +3444,13 @@ function StockActionCenter({
             if (filter === "Expiring / Expired") {
                 return row.issue === "Expiring" || row.issue === "Expired";
             }
+            if (filter === "Slow Moving") return row.issue === "Slow Moving";
             return true;
         });
     }, [filter, rows]);
 
     return (
-        <section className="overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+        <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
             <div className="flex flex-col gap-3 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-start gap-3">
                     <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
@@ -3458,7 +3461,7 @@ function StockActionCenter({
                             Stock Action Center
                         </h2>
                         <p className="mt-0.5 text-[11px] text-[#86778F]">
-                            Items that need your attention and what action to take.
+                            Review low stock, expiry risks, and slow-moving items.
                         </p>
                     </div>
                 </div>
@@ -3475,6 +3478,7 @@ function StockActionCenter({
                     <option value="Low Stock Items">Low Stock Items</option>
                     <option value="Out of Stock Items">Out of Stock Items</option>
                     <option value="Expiring / Expired">Expiring / Expired</option>
+                    <option value="Slow Moving">Slow Moving</option>
                 </select>
             </div>
 
@@ -3483,7 +3487,7 @@ function StockActionCenter({
                     No items found for the selected stock action filter.
                 </div>
             ) : (
-                <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden">
+                <div className="min-h-0 flex-1 w-full overflow-y-auto overflow-x-hidden">
                     <table className="w-full table-fixed text-[10px] xl:text-[11px]">
                         <colgroup>
                             <col className="w-[27%]" />
@@ -3812,7 +3816,7 @@ function RecentStockActivity({
     loading: boolean;
 }) {
     return (
-        <section className="overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+        <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
             <div className="flex items-start gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
                 <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
                     <CalendarClock size={18} />
@@ -3822,8 +3826,7 @@ function RecentStockActivity({
                         Recent Stock Activity
                     </h2>
                     <p className="mt-0.5 text-[11px] text-[#86778F]">
-                        Latest stock in and stock out movements from additions,
-                        restocks, and POS sales.
+                        Today's stock movements from additions, restocks, and POS sales.
                     </p>
                 </div>
             </div>
@@ -3834,10 +3837,10 @@ function RecentStockActivity({
                 </div>
             ) : movements.length === 0 ? (
                 <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">
-                    No recent stock movement data is available yet.
+                    No stock movements recorded today.
                 </div>
             ) : (
-                <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden">
+                <div className="min-h-0 flex-1 w-full overflow-y-auto overflow-x-hidden">
                     <table className="w-full table-fixed text-[10px] xl:text-[11px]">
                         <colgroup>
                             <col className="w-[23%]" />
@@ -4465,6 +4468,7 @@ function ManagerInventoryTable({
                                    statusFilter,
                                    onStatusFilterChange,
                                    onEdit,
+                                   onRestock,
                                    onDelete,
                                }: {
     inv: InventoryController;
@@ -4478,6 +4482,7 @@ function ManagerInventoryTable({
     statusFilter: string;
     onStatusFilterChange: (value: string) => void;
     onEdit: (product: Product) => void;
+    onRestock: (product: Product) => void;
     onDelete: (product: Product) => void;
 }) {
     const [expandedIds, setExpandedIds] = React.useState<Record<number, boolean>>(
@@ -4497,7 +4502,7 @@ function ManagerInventoryTable({
                             Branch Inventory List
                         </h2>
                         <p className="mt-0.5 text-[11px] text-[#86778F]">
-                            Manage your product inventory, update stock levels, and take quick actions.
+                            Search, filter, and maintain the sales products assigned to this branch.
                         </p>
                     </div>
                 </div>
@@ -4586,22 +4591,22 @@ function ManagerInventoryTable({
             </div>
 
             {products.length === 0 ? (
-                <div className="flex h-[712px] items-center justify-center px-5 text-center text-sm text-[#8A7D90]">
+                <div className="flex min-h-[180px] items-center justify-center px-5 text-center text-sm text-[#8A7D90]">
                     No products found for the current filters.
                 </div>
             ) : (
-                <div className="h-[712px] w-full overflow-y-auto overflow-x-hidden" aria-label="Scrollable branch inventory list (12 visible rows)">
+                <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain" style={{ maxHeight: 360 }} role="region" aria-label="Branch inventory list" tabIndex={0}>
                     <table className="w-full table-fixed text-[10px] xl:text-[11px]">
                         <colgroup>
                             <col className="w-[8%]" />
+                            <col className="w-[18%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[9%]" />
                             <col className="w-[19%]" />
-                            <col className="w-[12%]" />
-                            <col className="w-[9%]" />
-                            <col className="w-[9%]" />
-                            <col className="w-[10%]" />
-                            <col className="w-[10%]" />
-                            <col className="w-[9%]" />
-                            <col className="w-[14%]" />
                         </colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                         <tr className="border-b border-[#E9E1EE]">
@@ -4684,6 +4689,18 @@ function ManagerInventoryTable({
                                         </td>
                                         <td className="px-2 py-2.5 text-center">
                                             <div className="flex flex-wrap items-center justify-center gap-1">
+                                                <button
+                                                    type="button"
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        onRestock(product);
+                                                    }}
+                                                    aria-label={`Restock ${product.name}`}
+                                                    className="inline-flex items-center gap-1 rounded-lg bg-[#E5F8EC] px-2 py-1.5 text-[10px] font-semibold text-[#23834A] hover:bg-[#D5F0DF]"
+                                                >
+                                                    <PackagePlus size={11} />
+                                                    Restock
+                                                </button>
                                                 <button
                                                     type="button"
                                                     onClick={(event) => {

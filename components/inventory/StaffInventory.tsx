@@ -22,6 +22,7 @@ type StockLine = {
     category: string;
     stock: number;
     reorder: number;
+    expirationDate?: string | null;
     status: "In Stock" | "Low Stock" | "Out of Stock";
 };
 type ActivityRow = {
@@ -80,13 +81,29 @@ function safeDate(value: string) {
         month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila",
     });
 }
+
+// Keep the compact activity panel limited to the current Philippine business day.
+// The View All Activity dialog retains its existing selectable date range.
+function isActivityFromToday(value: string, today: string) {
+    if (!value) return false;
+    const parsed = new Date(value.includes(" ") ? value.replace(" ", "T") : value);
+    return !Number.isNaN(parsed.getTime()) && dateInManila(parsed) === today;
+}
+
+function inventoryExpirationLabel(value?: string | null) {
+    if (!value) return "—";
+    const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleDateString("en-US", {
+        month: "short", day: "numeric", year: "numeric",
+    });
+}
 function toStockLines(products: Product[]): StockLine[] {
     return products.flatMap(product => {
-        const from = (stockValue: number, reorderValue: number, name: string, reference: string, key: string, variantId: number | null): StockLine => {
+        const from = (stockValue: number, reorderValue: number, name: string, reference: string, key: string, variantId: number | null, expirationDate?: string | null): StockLine => {
             const stock = Math.max(0, Number(stockValue || 0));
             const reorder = Math.max(0, Number(reorderValue || 0));
             return {
-                key, variantId, product, reference: reference || "—", name, category: product.category || "Uncategorized", stock, reorder,
+                key, variantId, product, reference: reference || "—", name, category: product.category || "Uncategorized", stock, reorder, expirationDate,
                 status: stock <= 0 ? "Out of Stock" : stock <= reorder ? "Low Stock" : "In Stock",
             };
         };
@@ -94,10 +111,10 @@ function toStockLines(products: Product[]): StockLine[] {
             return product.variants.map(variant => {
                 const label = Object.values(variant.variantValues || {}).filter(Boolean).join(", ") || "Variant";
                 return from(variant.stock, variant.alertLevel, `${product.name} – ${label}`,
-                    variant.variantNumber || product.productNumber || "", `${product.id}:${variant.id}`, variant.id);
+                    variant.variantNumber || product.productNumber || "", `${product.id}:${variant.id}`, variant.id, variant.expirationDate);
             });
         }
-        return [from(product.stock, product.alertLevel, product.name, product.productNumber || "", `${product.id}:regular`, null)];
+        return [from(product.stock, product.alertLevel, product.name, product.productNumber || "", `${product.id}:regular`, null, product.expirationDate)];
     });
 }
 function stockBadge(status: StockLine["status"]) {
@@ -162,7 +179,6 @@ export default function StaffInventory() {
     const [category, setCategory] = React.useState("all");
     const [status, setStatus] = React.useState("all");
     const [taskFilter, setTaskFilter] = React.useState("all");
-    const [page, setPage] = React.useState(1);
     const [details, setDetails] = React.useState<StockLine | null>(null);
     const [showReceivingInfo, setShowReceivingInfo] = React.useState(false);
     const [canReceive, setCanReceive] = React.useState(false);
@@ -207,11 +223,11 @@ export default function StaffInventory() {
         [attention, taskFilter]);
     const reportsByKey = React.useMemo(() => new Set(shortageReports.map(r=>`${r.productId}:${r.variantId ?? "regular"}`)),
         [shortageReports]);
-    const pageSize = 25;
-    const pages = Math.max(1, Math.ceil(visible.length / pageSize));
-    const visiblePage = visible.slice((Math.min(page, pages) - 1) * pageSize, Math.min(page, pages) * pageSize);
-    React.useEffect(() => { setPage(1); }, [search, category, status]);
     const branch = inv.assignedBranchName || "Assigned Branch";
+    const todayActivities = React.useMemo(() => {
+        const today = dateInManila(now ?? new Date());
+        return activities.filter(item => isActivityFromToday(item.at, today));
+    }, [activities, now]);
 
     React.useEffect(() => {
         setNow(new Date());
@@ -393,26 +409,45 @@ export default function StaffInventory() {
                             <Stat label="Out of Stock" value={out.length} helper="Product variants with no available stock" color="bg-[#FFE7EB] text-[#CF3348]" icon={<Package size={19}/>}/>
                             <Stat label="Today's Stock Movements" value={activityLoading || activityError ? null : todayMovementCount} helper="Actual branch inventory movements today (PH time)" color="bg-[#E9F2FF] text-[#1E6FE8]" icon={<ArrowLeftRight size={19}/>}/>
                         </div>
-                        <div className="grid gap-4 xl:grid-cols-[1.15fr_1fr]">
-                            <section className={card}>
+                        <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
+                            {/* Manager-inspired table sizing, with Staff-only review actions. */}
+                            <section className={`${card} flex h-[470px] min-h-0 min-w-0 flex-col`}>
                                 <SectionHead icon={<ClipboardList size={18}/>} title="Stock Alerts to Review" subtitle="Low and out-of-stock products to verify or report.">
-                                    <select aria-label="Filter sales tasks" value={taskFilter} onChange={e=>setTaskFilter(e.target.value)} className={filterClass}>
+                                    <select aria-label="Filter sales tasks" value={taskFilter} onChange={e=>setTaskFilter(e.target.value)}
+                                            className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none">
                                         <option value="all">All Tasks</option><option value="Low Stock">Low Stock</option><option value="Out of Stock">Out of Stock</option>
                                     </select>
                                 </SectionHead>
-                                <div className="max-h-[330px] overflow-auto"><table className="w-full min-w-[580px] text-left text-xs">
-                                    <thead className="sticky top-0 bg-[#FFFDF8]"><tr><th className={headClass}>Product</th><th className={`${headClass} text-center`}>Stock</th><th className={`${headClass} text-center`}>Reorder</th><th className={headClass}>Task</th><th className={headClass}>Action</th></tr></thead>
-                                    <tbody>{tasks.slice(0,30).map(item=><tr key={item.key} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                                        <td className="px-3 py-3 font-medium">{item.name}</td><td className="px-3 py-3 text-center">{item.stock}</td><td className="px-3 py-3 text-center">{item.reorder}</td>
-                                        <td className="px-3 py-3"><span className={`rounded-lg px-2 py-1 ${stockBadge(item.status)}`}>{reportsByKey.has(item.key) ? "Reported" : item.status === "Out of Stock" ? "Report Shortage" : "Check / Report"}</span></td>
-                                        <td className="px-3 py-3"><button type="button" onClick={()=>setDetails(item)} className="rounded-lg border border-[#DCCBF2] bg-[#F8F5FF] px-3 py-1.5 font-semibold text-[#5932D8] hover:bg-[#EDE4FF]">Review</button></td>
-                                    </tr>)}</tbody></table>
-                                    {tasks.length===0 && <p className="py-10 text-center text-sm text-[#806A8C]">No stock tasks match this filter.</p>}
+                                <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden">
+                                    <table className="w-full table-fixed text-[10px] xl:text-[11px]">
+                                        <colgroup><col className="w-[36%]"/><col className="w-[11%]"/><col className="w-[12%]"/><col className="w-[23%]"/><col className="w-[18%]"/></colgroup>
+                                        <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
+                                            <th className="break-words px-2 py-2.5 text-left text-[9px] font-semibold uppercase text-[#806A8C]">Product</th>
+                                            <th className="break-words px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Current Stock</th>
+                                            <th className="break-words px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Reorder Point</th>
+                                            <th className="px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Task</th>
+                                            <th className="px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Action</th>
+                                        </tr></thead>
+                                        <tbody>{tasks.slice(0,30).map(item=><tr key={item.key} className="border-b border-[#EFE8F2] text-[#2B174C] last:border-b-0">
+                                            <td className="break-words px-3 py-2.5 font-semibold">{item.name}</td>
+                                            <td className="px-1 py-2.5 text-center font-semibold">{item.stock}</td>
+                                            <td className="px-1 py-2.5 text-center text-[#5F4E75]">{item.reorder}</td>
+                                            <td className="px-1 py-2.5 text-center">
+                                                <span className={`inline-flex max-w-full items-center justify-center break-words rounded-full px-2 py-1 text-center text-[10px] font-semibold leading-4 ${stockBadge(item.status)}`}>
+                                                    {reportsByKey.has(item.key) ? "Reported" : item.status === "Out of Stock" ? "Report Shortage" : "Check / Report"}
+                                                </span>
+                                            </td>
+                                            <td className="px-1.5 py-2.5 text-center">
+                                                <button type="button" onClick={()=>setDetails(item)} className="inline-flex w-full max-w-[110px] items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-[10px] font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">Review</button>
+                                            </td>
+                                        </tr>)}</tbody>
+                                    </table>
+                                    {tasks.length===0 && <p className="px-5 py-8 text-center text-sm text-[#8A7D90]">No stock tasks match this filter.</p>}
                                     {tasks.length>30 && <p className="border-t border-[#F0EAF4] px-4 py-2 text-xs text-[#806A8C]">Showing first 30 of {tasks.length} stock alerts. Use the branch inventory list to find more.</p>}
                                 </div>
                             </section>
-                            <section className={card}>
-                                <SectionHead icon={<Clock3 size={18}/>} title="Recent Stock Activity" subtitle="Latest branch transactions; setup balances are excluded.">
+                            <section className={`${card} flex h-[470px] min-h-0 min-w-0 flex-col`}>
+                                <SectionHead icon={<Clock3 size={18}/>} title="Recent Stock Activity" subtitle="Today's branch stock movements (Philippine time).">
                                     <button type="button" onClick={()=>{setActivityPage(1);setShowActivityHistory(true);}}
                                             disabled={activityLoading || !!activityError}
                                             className={`${outline} h-9 px-3 text-xs disabled:opacity-40`}>View All Activity</button>
@@ -422,15 +457,27 @@ export default function StaffInventory() {
                                     <button type="button" className="underline" onClick={()=>setActivityKey(key=>key+1)}>Retry</button>
                                 </div>}
                                 {activityLoading ? <div className="space-y-3 p-4" aria-busy="true" aria-label="Loading recent stock activity">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]"/>)}</div> :
-                                    <div className="max-h-[330px] overflow-auto"><table className="w-full text-left text-xs">
-                                        <thead className="sticky top-0 bg-[#FFFDF8]"><tr><th className={headClass}>Time</th><th className={headClass}>Product</th><th className={headClass}>Activity</th><th className={headClass}>Qty</th></tr></thead>
-                                        <tbody>{activities.map(item=><tr key={item.id} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                                            <td className="whitespace-nowrap px-3 py-3 text-[#806A8C]">{safeDate(item.at)}</td>
-                                            <td className="max-w-[180px] px-3 py-3"><span className="block truncate font-medium" title={item.item}>{item.item}</span>
-                                                <span className="block truncate text-[10px] text-[#8A7D90]" title={item.actorName}>By {item.actorName}</span></td>
-                                            <td className="px-3 py-3"><span className={`inline-block whitespace-nowrap rounded-lg px-2 py-1 ${activityBadge(item.kind)}`}>{item.kind}</span></td>
-                                            <td className={`whitespace-nowrap px-3 py-3 font-semibold ${item.quantity != null && item.quantity > 0 ? "text-[#218246]" : "text-[#5A476A]"}`}>{quantityLabel(item.quantity)}</td>
-                                        </tr>)}</tbody></table>{!activityError && activities.length===0&&<p className="py-10 text-center text-sm text-[#806A8C]">No recorded branch movements yet. Inventory setup records are kept in the database, but hidden here.</p>}</div>}
+                                    <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden">
+                                        <table className="w-full table-fixed text-[10px] xl:text-[11px]">
+                                            <colgroup><col className="w-[22%]"/><col className="w-[29%]"/><col className="w-[23%]"/><col className="w-[10%]"/><col className="w-[16%]"/></colgroup>
+                                            <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
+                                                <th className="break-words px-2 py-2.5 text-left text-[9px] font-semibold uppercase text-[#806A8C]">Date &amp; Time</th>
+                                                <th className="break-words px-2 py-2.5 text-left text-[9px] font-semibold uppercase text-[#806A8C]">Product</th>
+                                                <th className="break-words px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Movement</th>
+                                                <th className="px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Qty</th>
+                                                <th className="break-words px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Reference No.</th>
+                                            </tr></thead>
+                                            <tbody>{todayActivities.map(item=><tr key={item.id} className="border-b border-[#EFE8F2] text-[#2B174C] last:border-b-0">
+                                                <td className="break-words px-2 py-2.5 text-[#5F4E75]">{safeDate(item.at)}</td>
+                                                <td className="break-words px-2 py-2.5"><span className="block font-semibold" title={item.item}>{item.item}</span>
+                                                    <span className="mt-0.5 block break-words text-[10px] text-[#8A7D90]" title={item.actorName}>By {item.actorName}</span></td>
+                                                <td className="px-1 py-2.5 text-center"><span className={`inline-flex max-w-full items-center justify-center break-words rounded-full px-2 py-1 text-center text-[10px] font-semibold leading-4 ${activityBadge(item.kind)}`}>{item.kind}</span></td>
+                                                <td className={`px-1 py-2.5 text-center font-semibold ${item.quantity != null && item.quantity > 0 ? "text-[#23834A]" : item.quantity != null && item.quantity < 0 ? "text-[#D92C3F]" : "text-[#5A476A]"}`}>{quantityLabel(item.quantity)}</td>
+                                                <td className="break-all px-1 py-2.5 text-center text-[#5F4E75]" title={item.reference}>{item.reference}</td>
+                                            </tr>)}</tbody>
+                                        </table>
+                                        {!activityError && todayActivities.length===0 && <p className="px-5 py-8 text-center text-sm text-[#8A7D90]">No stock movements recorded today.</p>}
+                                    </div>}
                             </section>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
@@ -442,26 +489,31 @@ export default function StaffInventory() {
                         </div>
                         <section id="staff-sales-list" className={card}>
                             <SectionHead icon={<Package size={18}/>} title="Branch Sales Inventory List" subtitle={`Products available for daily stock operations · ${branch}`}>
-                                <div className="flex flex-wrap gap-2"><select aria-label="Filter categories" className={filterClass} value={category} onChange={e=>setCategory(e.target.value)}><option value="all">All Categories</option>
-                                    {categories.map(cat=><option key={cat} value={cat}>{cat}</option>)}</select>
-                                    <select aria-label="Filter stock statuses" className={filterClass} value={status} onChange={e=>setStatus(e.target.value)}><option value="all">All Status</option><option value="In Stock">In Stock</option><option value="Low Stock">Low Stock</option><option value="Out of Stock">Out of Stock</option></select></div>
-                            </SectionHead>
-                            <div className="max-h-[460px] overflow-auto"><table className="w-full min-w-[850px] text-left text-xs"><thead className="sticky top-0 bg-[#FFFDF8]"><tr>
-                                {['Product No.','Product','Category','Available Stock','Reorder Point','Status','Action'].map(label=><th key={label} className={headClass}>{label}</th>)}</tr></thead>
-                                <tbody>{visiblePage.map(item=><tr key={item.key} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                                    <td className="px-3 py-3 text-[#806A8C]">{item.reference}</td><td className="px-3 py-3 font-semibold">{item.name}</td><td className="px-3 py-3">{item.category}</td>
-                                    <td className="px-3 py-3 text-center">{item.stock}</td><td className="px-3 py-3 text-center">{item.reorder}</td>
-                                    <td className="px-3 py-3"><span className={`inline-flex min-w-[85px] justify-center rounded-lg px-2 py-1 ${stockBadge(item.status)}`}>{item.status}</span></td>
-                                    <td className="px-3 py-3"><button type="button" className="rounded-lg border border-[#DCCBF2] bg-[#F8F5FF] px-3 py-1.5 font-semibold text-[#5932D8]" onClick={()=>setDetails(item)}>View</button></td>
-                                </tr>)}</tbody></table>
-                                {visible.length===0 && <p className="py-10 text-center text-sm text-[#806A8C]">No products match your search or filters.</p>}</div>
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#E9E1EE] px-4 py-3">
-                                <p className="text-[11px] text-[#806A8C]">{visible.length} of {lines.length} product / variant records</p>
-                                <div className="flex items-center gap-2 text-xs text-[#5A476A]">
-                                    <button type="button" disabled={page<=1} className={`${outline} h-8 disabled:opacity-40`} onClick={()=>setPage(p=>Math.max(1,p-1))}>Previous</button>
-                                    <span>Page {Math.min(page,pages)} of {pages}</span>
-                                    <button type="button" disabled={page>=pages} className={`${outline} h-8 disabled:opacity-40`} onClick={()=>setPage(p=>Math.min(pages,p+1))}>Next</button>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <select aria-label="Filter categories" className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none" value={category} onChange={e=>setCategory(e.target.value)}><option value="all">All Categories</option>
+                                        {categories.map(cat=><option key={cat} value={cat}>{cat}</option>)}
+                                    </select>
+                                    <select aria-label="Filter stock statuses" className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none" value={status} onChange={e=>setStatus(e.target.value)}><option value="all">All Status</option><option value="In Stock">In Stock</option><option value="Low Stock">Low Stock</option><option value="Out of Stock">Out of Stock</option></select>
                                 </div>
+                            </SectionHead>
+                            <div className="max-h-[360px] w-full overflow-auto overscroll-contain" role="region" aria-label="Branch sales inventory list" tabIndex={0}>
+                                <table className="w-full min-w-[970px] table-fixed text-[10px] xl:text-[11px]">
+                                    <colgroup><col className="w-[12%]"/><col className="w-[23%]"/><col className="w-[15%]"/><col className="w-[11%]"/><col className="w-[11%]"/><col className="w-[12%]"/><col className="w-[10%]"/><col className="w-[6%]"/></colgroup>
+                                    <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
+                                        {['Product No.','Product','Category','Available Stock','Reorder Point','Expiration','Status','Action'].map((label,index)=><th key={label} className={`break-words px-2 py-2.5 text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C] ${index===1||index===2?'text-left':'text-center'}`}>{label}</th>)}
+                                    </tr></thead>
+                                    <tbody>{visible.map(item=><tr key={item.key} className="h-14 border-b border-[#EFE8F2] text-[#2B174C] last:border-b-0 hover:bg-[#FFFCF8]">
+                                        <td className="break-all px-2 py-2.5 text-center font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">{item.reference}</td>
+                                        <td className="break-words px-3 py-2.5 font-semibold">{item.name}</td>
+                                        <td className="break-words px-2 py-2.5 text-[#5F4E75]">{item.category}</td>
+                                        <td className="px-2 py-2.5 text-center font-semibold">{item.stock}</td>
+                                        <td className="px-2 py-2.5 text-center text-[#5F4E75]">{item.reorder}</td>
+                                        <td className="break-words px-2 py-2.5 text-center text-[#5F4E75]">{inventoryExpirationLabel(item.expirationDate)}</td>
+                                        <td className="px-1 py-2.5 text-center"><span className={`inline-flex max-w-full items-center justify-center rounded-full px-2 py-1 text-center text-[10px] font-semibold leading-4 ${stockBadge(item.status)}`}>{item.status}</span></td>
+                                        <td className="px-1 py-2.5 text-center"><button type="button" className="inline-flex max-w-full items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-[10px] font-semibold text-[#5330B6] hover:bg-[#ECE3FF]" onClick={()=>setDetails(item)}>View</button></td>
+                                    </tr>)}</tbody>
+                                </table>
+                                {visible.length===0 && <p className="py-10 text-center text-sm text-[#806A8C]">No products match your search or filters.</p>}
                             </div>
                         </section>
                     </div>}

@@ -994,7 +994,7 @@ function rentalInventoryPermission(permissions, role) {
     return "none";
 }
 
-const READ_ACTIONS = new Set(["get_manager_inventory","check_availability","get_rental_supplier_payables","get_rental_purchase_items"]);
+const READ_ACTIONS = new Set(["get_manager_inventory","check_availability","get_rental_supplier_payables","get_rental_purchase_items","get_owner_supplier_payables"]);
 const STAFF_READ_ACTIONS = new Set(["get_staff_rental_workspace","get_staff_equipment_schedule"]);
 const STAFF_WRITE_ACTIONS = new Set(["prepare_rental_allocation","release_rental_allocation",
     "return_rental_allocation","inspect_rental_allocation","clean_rental_allocation",
@@ -1032,6 +1032,28 @@ exports.handler = async (event) => {
         // Owners retain financial oversight. Catalog changes and physical repair approvals belong to managers.
         if(role==="owner" && !READ_ACTIONS.has(action) && !["pay_rental_supplier_purchase"].includes(action))
             fail(403,"Owner cannot perform branch equipment operations.");
+        // Owner-wide rental supplier balances (read-only; no branch selection required).
+        // Separate from the regular Sales Inventory supplier ledger.
+        if(action==="get_owner_supplier_payables") {
+            if(role!=="owner")fail(403,"Only the Owner may view all branch rental supplier balances.");
+            db=await dbPool.getConnection();
+            const [rows]=await db.execute(`SELECT p.id AS purchaseId,p.purchase_number AS purchaseNumber,
+                    p.supplier,b.branch_name AS branchName,p.purchase_total AS purchaseTotal,
+                    DATE_FORMAT(p.payment_due_date,'%Y-%m-%d') AS paymentDueDate,
+                    COALESCE((SELECT SUM(pay.amount) FROM rental_supplier_payments pay
+                              WHERE pay.purchase_id=p.id),0) AS amountPaid
+                FROM rental_purchase_transactions p
+                LEFT JOIN branches b ON b.id=p.branch_id AND b.store_id=p.store_id
+                WHERE p.store_id=? ORDER BY p.id DESC`,[storeId]);
+            const payables=rows.map(r=>{
+                const purchaseTotal=Number(r.purchaseTotal||0);
+                const amountPaid=Number(r.amountPaid||0);
+                const outstandingBalance=Math.max(0,Math.round((purchaseTotal-amountPaid)*100)/100);
+                return {...r,purchaseTotal,amountPaid,outstandingBalance,
+                    paymentStatus:outstandingBalance<0.005?"Paid":amountPaid>0?"Partially Paid":"Unpaid"};
+            });
+            return reply(200,{success:true,payables});
+        }
         // Resolve the manager's assigned branch from the verified manager record,
         // not from the browser's branch_id. Owner must select a store-owned branch.
         let branchId = role==="owner" ? id(body.branch_id||body.branchId,"Branch ID") : null;

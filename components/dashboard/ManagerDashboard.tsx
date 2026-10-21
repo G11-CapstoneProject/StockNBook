@@ -1274,6 +1274,7 @@ export default function ManagerDashboard() {
     const [mayReviewLeave, setMayReviewLeave] = useState(false);
     const [staffRecords, setStaffRecords] = useState<MDStaffAttendance[]>([]);
     const [managerAttendance, setManagerAttendance] = useState<MDManagerAttendance[]>([]);
+    const [selectedManagerLeave, setSelectedManagerLeave] = useState<MDManagerAttendance | null>(null);
     const [teamAttendance, setTeamAttendance] = useState<MDTeamAttendance[]>([]);
     const [myLogsOpen, setMyLogsOpen] = useState(false);
     const [teamAttendanceFilter, setTeamAttendanceFilter] = useState("month");
@@ -1284,6 +1285,9 @@ export default function ManagerDashboard() {
     // Match the Staff Attendance Log UI without changing the manager API workflow.
     const [managerAttendanceTab, setManagerAttendanceTab] = useState<"worked" | "exceptions">("worked");
     const [managerAttendanceRange, setManagerAttendanceRange] = useState<"month" | "90" | "all" | "day" | "custom">("month");
+    // Leave requests can be for future months. Show the complete leave history by default,
+    // independently of the Attendance tab's "This Month" selection.
+    const [managerLeaveAttendanceRange, setManagerLeaveAttendanceRange] = useState<"month" | "90" | "all" | "day" | "custom">("all");
     const [managerAttendanceDay, setManagerAttendanceDay] = useState(() => mdLocalDay(new Date()));
     const [managerAttendanceStart, setManagerAttendanceStart] = useState(() => mdLocalDay(new Date()));
     const [managerAttendanceEnd, setManagerAttendanceEnd] = useState(() => mdLocalDay(new Date()));
@@ -1413,7 +1417,8 @@ export default function ManagerDashboard() {
                     setStaffSummary(payload.attendanceSummary as MDStaffSummary);
                     setMayReviewLeave(payload.mayReviewLeave === true);
                     setStaffRecords(Array.isArray(payload.attendance) ? payload.attendance : []);
-                    setManagerAttendance(Array.isArray(payload.managerAttendance) ? payload.managerAttendance : []);
+                    setManagerAttendance(Array.isArray(payload.managerAttendance)
+                        ? payload.managerAttendance.map(mdEnrichManagerAttendance) : []);
                     setTeamAttendance(Array.isArray(payload.teamAttendance) ? payload.teamAttendance : []);
                     setManagerClockToday(payload.managerAttendanceToday || null);
                     setManagerClockError("");
@@ -1510,15 +1515,27 @@ export default function ManagerDashboard() {
     // Never generate attendance, absence, or leave records that do not exist.
     const myWorkedAttendance = managerAttendance.filter(row => Boolean(row.timeIn || row.timeOut));
     const myAttendanceExceptions = managerAttendance.filter(row => /absent|leave/i.test(row.status || ""));
-    const myAttendanceTabRecords = managerAttendanceTab === "worked" ? myWorkedAttendance : myAttendanceExceptions;
-    const myAttendanceLogRows = myAttendanceTabRecords.filter(row => {
-        const day = String(row.date || "").slice(0, 10);
-        if (managerAttendanceRange === "90") return day >= mdDatePlusDays(today, -89) && day <= today;
-        if (managerAttendanceRange === "day") return day === managerAttendanceDay;
-        if (managerAttendanceRange === "custom") return Boolean(managerAttendanceStart && managerAttendanceEnd &&
+    const matchesManagerLogRange = (row: MDManagerAttendance, range: "month" | "90" | "all" | "day" | "custom", exceptions: boolean) => {
+        // Use the submitted date when available; otherwise the recorded leave date.
+        const day = exceptions
+            ? (mdManagerLeaveRequestDate(row) || String(row.date || "").slice(0, 10))
+            : String(row.date || "").slice(0, 10);
+        if (range === "90") return day >= mdDatePlusDays(today, -89) && day <= today;
+        if (range === "day") return day === managerAttendanceDay;
+        if (range === "custom") return Boolean(managerAttendanceStart && managerAttendanceEnd &&
             managerAttendanceStart <= managerAttendanceEnd && day >= managerAttendanceStart && day <= managerAttendanceEnd);
-        return mdAttendanceInPeriod(day, managerAttendanceRange === "all" ? "all" : "month", today);
-    }).sort((a, b) => String(b.date).localeCompare(String(a.date)) || b.id - a.id);
+        return mdAttendanceInPeriod(day, range === "all" ? "all" : "month", today);
+    };
+    const activeManagerAttendanceRange = managerAttendanceTab === "exceptions" ? managerLeaveAttendanceRange : managerAttendanceRange;
+    const filteredMyLeaveAttendance = myAttendanceExceptions.filter(row =>
+        matchesManagerLogRange(row, managerLeaveAttendanceRange, true));
+    const myAttendanceTabRecords = managerAttendanceTab === "worked" ? myWorkedAttendance : filteredMyLeaveAttendance;
+    const myAttendanceLogRows = myAttendanceTabRecords.filter(row =>
+        managerAttendanceTab === "exceptions" || matchesManagerLogRange(row, managerAttendanceRange, false)).sort((a, b) => {
+        const first = managerAttendanceTab === "exceptions" ? mdManagerLeaveRequestDate(a) || a.date : a.date;
+        const second = managerAttendanceTab === "exceptions" ? mdManagerLeaveRequestDate(b) || b.date : b.date;
+        return String(second).localeCompare(String(first)) || b.id - a.id;
+    });
     const visibleTeamAttendance = teamAttendanceRows.filter(row =>
         mdAttendanceInPeriod(row.date, teamAttendanceFilter, today) &&
         `${row.employeeName} ${row.employeeId} ${row.status}`.toLowerCase().includes(teamAttendanceSearch.trim().toLowerCase())
@@ -1643,6 +1660,13 @@ export default function ManagerDashboard() {
         visibleTeamAttendance.map(row => [row.employeeName, String(row.employeeId), mdDisplayDate(row.date),
             mdClockTime(row.timeIn), mdClockTime(row.timeOut), mdHours(row.hoursWorked), row.status]),
         "manager_team_attendance", assignedBranchName, today);
+    const exportMyLeaveRequests = () => mdExportRows(
+        "My Absent / Leave Requests", ["Date Requested", "Leave Date / Range", "Type", "Reason", "Status", "Owner Response"],
+        myAttendanceLogRows.map(row => [mdManagerLeaveRequestDate(row) ? mdDisplayDate(mdManagerLeaveRequestDate(row)!) : "—",
+            mdManagerLeavePeriod(row), /absent/i.test(row.status) ? "Absent" : (row.leaveType || "Leave"),
+            row.reason || "—", row.approvalStatus || row.status,
+            row.decisionReason || "—"]),
+        "manager_my_leave_requests", assignedBranchName, today);
     const exportMyAttendance = (rows: MDManagerAttendance[] = visibleMyAttendance) => mdExportRows(
         "My Manager Attendance", ["Employee ID", "Date", "Time In", "Time Out", "Hours Worked", "Status"],
         rows.map(row => [
@@ -1678,7 +1702,7 @@ export default function ManagerDashboard() {
                     <p className="mt-1 text-[12px] text-[#7A6A84]">Operational stock and employee overview for {assignedBranchName}.</p>
                 </div>
                 <div className="flex gap-2.5">
-                    <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm"><CalendarDays size={15} className="mr-2 text-[#6D35D4]"/>{formatCurrentDashboardDateTime(currentDateTime)}</span>
+                    <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">{formatCurrentDashboardDateTime(currentDateTime)}</span>
                     <button type="button" onClick={() => void loadManagerDashboard()} disabled={isRefreshing} className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-60"><RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""}/>{isRefreshing ? "Refreshing..." : "Refresh"}</button>
                 </div>
             </div>
@@ -1689,25 +1713,21 @@ export default function ManagerDashboard() {
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     <ManagerMetricCard title="Low Stock" value={lowCount} subtitle="Items below reorder level" icon={<AlertTriangle size={24}/>} tone="orange" onClick={() => { setStockAlertFilter("low"); setShowStockAlertsModal(true); }}/>
                     <ManagerMetricCard title="Out of Stock" value={outCount} subtitle="Products without available stock" icon={<PackageX size={24}/>} tone="red" onClick={() => { setStockAlertFilter("out"); setShowStockAlertsModal(true); }}/>
-                    <div className="flex min-h-[116px] items-center gap-4 rounded-2xl border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
+                    <button type="button" onClick={() => router.push("/inventory")} title="Open Inventory to review rental maintenance"
+                            className="flex min-h-[116px] w-full items-center gap-4 rounded-2xl border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm transition hover:border-[#D7C9E3] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]">
                         <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#EAF1FF] text-[#2563EB]"><MdWrenchIcon/></span>
                         <div><p className="text-[14px] font-semibold text-[#4B3E55]">Under Maintenance</p><p className="mt-1 text-[28px] font-bold text-[#1A1220]">{rentalMaintenance === null ? "—" : rentalMaintenance}</p><p className="mt-2 text-[11px] text-[#8A7D92]">{rentalMaintenance === null ? "Rental condition data not connected" : "Rental units requiring maintenance"}</p></div>
-                    </div>
-                    <ManagerMetricCard title="Employees Requesting Leave" value={pendingLeaveEmployeeCount} subtitle={`${pendingLeaveApplicationCount} pending leave application(s)`} icon={<MDBellIcon/>} tone="violet" onClick={() => router.push("/manager/staff-management#employee-requests")}/>
+                    </button>
+                    <ManagerMetricCard title="Pending Leave Requests" value={pendingLeaveApplicationCount} subtitle={`${pendingLeaveApplicationCount} ${pendingLeaveApplicationCount === 1 ? "application" : "applications"} awaiting review`} icon={<MDBellIcon/>} tone="violet" onClick={() => router.push("/manager/staff-management#employee-requests")}/>
                 </div>
                 <div className="grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2 2xl:grid-cols-3">
                     <MDChartCard title="Inventory Health" subtitle="Current sales stock, including product variants"
                                  icon={<Box size={18}/>} segments={inventorySegments} total={inventoryHealth.total}
                                  centerLabel="Stock Lines" exportClick={exportStock}/>
-                    <div className="relative min-w-0">
+                    <div className="min-w-0">
                         <MDChartCard title="Employee Attendance" subtitle="Today's attendance for your branch staff"
                                      icon={<MDPeopleIcon/>} segments={donutSegments} total={staffSummary?.total ?? null}
-                                     centerLabel="Total Staff" exportClick={exportStaffAttendance} error={staffError} reserveFooter/>
-                        <button type="button" onClick={() => router.push("/manager/staff-management#employee-requests")}
-                                className="absolute bottom-2.5 left-4 right-4 flex items-center justify-between gap-2 rounded-lg border border-[#E9DDF4] bg-[#FAF7FE] px-3 py-2 text-[11px] font-semibold text-[#5D2DAB] hover:bg-[#F1E8FB]">
-                            <span className="truncate">Employees requesting leave</span>
-                            <span className="shrink-0 rounded-full bg-[#ECE0FC] px-2 py-0.5">{pendingLeaveEmployeeCount}</span>
-                        </button>
+                                     centerLabel="Total Staff" exportClick={exportStaffAttendance} error={staffError}/>
                     </div>
                     <section className="flex h-[360px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm lg:col-span-2 2xl:col-span-1" aria-label="My Attendance Log">
                         {/* Same Attendance Log design language as the Staff Dashboard. */}
@@ -1716,7 +1736,7 @@ export default function ManagerDashboard() {
                                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><CalendarClock size={19}/></span>
                                 <div className="min-w-0"><h2 className="text-[15px] font-bold text-[#21132E]">Attendance Log</h2><p className="mt-0.5 text-[11px] text-[#86778F]">Your attendance and leave history</p></div>
                             </div>
-                            <button type="button" onClick={() => exportMyAttendance(myAttendanceLogRows)}
+                            <button type="button" onClick={() => managerAttendanceTab === "exceptions" ? exportMyLeaveRequests() : exportMyAttendance(myAttendanceLogRows)}
                                     className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-[#D9CDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
                                 <MdDownload size={14}/>Export
                             </button>
@@ -1744,33 +1764,38 @@ export default function ManagerDashboard() {
                                 <button type="button" aria-pressed={managerAttendanceTab === "worked"} onClick={() => setManagerAttendanceTab("worked")}
                                         className={`pb-1 font-semibold ${managerAttendanceTab === "worked" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Attendance ({myWorkedAttendance.length})</button>
                                 <button type="button" aria-pressed={managerAttendanceTab === "exceptions"} onClick={() => setManagerAttendanceTab("exceptions")}
-                                        className={`pb-1 font-semibold ${managerAttendanceTab === "exceptions" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Absent / Leave ({myAttendanceExceptions.length})</button>
+                                        className={`pb-1 font-semibold ${managerAttendanceTab === "exceptions" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Absent / Leave ({filteredMyLeaveAttendance.length})</button>
                             </div>
-                            <select aria-label="Manager attendance date range" value={managerAttendanceRange}
-                                    onChange={e => setManagerAttendanceRange(e.target.value as "month" | "90" | "all" | "day" | "custom")}
+                            <select aria-label="Manager attendance date range" value={activeManagerAttendanceRange}
+                                    onChange={e => {
+                                        const range = e.target.value as "month" | "90" | "all" | "day" | "custom";
+                                        if (managerAttendanceTab === "exceptions") setManagerLeaveAttendanceRange(range);
+                                        else setManagerAttendanceRange(range);
+                                    }}
                                     className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[10px] font-semibold text-[#2B174C]">
-                                <option value="month">This Month</option><option value="90">Last 90 Days</option><option value="all">Available History</option>
+                                <option value="month">This Month</option><option value="90">Last 90 Days</option><option value="all">{managerAttendanceTab === "exceptions" ? "All Requests" : "Available History"}</option>
                                 <option value="day">Specific Date</option><option value="custom">Date Range</option>
                             </select>
                         </div>
-                        {(managerAttendanceRange === "day" || managerAttendanceRange === "custom") && <div className="flex shrink-0 flex-wrap gap-2 border-t border-[#EEE8F2] px-4 py-2 text-[11px] text-[#5A476A]">
-                            <label className="flex items-center gap-2">{managerAttendanceRange === "day" ? "Date" : "From"}
-                                <input type="date" aria-label={managerAttendanceRange === "day" ? "Specific manager attendance date" : "Manager attendance start date"}
-                                       value={managerAttendanceRange === "day" ? managerAttendanceDay : managerAttendanceStart}
-                                       onChange={e => managerAttendanceRange === "day" ? setManagerAttendanceDay(e.target.value) : setManagerAttendanceStart(e.target.value)}
+                        {((activeManagerAttendanceRange) === "day" ||
+                            (activeManagerAttendanceRange) === "custom") && <div className="flex shrink-0 flex-wrap gap-2 border-t border-[#EEE8F2] px-4 py-2 text-[11px] text-[#5A476A]">
+                            <label className="flex items-center gap-2">{(activeManagerAttendanceRange) === "day" ? "Date" : "From"}
+                                <input type="date" aria-label={(activeManagerAttendanceRange) === "day" ? "Specific manager attendance date" : "Manager attendance start date"}
+                                       value={(activeManagerAttendanceRange) === "day" ? managerAttendanceDay : managerAttendanceStart}
+                                       onChange={e => (activeManagerAttendanceRange) === "day" ? setManagerAttendanceDay(e.target.value) : setManagerAttendanceStart(e.target.value)}
                                        className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/>
                             </label>
-                            {managerAttendanceRange === "custom" && <label className="flex items-center gap-2">To
+                            {(activeManagerAttendanceRange) === "custom" && <label className="flex items-center gap-2">To
                                 <input type="date" aria-label="Manager attendance end date" min={managerAttendanceStart} value={managerAttendanceEnd}
                                        onChange={e => setManagerAttendanceEnd(e.target.value)} className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/>
                             </label>}
                         </div>}
                         <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
-                            <table className="w-full min-w-[410px] text-left text-[10px]">
+                            <table className={`w-full text-left text-[10px] ${managerAttendanceTab === "exceptions" ? "min-w-[300px]" : "min-w-[410px]"}`}>
                                 <thead className="sticky top-0 z-10 border-y border-[#EEE8F2] bg-[#FBF9FC] uppercase tracking-[0.04em] text-[#806A8C]">
                                 {managerAttendanceTab === "worked" ?
                                     <tr>{["Date", "Time In", "Time Out", "Hours", "Status"].map(label => <th key={label} className="px-3 py-2 font-semibold">{label}</th>)}</tr> :
-                                    <tr>{["Date", "Type", "Status"].map(label => <th key={label} className="px-3 py-2 font-semibold">{label}</th>)}</tr>}
+                                    <tr>{["Date", "Status", "View"].map(label => <th key={label} className="px-3 py-2 font-semibold">{label}</th>)}</tr>}
                                 </thead>
                                 <tbody>
                                 {myAttendanceLogRows.length === 0 ?
@@ -1785,8 +1810,9 @@ export default function ManagerDashboard() {
                                             <td className="whitespace-nowrap px-3 py-2">{row.timeOut ? mdHours(row.hoursWorked) : "—"}</td>
                                             <td className="px-3 py-2"><MDAttendanceBadge status={row.status}/></td>
                                         </> : <>
-                                            <td className="px-3 py-2 font-semibold">{/absent/i.test(row.status) ? "Absent" : (row.leaveType || "Leave")}</td>
                                             <td className="px-3 py-2">{row.approvalStatus ? <MDStatusBadge status={row.approvalStatus}/> : <MDAttendanceBadge status={row.status}/>}</td>
+                                            <td className="px-3 py-2"><button type="button" onClick={() => setSelectedManagerLeave(row)}
+                                                                              className="rounded-lg border border-[#D9C9EA] bg-[#F7F1FF] px-2.5 py-1.5 font-semibold text-[#5D2DAB] hover:bg-[#ECE3F8]">View</button></td>
                                         </>}
                                     </tr>)}
                                 </tbody>
@@ -1809,7 +1835,7 @@ export default function ManagerDashboard() {
                             </tr>)}{stockRows.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-[#8A7D92]">No matching stock alerts.</td></tr>}</tbody>
                         </table></div><p className="border-t border-[#EEE7F2] px-4 py-2 text-right text-[10px] text-[#8A7D92]">Showing {stockRows.length} of {attentionItems.length} items</p>
                     </MDPanel>
-                    <MDPanel title="Team Attendance" subtitle="Recorded staff attendance and approved leave" tall icon={<MDPeopleIcon/>}
+                    <MDPanel title="Team Attendance" subtitle="Recorded staff attendance and approved leave" tall inlineHeader icon={<MDPeopleIcon/>}
                              onExport={exportTeamAttendance} search={teamAttendanceSearch} setSearch={setTeamAttendanceSearch}
                              searchPlaceholder="Search employees..." headerActions={
                         <select aria-label="Filter team attendance by date" value={teamAttendanceFilter} onChange={e => setTeamAttendanceFilter(e.target.value)}
@@ -1880,6 +1906,36 @@ export default function ManagerDashboard() {
                 </div>
             </form>
         </div>}
+        {selectedManagerLeave && <div role="presentation" className="fixed inset-0 z-[95] flex items-center justify-center bg-[#160C24]/50 p-4 font-sans"
+                                      onMouseDown={event => { if (event.target === event.currentTarget) setSelectedManagerLeave(null); }}>
+            <section role="dialog" aria-modal="true" aria-label="Manager leave request details"
+                     className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl">
+                <div className="flex items-start justify-between border-b border-[#E9E1EE] px-5 py-4">
+                    <div><h2 className="text-[17px] font-bold text-[#21132E]">Absent / Leave Request Details</h2>
+                        <p className="mt-1 text-xs text-[#86778F]">Your request and the owner's decision</p></div>
+                    <button type="button" aria-label="Close leave request details" onClick={() => setSelectedManagerLeave(null)}
+                            className="rounded-lg p-1.5 text-[#806A8C] hover:bg-[#F7F1FF]"><MdX size={20}/></button>
+                </div>
+                <div className="max-h-[65vh] space-y-4 overflow-y-auto px-5 py-5">
+                    <div className="grid grid-cols-2 gap-4 rounded-xl bg-[#F9F6FC] p-4 text-xs">
+                        <div><p className="text-[#86778F]">Date Requested</p><p className="mt-1 font-semibold text-[#21132E]">{mdManagerLeaveRequestDate(selectedManagerLeave) ? mdDisplayDate(mdManagerLeaveRequestDate(selectedManagerLeave)!) : "Not available"}</p></div>
+                        <div><p className="text-[#86778F]">Leave Date / Range</p><p className="mt-1 font-semibold text-[#21132E]">{mdManagerLeavePeriod(selectedManagerLeave)}</p></div>
+                        <div><p className="text-[#86778F]">Leave Type</p><p className="mt-1 font-semibold text-[#21132E]">{/absent/i.test(selectedManagerLeave.status) ? "Absent" : (selectedManagerLeave.leaveType || "Leave")}</p></div>
+                        <div><p className="text-[#86778F]">Status</p><div className="mt-1">{selectedManagerLeave.approvalStatus ? <MDStatusBadge status={selectedManagerLeave.approvalStatus}/> : <MDAttendanceBadge status={selectedManagerLeave.status}/>}</div></div>
+                    </div>
+                    <div><p className="text-xs font-bold text-[#5A476A]">Your Reason</p>
+                        <p className="mt-1 whitespace-pre-wrap break-words rounded-xl border border-[#E9E1EE] px-3 py-3 text-sm text-[#21132E]">{selectedManagerLeave.reason || "No reason recorded."}</p></div>
+                    <div><p className="text-xs font-bold text-[#5A476A]">Owner's Response</p>
+                        <p className="mt-1 whitespace-pre-wrap break-words rounded-xl border border-[#E9E1EE] bg-[#F9F6FC] px-3 py-3 text-sm text-[#21132E]">{selectedManagerLeave.decisionReason || (selectedManagerLeave.approvalStatus === "Pending" ? "Awaiting the owner's decision." : "No owner response is available in the attendance data.")}</p>
+                        {selectedManagerLeave.reviewedAt && <p className="mt-2 text-[11px] text-[#86778F]">Decision recorded: {mdDisplayTimestamp(selectedManagerLeave.reviewedAt)}</p>}
+                    </div>
+                </div>
+                <div className="flex justify-end border-t border-[#E9E1EE] px-5 py-3">
+                    <button type="button" onClick={() => setSelectedManagerLeave(null)}
+                            className="rounded-xl border border-[#E3D8EA] px-4 py-2 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">Close</button>
+                </div>
+            </section>
+        </div>}
         {myLogsOpen && <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/45 px-4 py-6 font-sans" onMouseDown={() => setMyLogsOpen(false)}>
             <section role="dialog" aria-modal="true" aria-label="My Attendance Logs" onMouseDown={event => event.stopPropagation()}
                      className="flex max-h-[80vh] w-full max-w-[900px] flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl">
@@ -1907,7 +1963,10 @@ export default function ManagerDashboard() {
 /* Dashboard overview panels and staff leave workflow. Manager Inventory is unchanged. */
 type MDStaffSummary = { total: number; present: number; absent: number; onLeave: number; notRecorded: number };
 type MDStaffAttendance = { employeeId: number; employeeName: string; status: string; timeIn: string | null; timeOut: string | null };
-type MDManagerAttendance = { id: number; date: string; timeIn: string | null; timeOut: string | null; hoursWorked: number | null; status: string; leaveType?: string; approvalStatus?: string; reason?: string };
+type MDManagerAttendance = { id: number; date: string; timeIn: string | null; timeOut: string | null; hoursWorked: number | null;
+    status: string; leaveType?: string; approvalStatus?: string; reason?: string;
+    requestCreatedAt?: string | null; leaveEndDate?: string | null; decisionReason?: string | null;
+    reviewedAt?: string | null };
 type MDTeamAttendance = MDManagerAttendance & { employeeId: number; employeeName: string };
 function mdClockTime(value?: string | null): string {
     if (!value) return "—";
@@ -1934,6 +1993,35 @@ type MDLeaveGroup = { key: string; ids: number[]; employeeName: string; employee
     leaveType: string; dates: string[]; reason: string; status: string; decisionReason: string | null; createdAt: string };
 type MDPayable = { purchaseId: number; purchaseNumber: string; supplier: string; purchaseTotal: number;
     outstandingBalance: number; paymentDueDate: string | null };
+
+// The overview API may return the request/audit fields in camelCase or SQL snake_case.
+// Preserve existing attendance properties, and only enrich the requested leave details.
+function mdEnrichManagerAttendance(row: MDManagerAttendance): MDManagerAttendance {
+    const raw = toRecord(row);
+    return { ...row,
+        requestCreatedAt: readText(raw, ["requestCreatedAt", "request_created_at", "createdAt", "created_at", "submittedAt", "submitted_at", "requestedAt", "requested_at"]) || null,
+        leaveEndDate: readText(raw, ["leaveEndDate", "leave_end_date", "endDate", "end_date"]) || null,
+        leaveType: readText(raw, ["leaveType", "leave_type"]) || row.leaveType,
+        approvalStatus: readText(raw, ["approvalStatus", "approval_status"]) || row.approvalStatus,
+        reason: readText(raw, ["reason", "leaveReason", "leave_reason"]) || row.reason,
+        decisionReason: readText(raw, ["decisionReason", "decision_reason", "ownerResponse", "owner_response", "reviewReason", "review_reason", "reviewNotes", "review_notes", "reviewerRemarks", "reviewer_remarks"]) || null,
+        reviewedAt: readText(raw, ["reviewedAt", "reviewed_at", "decidedAt", "decided_at"]) || null,
+    };
+}
+function mdManagerLeaveRequestDate(row: MDManagerAttendance): string | null {
+    const match = String(row.requestCreatedAt || "").match(/^\d{4}-\d{2}-\d{2}/);
+    return match ? match[0] : null;
+}
+function mdManagerLeavePeriod(row: MDManagerAttendance): string {
+    const start = String(row.date || "").slice(0, 10);
+    const end = String(row.leaveEndDate || "").slice(0, 10);
+    if (!start) return "Not available";
+    return end && end !== start ? `${mdDisplayDate(start)} – ${mdDisplayDate(end)}` : mdDisplayDate(start);
+}
+function mdDisplayTimestamp(value: string): string {
+    const date = value.slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(date) ? mdDisplayDate(date) : value;
+}
 
 function mdLocalDay(date: Date) {
     const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
@@ -2040,15 +2128,15 @@ function MDStockBadge({ status }: { status: string }) {
         status.includes("Low") ? "bg-[#FFF3D8] text-[#B66A00]" : "bg-[#F1EBFF] text-[#6D35D4]";
     return <span className={`inline-flex rounded-full px-2 py-1 text-[9px] font-bold uppercase ${colors}`}>{status}</span>;
 }
-function MDPanel({ title, subtitle, icon, children, onExport, search, setSearch, searchPlaceholder, headerActions, tall = false }: {
+function MDPanel({ title, subtitle, icon, children, onExport, search, setSearch, searchPlaceholder, headerActions, tall = false, inlineHeader = false }: {
     title: string; subtitle: string; icon: React.ReactNode; children: React.ReactNode;
     onExport: () => void; search?: string; setSearch?: (value: string) => void; searchPlaceholder?: string;
-    headerActions?: React.ReactNode; tall?: boolean;
+    headerActions?: React.ReactNode; tall?: boolean; inlineHeader?: boolean;
 }) {
     return <section className={`flex min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm ${tall ? "h-[380px]" : "h-[320px]"}`}>
-        <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[#EEE7F2] px-4 py-3.5">
-            <div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><div className="min-w-0"><h2 className="text-[15px] font-bold text-[#1A1220]">{title}</h2><p className="mt-0.5 text-[11px] text-[#9A8DA8]">{subtitle}</p></div></div>
-            <div className="flex flex-wrap items-center gap-2">{setSearch && <div className="relative hidden sm:block"><MdSearch size={13} className="absolute left-2 top-2.5 text-[#806A8C]"/><input aria-label={`Search ${title}`} value={search || ""} onChange={e => setSearch(e.target.value)} className="h-8 w-40 rounded-lg border border-[#E6DDF0] pl-7 pr-2 text-[10px] outline-none focus:border-[#8B65B9]" placeholder={searchPlaceholder}/></div>}
+        <div className={`flex flex-wrap items-start justify-between gap-2 border-b border-[#EEE7F2] px-4 py-3.5 ${inlineHeader ? "xl:flex-nowrap xl:items-center" : ""}`}>
+            <div className={`flex min-w-0 items-center gap-2.5 ${inlineHeader ? "xl:flex-1" : ""}`}><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><div className="min-w-0"><h2 className={`text-[15px] font-bold text-[#1A1220] ${inlineHeader ? "xl:whitespace-nowrap" : ""}`}>{title}</h2><p className={`mt-0.5 text-[11px] text-[#9A8DA8] ${inlineHeader ? "xl:truncate" : ""}`}>{subtitle}</p></div></div>
+            <div className={`flex flex-wrap items-center gap-2 ${inlineHeader ? "xl:shrink-0 xl:flex-nowrap" : ""}`}>{setSearch && <div className="relative hidden sm:block"><MdSearch size={13} className="absolute left-2 top-2.5 text-[#806A8C]"/><input aria-label={`Search ${title}`} value={search || ""} onChange={e => setSearch(e.target.value)} className={`h-8 rounded-lg border border-[#E6DDF0] pl-7 pr-2 text-[10px] outline-none focus:border-[#8B65B9] ${inlineHeader ? "w-36 xl:w-32" : "w-40"}`} placeholder={searchPlaceholder}/></div>}
                 {headerActions}
                 <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={onExport} className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
             </div>

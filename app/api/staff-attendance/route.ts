@@ -222,7 +222,9 @@ export async function GET(request: NextRequest) {
                 NULL AS timeIn, NULL AS timeOut, NULL AS hoursWorked,
                 'Leave' AS status, reason, leave_type AS leaveType,
                 approval_status AS approvalStatus,
-                DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS requestCreatedAt
+                DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS requestCreatedAt,
+                decision_reason AS decisionReason,
+                DATE_FORMAT(reviewed_at, '%Y-%m-%d %H:%i:%s') AS reviewedAt
             FROM stocknbook_staff_leave_requests
             WHERE employee_id = ? AND employee_role = 'staff'
               AND store_id = ? AND branch_id = ? ${leavePeriodSql}

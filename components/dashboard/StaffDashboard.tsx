@@ -1663,7 +1663,7 @@ function StaffSkeletonBar({ className = "" }: { className?: string }) {
 
 function StaffMetricSkeleton() {
     return (
-        <div className="flex min-h-[114px] items-center gap-3 rounded-[16px] border border-[#E7DFEC] bg-white px-4 py-4 shadow-sm">
+        <div className="flex min-h-[128px] items-center gap-4 rounded-2xl border border-[#E9E0EF] bg-white px-5 py-4 shadow-sm">
             <div className="h-14 w-14 shrink-0 rounded-full bg-[#EEE9F4]" />
             <div className="min-w-0 flex-1">
                 <StaffSkeletonBar className="h-[14px] w-28" />
@@ -1947,39 +1947,34 @@ type StaffActionToastMessage = {
     tone?: "success" | "error";
 };
 
-/** Same placement, colors, dismiss and fade timing as Manager Inventory notifications. */
+/** Visually and behaviorally matched to the Manager Dashboard notification. */
 function StaffActionToast({ toast, onClose }: {
     toast: StaffActionToastMessage | null;
     onClose: () => void;
 }) {
-    const [isFadingOut, setIsFadingOut] = React.useState(false);
-    React.useEffect(() => {
-        if (!toast) { setIsFadingOut(false); return; }
-        setIsFadingOut(false);
-        const fadeTimer = window.setTimeout(() => setIsFadingOut(true), 5000);
-        const closeTimer = window.setTimeout(onClose, 5600);
-        return () => { window.clearTimeout(fadeTimer); window.clearTimeout(closeTimer); };
+    useEffect(() => {
+        if (!toast) return;
+        const timer = window.setTimeout(onClose, 5500);
+        return () => window.clearTimeout(timer);
     }, [toast, onClose]);
     if (!toast) return null;
     const isError = toast.tone === "error";
-    return <div role="status" aria-live="polite" className={[
-        "fixed bottom-5 right-5 z-[160] flex w-[min(360px,calc(100vw-2.5rem))] items-start gap-3 rounded-2xl border bg-white p-4 shadow-[0_18px_42px_rgba(43,23,76,0.22)] transition-all duration-700 ease-out",
-        isError ? "border-[#F4BFC5]" : "border-[#BCE8CA]",
-        isFadingOut ? "translate-y-3 opacity-0" : "translate-y-0 opacity-100",
-    ].join(" ")}>
-        <span className={[
-            "mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
-            isError ? "bg-[#FFE7EA] text-[#D92C3F]" : "bg-[#E5F8EC] text-[#23834A]",
-        ].join(" ")}>
-            {isError ? <AlertTriangle size={20} strokeWidth={2.4} /> : <CheckCircle2 size={20} strokeWidth={2.4} />}
-        </span>
-        <div className="min-w-0 flex-1">
-            <p className="text-sm font-bold text-[#1A1220]">{toast.title}</p>
-            <p className="mt-0.5 text-xs leading-5 text-[#6A5D6F]">{toast.message}</p>
+    return (
+        <div role="status" aria-live="polite"
+             className={`fixed bottom-5 right-5 z-[180] flex w-[min(360px,calc(100vw-2rem))] items-center gap-3 rounded-2xl border bg-white p-4 shadow-xl ${isError ? "border-[#F4BFC5]" : "border-[#BCE8CA]"}`}>
+            <span className={`rounded-full p-2 ${isError ? "bg-red-50 text-red-700" : "bg-green-50 text-green-700"}`}>
+                {isError ? <AlertTriangle size={19}/> : <CheckCircle2 size={20}/>}
+            </span>
+            <div className="min-w-0 flex-1">
+                <p className="text-sm font-bold text-[#1A1220]">{toast.title}</p>
+                <p className="mt-0.5 text-xs text-[#806A8C]">{toast.message}</p>
+            </div>
+            <button type="button" onClick={onClose} aria-label="Dismiss notification"
+                    className="shrink-0 text-[#806A8C] transition hover:text-[#2B174C]">
+                <X size={18}/>
+            </button>
         </div>
-        <button type="button" onClick={onClose} aria-label="Dismiss notification"
-                className="shrink-0 text-lg leading-none text-[#9B8AAA] transition hover:text-[#2B174C]">×</button>
-    </div>;
+    );
 }
 
 export default function StaffDashboard() {
@@ -2463,7 +2458,7 @@ export default function StaffDashboard() {
         }));
 
         const expiryTasks = allExpirationAlertItems
-            .filter((item) => item.status === "Expired" || item.daysRemaining <= 7)
+            .filter((item) => item.status === "Expired" || item.daysRemaining <= EXPIRING_SOON_DAYS)
             .map((item) => ({
                 id: `expiry-${item.id}`,
                 productId: item.productId,
@@ -2965,33 +2960,34 @@ export default function StaffDashboard() {
 
     return (
         <>
-            <header className="sticky top-0 z-20 border-b border-[#E9E1EE] bg-[#FFFDF8]/95 font-sans backdrop-blur">
-                <div className="flex min-h-[85px] flex-wrap items-center justify-between gap-3 px-5 py-3 lg:px-6">
+            <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
+                <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
                     <div className="min-w-0">
-                        <h1 className="text-[25px] font-bold tracking-tight text-[#21132E]">Staff Dashboard</h1>
-                        <p className="mt-0.5 text-xs text-[#86778F]">{greeting}, {staffFirstName}. Work requiring attention in your branch, based on your access.</p>
+                        <h1 className="text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">Staff Dashboard</h1>
+                        <p className="mt-1 text-[12px] text-[#7A6A84]">{greeting}, {staffFirstName}. Work requiring attention in your branch, based on your access.</p>
                     </div>
-                    <div className="flex items-center gap-2">
-                        <span className="inline-flex h-9 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] shadow-sm">
-                            <CalendarDays size={15}/>{formatCurrentDashboardDateTime(currentDateTime)}
+                    <div className="flex items-center gap-2.5">
+                        <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
+                            {formatCurrentDashboardDateTime(currentDateTime)}
                         </span>
                         <button type="button" onClick={() => void loadStaffDashboard()} disabled={isRefreshing}
                                 title="Refresh dashboard" aria-label="Refresh dashboard"
-                                className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#2B174C] px-3 text-xs font-semibold text-white hover:bg-[#432764] disabled:opacity-50">
-                            <RefreshCw size={15} className={isRefreshing ? "animate-spin" : ""}/> Refresh
+                                className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-60">
+                            <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""}/>
+                            {isRefreshing ? "Refreshing..." : "Refresh"}
                         </button>
                     </div>
                 </div>
             </header>
-            <main aria-busy={!hasLoadedDashboard} className="min-h-[calc(100vh-85px)] bg-[#FFFDF8] px-5 py-5 font-sans lg:px-6">
+            <main aria-busy={!hasLoadedDashboard} className="min-h-[calc(100vh-88px)] bg-[#FFFDF8] px-6 py-5 font-sans">
                 {!hasLoadedDashboard ? <StaffDashboardSkeleton /> : (
                     <div className="mx-auto space-y-4">
                         {bookingsError && <p role="alert" className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] p-3 text-xs text-[#B42318]">{bookingsError}</p>}
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                            <SalesSummaryCard title="Products to Allocate" value={confirmedForAllocation === null ? "—" : String(confirmedForAllocation)} subtitle={confirmedForAllocation === null ? "Booking access not granted" : "Confirmed bookings needing preparation"} icon={<Package size={23}/>} tone="violet"/>
-                            <SalesSummaryCard title="Stock Alerts" value={showInventoryAlerts === null ? "—" : String(showInventoryAlerts)} subtitle={showInventoryAlerts === null ? "Inventory access not granted" : "Low and out-of-stock items"} icon={<AlertTriangle size={23}/>} tone="red"/>
-                            <SalesSummaryCard title="Rental Inspections" value="—" subtitle="Connect assigned return inspections" icon={<Search size={23}/>} tone="blue"/>
-                            <SalesSummaryCard title="Bookings to Review" value={needsReview === null ? "—" : String(needsReview)} subtitle={needsReview === null ? "Booking access not granted" : "Pending booking requirements"} icon={<CalendarCheck size={23}/>} tone="green"/>
+                            <SalesSummaryCard title="Products to Allocate" value={confirmedForAllocation === null ? "—" : String(confirmedForAllocation)} subtitle={confirmedForAllocation === null ? "Booking access not granted" : "Confirmed bookings needing preparation"} icon={<Package size={24}/>} tone="violet"/>
+                            <SalesSummaryCard title="Stock Alerts" value={showInventoryAlerts === null ? "—" : String(showInventoryAlerts)} subtitle={showInventoryAlerts === null ? "Inventory access not granted" : "Low and out-of-stock items"} icon={<AlertTriangle size={24}/>} tone="red"/>
+                            <SalesSummaryCard title="Rental Inspections" value="—" subtitle="Connect assigned return inspections" icon={<Search size={24}/>} tone="blue"/>
+                            <SalesSummaryCard title="Bookings to Review" value={needsReview === null ? "—" : String(needsReview)} subtitle={needsReview === null ? "Booking access not granted" : "Pending booking requirements"} icon={<CalendarCheck size={24}/>} tone="green"/>
                         </div>
                         <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
                             <StaffWorkTable
@@ -3022,8 +3018,7 @@ export default function StaffDashboard() {
             {expiryReview && (() => {
                 const product = products.find(entry => entry.id === expiryReview.productId);
                 return product ? <StaffExpiredStockReviewDialog
-                    alert={expiryReview} product={product} onClose={() => setExpiryReview(null)}
-                    onNotify={showStaffToast} /> : null;
+                    alert={expiryReview} product={product} onClose={() => setExpiryReview(null)} /> : null;
             })()}
             {directRestock && <StaffReceiveStockDialog
                 product={directRestock.product}
@@ -3078,20 +3073,14 @@ function SalesSummaryCard({
     const style = toneStyles[tone];
 
     return (
-        <div className="flex min-h-[116px] items-center gap-4 rounded-[16px] bg-white px-5 py-4 shadow-sm">
-      <span
-          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] ${style.background} ${style.icon}`}
-      >
-        {icon}
-      </span>
-            <div className="min-w-0">
-                <p className="text-[12px] font-semibold leading-5 text-[#4B3E55]">
-                    {title}
-                </p>
-                <p className="mt-1 truncate text-[25px] font-bold leading-none tracking-tight text-[#21132E]">
-                    {value}
-                </p>
-                <p className="mt-1 text-[11px] leading-4 text-[#86778F]">{subtitle}</p>
+        <div className="flex min-h-[116px] w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
+            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}>
+                {icon}
+            </span>
+            <div className="min-w-0 flex-1">
+                <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">{title}</p>
+                <p className="mt-1 truncate text-[28px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">{value}</p>
+                <p className="mt-2 text-[11px] leading-4 text-[#8A7D92]">{subtitle}</p>
             </div>
         </div>
     );
@@ -5711,12 +5700,12 @@ function StaffWorkTable({
         }), [operations, moduleFilter, priorityFilter]);
     const modules = [...new Set(operations.map((item) => item.source))];
 
-    return <section className="flex h-[540px] min-w-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
-            <div className="flex min-w-0 items-start gap-3">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><ClipboardList size={18}/></span>
-                <div><h2 className="text-[15px] font-bold text-[#21132E]">Today&apos;s Work</h2>
-                    <p className="mt-0.5 text-[11px] text-[#86778F]">Inventory and booking tasks requiring staff action.</p></div>
+    return <section className="flex h-[540px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#EEE7F2] px-4 py-3.5">
+            <div className="flex min-w-0 items-center gap-2.5">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]"><ClipboardList size={19}/></span>
+                <div><h2 className="text-[15px] font-bold text-[#1A1220]">Today&apos;s Work</h2>
+                    <p className="mt-0.5 text-[11px] text-[#9A8DA8]">Inventory and booking tasks requiring staff action.</p></div>
             </div>
             <div className="flex flex-wrap items-end gap-2">
                 <label className="flex flex-col gap-1 text-[10px] font-medium text-[#806A8C]">Module
@@ -5735,10 +5724,10 @@ function StaffWorkTable({
             </div>
         </div>
         <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
-            <table className="w-full min-w-[605px] table-fixed text-[10px] xl:text-[11px]">
+            <table className="w-full min-w-[605px] table-fixed text-[11px]">
                 <colgroup><col className="w-[31%]"/><col className="w-[15%]"/><col className="w-[21%]"/><col className="w-[14%]"/><col className="w-[19%]"/></colgroup>
-                <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
-                <tr className="border-b border-[#E9E1EE]">
+                <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
+                <tr className="border-b border-[#EEE7F2]">
                     {[["Task", false], ["Module", false], ["Reference No.", false], ["Priority", true], ["Action", true]].map(([label, center]) =>
                         <th key={String(label)} className={`px-2.5 py-2.5 text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C] ${center ? "text-center" : "text-left"}`}>{label}</th>)}
                 </tr>
@@ -5752,12 +5741,12 @@ function StaffWorkTable({
                     const mayChange = booking ? canManageBookings : inventory && !expiry ? canRestockInventory : false;
                     const isExpired = expiry && /expired/i.test(item.status);
                     const action = booking ? /pending|awaiting/i.test(item.status) ? "Review" : /confirm/i.test(item.status) ? "Allocate" : "Prepare"
-                        : isExpired ? "Review / Remove" : expiry ? "Prioritize Sale" : "Restock";
+                        : isExpired ? "View Alert" : expiry ? "Prioritize Sale" : "Restock";
                     const moduleName = booking ? "Bookings" : item.source === "rental" ? "Rentals" : inventory ? "Inventory" : "Sales / POS";
                     const priority = item.priority || "Medium";
                     const badge = priority === "High" ? "bg-[#FFE7EA] text-[#D92C3F]" : priority === "Medium" ? "bg-[#FFF2D3] text-[#C77A00]" : "bg-[#E8F2FF] text-[#3372BA]";
                     const taskText = booking ? action === "Allocate" ? "Allocate products for confirmed booking" : action === "Review" ? "Review booking requirements" : "Prepare booking items"
-                        : isExpired ? "Review / remove expired stock" : expiry ? "Review expiring stock" : "Restock low-stock item";
+                        : isExpired ? "Check expired stock — do not sell" : expiry ? "Prioritize sale before expiry" : "Restock low-stock item";
                     const referenceNo = String(item.reference || "").trim();
                     const onAction = () => {
                         if (booking) {
@@ -5779,7 +5768,7 @@ function StaffWorkTable({
                         <td className="px-1.5 py-2.5 text-center align-middle"><span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold ${badge}`}>{priority}</span></td>
                         <td className="px-2 py-2.5 text-center align-middle">
                             {canAct ? <button type="button" onClick={onAction} disabled={inventory && !expiry && canRestockInventory && !item.productId}
-                                              className="inline-flex w-full max-w-[118px] items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-center text-[10px] font-semibold leading-4 text-[#5330B6] transition hover:bg-[#ECE3FF] disabled:opacity-50">
+                                              className="inline-flex w-full max-w-[118px] items-center justify-center rounded-lg border border-[#D9C9EA] bg-[#F7F1FF] px-2 py-1.5 text-center text-[11px] font-semibold leading-4 text-[#5D2DAB] transition hover:bg-[#ECE3F8] disabled:opacity-50">
                                 {mayChange || expiry ? action : "View"}</button> : <span className="text-[#9A8DA8]">—</span>}
                         </td>
                     </tr>;
@@ -5804,66 +5793,65 @@ type StaffAuthorizedReceipt = {
     notes?: string | null;
 };
 
-// Staff are allowed to inspect expired SALES inventory but only a Manager/Owner
-// may archive or permanently delete it. This is the same review visual as Manager
-// Stock Action Center without exposing privileged delete API calls to Staff.
-function StaffExpiredStockReviewDialog({ alert, product, onClose, onNotify }: {
+// Staff can review expiration notices without changing or disposing of inventory.
+// Expiring items can be prioritized for sale while valid; expired items remain blocked.
+function StaffExpiredStockReviewDialog({ alert, product, onClose }: {
     alert: ExpirationAlertItem;
     product: Product;
     onClose: () => void;
-    onNotify: (notification: StaffActionToastMessage) => void;
 }) {
-    const variant = alert.variantId == null ? null : (product.variants || []).find(value => value.id === alert.variantId);
-    const salesPrice = variant?.salesPrice ?? product.salesPrice;
-    const alertLevel = variant?.alertLevel ?? variant?.alert_level ?? product.alertLevel;
     const expired = alert.status === "Expired";
     const date = formatDashboardExpirationDate(alert.expirationDate);
-    const moneyOrDash = (value?: number | null) => value == null ? "—" : `₱${Number(value).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     const itemLabel = `${alert.productName}${alert.variantName ? ` — ${alert.variantName}` : ""}`;
+    const daysLabel = expired
+        ? `${Math.abs(alert.daysRemaining)} day(s) overdue`
+        : alert.daysRemaining === 0
+            ? "Expires today"
+            : `${alert.daysRemaining} day(s) left`;
+
     return <div role="presentation" className="fixed inset-0 z-[150] flex items-center justify-center bg-black/50 px-3 py-5 font-sans"
                 onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
         <section role="dialog" aria-modal="true" aria-labelledby="staff-stock-review-title"
-                 className="flex max-h-[92vh] w-full max-w-[738px] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-            <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[#E9E1EE] px-6 py-4">
+                 className="flex max-h-[92vh] w-full max-w-[560px] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[#E9E1EE] px-5 py-4">
                 <div className="flex min-w-0 items-center gap-3">
                     <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#5A35A5]"><ClipboardList size={20}/></span>
-                    <div><h2 id="staff-stock-review-title" className="text-lg font-bold text-[#21132E]">
-                        {expired ? "Review / Remove Affected Item" : "Prioritize Sale — Affected Item Review"}</h2>
-                        <p className="mt-1 text-xs text-[#806A8C]">Review the affected inventory before taking action.</p></div>
+                    <h2 id="staff-stock-review-title" className="text-lg font-bold text-[#21132E]">
+                        {expired ? "Expired Stock Alert" : "Expiring Soon — Prioritize Sale"}
+                    </h2>
                 </div>
-                <button type="button" onClick={onClose} aria-label="Close stock review" className="text-xl text-[#806A8C] hover:text-[#2B174C]"><X size={18}/></button>
+                <button type="button" onClick={onClose} aria-label="Close stock review" className="shrink-0 text-[#806A8C] hover:text-[#2B174C]"><X size={18}/></button>
             </header>
-            <div className="min-h-0 space-y-5 overflow-y-auto px-6 py-5">
-                <div className={`rounded-xl border p-4 ${expired ? "border-[#F2C7CC] bg-[#FFF3F4]" : "border-[#E3D8EA] bg-[#F8F3FF]"}`}>
-                    <p className={`text-sm font-bold ${expired ? "text-[#B42335]" : "text-[#4E2C66]"}`}>
-                        {expired ? "Expired stock — do not sell" : "Expiring soon — prioritize sale"}</p>
-                    <p className="mt-1 text-xs leading-5 text-[#5A476A]">{expired
-                        ? "This item is past its recorded expiration date. Review the stock and follow the business's disposal procedure before any removal."
-                        : "This item is approaching its recorded expiration date. Review it for lawful prioritization or appropriate stock handling."}</p>
+            <div className="min-h-0 space-y-4 overflow-y-auto px-5 py-5">
+                <div>
+                    <h3 className="text-base font-bold text-[#21132E]">{itemLabel}</h3>
+                    <p className="mt-1 text-xs text-[#806A8C]">Product No. {getStaffProductNumber(product) || "—"}</p>
                 </div>
-                <div><h3 className="text-base font-bold text-[#21132E]">{itemLabel}</h3>
-                    <p className="mt-1 text-xs text-[#806A8C]">Product No. {getStaffProductNumber(product) || "—"}</p></div>
-                <div className="grid grid-cols-1 gap-x-5 gap-y-4 rounded-xl border border-[#E9E1EE] bg-[#FFFCF8] p-4 sm:grid-cols-2">
+                <div className={`rounded-xl border p-4 ${expired ? "border-[#F2C7CC] bg-[#FFF3F4]" : "border-[#F4D79A] bg-[#FFF9EB]"}`}>
+                    <p className={`text-sm font-bold ${expired ? "text-[#B42335]" : "text-[#A56607]"}`}>
+                        {expired ? "Do Not Sell" : "Prioritize Sale Before Expiry"}
+                    </p>
+                    <p className="mt-1 text-xs leading-5 text-[#5A476A]">
+                        {expired
+                            ? "This item has expired. Keep it out of sales and notify your manager."
+                            : "This item is nearing its expiration date. Prioritize sales only while it is still safe and permitted for sale."}
+                    </p>
+                </div>
+                <div className="grid grid-cols-1 gap-3 rounded-xl border border-[#E9E1EE] bg-[#FFFCF8] p-4 sm:grid-cols-3">
                     {[
-                        ["Category", product.category || "—"], ["Branch", alert.branchName],
-                        ["Affected Stock", `${alert.stock.toLocaleString("en-PH")} pcs`], ["Reorder Point", alertLevel != null ? `${alertLevel} pcs` : "—"],
-                        ["Expiration Date", date], ["Expiration Status", expired ? `${Math.abs(alert.daysRemaining)} day(s) overdue` : `${alert.daysRemaining} day(s) left`],
-                        ["Unit Cost", "Manager only"], ["Selling Price", moneyOrDash(salesPrice)],
-                        ["Sales Velocity", "—"], ["Affected Stock Value (Cost)", "Manager only"],
+                        ["Affected Quantity", `${alert.stock.toLocaleString("en-PH")} pcs`],
+                        ["Expiration Date", date],
+                        ["Expiration Status", daysLabel],
                     ].map(([label, value]) => <div key={label}>
                         <p className="text-[11px] text-[#806A8C]">{label}</p>
                         <p className="mt-1 text-sm font-semibold text-[#2B174C]">{value}</p>
                     </div>)}
                 </div>
-                <p className="rounded-xl border border-[#E9E1EE] bg-[#FAF8FD] p-3 text-xs leading-5 text-[#806A8C]">
-                    Staff may review affected sales inventory. Only an authorized Manager or Owner may delete or archive products or variants.
-                </p>
             </div>
-            <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-[#E9E1EE] bg-white px-6 py-4">
-                <button type="button" onClick={onClose} className="rounded-xl border border-[#E3D8EA] px-4 py-2.5 text-sm font-semibold text-[#2B174C]">Keep Item</button>
-                <button type="button" onClick={() => onNotify({ title: "Manager approval required", message: "Staff cannot delete or archive inventory. Ask your manager to review this affected item.", tone: "error" })}
+            <footer className="flex shrink-0 items-center justify-end border-t border-[#E9E1EE] bg-white px-5 py-4">
+                <button type="button" onClick={onClose}
                         className="rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#1B0D31]">
-                    Review Delete / Archive
+                    Understood
                 </button>
             </footer>
         </section>
@@ -6064,6 +6052,8 @@ type StaffAttendanceRecord = {
     date: string;
     endDate?: string;
     requestCreatedAt?: string;
+    decisionReason?: string;
+    reviewedAt?: string;
     timeIn: string | null;
     timeOut: string | null;
     hoursWorked: number | null;
@@ -6089,6 +6079,8 @@ function formatAttendanceRecord(value: unknown): StaffAttendanceRecord {
         date: get(["date", "attendanceDate", "attendance_date", "leave_date"]),
         endDate: get(["endDate", "end_date", "leave_end_date"]) || undefined,
         requestCreatedAt: get(["requestCreatedAt", "createdAt", "created_at"]) || undefined,
+        decisionReason: get(["decisionReason", "decision_reason"]) || undefined,
+        reviewedAt: get(["reviewedAt", "reviewed_at"]) || undefined,
         timeIn: timeIn || null, timeOut: timeOut || null,
         hoursWorked: hours !== null && Number.isFinite(hours) ? hours : null,
         status: get(["status", "attendance_status"]) || "Unknown",
@@ -6480,11 +6472,16 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
     const [error, setError] = useState("");
     const [tab, setTab] = useState<"worked" | "exceptions">("worked");
     const [range, setRange] = useState<"month" | "90" | "all" | "day" | "custom">("month");
+    const [leaveRange, setLeaveRange] = useState<"month" | "90" | "all" | "day" | "custom">("all");
     const [filterDay, setFilterDay] = useState(() => formatLocalIsoDate(new Date()));
     const [filterStart, setFilterStart] = useState(() => formatLocalIsoDate(new Date()));
     const [filterEnd, setFilterEnd] = useState(() => formatLocalIsoDate(new Date()));
+    const [leaveFilterDay, setLeaveFilterDay] = useState(() => formatLocalIsoDate(new Date()));
+    const [leaveFilterStart, setLeaveFilterStart] = useState(() => formatLocalIsoDate(new Date()));
+    const [leaveFilterEnd, setLeaveFilterEnd] = useState(() => formatLocalIsoDate(new Date()));
     const [todayAttendance, setTodayAttendance] = useState<StaffAttendanceRecord | null>(null);
     const [leaveOpen, setLeaveOpen] = useState(false);
+    const [selectedLeaveRequest, setSelectedLeaveRequest] = useState<StaffAttendanceRecord | null>(null);
     const [leaveMode, setLeaveMode] = useState<"single" | "range">("single");
     const [leaveDate, setLeaveDate] = useState("");
     const [leaveEndDate, setLeaveEndDate] = useState("");
@@ -6534,7 +6531,24 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
         const status = record.status.toLowerCase();
         return status.includes("absent") || status.includes("leave") || status === "pending" || status === "rejected";
     });
-    const filtered = tab === "worked" ? worked : exceptions;
+    // Match the Manager Dashboard: leave history uses the submission date when
+    // available, while attendance keeps its own independent date-range filter.
+    const filteredExceptions = exceptions.filter((record) => {
+        const requestedDay = String(record.requestCreatedAt || record.date || "").slice(0, 10);
+        if (leaveRange === "all") return true;
+        if (leaveRange === "month") return requestedDay.slice(0, 7) === today.slice(0, 7);
+        if (leaveRange === "90") {
+            const start = formatLocalIsoDate(new Date(
+                currentDateTime.getFullYear(), currentDateTime.getMonth(), currentDateTime.getDate() - 89,
+            ));
+            return requestedDay >= start && requestedDay <= today;
+        }
+        if (leaveRange === "day") return requestedDay === leaveFilterDay;
+        return Boolean(leaveFilterStart && leaveFilterEnd && leaveFilterStart <= leaveFilterEnd &&
+            requestedDay >= leaveFilterStart && requestedDay <= leaveFilterEnd);
+    });
+    const filtered = tab === "worked" ? worked : filteredExceptions;
+    const activeRange = tab === "worked" ? range : leaveRange;
 
     const postAction = async (action: "time_in" | "time_out" | "request_leave") => {
         const token = getSavedItem("token");
@@ -6598,10 +6612,10 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
         } finally { setExportPending(false); }
     };
 
-    return <section className="flex h-[540px] min-w-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+    return <section className="flex h-[540px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
-            <div className="flex min-w-0 items-start gap-3">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><Clock3 size={18}/></span>
+            <div className="flex min-w-0 items-center gap-2.5">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><CalendarClock size={19}/></span>
                 <div><h2 className="text-[15px] font-bold text-[#21132E]">Attendance Log</h2><p className="mt-0.5 text-[11px] text-[#86778F]">Your attendance and leave history</p></div>
             </div>
             <button type="button" onClick={() => void exportAttendance()} disabled={exportPending || loading || Boolean(error)}
@@ -6620,32 +6634,59 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
             <button type="button" onClick={() => void postAction("time_out")} disabled={actionPending || loading || !onDuty || Boolean(error)}
                     className="inline-flex h-9 items-center justify-center gap-1 rounded-xl bg-[#FDECEC] px-1 text-[11px] font-semibold text-[#B42318] hover:bg-[#FBE0E0] disabled:opacity-50"><LogOut size={15}/>Time Out</button>
             <button type="button" onClick={() => {setError(""); setLeaveOpen(true);}} disabled={actionPending}
-                    className="inline-flex h-9 items-center justify-center gap-1 rounded-xl border border-[#D9CDF0] bg-[#F9F6FC] px-1 text-[11px] font-semibold text-[#5A35A5] hover:bg-[#F1EBFF]"><CalendarX2 size={15}/>Request Leave</button>
+                    className="inline-flex h-9 items-center justify-center gap-1 rounded-xl border border-[#D9CDF0] bg-[#F9F6FC] px-1 text-[11px] font-semibold text-[#5A35A5] hover:bg-[#F1EBFF]"><CalendarDays size={15}/>Request Leave</button>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#EEE8F2] px-4 py-2">
             <div className="flex items-center gap-3 text-[11px]">
                 <button type="button" onClick={() => setTab("worked")} aria-pressed={tab === "worked"} className={`pb-1 font-semibold ${tab === "worked" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Attendance ({worked.length})</button>
-                <button type="button" onClick={() => setTab("exceptions")} aria-pressed={tab === "exceptions"} className={`pb-1 font-semibold ${tab === "exceptions" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Absent / Leave ({exceptions.length})</button>
+                <button type="button" onClick={() => setTab("exceptions")} aria-pressed={tab === "exceptions"} className={`pb-1 font-semibold ${tab === "exceptions" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Absent / Leave ({filteredExceptions.length})</button>
             </div>
-            {tab === "exceptions" ?
-                <span className="rounded-lg border border-[#E3D8EA] bg-[#F8F5FC] px-2.5 py-2 text-[10px] font-semibold text-[#5A476A]" title="All leave applications, including past and upcoming requests">All Leave Requests</span> :
-                <select aria-label="Attendance date range" value={range} onChange={(event) => setRange(event.target.value as "month" | "90" | "all" | "day" | "custom")}
-                        className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[10px] font-semibold text-[#2B174C]"><option value="month">This Month</option><option value="90">Last 90 Days</option><option value="all">All Records</option><option value="day">Specific Date</option><option value="custom">Date Range</option></select>}
+            <select aria-label={tab === "exceptions" ? "Leave request date range" : "Attendance date range"}
+                    value={activeRange}
+                    onChange={(event) => {
+                        const selectedRange = event.target.value as "month" | "90" | "all" | "day" | "custom";
+                        if (tab === "exceptions") setLeaveRange(selectedRange);
+                        else setRange(selectedRange);
+                    }}
+                    className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[10px] font-semibold text-[#2B174C]">
+                <option value="month">This Month</option>
+                <option value="90">Last 90 Days</option>
+                <option value="all">{tab === "exceptions" ? "All Requests" : "All Records"}</option>
+                <option value="day">Specific Date</option>
+                <option value="custom">Date Range</option>
+            </select>
         </div>
-        {tab === "worked" && (range === "day" || range === "custom") && <div className="flex flex-wrap gap-2 border-t border-[#EEE8F2] px-4 py-2 text-[11px] text-[#5A476A]">
-            <label className="flex items-center gap-2">{range === "day" ? "Date" : "From"}<input aria-label={range === "day" ? "Specific attendance date" : "Attendance start date"} type="date" value={range === "day" ? filterDay : filterStart}
-                                                                                                 onChange={(event) => range === "day" ? setFilterDay(event.target.value) : setFilterStart(event.target.value)} className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/></label>
-            {range === "custom" && <label className="flex items-center gap-2">To<input aria-label="Attendance end date" type="date" min={filterStart} value={filterEnd} onChange={(event) => setFilterEnd(event.target.value)} className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/></label>}
+        {(activeRange === "day" || activeRange === "custom") && <div className="flex flex-wrap gap-2 border-t border-[#EEE8F2] px-4 py-2 text-[11px] text-[#5A476A]">
+            <label className="flex items-center gap-2">{activeRange === "day" ? "Date" : "From"}
+                <input aria-label={tab === "exceptions" ? (activeRange === "day" ? "Specific leave request date" : "Leave request start date") : (activeRange === "day" ? "Specific attendance date" : "Attendance start date")}
+                       type="date"
+                       value={tab === "exceptions" ? (activeRange === "day" ? leaveFilterDay : leaveFilterStart) : (activeRange === "day" ? filterDay : filterStart)}
+                       onChange={(event) => {
+                           if (tab === "exceptions") {
+                               if (activeRange === "day") setLeaveFilterDay(event.target.value);
+                               else setLeaveFilterStart(event.target.value);
+                           } else if (activeRange === "day") setFilterDay(event.target.value);
+                           else setFilterStart(event.target.value);
+                       }}
+                       className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/>
+            </label>
+            {activeRange === "custom" && <label className="flex items-center gap-2">To
+                <input aria-label={tab === "exceptions" ? "Leave request end date" : "Attendance end date"}
+                       type="date" min={tab === "exceptions" ? leaveFilterStart : filterStart}
+                       value={tab === "exceptions" ? leaveFilterEnd : filterEnd}
+                       onChange={(event) => tab === "exceptions" ? setLeaveFilterEnd(event.target.value) : setFilterEnd(event.target.value)}
+                       className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/>
+            </label>}
         </div>}
         {error && <div role="alert" className="mx-4 mb-2 rounded-lg bg-[#FFF0F0] px-3 py-2 text-[11px] text-[#B42318]">{error} <button type="button" className="ml-1 underline" onClick={() => void loadAttendance()}>Retry</button></div>}
         <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
-            <table className="w-full min-w-[410px] text-left text-[10px]">
+            <table className={`w-full text-left text-[10px] ${tab === "worked" ? "min-w-[410px]" : "min-w-[300px]"}`}>
                 <thead className="sticky top-0 z-10 border-y border-[#EEE8F2] bg-[#FBF9FC] uppercase tracking-[0.04em] text-[#806A8C]">
                 {tab === "worked" ? <tr><th className="px-3 py-2 font-semibold">Date</th><th className="px-3 py-2 font-semibold">Time In</th><th className="px-3 py-2 font-semibold">Time Out</th><th className="px-3 py-2 font-semibold">Hours</th><th className="px-3 py-2 font-semibold">Status</th></tr>
-                    : <tr><th className="px-3 py-2 font-semibold">Date</th><th className="px-3 py-2 font-semibold">Type</th><th className="px-3 py-2 font-semibold">Reason</th><th className="px-3 py-2 font-semibold">Status</th></tr>}
+                    : <tr><th className="px-3 py-2 font-semibold">Date</th><th className="px-3 py-2 font-semibold">Status</th><th className="px-3 py-2 font-semibold">Action</th></tr>}
                 </thead>
                 <tbody>
-                {loading ? <tr><td colSpan={5} className="px-3 py-10 text-center text-[#86778F]">Loading attendance...</td></tr> : filtered.length === 0 ? <tr><td colSpan={5} className="px-3 py-10 text-center text-[#86778F]">{tab === "worked" ? "No attendance records for this period." : "No absences or leave requests recorded."}</td></tr>
+                {loading ? <tr><td colSpan={tab === "worked" ? 5 : 3} className="px-3 py-10 text-center text-[#86778F]">Loading attendance...</td></tr> : filtered.length === 0 ? <tr><td colSpan={tab === "worked" ? 5 : 3} className="px-3 py-10 text-center text-[#86778F]">{tab === "worked" ? "No attendance records for this period." : "No absences or leave requests recorded."}</td></tr>
                     : filtered.map((record, index) => <tr key={`${record.id}-${record.date}-${index}`} className="border-b border-[#F1ECF4] last:border-0 hover:bg-[#FCFAFE]">
                         {tab === "worked" ? <>
                             <td className="whitespace-nowrap px-3 py-2 text-[#5A476A]">{staffAttendanceDay(record.date)}</td>
@@ -6655,14 +6696,47 @@ function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber
                             <td className="px-3 py-2"><span className={`rounded-lg px-2 py-1 font-semibold ${record.timeOut ? "bg-[#E7F7ED] text-[#147D43]" : "bg-[#FFF4DF] text-[#A86905]"}`}>{staffAttendanceStatus(record)}</span></td>
                         </> : <>
                             <td className="whitespace-nowrap px-3 py-2 text-[#5A476A]">{staffAttendanceDay(record.date)}{record.endDate && record.endDate !== record.date ? ` – ${staffAttendanceDay(record.endDate)}` : ""}</td>
-                            <td className="px-3 py-2 font-semibold">{record.leaveType || staffAttendanceStatus(record)}</td>
-                            <td className="max-w-[190px] break-words px-3 py-2" title={record.reason}>{record.reason || "—"}</td>
                             <td className="px-3 py-2"><span className={`inline-flex rounded-lg px-2 py-1 font-semibold ${staffLeaveStatusStyle(staffLeaveStatus(record))}`}>{staffLeaveStatus(record)}</span></td>
+                            <td className="px-3 py-2"><button type="button" onClick={() => setSelectedLeaveRequest(record)}
+                                                              className="rounded-lg border border-[#D9C9EA] bg-[#F7F1FF] px-2.5 py-1.5 font-semibold text-[#5D2DAB] hover:bg-[#ECE3F8]">View</button></td>
                         </>}
                     </tr>)}
                 </tbody>
             </table>
         </div>
+        {selectedLeaveRequest && <div role="presentation" className="fixed inset-0 z-[95] flex items-center justify-center bg-[#160C24]/50 p-4 font-sans"
+                                      onMouseDown={event => { if (event.target === event.currentTarget) setSelectedLeaveRequest(null); }}>
+            <section role="dialog" aria-modal="true" aria-label="Staff leave request details"
+                     className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl">
+                <div className="flex items-start justify-between border-b border-[#E9E1EE] px-5 py-4">
+                    <div><h2 className="text-[17px] font-bold text-[#21132E]">Absent / Leave Request Details</h2>
+                        <p className="mt-1 text-xs text-[#86778F]">Your request and the manager's decision</p></div>
+                    <button type="button" aria-label="Close leave request details" onClick={() => setSelectedLeaveRequest(null)}
+                            className="rounded-lg p-1.5 text-[#806A8C] hover:bg-[#F7F1FF]"><X size={20}/></button>
+                </div>
+                <div className="max-h-[65vh] space-y-4 overflow-y-auto px-5 py-5">
+                    <div className="grid grid-cols-2 gap-4 rounded-xl bg-[#F9F6FC] p-4 text-xs">
+                        <div><p className="text-[#86778F]">Date Requested</p>
+                            <p className="mt-1 font-semibold text-[#21132E]">{selectedLeaveRequest.requestCreatedAt ? staffAttendanceDay(selectedLeaveRequest.requestCreatedAt) : "Not available"}</p></div>
+                        <div><p className="text-[#86778F]">Leave Date / Range</p>
+                            <p className="mt-1 font-semibold text-[#21132E]">{staffAttendanceDay(selectedLeaveRequest.date)}{selectedLeaveRequest.endDate && selectedLeaveRequest.endDate !== selectedLeaveRequest.date ? ` – ${staffAttendanceDay(selectedLeaveRequest.endDate)}` : ""}</p></div>
+                        <div><p className="text-[#86778F]">Leave Type</p>
+                            <p className="mt-1 font-semibold text-[#21132E]">{selectedLeaveRequest.leaveType || (staffAttendanceStatus(selectedLeaveRequest) === "Absent" ? "Absent" : "Leave")}</p></div>
+                        <div><p className="text-[#86778F]">Status</p><div className="mt-1"><span className={`inline-flex rounded-lg px-2 py-1 font-semibold ${staffLeaveStatusStyle(staffLeaveStatus(selectedLeaveRequest))}`}>{staffLeaveStatus(selectedLeaveRequest)}</span></div></div>
+                    </div>
+                    <div><p className="text-xs font-bold text-[#5A476A]">Your Reason</p>
+                        <p className="mt-1 whitespace-pre-wrap break-words rounded-xl border border-[#E9E1EE] px-3 py-3 text-sm text-[#21132E]">{selectedLeaveRequest.reason || "No reason recorded."}</p></div>
+                    <div><p className="text-xs font-bold text-[#5A476A]">Manager's Response</p>
+                        <p className="mt-1 whitespace-pre-wrap break-words rounded-xl border border-[#E9E1EE] bg-[#F9F6FC] px-3 py-3 text-sm text-[#21132E]">{selectedLeaveRequest.decisionReason || (staffLeaveStatus(selectedLeaveRequest).toLowerCase() === "pending" ? "Awaiting the manager's decision." : "No manager response was recorded.")}</p>
+                        {selectedLeaveRequest.reviewedAt && <p className="mt-2 text-[11px] text-[#86778F]">Decision recorded: {staffAttendanceDay(selectedLeaveRequest.reviewedAt)}</p>}
+                    </div>
+                </div>
+                <div className="flex justify-end border-t border-[#E9E1EE] px-5 py-3">
+                    <button type="button" onClick={() => setSelectedLeaveRequest(null)}
+                            className="rounded-xl border border-[#E3D8EA] px-4 py-2 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">Close</button>
+                </div>
+            </section>
+        </div>}
         {leaveOpen && <div role="presentation" className="fixed inset-0 z-[90] flex items-center justify-center bg-[#160C24]/50 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setLeaveOpen(false); }}>
             <form onSubmit={(event) => { event.preventDefault(); if (leaveDate && (leaveMode === "single" || (leaveEndDate && leaveEndDate >= leaveDate)) && leaveReason.trim()) void postAction("request_leave"); }}
                   className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5 shadow-xl">

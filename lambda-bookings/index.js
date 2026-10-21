@@ -279,12 +279,12 @@ function rentalTodayManila() {
 }
 async function rentalOverlapAllocations(connection,{storeId,branchId,equipmentId,from,to}) {
     const [rows]=await connection.execute(`SELECT quantity,status,
-        DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
-        DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
-        FROM rental_booking_allocations
-        WHERE store_id=? AND branch_id=? AND equipment_id=?
-          AND status IN ('reserved','checked_out')
-          AND start_date<=? AND (end_date>=? OR status='checked_out')`,
+                                                  DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
+                                                  DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
+                                           FROM rental_booking_allocations
+                                           WHERE store_id=? AND branch_id=? AND equipment_id=?
+                                             AND status IN ('reserved','checked_out')
+                                             AND start_date<=? AND (end_date>=? OR status='checked_out')`,
         [storeId,branchId,equipmentId,to,from]);
     return rows;
 }
@@ -1821,22 +1821,22 @@ exports.handler = async (event) => {
                 [targetStoreId,requestedBranch]);
             if(!branches.length)return response(404,{error:"Branch not found for this store."});
             const [items]=await connection.execute(`SELECT id,name,rental_rate_per_day AS dailyRate,
-                    total_units AS totalUnits,rented_out_units AS rentedOutUnits,
-                    maintenance_units AS maintenanceUnits,missing_units AS missingUnits
-                FROM rental_equipment WHERE store_id=? AND branch_id=? AND archived_at IS NULL
-                    AND rental_rate_per_day>0 AND total_units>maintenance_units+missing_units
-                ORDER BY name LIMIT 200`,[targetStoreId,requestedBranch]);
+                                                           total_units AS totalUnits,rented_out_units AS rentedOutUnits,
+                                                           maintenance_units AS maintenanceUnits,missing_units AS missingUnits
+                                                    FROM rental_equipment WHERE store_id=? AND branch_id=? AND archived_at IS NULL
+                                                                            AND rental_rate_per_day>0 AND total_units>maintenance_units+missing_units
+                                                    ORDER BY name LIMIT 200`,[targetStoreId,requestedBranch]);
             const allocationsByEquipment=new Map();
             if(withDates && items.length){
                 const ids=items.map(e=>Number(e.id));
                 const placeholders=ids.map(()=>'?').join(',');
                 const [allocations]=await connection.execute(`SELECT equipment_id AS equipmentId,quantity,status,
-                        DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
-                        DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
-                    FROM rental_booking_allocations
-                    WHERE store_id=? AND branch_id=? AND equipment_id IN (${placeholders})
-                        AND status IN ('reserved','checked_out')
-                        AND start_date<=? AND (end_date>=? OR status='checked_out')`,
+                                                                     DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
+                                                                     DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
+                                                              FROM rental_booking_allocations
+                                                              WHERE store_id=? AND branch_id=? AND equipment_id IN (${placeholders})
+                                                                AND status IN ('reserved','checked_out')
+                                                                AND start_date<=? AND (end_date>=? OR status='checked_out')`,
                     [targetStoreId,requestedBranch,...ids,endDate,startDate]);
                 for(const allocation of allocations){
                     const id=Number(allocation.equipmentId);
@@ -2520,6 +2520,167 @@ exports.handler = async (event) => {
                     cashRecovered:Number(claims[0].recoveredCash),depositsApplied:Number(claims[0].appliedDeposits),
                     outstandingClaims:Number(claims[0].outstanding)}});
         }
+        // ── OWNER: realized booking goods revenue / rankings ──────────────────
+        // Read only. Uses completed bookings and their persisted financial snapshots.
+        // Physical rental lines are part of bookings, not a second independent sale.
+        // Do not include refundable deposits, uncompleted bookings, or payment receipts
+        // again; the Owner dashboard already counts each completed booking once.
+        if (action === "get_owner_dashboard_financial_summary") {
+            if (tokenRole !== "owner") return response(403, { error: "Owner access required." });
+            const parts = new Intl.DateTimeFormat("en-CA", {
+                timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit"
+            }).formatToParts(new Date());
+            const part = name => parts.find(p => p.type === name)?.value || "";
+            const today = `${part("year")}-${part("month")}-${part("day")}`;
+            const currentMonth = today.slice(0, 7);
+            const yearStart = `${part("year")}-01-01`;
+            const monthIndex = Number(part("month")) - 1;
+            const quarterStart = `${part("year")}-${String(Math.floor(monthIndex / 3) * 3 + 1).padStart(2,"0")}-01`;
+            const periodStarts = { month: `${currentMonth}-01`, quarter: quarterStart, year: yearStart };
+            const periods = ["month", "quarter", "year"];
+            // One query per underlying relation, not one query per booking/branch.
+            const [bookingsForSummary] = await connection.execute(`
+                SELECT b.id, b.package_name AS packageName, b.booking_type AS bookingType,
+                       b.agreed_price AS agreedPrice,
+                       DATE_FORMAT(b.event_date,'%Y-%m-%d') AS eventDate,
+                       f.booking_id AS financialRecordId,
+                       f.package_base AS packageBase,
+                       f.rental_subtotal AS rentalSubtotal,
+                       f.delivery_fee AS deliveryFee, f.setup_fee AS setupFee
+                FROM bookings b
+                         LEFT JOIN booking_financial_details f
+                                   ON f.booking_id=b.id AND f.store_id=b.store_id AND f.branch_id=b.branch_id
+                WHERE b.store_id=? AND LOWER(TRIM(b.status))='completed'
+                  AND b.event_date >= ? AND b.event_date <= ?
+                ORDER BY b.event_date DESC,b.id DESC`, [store_id, yearStart, today]);
+            const [salesLines] = await connection.execute(`
+                SELECT bi.booking_id AS bookingId,
+                       COALESCE(SUM(CASE WHEN LOWER(TRIM(bi.source_type))='custom'
+                                             THEN bi.estimated_subtotal ELSE 0 END),0) AS customSales,
+                       COALESCE(SUM(CASE WHEN LOWER(TRIM(bi.source_type))='package'
+                                             THEN bi.booked_quantity ELSE 0 END),0) AS packageUnits
+                FROM booking_items bi JOIN bookings b
+                                           ON b.id=bi.booking_id AND b.store_id=bi.store_id AND b.branch_id=bi.branch_id
+                WHERE b.store_id=? AND LOWER(TRIM(b.status))='completed'
+                  AND b.event_date >= ? AND b.event_date <= ?
+                GROUP BY bi.booking_id`, [store_id, yearStart, today]);
+            const [rentalLines] = await connection.execute(`
+                SELECT ri.booking_id AS bookingId,ri.equipment_id AS equipmentId,
+                       ri.equipment_name AS equipmentName,ri.quantity,
+                       ri.agreed_line_total AS lineRevenue
+                FROM booking_rental_items ri JOIN bookings b
+                                                  ON b.id=ri.booking_id AND b.store_id=ri.store_id AND b.branch_id=ri.branch_id
+                WHERE b.store_id=? AND LOWER(TRIM(b.status))='completed'
+                  AND b.event_date >= ? AND b.event_date <= ?`, [store_id, yearStart, today]);
+
+            const salesByBooking = new Map(salesLines.map(r => [String(r.bookingId), r]));
+            const rentalsByBooking = new Map();
+            for (const line of rentalLines) {
+                const key = String(line.bookingId);
+                if (!rentalsByBooking.has(key)) rentalsByBooking.set(key, []);
+                rentalsByBooking.get(key).push(line);
+            }
+            const money = v => Math.round(Number(v || 0) * 100) / 100;
+            const topBookingPackages = {month:[],quarter:[],year:[]};
+            const topRentedProducts = {month:[],quarter:[],year:[]};
+            const packageMaps = Object.fromEntries(periods.map(p => [p,new Map()]));
+            const rentalMaps = Object.fromEntries(periods.map(p => [p,new Map()]));
+            let bookingConsumable = 0, bookingRental = 0, bookingTotal = 0;
+            let unverifiedBookings = 0, completedThisMonth = 0;
+            const reasons = new Set();
+
+            for (const b of bookingsForSummary) {
+                const bookedDate = String(b.eventDate || "").slice(0,10);
+                const bookingId = String(b.id);
+                const agreed = money(b.agreedPrice);
+                const savedLines = rentalsByBooking.get(bookingId) || [];
+                const rentalQuote = money(savedLines.reduce((sum,line) => sum + Number(line.lineRevenue || 0),0));
+                const itemSnapshot = salesByBooking.get(bookingId) || {};
+                const packageBase = money(b.packageBase);
+                const customSales = money(itemSnapshot.customSales);
+                const declaredRental = money(b.rentalSubtotal);
+                const fees = money(Number(b.deliveryFee || 0) + Number(b.setupFee || 0));
+                const expected = money(packageBase + customSales + declaredRental + fees);
+                const isVerified = b.financialRecordId != null && agreed >= 0 &&
+                    Math.abs(agreed-expected) <= 0.01 &&
+                    Math.abs(rentalQuote-declaredRental) <= 0.01 &&
+                    fees <= 0.005 &&
+                    (packageBase <= 0.005 || Number(itemSnapshot.packageUnits || 0) > 0);
+                const inMonth = bookedDate >= periodStarts.month;
+                if (inMonth) {
+                    completedThisMonth++;
+                    bookingTotal = money(bookingTotal + agreed);
+                    if (isVerified) {
+                        bookingConsumable = money(bookingConsumable + packageBase + customSales);
+                        bookingRental = money(bookingRental + declaredRental);
+                    } else {
+                        unverifiedBookings++;
+                        if (b.financialRecordId == null) reasons.add("Some completed bookings have no financial snapshot.");
+                        else if (fees > 0) reasons.add("Service fees need their own revenue category.");
+                        else if (Math.abs(agreed-expected)>0.01) reasons.add("Some booking totals do not reconcile to item charges.");
+                        else if (Math.abs(rentalQuote-declaredRental)>0.01) reasons.add("Rental charges do not reconcile to saved rental items.");
+                        else reasons.add("Some package inclusions cannot be classified reliably.");
+                    }
+                }
+                for (const period of periods) {
+                    if (bookedDate < periodStarts[period]) continue;
+                    // Only count the portion of the booking attributed to its package,
+                    // not separately billed rental or custom items a second time.
+                    const type = String(b.bookingType || "").toLowerCase();
+                    const packageName = String(b.packageName || "").trim();
+                    if (packageName && !type.includes("custom") && !packageName.toLowerCase().includes("custom")) {
+                        const earnedPackage = b.financialRecordId != null ? packageBase :
+                            (rentalQuote <= 0.005 ? agreed : 0);
+                        if (earnedPackage > 0) {
+                            const key = packageName.toLowerCase();
+                            const old = packageMaps[period].get(key) || {key,name:packageName,bookings:0,revenue:0};
+                            old.bookings += 1;
+                            old.revenue = money(old.revenue + earnedPackage);
+                            packageMaps[period].set(key,old);
+                        }
+                    }
+                    // The stored equipment-level charge is the source for top rentals.
+                    // Do not attribute the same rental booking's revenue to packages again.
+                    for (const line of savedLines) {
+                        const key = String(line.equipmentId);
+                        const old = rentalMaps[period].get(key) || {
+                            key,name:String(line.equipmentName || `Equipment #${key}`),
+                            rentals:0,revenue:0
+                        };
+                        old.rentals += Number(line.quantity || 0);
+                        old.revenue = money(old.revenue + Number(line.lineRevenue || 0));
+                        rentalMaps[period].set(key,old);
+                    }
+                }
+            }
+            for (const period of periods) {
+                topBookingPackages[period] = Array.from(packageMaps[period].values())
+                    .sort((a,b) => b.revenue-a.revenue).slice(0,5);
+                topRentedProducts[period] = Array.from(rentalMaps[period].values())
+                    .sort((a,b) => b.revenue-a.revenue).slice(0,5);
+            }
+            const verified = unverifiedBookings === 0 &&
+                Math.abs(money(bookingConsumable + bookingRental) - bookingTotal) <= 0.01;
+            return response(200, {
+                success:true, topBookingPackages, topRentedProducts,
+                bookingRevenueAllocation: {
+                    month:currentMonth, verified,
+                    bookingConsumable:verified?bookingConsumable:null,
+                    bookingRental:verified?bookingRental:null,
+                    bookingRevenue:bookingTotal,
+                    // Separately expose only amounts proved by saved, reconciled
+                    // booking financial rows. Missing legacy snapshots stay unallocated.
+                    verifiedBookingConsumable:bookingConsumable,
+                    verifiedBookingRental:bookingRental,
+                    unallocatedBookingRevenue:money(Math.max(0,bookingTotal-bookingConsumable-bookingRental)),
+                    reason:verified?"":([...reasons][0] || "Booking goods revenue needs reconciliation.")
+                },
+                summaryInfo:{ completedBookingsThisMonth:completedThisMonth,
+                    unverifiedBookingsThisMonth:unverifiedBookings,
+                    completedBookingsThisYear:bookingsForSummary.length }
+            });
+        }
+
         // ── PROTECTED: get_booking_page_bookings ────────────────────────────────
         // Use this action on the OwnerBookings, ManagerBookings, and
         // StaffBookings screens. It returns the fields needed by those pages
@@ -2915,10 +3076,10 @@ exports.handler = async (event) => {
             await connection.beginTransaction();
             try {
                 const [rows] = await connection.execute(`SELECT id,booking_reference,name,status,
-                        DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate,
-                        DATE_FORMAT(COALESCE(event_end_date,event_date),'%Y-%m-%d') AS eventEndDate,
-                        agreed_price,package_price,required_down_payment,amount_paid
-                        FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                                DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate,
+                                                                DATE_FORMAT(COALESCE(event_end_date,event_date),'%Y-%m-%d') AS eventEndDate,
+                                                                agreed_price,package_price,required_down_payment,amount_paid
+                                                         FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
                     [bookingId,store_id,branchId]);
                 if (!rows.length) throw rentalError("Booking not found in your assigned branch.");
                 const booking = rows[0];
@@ -2928,7 +3089,7 @@ exports.handler = async (event) => {
                     throw rentalError(`Booking must be ${expected} before Staff can mark it ${target}.`);
 
                 const [approvalRows] = await connection.execute(`SELECT status FROM booking_approval_requests
-                    WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1`, [bookingId,store_id,branchId]);
+                                                                 WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1`, [bookingId,store_id,branchId]);
                 if (["pending", "rejected"].includes(String(approvalRows[0]?.status || "").toLowerCase()))
                     throw rentalError("Manager approval is unresolved for this booking.");
                 const agreed = Number(booking.agreed_price ?? booking.package_price ?? 0);
@@ -2941,7 +3102,7 @@ exports.handler = async (event) => {
                 // Reservation is made on confirmation. Ensure the actual Sales lines
                 // still reflect that reservation before Staff begins fulfillment.
                 const [sales] = await connection.execute(`SELECT booked_quantity,reserved_quantity,inventory_status
-                    FROM booking_items WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                          FROM booking_items WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
                     [bookingId,store_id,branchId]);
                 if (sales.some(line => Number(line.booked_quantity) <= 0 ||
                     Number(line.reserved_quantity) !== Number(line.booked_quantity) ||
@@ -2949,11 +3110,11 @@ exports.handler = async (event) => {
                     throw rentalError("Booking sales inventory is not fully reserved. Ask Manager to reconcile the booking.");
 
                 const [rentals] = await connection.execute(`SELECT r.equipment_id,r.quantity,
-                    a.quantity AS allocatedQuantity,a.status AS allocationStatus
-                    FROM booking_rental_items r LEFT JOIN rental_booking_allocations a
-                      ON a.store_id=r.store_id AND a.branch_id=r.branch_id AND a.equipment_id=r.equipment_id
-                     AND a.booking_reference COLLATE utf8mb4_unicode_ci=r.booking_reference COLLATE utf8mb4_unicode_ci
-                    WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=? FOR UPDATE`,
+                                                                   a.quantity AS allocatedQuantity,a.status AS allocationStatus
+                                                            FROM booking_rental_items r LEFT JOIN rental_booking_allocations a
+                                                                                                  ON a.store_id=r.store_id AND a.branch_id=r.branch_id AND a.equipment_id=r.equipment_id
+                                                                                                      AND a.booking_reference COLLATE utf8mb4_unicode_ci=r.booking_reference COLLATE utf8mb4_unicode_ci
+                                                            WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=? FOR UPDATE`,
                     [bookingId,store_id,branchId]);
                 if (!sales.length && !rentals.length)
                     throw rentalError("Booking has no verified inventory or rental equipment to fulfill.");
@@ -2974,7 +3135,7 @@ exports.handler = async (event) => {
                     await requireRentalReturnBeforeCompletion(connection,{bookingId,storeId:store_id,branchId});
                     if (rentals.length) {
                         const [finance] = await connection.execute(`SELECT refundable_deposit_required,deposit_collected
-                            FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                                                                    FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
                             [bookingId,store_id,branchId]);
                         if (!finance.length || Number(finance[0].deposit_collected) + 0.005 <
                             Number(finance[0].refundable_deposit_required))
@@ -2983,7 +3144,7 @@ exports.handler = async (event) => {
                 }
 
                 const [updated] = await connection.execute(`UPDATE bookings SET status=?
-                    WHERE id=? AND store_id=? AND branch_id=? AND status=?`,
+                                                            WHERE id=? AND store_id=? AND branch_id=? AND status=?`,
                     [target,bookingId,store_id,branchId,current]);
                 if (updated.affectedRows !== 1) throw rentalError("Booking status changed. Refresh and retry.");
                 const employee = await getActingEmployee(connection,decodedToken,tokenRole,store_id);
@@ -3078,7 +3239,7 @@ exports.handler = async (event) => {
                         throw rentalError('Save and review the agreed price first; do not override it during confirmation.');
                     if(review.approval?.status==='rejected')throw rentalError('Rejected approval request must be reviewed again before confirming.');
                     await connection.execute(`UPDATE booking_approval_requests SET status='approved',reviewed_by=?,reviewed_at=NOW()
-                        WHERE booking_id=? AND store_id=? AND branch_id=? AND status='pending'`,
+                                              WHERE booking_id=? AND store_id=? AND branch_id=? AND status='pending'`,
                         [String(actingEmployee.name||'Manager'),Number(booking_id),store_id,Number(requestedBranchId||rows[0].branch_id)]);
                 }
                 // 1️⃣ Update booking status

@@ -76,8 +76,8 @@ async function verifyManager(request: NextRequest, db: Pool | PoolConnection): P
                 m.manager_name AS managerName, s.store_name AS storeName,
                 br.branch_name AS branchName
          FROM managers m
-         JOIN branches br ON br.id = m.branch_id AND br.store_id = m.store_id
-         JOIN stores s ON s.id = m.store_id
+                  JOIN branches br ON br.id = m.branch_id AND br.store_id = m.store_id
+                  JOIN stores s ON s.id = m.store_id
          WHERE m.id = ? AND m.store_id = ? LIMIT 1`,
         [managerId, signedStoreId],
     );
@@ -185,7 +185,7 @@ export async function GET(request: NextRequest) {
         // Personal manager log; use the VERIFIED manager ID, not any ID from the browser.
         // The same attendance/leave tables are used as the Staff Attendance Log.
         const [managerClockRows] = await db.query<RowDataPacket[]>(`
-            SELECT id, DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date,
+                    SELECT id, DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date,
                    DATE_FORMAT(time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
                    DATE_FORMAT(time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut,
                    CASE WHEN time_in IS NOT NULL AND time_out IS NOT NULL
@@ -198,11 +198,14 @@ export async function GET(request: NextRequest) {
             ORDER BY attendance_date DESC, id DESC LIMIT 800`,
             [manager.storeId, manager.branchId, manager.id]);
         const [managerLeaveRows] = await db.query<RowDataPacket[]>(`
-            SELECT id, DATE_FORMAT(leave_date,'%Y-%m-%d') AS date,
-                   leave_type AS leaveType, reason, approval_status AS approvalStatus
-            FROM stocknbook_staff_leave_requests
-            WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
-            ORDER BY leave_date DESC, id DESC LIMIT 800`,
+                    SELECT id, DATE_FORMAT(leave_date,'%Y-%m-%d') AS date,
+                   leave_type AS leaveType, reason, approval_status AS approvalStatus,
+                   DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s') AS requestCreatedAt,
+                   decision_reason AS decisionReason,
+                   DATE_FORMAT(reviewed_at,'%Y-%m-%d %H:%i:%s') AS reviewedAt
+                    FROM stocknbook_staff_leave_requests
+                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                    ORDER BY leave_date DESC, id DESC LIMIT 800`,
             [manager.storeId, manager.branchId, manager.id]);
         const managerAttendance = [
             ...managerClockRows,
@@ -211,14 +214,17 @@ export async function GET(request: NextRequest) {
                 timeIn: null, timeOut: null, hoursWorked: null,
                 status: 'Leave', leaveType: row.leaveType, reason: row.reason,
                 approvalStatus: row.approvalStatus,
+                requestCreatedAt: row.requestCreatedAt,
+                decisionReason: row.decisionReason,
+                reviewedAt: row.reviewedAt,
             })),
         ].sort((a,b) => String(b.date).localeCompare(String(a.date)) || Number(b.id)-Number(a.id));
         const managerAttendanceToday = managerClockRows.find(row => row.date === phToday) || null;
 
         // Existing Team Attendance panel needs the branch's recent staff history.
         const [teamAttendance] = await db.query<RowDataPacket[]>(`
-            SELECT id, employee_id AS employeeId, employee_name AS employeeName,
-                   DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date,
+                    SELECT id, employee_id AS employeeId, employee_name AS employeeName,
+                           DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date,
                    DATE_FORMAT(time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
                    DATE_FORMAT(time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut,
                    CASE WHEN time_in IS NOT NULL AND time_out IS NOT NULL
@@ -229,7 +235,7 @@ export async function GET(request: NextRequest) {
             FROM stocknbook_staff_attendance
             WHERE store_id=? AND branch_id=? AND employee_role='staff'
               AND attendance_date >= DATE_SUB(${PH_TODAY}, INTERVAL 90 DAY)
-            ORDER BY attendance_date DESC, id DESC LIMIT 800`,
+                    ORDER BY attendance_date DESC, id DESC LIMIT 800`,
             scope);
         return response({ success: true, date, mayReviewLeave: manager.mayReviewLeave,
             attendanceSummary: counts, attendance, leaves,
@@ -252,29 +258,29 @@ export async function POST(request: NextRequest) {
             await connection.beginTransaction();
             if (action === "time_in") {
                 const [existing] = await connection.query<RowDataPacket[]>(`
-                    SELECT id FROM stocknbook_staff_attendance
-                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
-                      AND attendance_date=${PH_TODAY} LIMIT 1 FOR UPDATE`,
+                            SELECT id FROM stocknbook_staff_attendance
+                            WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                              AND attendance_date=${PH_TODAY} LIMIT 1 FOR UPDATE`,
                     [manager.storeId, manager.branchId, manager.id]);
                 if (existing.length) throw new ApiError(409, "You have already recorded attendance today.");
                 const [approved] = await connection.query<RowDataPacket[]>(`
-                    SELECT id FROM stocknbook_staff_leave_requests
-                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
-                      AND leave_date=${PH_TODAY} AND approval_status='Approved' LIMIT 1`,
+                            SELECT id FROM stocknbook_staff_leave_requests
+                            WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                              AND leave_date=${PH_TODAY} AND approval_status='Approved' LIMIT 1`,
                     [manager.storeId, manager.branchId, manager.id]);
                 if (approved.length) throw new ApiError(409, "You have approved leave today; attendance cannot also be recorded.");
                 await connection.execute(`
-                    INSERT INTO stocknbook_staff_attendance
-                    (store_id,branch_id,employee_id,employee_role,store_name,branch_name,
-                     employee_name,employee_number,attendance_date,time_in,attendance_status)
-                    VALUES (?,?,?,'manager',?,?,?,?,${PH_TODAY},${PH_NOW},'Present')`,
+                            INSERT INTO stocknbook_staff_attendance
+                            (store_id,branch_id,employee_id,employee_role,store_name,branch_name,
+                             employee_name,employee_number,attendance_date,time_in,attendance_status)
+                            VALUES (?,?,?,'manager',?,?,?,?,${PH_TODAY},${PH_NOW},'Present')`,
                     [manager.storeId, manager.branchId, manager.id, manager.storeName,
                         manager.branchName, manager.managerName, String(manager.id)]);
             } else if (action === "time_out") {
                 const [rows] = await connection.query<RowDataPacket[]>(`
-                    SELECT id,time_in,time_out,attendance_status FROM stocknbook_staff_attendance
-                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
-                      AND attendance_date=${PH_TODAY} LIMIT 1 FOR UPDATE`,
+                            SELECT id,time_in,time_out,attendance_status FROM stocknbook_staff_attendance
+                            WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                              AND attendance_date=${PH_TODAY} LIMIT 1 FOR UPDATE`,
                     [manager.storeId, manager.branchId, manager.id]);
                 if (!rows.length || !rows[0].time_in || rows[0].time_out || rows[0].attendance_status !== "Present") {
                     throw new ApiError(409, "Time In is required before Time Out, and Time Out can only be recorded once.");
@@ -300,19 +306,19 @@ export async function POST(request: NextRequest) {
                     throw new ApiError(400, "Leave dates cannot be in the past.");
                 }
                 const [attendanceConflict] = await connection.query<RowDataPacket[]>(`
-                    SELECT DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date
-                    FROM stocknbook_staff_attendance
-                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
-                      AND attendance_date BETWEEN ? AND ? LIMIT 1 FOR UPDATE`,
+                            SELECT DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date
+                            FROM stocknbook_staff_attendance
+                            WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                              AND attendance_date BETWEEN ? AND ? LIMIT 1 FOR UPDATE`,
                     [manager.storeId,manager.branchId,manager.id,startDate,endDate]);
                 if (attendanceConflict.length) {
                     throw new ApiError(409, `Attendance already exists on ${attendanceConflict[0].date}. Choose other leave dates.`);
                 }
                 const [leaveConflict] = await connection.query<RowDataPacket[]>(`
-                    SELECT DATE_FORMAT(leave_date,'%Y-%m-%d') AS date
-                    FROM stocknbook_staff_leave_requests
-                    WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
-                      AND leave_date BETWEEN ? AND ? LIMIT 1 FOR UPDATE`,
+                            SELECT DATE_FORMAT(leave_date,'%Y-%m-%d') AS date
+                            FROM stocknbook_staff_leave_requests
+                            WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
+                              AND leave_date BETWEEN ? AND ? LIMIT 1 FOR UPDATE`,
                     [manager.storeId,manager.branchId,manager.id,startDate,endDate]);
                 if (leaveConflict.length) {
                     throw new ApiError(409, `A leave request already exists for ${leaveConflict[0].date}.`);
@@ -320,10 +326,10 @@ export async function POST(request: NextRequest) {
                 for (let index = 0; index < dayCount; index++) {
                     const day = new Date(Date.parse(`${startDate}T00:00:00Z`) + index*86400000).toISOString().slice(0,10);
                     await connection.execute(`
-                        INSERT INTO stocknbook_staff_leave_requests
-                        (store_id,branch_id,employee_id,employee_role,store_name,branch_name,
-                         employee_name,employee_number,leave_date,leave_type,reason,approval_status)
-                        VALUES (?,?,?,'manager',?,?,?,?,?,?,?,'Pending')`,
+                                INSERT INTO stocknbook_staff_leave_requests
+                                (store_id,branch_id,employee_id,employee_role,store_name,branch_name,
+                                 employee_name,employee_number,leave_date,leave_type,reason,approval_status)
+                                VALUES (?,?,?,'manager',?,?,?,?,?,?,?,'Pending')`,
                         [manager.storeId,manager.branchId,manager.id,manager.storeName,
                             manager.branchName,manager.managerName,String(manager.id),day,kind,reason]);
                 }

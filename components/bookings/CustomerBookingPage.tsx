@@ -100,6 +100,15 @@ type RentalCatalogItem = {
     name: string;
     dailyRate: number;
     physicallyAvailable: number;
+    // Null until the customer chooses a valid event date range.
+    reservedForDates: number | null;
+    availableForDates: number | null;
+};
+type RentalAvailabilityWarning = {
+    equipmentId: number;
+    name: string;
+    requested: number;
+    available: number;
 };
 type SelectedRentalItem = RentalCatalogItem & { quantity: number };
 
@@ -989,6 +998,8 @@ export default function CustomerBookingPage() {
     const [rentalCatalog, setRentalCatalog] = useState<RentalCatalogItem[]>([]);
     const [rentalCatalogLoading, setRentalCatalogLoading] = useState(false);
     const [rentalCatalogError, setRentalCatalogError] = useState("");
+    const [rentalCatalogPeriodKey, setRentalCatalogPeriodKey] = useState("");
+    const [rentalAvailabilityWarning, setRentalAvailabilityWarning] = useState<RentalAvailabilityWarning | null>(null);
     const [rentalSearch, setRentalSearch] = useState("");
     const [selectedRentalItems, setSelectedRentalItems] = useState<SelectedRentalItem[]>([]);
     const [rentalEndDate, setRentalEndDate] = useState("");
@@ -1030,6 +1041,17 @@ export default function CustomerBookingPage() {
     // Invalid or unusually long ranges must never generate a misleading quotation.
     const rentalDuration = requestedEventDays <= 30 && (eventDurationType === "single" || eventEndDate > date)
         ? requestedEventDays : 0;
+    const rentalPeriodKey = store?.id && customBranchId && rentalDuration > 0
+        ? `${store.id}:${customBranchId}:${date}:${eventEndDate}` : "";
+    const rentalAvailabilityReady = !!rentalPeriodKey && rentalCatalogPeriodKey === rentalPeriodKey &&
+        !rentalCatalogLoading && !rentalCatalogError;
+    // Preserve a customer's requested quantity when dates change, but flag it
+    // rather than allowing an overbooked request to be submitted.
+    const rentalSelectionConflict = rentalAvailabilityReady
+        ? selectedRentalItems.find(selected => {
+            const available = rentalCatalog.find(e => e.id === selected.id)?.availableForDates;
+            return available == null || selected.quantity > available;
+        }) : undefined;
     const todayForPicker = (() => {
         const now = new Date();
         now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
@@ -1201,6 +1223,10 @@ export default function CustomerBookingPage() {
                     : "Please select at least one inventory item or describe your custom request.";
         }
 
+        if (selectedRentalItems.length && (!rentalDuration || !rentalAvailabilityReady))
+            errors.selection = 'Select valid event dates and wait for rental availability to load.';
+        else if (rentalSelectionConflict)
+            errors.selection = `${rentalSelectionConflict.name} exceeds the available units for your event dates.`;
         if (bookingType === "custom" && !eventType.trim()) errors.eventType = "Event type is required.";
         if (!customBranchId || !branches.some(b => b.id === customBranchId))
             errors.selection = "Select a valid branch before booking.";
@@ -1374,29 +1400,78 @@ export default function CustomerBookingPage() {
         return () => controller.abort();
     }, [store?.id, urlBranchId]);
 
+    // Switching the branch invalidates all rental selections. Changing event
+    // dates only refreshes availability, preserving quantities for review.
     useEffect(() => {
-        setRentalCatalog([]); setSelectedRentalItems([]); setRentalCatalogError("");
-        setRentalCatalogLoading(false);
-        if (!store || !customBranchId || !branches.some(b=>b.id===customBranchId)) return;
-        let cancelled=false;
+        setSelectedRentalItems([]);
+        setRentalAvailabilityWarning(null);
+        setRentalCatalog([]);
+        setRentalCatalogPeriodKey("");
+    }, [store?.id, customBranchId]);
+
+    useEffect(() => {
+        setRentalCatalogPeriodKey("");
+        setRentalCatalogError("");
+        if (!store || !customBranchId || !branches.some(b => b.id === customBranchId)) {
+            setRentalCatalog([]);
+            setRentalCatalogLoading(false);
+            return;
+        }
+        const controller = new AbortController();
+        const requestedKey = rentalPeriodKey;
         setRentalCatalogLoading(true);
-        (async () => {
+        void (async () => {
             try {
-                const response=await fetch('/api/bookings',{
-                    method:'POST',headers:{'Content-Type':'application/json'},
-                    body:JSON.stringify({action:'get_public_rental_catalog',storeId:store.id,branchId:customBranchId})
+                const response = await fetch('/api/bookings', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    signal: controller.signal,
+                    body: JSON.stringify({
+                        action: 'get_public_rental_catalog', storeId: store.id, branchId: customBranchId,
+                        ...(requestedKey ? {startDate: date, endDate: eventEndDate} : {})
+                    })
                 });
-                const data=await response.json();
-                if(!response.ok)throw new Error(data.error||'Unable to load rental equipment.');
-                if(cancelled)return;
-                if(Number(data.branchId)!==customBranchId)throw new Error('Rental catalog branch mismatch.');
-                setRentalCatalog(data.equipment||[]);
-            }catch(error){if(!cancelled){setRentalCatalog([]);
-                setRentalCatalogError(error instanceof Error ? error.message : 'Rental equipment unavailable.');}}
-            finally { if (!cancelled) setRentalCatalogLoading(false); }
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Unable to check rental equipment availability.');
+                if (controller.signal.aborted) return;
+                if (Number(data.branchId) !== customBranchId) throw new Error('Rental catalog branch mismatch.');
+                if (requestedKey && (data.startDate !== date || data.endDate !== eventEndDate || !data.availabilityForDates))
+                    throw new Error('Rental availability response does not match the chosen event dates.');
+                setRentalCatalog(Array.isArray(data.equipment) ? data.equipment : []);
+                setRentalCatalogPeriodKey(requestedKey);
+            } catch (error) {
+                if (!controller.signal.aborted) {
+                    setRentalCatalog([]);
+                    setRentalCatalogError(error instanceof Error ? error.message : 'Rental equipment unavailable.');
+                }
+            } finally {
+                if (!controller.signal.aborted) setRentalCatalogLoading(false);
+            }
         })();
-        return ()=>{cancelled=true;};
-    },[store,customBranchId,branches]);
+        return () => controller.abort();
+    }, [store?.id, customBranchId, branches, rentalPeriodKey, date, eventEndDate]);
+
+    function warnRentalAvailability(item: RentalCatalogItem, requested: number) {
+        setRentalAvailabilityWarning({equipmentId: item.id, name: item.name,
+            requested, available: Math.max(0, Number(item.availableForDates ?? 0))});
+    }
+
+    function updateRentalQuantity(item: RentalCatalogItem, requested: number) {
+        if (!rentalAvailabilityReady) {
+            setFieldErrors(prev => ({...prev, selection: 'Choose your event dates and wait for the rental availability check.'}));
+            return;
+        }
+        if (!Number.isSafeInteger(requested) || requested < 1) return;
+        const available = Math.max(0, Number(item.availableForDates ?? 0));
+        if (requested > available) {
+            warnRentalAvailability(item, requested);
+            return;
+        }
+        setSelectedRentalItems(prev => prev.some(x => x.id === item.id)
+            ? prev.map(x => x.id === item.id ? {...item, quantity: requested} : x)
+            : [...prev, {...item, quantity: requested}]);
+        clearError('selection');
+    }
 
     useEffect(() => {
         setInventoryItems([]); setSelectedCustomItems([]);setCustomItemQty({});
@@ -1486,6 +1561,35 @@ export default function CustomerBookingPage() {
 
         try {
             setSubmitting(true);
+            // Recheck immediately before submission; no inventory is held here.
+            // Confirmation will repeat this check transactionally.
+            if (selectedRentalItems.length) {
+                const check = await fetch('/api/bookings', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action: 'get_public_rental_catalog',
+                        storeId: store.id, branchId: selectedBranchId,
+                        startDate: date, endDate: eventEndDate})
+                });
+                const checkedData = await check.json();
+                if (!check.ok || !checkedData.availabilityForDates ||
+                    checkedData.startDate !== date || checkedData.endDate !== eventEndDate) {
+                    setRentalCatalogError(checkedData.error || 'Unable to verify rental availability. Please try again.');
+                    return;
+                }
+                const liveCatalog = Array.isArray(checkedData.equipment) ? checkedData.equipment as RentalCatalogItem[] : [];
+                setRentalCatalog(liveCatalog);
+                setRentalCatalogPeriodKey(rentalPeriodKey);
+                const firstConflict = selectedRentalItems.find(selected => {
+                    const available = liveCatalog.find(item => item.id === selected.id)?.availableForDates;
+                    return available == null || selected.quantity > available;
+                });
+                if (firstConflict) {
+                    const fresh = liveCatalog.find(item => item.id === firstConflict.id);
+                    setRentalAvailabilityWarning({equipmentId:firstConflict.id,name:firstConflict.name,
+                        requested:firstConflict.quantity,available:Number(fresh?.availableForDates || 0)});
+                    return;
+                }
+            }
             const response = await fetch("/api/bookings", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -2504,6 +2608,13 @@ export default function CustomerBookingPage() {
                                                 : rentalDuration > 0 ? `Rental duration: ${rentalDuration} ${rentalDuration === 1 ? "day" : "days"}.`
                                                     : "Choose valid event dates above."}
                                     </p>
+                                    {rentalDuration > 0 && !rentalAvailabilityReady &&
+                                        <p className="mt-2 text-xs text-[#806A8C]" aria-live="polite">
+                                            {rentalCatalogLoading ? 'Checking confirmed reservations for your event dates…' : rentalCatalogError || 'Date-specific availability is not ready yet.'}
+                                        </p>}
+                                    {rentalSelectionConflict && <div role="alert" className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                        {rentalSelectionConflict.name}: the requested {rentalSelectionConflict.quantity} units exceed what remains for {date} to {eventEndDate}. Reduce the quantity or choose different dates.
+                                    </div>}
                                     <input type="search" value={rentalSearch} onChange={e => setRentalSearch(e.target.value)}
                                            placeholder="Search rental equipment..." aria-label="Search rental equipment"
                                            className="mt-3 h-11 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm outline-none focus:border-[#2B174C]" />
@@ -2514,23 +2625,32 @@ export default function CustomerBookingPage() {
                                         </div>}
                                         {!rentalCatalogLoading && rentalCatalog.filter(item => item.name.toLowerCase().includes(rentalSearch.toLowerCase())).map(item => {
                                             const chosen = selectedRentalItems.find(x => x.id === item.id);
-                                            return <div key={item.id} className="flex items-center justify-between gap-2 rounded-lg border border-[#E6DDF0] bg-white p-2">
+                                            const available = item.availableForDates;
+                                            const isUnavailable = rentalAvailabilityReady && available === 0;
+                                            const chosenExceedsAvailability = !!chosen && rentalAvailabilityReady &&
+                                                (available == null || chosen.quantity > available);
+                                            return <div key={item.id} className={`flex items-center justify-between gap-2 rounded-lg border bg-white p-2 ${chosenExceedsAvailability ? 'border-amber-400' : 'border-[#E6DDF0]'}`}>
                                                 <div className="min-w-0 text-xs">
                                                     <p className="font-semibold text-[#2B174C]">{item.name}</p>
-                                                    <p className="text-[#806A8C]">{peso(item.dailyRate)} / item / day · {item.physicallyAvailable} physically ready</p>
+                                                    <p className="text-[#806A8C]">{peso(item.dailyRate)} / item / day · {item.physicallyAvailable} units currently ready at this branch</p>
+                                                    {rentalAvailabilityReady && <p className={`mt-1 font-semibold ${isUnavailable || chosenExceedsAvailability ? 'text-[#B45309]' : 'text-[#138342]'}`}>
+                                                        {available} available for your selected dates
+                                                    </p>}
+                                                    {chosenExceedsAvailability && <p className="mt-1 text-amber-700">Selected {chosen.quantity}, but only {available} remain. Reduce quantity or change dates.</p>}
                                                 </div>
                                                 <div className="flex shrink-0 items-center gap-2">
-                                                    <input type="number" aria-label={`Quantity of ${item.name}`} min={1} max={item.physicallyAvailable}
+                                                    <input type="number" aria-label={`Quantity of ${item.name}`} min={1}
+                                                           max={available ?? undefined}
+                                                           disabled={!rentalAvailabilityReady}
                                                            value={chosen?.quantity || 1}
-                                                           onChange={e => {
-                                                               const quantity = Math.max(1, Math.min(item.physicallyAvailable, Number(e.target.value) || 1));
-                                                               setSelectedRentalItems(prev => prev.some(x => x.id === item.id) ? prev.map(x => x.id === item.id ? {...x, quantity} : x) : [...prev, {...item, quantity}]);
-                                                           }} className="w-16 rounded-lg border border-[#E6DDF0] p-1.5 text-sm" />
+                                                           onChange={e => updateRentalQuantity(item, Number(e.target.value))}
+                                                           className="w-16 rounded-lg border border-[#E6DDF0] p-1.5 text-sm disabled:opacity-50" />
                                                     <button type="button" onClick={() => {
-                                                        setSelectedRentalItems(prev => chosen ? prev.filter(x => x.id !== item.id) : [...prev, {...item, quantity:1}]);
-                                                        clearError("selection");
-                                                    }} className="rounded-lg border border-[#E6DDF0] px-2 py-1.5 text-xs font-semibold text-[#2B174C]">
-                                                        {chosen ? "Remove" : "Add"}
+                                                        if (chosen) { setSelectedRentalItems(prev => prev.filter(x => x.id !== item.id));clearError('selection'); }
+                                                        else updateRentalQuantity(item, 1);
+                                                    }} disabled={!chosen && !rentalAvailabilityReady}
+                                                            className="rounded-lg border border-[#E6DDF0] px-2 py-1.5 text-xs font-semibold text-[#2B174C] disabled:opacity-50">
+                                                        {chosen ? 'Remove' : 'Add'}
                                                     </button>
                                                 </div>
                                             </div>;
@@ -3007,6 +3127,30 @@ export default function CustomerBookingPage() {
                                     Select this package
                                 </button>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {rentalAvailabilityWarning && (
+                <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true"
+                     aria-labelledby="rental-availability-warning-title">
+                    <div className="w-full max-w-md rounded-2xl border border-[#E6DDF0] bg-white p-6 shadow-xl">
+                        <div className="flex items-center gap-2 text-amber-700"><AlertCircle size={22}/>
+                            <h2 id="rental-availability-warning-title" className="text-lg font-bold">Not enough rental equipment</h2>
+                        </div>
+                        <p className="mt-3 text-sm text-[#2B174C]">For <strong>{date}{eventEndDate !== date ? ` to ${eventEndDate}` : ''}</strong>,
+                            only <strong>{rentalAvailabilityWarning.available}</strong> {rentalAvailabilityWarning.name} unit(s) are available.
+                            You requested <strong>{rentalAvailabilityWarning.requested}</strong>.</p>
+                        <p className="mt-2 text-xs text-[#806A8C]">Confirmed reservations affect these dates. Pending requests do not reserve stock. Select fewer units or choose another date.</p>
+                        <div className="mt-5 flex flex-wrap justify-end gap-2">
+                            <button type="button" onClick={() => setRentalAvailabilityWarning(null)}
+                                    className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm font-semibold text-[#2B174C]">Choose another date</button>
+                            {rentalAvailabilityWarning.available > 0 && <button type="button" onClick={() => {
+                                const item=rentalCatalog.find(x=>x.id===rentalAvailabilityWarning.equipmentId);
+                                if(item && rentalAvailabilityReady) updateRentalQuantity(item,rentalAvailabilityWarning.available);
+                                setRentalAvailabilityWarning(null);
+                            }} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white">Use {rentalAvailabilityWarning.available} available</button>}
                         </div>
                     </div>
                 </div>

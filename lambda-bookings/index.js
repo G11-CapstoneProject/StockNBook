@@ -250,6 +250,44 @@ function rentalDays(from, to) {
     if (days < 1 || days > 30) throw new Error("Rental period must be from 1 to 30 calendar days.");
     return days;
 }
+// One calculation for public quotations, the submission check and final confirmation.
+// The highest overlapping quantity on any day is the restriction for a date range.
+// Checked-out items remain unavailable through today if overdue (same as confirmation).
+function rentalPeakReserved(allocations, from, to, today) {
+    const changes=new Map();
+    for(const allocation of allocations) {
+        const status=String(allocation.status);
+        if(status!=='reserved'&&status!=='checked_out')continue;
+        const first=String(allocation.startDate)>from?String(allocation.startDate):from;
+        const heldEnd=status==='checked_out'&&String(allocation.endDate)<today?today:String(allocation.endDate);
+        const last=heldEnd<to?heldEnd:to;
+        if(first>last)continue;
+        changes.set(first,(changes.get(first)||0)+Number(allocation.quantity));
+        const following=new Date(Date.parse(`${last}T00:00:00Z`)+86400000).toISOString().slice(0,10);
+        changes.set(following,(changes.get(following)||0)-Number(allocation.quantity));
+    }
+    let active=0,peak=0;
+    for(const [,change] of [...changes].sort(([a],[b])=>a.localeCompare(b))){
+        active+=change;peak=Math.max(peak,active);
+    }
+    return peak;
+}
+function rentalTodayManila() {
+    const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+    const part=type=>parts.find(p=>p.type===type)?.value||'';
+    return `${part('year')}-${part('month')}-${part('day')}`;
+}
+async function rentalOverlapAllocations(connection,{storeId,branchId,equipmentId,from,to}) {
+    const [rows]=await connection.execute(`SELECT quantity,status,
+        DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
+        DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
+        FROM rental_booking_allocations
+        WHERE store_id=? AND branch_id=? AND equipment_id=?
+          AND status IN ('reserved','checked_out')
+          AND start_date<=? AND (end_date>=? OR status='checked_out')`,
+        [storeId,branchId,equipmentId,to,from]);
+    return rows;
+}
 function rentalMoneyCents(value) {
     const n = Number(value);
     if (!Number.isFinite(n) || n < 0 || !Number.isSafeInteger(Math.round(n * 100)))
@@ -283,6 +321,15 @@ async function saveRentalRequestLines(connection,{bookingId,storeId,branchId,ref
         const e=equipment[0];
         if (Number(e.total_units)-Number(e.maintenance_units)-Number(e.missing_units)<line.quantity)
             throw new Error(`${e.name}: selected quantity exceeds physical rental stock.`);
+        // Read-only availability check. Pending Review is NOT a reservation;
+        // an overlapping confirmation is still serialized by confirmRentalAllocations.
+        const overlaps=await rentalOverlapAllocations(connection,{
+            storeId,branchId,equipmentId:line.equipmentId,from:startDate,to:endDate
+        });
+        const peak=rentalPeakReserved(overlaps,startDate,endDate,rentalTodayManila());
+        const remaining=Math.max(0,Number(e.total_units)-Number(e.maintenance_units)-Number(e.missing_units)-peak);
+        if(line.quantity>remaining)
+            throw rentalError(`${e.name}: only ${remaining} unit(s) available for ${startDate} to ${endDate}. Please reduce the quantity or choose another date.`);
         const cents=rentalMoneyCents(e.rental_rate_per_day);
         if(line.expectedDailyRate!==undefined&&rentalMoneyCents(line.expectedDailyRate)!==cents)
             throw rentalError(`${e.name}: the daily rental rate changed. Refresh the page before requesting this booking.`);
@@ -326,26 +373,10 @@ async function confirmRentalAllocations(connection,{bookingId,storeId,branchId,p
             [line.equipmentId,storeId,branchId]);
         if(!eq.length)throw rentalError("Rental equipment was archived. Update the request before confirming.");
         const from=String(line.startDate).slice(0,10),to=String(line.endDate).slice(0,10);
-        const [existing]=await connection.execute(`SELECT quantity,
-                                                          DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate,status
-                                                   FROM rental_booking_allocations WHERE store_id=? AND branch_id=? AND equipment_id=?
-                                                                                     AND status IN ('reserved','checked_out') AND start_date<=? AND (end_date>=? OR status='checked_out')`,
-            [storeId,branchId,line.equipmentId,to,from]);
-        const dayParts=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
-        const part=type=>dayParts.find(x=>x.type===type)?.value||'';
-        const today=`${part('year')}-${part('month')}-${part('day')}`;
-        const events=new Map();
-        for(const a of existing){
-            const first=String(a.startDate)>from?String(a.startDate):from;
-            const lastDate=a.status==='checked_out'&&String(a.endDate)<today?today:String(a.endDate);
-            const last=lastDate<to?lastDate:to;
-            if(first>last)continue;
-            events.set(first,(events.get(first)||0)+Number(a.quantity));
-            const following=new Date(Date.parse(`${last}T00:00:00Z`)+86400000).toISOString().slice(0,10);
-            events.set(following,(events.get(following)||0)-Number(a.quantity));
-        }
-        let active=0,peak=0;
-        for(const [,change] of [...events].sort(([a],[b])=>a.localeCompare(b))) {active+=change;peak=Math.max(peak,active);}
+        const existing=await rentalOverlapAllocations(connection,{
+            storeId,branchId,equipmentId:line.equipmentId,from,to
+        });
+        const peak=rentalPeakReserved(existing,from,to,rentalTodayManila());
         const physical=Number(eq[0].total_units)-Number(eq[0].maintenance_units)-Number(eq[0].missing_units);
         if(physical-peak<Number(line.quantity))throw rentalError(`Not enough rental equipment for ${from} to ${to}. Choose another date or reduce quantity.`);
         await connection.execute(`INSERT INTO rental_booking_allocations
@@ -1772,19 +1803,57 @@ exports.handler = async (event) => {
             if(!Number.isSafeInteger(targetStoreId)||targetStoreId<=0||
                 !Number.isSafeInteger(requestedBranch)||requestedBranch<=0)
                 return response(400,{error:"Select a valid branch before viewing rental equipment."});
+            const startInput=body.startDate ?? body.start_date;
+            const endInput=body.endDate ?? body.end_date;
+            const withDates=startInput!=null&&endInput!=null&&startInput!==''&&endInput!=='';
+            if(!withDates && ((startInput!=null&&startInput!=='')||(endInput!=null&&endInput!=='')))
+                return response(400,{error:'Select both rental start and end dates.'});
+            let startDate=null,endDate=null;
+            if(withDates){
+                try {
+                    startDate=rentalDate(startInput,'Rental start date');
+                    endDate=rentalDate(endInput,'Rental end date');
+                    rentalDays(startDate,endDate);
+                }catch(error){return response(400,{error:error.message});}
+            }
             const [branches]=await connection.execute(
                 'SELECT id,branch_name AS branchName FROM branches WHERE store_id=? AND id=? LIMIT 1',
                 [targetStoreId,requestedBranch]);
             if(!branches.length)return response(404,{error:"Branch not found for this store."});
-            const chosen=requestedBranch;
             const [items]=await connection.execute(`SELECT id,name,rental_rate_per_day AS dailyRate,
-                                                           total_units AS totalUnits,maintenance_units AS maintenanceUnits,missing_units AS missingUnits
-                                                    FROM rental_equipment WHERE store_id=? AND branch_id=? AND archived_at IS NULL
-                                                                            AND rental_rate_per_day>0 AND total_units>maintenance_units+missing_units ORDER BY name LIMIT 200`,
-                [targetStoreId,chosen]);
-            return response(200,{branchId:chosen,branchName:branches[0].branchName,
-                equipment:items.map(e=>({id:Number(e.id),name:e.name,dailyRate:Number(e.dailyRate),
-                    physicallyAvailable:Number(e.totalUnits)-Number(e.maintenanceUnits)-Number(e.missingUnits)}))});
+                    total_units AS totalUnits,rented_out_units AS rentedOutUnits,
+                    maintenance_units AS maintenanceUnits,missing_units AS missingUnits
+                FROM rental_equipment WHERE store_id=? AND branch_id=? AND archived_at IS NULL
+                    AND rental_rate_per_day>0 AND total_units>maintenance_units+missing_units
+                ORDER BY name LIMIT 200`,[targetStoreId,requestedBranch]);
+            const allocationsByEquipment=new Map();
+            if(withDates && items.length){
+                const ids=items.map(e=>Number(e.id));
+                const placeholders=ids.map(()=>'?').join(',');
+                const [allocations]=await connection.execute(`SELECT equipment_id AS equipmentId,quantity,status,
+                        DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
+                        DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
+                    FROM rental_booking_allocations
+                    WHERE store_id=? AND branch_id=? AND equipment_id IN (${placeholders})
+                        AND status IN ('reserved','checked_out')
+                        AND start_date<=? AND (end_date>=? OR status='checked_out')`,
+                    [targetStoreId,requestedBranch,...ids,endDate,startDate]);
+                for(const allocation of allocations){
+                    const id=Number(allocation.equipmentId);
+                    if(!allocationsByEquipment.has(id))allocationsByEquipment.set(id,[]);
+                    allocationsByEquipment.get(id).push(allocation);
+                }
+            }
+            const today=rentalTodayManila();
+            return response(200,{branchId:requestedBranch,branchName:branches[0].branchName,
+                startDate,endDate,availabilityForDates:withDates,
+                equipment:items.map(e=>{
+                    const capacity=Math.max(0,Number(e.totalUnits)-Number(e.maintenanceUnits)-Number(e.missingUnits));
+                    const physicallyAvailable=Math.max(0,capacity-Number(e.rentedOutUnits));
+                    const reservedForDates=withDates?rentalPeakReserved(allocationsByEquipment.get(Number(e.id))||[],startDate,endDate,today):null;
+                    return {id:Number(e.id),name:e.name,dailyRate:Number(e.dailyRate),physicallyAvailable,
+                        reservedForDates,availableForDates:withDates?Math.max(0,capacity-reservedForDates):null};
+                })});
         }
 
         if (action === 'get_public_booking_fees') {

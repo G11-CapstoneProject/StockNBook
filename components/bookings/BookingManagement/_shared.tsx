@@ -1193,96 +1193,95 @@ export function BookingRow({
                                 )}
 
                                 {(!hideSummaryRow || detailTab === "Items") && (
-                                    <div className="flex h-[290px] flex-col rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
-                                        <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
-                                            <div className="flex items-center gap-2">
-                                                <Package
-                                                    size={14}
-                                                    className="text-[#6C3AD6]"
-                                                />
-
-                                                <p className="text-[16px] font-bold text-[#1A1220]">
-                                                    Booking Inventory Items
-                                                </p>
+                                    <div className="min-w-0 space-y-3">
+                                        {itemsLoading ? (
+                                            <div role="status" className="rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-5 text-center text-sm text-[#7A6A84]">
+                                                Loading booking items...
                                             </div>
-
-                                            {(bookingItems.length + bookingRentalItems.length) > 0 && (
-                                                <span className="shrink-0 rounded-full bg-[#F0E9FF] px-2.5 py-1 text-[11px] font-bold text-[#5A35A5]">
-                                                    {bookingItems.length + bookingRentalItems.length} lines
-                                                </span>
-                                            )}
-                                        </div>
-
-                                        <div className="min-h-0 flex-1">
-                                            {itemsLoading ? (
-                                                <div className="flex h-full items-center justify-center">
-                                                    <p className="text-sm text-[#7A6A84]">
-                                                        Loading items...
-                                                    </p>
-                                                </div>
-                                            ) : itemsError ? (
-                                                <p className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-3 py-2 text-xs font-semibold text-[#C32F2F]">
-                                                    {itemsError}
-                                                </p>
-                                            ) : (bookingItems.length + bookingRentalItems.length) === 0 ? (
-                                                <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-[#E6DDF0] bg-white px-4 text-center">
-                                                    <p className="text-sm text-[#7A6A84]">
-                                                        No saved items found for this booking.
-                                                    </p>
-                                                </div>
-                                            ) : (
-                                                <div className="h-full space-y-2 overflow-y-auto overscroll-contain pr-1">
-                                                    {bookingItems.map((item) => {
-                                                        const itemLabel = item.variant_name
-                                                            ? `${item.product_name} — ${item.variant_name}`
-                                                            : item.product_name;
-
-                                                        const quantity = Number(
-                                                            item.booked_quantity ||
-                                                            item.reserved_quantity ||
-                                                            0
-                                                        );
-
-                                                        return (
-                                                            <div
-                                                                key={item.id}
-                                                                className="flex items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2"
-                                                            >
-                                                                <div className="min-w-0">
-                                                                    <p className="truncate text-sm font-semibold text-[#1A1220]">
-                                                                        {itemLabel}
-                                                                    </p>
-
-                                                                    <p className="mt-0.5 text-[11px] text-[#806A8C]">
-                                                                        {item.source_type === 'package' ? 'Package inclusion · Sales inventory' : 'Sales inventory'}
-                                                                        {item.inventory_status ? ` · ${item.inventory_status}` : ''}
-                                                                    </p>
-                                                                </div>
-
-                                                                <span className="shrink-0 rounded-full bg-[#F7F1FF] px-2.5 py-1 text-xs font-bold text-[#4E2C66]">
-                                                                    x{quantity}
-                                                                </span>
-                                                            </div>
-                                                        );
-                                                    })}
-                                                    {bookingRentalItems.map(item => (
-                                                        <div key={`rental-${item.id}`}
-                                                             className="flex items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
-                                                            <div className="min-w-0">
-                                                                <p className="truncate text-sm font-semibold text-[#1A1220]">{item.equipment_name}</p>
-                                                                <p className="mt-0.5 text-[11px] text-[#806A8C]">
-                                                                    Rental equipment · {item.allocation_status.replace(/_/g, ' ')}
-                                                                    {' · '}{item.start_date === item.end_date ? item.start_date : `${item.start_date} – ${item.end_date}`}
-                                                                </p>
-                                                            </div>
-                                                            <span className="shrink-0 rounded-full bg-[#F7F1FF] px-2.5 py-1 text-xs font-bold text-[#4E2C66]">
-                                                                x{Number(item.quantity)}
-                                                            </span>
+                                        ) : itemsError ? (
+                                            <p role="alert" className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-3 py-2 text-xs font-semibold text-[#C32F2F]">
+                                                {itemsError}
+                                            </p>
+                                        ) : (
+                                            <>
+                                                <section aria-label="Inclusions" className="min-w-0 rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                                    <div className="mb-3 flex items-center justify-between gap-2">
+                                                        <div className="flex items-center gap-2">
+                                                            <Package size={14} className="shrink-0 text-[#6C3AD6]" />
+                                                            <h3 className="text-[16px] font-bold text-[#1A1220]">Inclusions</h3>
                                                         </div>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </div>
+                                                        <span className="shrink-0 rounded-full bg-[#F0E9FF] px-2.5 py-1 text-[11px] font-bold text-[#5A35A5]">
+                                                            {bookingItems.length} {bookingItems.length === 1 ? "item" : "items"}
+                                                        </span>
+                                                    </div>
+                                                    {bookingItems.length === 0 ? (
+                                                        <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-white px-3 py-4 text-center text-xs text-[#7A6A84]">
+                                                            No sales inventory inclusions for this booking.
+                                                        </div>
+                                                    ) : (
+                                                        <div className="max-h-[245px] space-y-2 overflow-y-auto overscroll-contain pr-1">
+                                                            {bookingItems.map((item) => {
+                                                                const itemLabel = item.variant_name
+                                                                    ? `${item.product_name} — ${item.variant_name}`
+                                                                    : item.product_name;
+                                                                const quantity = Number(item.booked_quantity || item.reserved_quantity || 0);
+                                                                return (
+                                                                    <div key={item.id} className="flex items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
+                                                                        <div className="min-w-0">
+                                                                            <p className="truncate text-sm font-semibold text-[#1A1220]" title={itemLabel}>
+                                                                                {itemLabel}
+                                                                            </p>
+                                                                            <p className="mt-0.5 text-[11px] text-[#806A8C]">
+                                                                                {item.source_type === "package" ? "Package inclusion · Sales inventory" : "Sales inventory"}
+                                                                                {item.inventory_status ? ` · ${item.inventory_status}` : ""}
+                                                                            </p>
+                                                                        </div>
+                                                                        <span className="shrink-0 rounded-full bg-[#F7F1FF] px-2.5 py-1 text-xs font-bold text-[#4E2C66]">
+                                                                            x{quantity}
+                                                                        </span>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </section>
+                                                <section aria-label="Additional Rental Equipment" className="min-w-0 rounded-[14px] border border-[#E6DDF0] bg-[#FFFDF8] p-4">
+                                                    <div className="mb-3 flex items-center justify-between gap-2">
+                                                        <div className="flex min-w-0 items-center gap-2">
+                                                            <Package size={14} className="shrink-0 text-[#6C3AD6]" />
+                                                            <h3 className="text-[16px] font-bold text-[#1A1220]">Additional Rental Equipment</h3>
+                                                        </div>
+                                                        <span className="shrink-0 rounded-full bg-[#F0E9FF] px-2.5 py-1 text-[11px] font-bold text-[#5A35A5]">
+                                                            {bookingRentalItems.length} {bookingRentalItems.length === 1 ? "item" : "items"}
+                                                        </span>
+                                                    </div>
+                                                    {bookingRentalItems.length === 0 ? (
+                                                        <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-white px-3 py-4 text-center text-xs text-[#7A6A84]">
+                                                            No additional rental equipment for this booking.
+                                                        </div>
+                                                    ) : (
+                                                        <div className="max-h-[245px] space-y-2 overflow-y-auto overscroll-contain pr-1">
+                                                            {bookingRentalItems.map((item) => (
+                                                                <div key={`rental-${item.id}`} className="flex items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
+                                                                    <div className="min-w-0">
+                                                                        <p className="truncate text-sm font-semibold text-[#1A1220]" title={item.equipment_name}>
+                                                                            {item.equipment_name}
+                                                                        </p>
+                                                                        <p className="mt-0.5 text-[11px] text-[#806A8C]">
+                                                                            Rental equipment · {item.allocation_status.replace(/_/g, " ")}
+                                                                            {" · "}{item.start_date === item.end_date ? item.start_date : `${item.start_date} – ${item.end_date}`}
+                                                                        </p>
+                                                                    </div>
+                                                                    <span className="shrink-0 rounded-full bg-[#F7F1FF] px-2.5 py-1 text-xs font-bold text-[#4E2C66]">
+                                                                        x{Number(item.quantity)}
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </section>
+                                            </>
+                                        )}
                                     </div>
                                 )}
 

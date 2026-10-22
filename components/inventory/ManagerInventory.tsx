@@ -7634,8 +7634,9 @@ function VariantEditor({
 }
 
 // Staff receiving task authorization is co-located to avoid creating new UI files.
-type Task = { id: number; productId: number; variantId: number | null; productName: string; quantity: number; deliveryReference: string; createdAt: string };
+type Task = { id: number; productId: number; variantId: number | null; productName: string; quantity: number; authorizedQuantity?: number; alreadyReceived?: number; lastReceivingNotes?: string | null; deliveryReference: string; createdAt: string };
 type Shortage = { id: number; productName: string; stockSnapshot: number; reorderSnapshot: number; notes: string };
+type StaffCondition = {id: number; productName: string; issueType: string; expirationDate?: string | null; notes: string; createdAt?: string};
 const btn = "rounded-xl border border-[#E5DCF0] px-3 py-2 text-xs font-semibold text-[#2B174C] hover:bg-[#F5EFFF] disabled:opacity-40";
 
 /** Supervisor authorizations change quantities only when the designated staff physically receives the delivery. */
@@ -7646,7 +7647,10 @@ function ManagerStaffReceiving({ products }: { products: Product[] }) {
     const [error, setError] = React.useState("");
     const [notice, setNotice] = React.useState("");
     const [tasks, setTasks] = React.useState<Task[]>([]);
+    const [partialReceiptSupported, setPartialReceiptSupported] = React.useState(false);
     const [shortages, setShortages] = React.useState<Shortage[]>([]);
+    const [conditions, setConditions] = React.useState<StaffCondition[]>([]);
+    const [conditionReportingSupported,setConditionReportingSupported] = React.useState(false);
     const [productId, setProductId] = React.useState("");
     const [variantId, setVariantId] = React.useState("");
     const [quantity, setQuantity] = React.useState("");
@@ -7669,7 +7673,10 @@ function ManagerStaffReceiving({ products }: { products: Product[] }) {
         try {
             const result = await post({action:"get_staff_inventory_workspace"});
             setTasks(Array.isArray(result.receivingTasks) ? result.receivingTasks : []);
+            setPartialReceiptSupported(result.supportsPartialReceiving === true);
             setShortages(Array.isArray(result.shortages) ? result.shortages : []);
+            setConditions(Array.isArray(result.conditionReports) ? result.conditionReports : []);
+            setConditionReportingSupported(result.supportsConditionReports === true);
         } catch (e) { setError(e instanceof Error ? e.message : "Failed to load receiving tasks."); }
         finally { setLoading(false); }
     }, [post]);
@@ -7700,11 +7707,17 @@ function ManagerStaffReceiving({ products }: { products: Product[] }) {
         catch (e) { setError(e instanceof Error ? e.message : "Unable to resolve report."); }
         finally { setBusy(false); }
     };
+    const resolveCondition = async (reportId: number) => {
+        setBusy(true);setError("");
+        try {await post({action:"resolve_staff_stock_condition",reportId});await load();}
+        catch(e){setError(e instanceof Error ? e.message : "Unable to resolve condition report.");}
+        finally{setBusy(false);}
+    };
     return <section className="rounded-2xl border border-[#E6DDF0] bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2"><ClipboardCheck size={19} className="text-[#6944C9]"/>
-                <div><h3 className="text-sm font-bold text-[#21132E]">Staff Receiving & Shortage Reports</h3>
-                    <p className="text-xs text-[#806A8C]">Authorize physical receiving without giving staff purchasing or pricing permissions.</p></div></div>
+                <div><h3 className="text-sm font-bold text-[#21132E]">Staff Reports & Delivery Receiving</h3>
+                    <p className="text-xs text-[#806A8C]">Review shortage reports and authorize physical receiving without granting purchasing or pricing access.</p></div></div>
             <button type="button" onClick={()=>setOpen(v=>!v)} className={btn} aria-expanded={open}>{open ? "Hide Workspace" : "Manage Staff Stock Tasks"}</button>
         </div>
         {open && <div className="mt-4 space-y-4 border-t border-[#EEE7F5] pt-4">
@@ -7712,7 +7725,7 @@ function ManagerStaffReceiving({ products }: { products: Product[] }) {
             {notice && <p role="status" className="text-sm text-green-700">{notice}</p>}
             <form onSubmit={authorize} className="space-y-3 rounded-xl bg-[#FAF7FF] p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold"><PackagePlus size={17}/> Authorize a staff stock receipt</div>
-                <p className="text-xs text-[#806A8C]">Use a delivery reference that has not already been recorded as received through Manager Receive Stock. Purchasing and invoices remain a separate Manager/Owner responsibility.</p>
+                <p className="text-xs text-[#806A8C]">Authorize only an existing product and a delivery not already posted through Manager Receive Stock. This task does not create a supplier invoice; Staff adds only physically accepted units when confirming receipt.</p>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                     <label className="text-xs">Product<select required value={productId} onChange={e=>{setProductId(e.target.value);setVariantId("");}} className="mt-1 w-full rounded-lg border p-2"><option value="">Select product</option>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
                     {selected?.hasVariants && <label className="text-xs">Variant<select required value={variantId} onChange={e=>setVariantId(e.target.value)} className="mt-1 w-full rounded-lg border p-2"><option value="">Select variant</option>{selected.variants?.map(v=><option key={v.id} value={v.id}>{Object.values(v.variantValues || {}).join(" / ") || `Variant ${v.id}`}</option>)}</select></label>}
@@ -7723,7 +7736,28 @@ function ManagerStaffReceiving({ products }: { products: Product[] }) {
                 </div><button type="submit" disabled={busy || loading || !productId || !!selected?.hasVariants && !variantId} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-40">{busy ? "Saving..." : "Authorize Delivery"}</button>
             </form>
             <div className="flex justify-between"><h4 className="text-sm font-semibold">Pending Authorized Deliveries ({tasks.length})</h4><button onClick={()=>void load()} type="button" className={btn} disabled={loading}><RefreshCw size={13} className="inline"/> Refresh</button></div>
-            <div className="max-h-44 overflow-auto text-xs">{tasks.length === 0 ? <p className="text-[#806A8C]">No pending deliveries.</p> : tasks.map(t=><div key={t.id} className="flex items-center justify-between gap-2 border-b py-2"><p>{t.productName} · {t.quantity} units · {t.deliveryReference}</p><button className={btn} disabled={busy} onClick={()=>void cancelTask(t.id)}>Cancel</button></div>)}</div>
+            <div className="max-h-56 overflow-auto text-xs">{tasks.length === 0 ? <p className="text-[#806A8C]">No pending deliveries.</p> : tasks.map(t=>{
+                const total = Number(t.authorizedQuantity ?? t.quantity);
+                const received = Number(t.alreadyReceived ?? 0);
+                const remaining = Number(t.quantity);
+                return <div key={t.id} className="flex flex-wrap items-center justify-between gap-3 border-b border-[#EEE7F5] py-3">
+                    <div className="min-w-0 space-y-1">
+                        <p className="font-semibold text-[#2B174C]">{t.productName} <span className="font-normal text-[#806A8C]">· {t.deliveryReference}</span></p>
+                        <p className="text-[#695D75]">Authorized: <b>{total}</b> · Received: <b>{received}</b> · Remaining: <b>{remaining}</b></p>
+                        {received>0 && <span className="inline-flex rounded-full bg-[#F1EBFF] px-2 py-1 text-[10px] font-semibold text-[#5330B6]">Partially Received</span>}
+                        {t.lastReceivingNotes && <p className="max-w-2xl text-[#95600A]">Staff receipt notes: {t.lastReceivingNotes}</p>}
+                    </div>
+                    <button type="button" className={btn} disabled={busy} onClick={()=>void cancelTask(t.id)}>{received>0 ? "Cancel Remaining" : "Cancel"}</button>
+                </div>;
+            })}</div>
+            {!partialReceiptSupported && !loading && <p className="text-[11px] text-[#94611B]">Partial receipt API support is not active yet. Complete the SQL migration and backend patch before testing deliveries received in stages.</p>}
+            <h4 className="text-sm font-semibold">Open Product Condition Reports ({conditions.length})</h4>
+            {!conditionReportingSupported && !loading && <p className="text-[11px] text-[#926400]">Product condition reports require the accompanying backend patch and SQL migration.</p>}
+            <div className="max-h-56 space-y-2 overflow-auto">{conditions.length===0 ? <p className="text-xs text-[#806A8C]">No expired, expiring or damaged items reported.</p> : conditions.map(c=><div key={c.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#EEE7F5] px-3 py-2 text-xs">
+                <div><p className="font-semibold">{c.productName} · <span className="text-[#BA3751]">{c.issueType}</span></p><p className="text-[#806A8C]">{c.notes}</p>{c.expirationDate&&<p className="text-[#806A8C]">Expiration: {String(c.expirationDate).slice(0,10)}</p>}</div>
+                <button type="button" className={btn} disabled={busy} onClick={()=>void resolveCondition(c.id)}>Mark Reviewed</button>
+            </div>)}</div>
+            <p className="text-[11px] text-[#806A8C]">Mark Reviewed only after verifying the issue and completing any required disposal or inventory adjustment using existing Manager controls. This does not change stock.</p>
             <h4 className="text-sm font-semibold">Open Shortage Reports ({shortages.length})</h4>
             <div className="max-h-56 space-y-2 overflow-auto">{shortages.length===0 ? <p className="text-xs text-[#806A8C]">No open shortage reports.</p> : shortages.map(s=><div key={s.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs"><div><b>{s.productName}</b> · {s.stockSnapshot} on hand / {s.reorderSnapshot} reorder<p className="text-[#806A8C]">{s.notes}</p></div><button type="button" disabled={busy} onClick={()=>void resolve(s.id)} className={btn}>Mark Resolved</button></div>)}</div>
         </div>}

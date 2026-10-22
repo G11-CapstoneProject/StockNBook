@@ -2488,7 +2488,7 @@ async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}
                                                         p.alert_level AS alertLevel,DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS expiresAt,p.has_variants AS hasVariants,
                                                         DATE_FORMAT(p.created_at,'%Y-%m-%d') AS createdDate,
                                                         ${hasVariants ? "v.id AS variantId,v.stock AS variantStock,v.alert_level AS variantAlert,DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS variantExpiry" :
-                                                                'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
+            'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
                                                  FROM products p ${hasVariants ? 'LEFT JOIN product_variants v ON v.product_id=p.id AND v.deleted_at IS NULL' : ''}
                                                  WHERE p.store_id=? AND p.deleted_at IS NULL ${branchId ? 'AND p.branch_id=?' : ''}
                                                  ORDER BY p.id`, args);
@@ -3077,12 +3077,11 @@ exports.handler = async (event) => {
         // stock adjustment, or product deletion operations.
         if (tokenRole === "staff" && !new Set([
             "get_products", "get_staff_inventory_workspace", "get_staff_inventory_activity",
-            "complete_staff_stock_receipt", "report_staff_stock_shortage",
-            "get_product_editor_details", "get_stock_suppliers", "receive_stock",
+            "complete_staff_stock_receipt", "report_staff_stock_shortage", "report_staff_stock_condition",
         ]).has(action)) {
             return unauthorized(headers, "This product operation is not permitted for staff.");
         }
-        if (tokenRole === "staff" && ["complete_staff_stock_receipt", "report_staff_stock_shortage"].includes(action)) {
+        if (tokenRole === "staff" && ["complete_staff_stock_receipt", "report_staff_stock_shortage", "report_staff_stock_condition"].includes(action)) {
             const [rows] = await connection.execute(
                 `SELECT permissions FROM staff WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,
                 [Number(decoded.staff_id),storeId,activeBranchId]);
@@ -3104,10 +3103,13 @@ exports.handler = async (event) => {
          * This action MUST NOT use receive_stock: that action creates a financial purchase.
          */
         if (["get_staff_inventory_workspace", "get_staff_inventory_activity", "get_staff_receiving_permissions", "set_staff_receiving_permission", "authorize_staff_stock_receipt",
-            "complete_staff_stock_receipt", "cancel_staff_stock_receipt", "report_staff_stock_shortage", "resolve_staff_stock_shortage"].includes(action)) {
+            "complete_staff_stock_receipt", "cancel_staff_stock_receipt", "report_staff_stock_shortage", "resolve_staff_stock_shortage", "report_staff_stock_condition", "resolve_staff_stock_condition"].includes(action)) {
             if (!(await tableExists(connection, "staff_stock_receiving_tasks")) ||
                 !(await tableExists(connection, "staff_stock_shortage_reports"))) {
                 return jsonResponse(503, headers, { error: "The Staff Inventory SQL migration is required before using these operations." });
+            }
+            if (!(await tableExists(connection, "staff_stock_condition_reports"))) {
+                return jsonResponse(503, headers, { error: "The Staff product condition reports SQL migration is required." });
             }
             if (!activeBranchId) return badRequest(headers, "An assigned branch is required.");
             if (!["owner", "manager", "staff"].includes(tokenRole)) return unauthorized(headers, "Inventory access denied.");
@@ -3204,7 +3206,11 @@ exports.handler = async (event) => {
                 const [receivingTasks] = await connection.execute(
                     `SELECT t.id, t.product_id AS productId, t.variant_id AS variantId,
                             p.name AS productName, p.product_number AS productNumber,
-                            pv.variant_values AS variantValues, t.authorized_quantity AS quantity,
+                            pv.variant_values AS variantValues,
+                            t.authorized_quantity AS authorizedQuantity,
+                            COALESCE(t.received_quantity,0) AS alreadyReceived,
+                            (t.authorized_quantity - COALESCE(t.received_quantity,0)) AS quantity,
+                            t.last_receiving_notes AS lastReceivingNotes,
                             t.delivery_reference AS deliveryReference, t.expiration_date AS expirationDate,
                             t.status, t.notes, t.created_at AS createdAt
                      FROM staff_stock_receiving_tasks t
@@ -3221,6 +3227,17 @@ exports.handler = async (event) => {
                               JOIN products p ON p.id=r.product_id AND p.store_id=r.store_id AND p.branch_id=r.branch_id
                      WHERE r.store_id=? AND r.branch_id=? AND r.status='open'
                      ORDER BY r.created_at DESC LIMIT 100`, [storeId,activeBranchId]);
+                const [conditionReports] = await connection.execute(
+                    `SELECT r.id, r.product_id AS productId, r.variant_id AS variantId,
+                            p.name AS productName, r.issue_type AS issueType, r.notes,
+                            COALESCE(pv.expiration_date,p.expiration_date) AS expirationDate,
+                            r.created_at AS createdAt
+                     FROM staff_stock_condition_reports r
+                     JOIN products p ON p.id=r.product_id AND p.store_id=r.store_id AND p.branch_id=r.branch_id
+                     LEFT JOIN product_variants pv ON pv.id=r.variant_id AND pv.product_id=p.id
+                     WHERE r.store_id=? AND r.branch_id=? AND r.status='open'
+                     ORDER BY r.created_at DESC, r.id DESC LIMIT 100`,
+                    [storeId,activeBranchId]);
                 const [movements] = await connection.execute(
                     `SELECT m.id, m.created_at AS at, p.name AS productName,
                             pv.variant_values AS variantValues, m.movement_type AS kind,
@@ -3241,8 +3258,8 @@ exports.handler = async (event) => {
                        AND m.created_at >= FROM_UNIXTIME(?) AND m.created_at < FROM_UNIXTIME(?)`,
                     [storeId,activeBranchId,manilaDayStartEpoch,manilaDayStartEpoch+86400]);
                 return jsonResponse(200, headers, {
-                    success:true, canReceiveStock:allowedReceiving,
-                    receivingTasks, shortages, movements,
+                    success:true, canReceiveStock:allowedReceiving, supportsPartialReceiving:true,
+                    receivingTasks, shortages, conditionReports, supportsConditionReports:true, movements,
                     todayMovementCount:Number(todayRows[0]?.total || 0),
                 });
             }
@@ -3332,17 +3349,44 @@ exports.handler = async (event) => {
                     !(await tableExists(connection,"inventory_batches"))) {
                     return jsonResponse(503,headers,{error:"V2 inventory movement and batch tables are required."});
                 }
+                if (!(await tableExists(connection,"staff_stock_receipt_events"))) {
+                    return jsonResponse(503,headers,{error:"Run the partial receiving SQL migration before recording receipts."});
+                }
                 await connection.beginTransaction();
                 const [tasks] = await connection.execute(
                     `SELECT * FROM staff_stock_receiving_tasks WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
                     [taskId,storeId,activeBranchId]);
                 const task = tasks[0];
                 if (!task) { await safeRollback(connection);return notFound(headers,"Receiving task unavailable."); }
+                // Each partial receipt gets its own idempotency event. Retry with the same
+                // requestKey returns success without increasing stock twice.
+                const [existingReceipt] = await connection.execute(
+                    `SELECT id, received_quantity AS receivedQuantity FROM staff_stock_receipt_events
+                     WHERE store_id=? AND branch_id=? AND task_id=? AND request_key=? LIMIT 1`,
+                    [storeId,activeBranchId,taskId,requestKey]);
+                if (existingReceipt.length) {
+                    await safeRollback(connection);
+                    return jsonResponse(200,headers,{success:true,alreadyProcessed:true,
+                        quantity:Number(existingReceipt[0].receivedQuantity)});
+                }
+                // Preserve idempotent retries for receipts completed before this migration.
                 if (task.status === "received" && task.request_key === requestKey) {
-                    await safeRollback(connection); return jsonResponse(200,headers,{success:true,alreadyProcessed:true});
+                    await safeRollback(connection);
+                    return jsonResponse(200,headers,{success:true,alreadyProcessed:true});
                 }
                 if (task.status !== "pending") {await safeRollback(connection);return jsonResponse(409,headers,{error:"This receiving task was already processed."});}
-                const quantity = Number(task.authorized_quantity);
+                const remaining = Number(task.authorized_quantity) - Number(task.received_quantity || 0);
+                const quantity = body.receivedQuantity == null ? remaining : Number(body.receivedQuantity);
+                const receivingNotes = toSafeString(body.receivingNotes,500);
+                if (!Number.isSafeInteger(remaining) || remaining < 1 ||
+                    !Number.isSafeInteger(quantity) || quantity < 1 || quantity > remaining) {
+                    await safeRollback(connection);
+                    return badRequest(headers,`Actual acceptable quantity must be between 1 and ${remaining}.`);
+                }
+                if (quantity < remaining && receivingNotes.length < 5) {
+                    await safeRollback(connection);
+                    return badRequest(headers,"Explain the partial delivery in at least 5 characters.");
+                }
                 const dateParts = new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Manila",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date());
                 const part = kind => dateParts.find(p=>p.type===kind)?.value||"";
                 const today = `${part("year")}-${part("month")}-${part("day")}`;
@@ -3371,30 +3415,100 @@ exports.handler = async (event) => {
                 if (variantId === null && Number(product.stock)!==before) {
                     await safeRollback(connection);return jsonResponse(409,headers,{error:"Stock differs between POS and product inventory; ask the Manager to reconcile it."});
                 }
+                const [receiptEvent] = await connection.execute(
+                    `INSERT INTO staff_stock_receipt_events
+                     (store_id,branch_id,task_id,request_key,received_quantity,received_by,receiving_notes)
+                     VALUES (?,?,?,?,?,?,?)`,
+                    [storeId,activeBranchId,taskId,requestKey,quantity,staffId,receivingNotes || null]);
+                const receiptEventId = Number(receiptEvent.insertId);
                 await connection.execute(`UPDATE products SET stock=stock+? WHERE id=? AND store_id=? AND branch_id=?`,[quantity,task.product_id,storeId,activeBranchId]);
                 await connection.execute(`UPDATE branch_inventory SET quantity_on_hand=quantity_on_hand+? WHERE id=?`,[quantity,inventory[0].id]);
                 await connection.execute(
                     `INSERT INTO inventory_batches (store_id,branch_id,branch_inventory_id,batch_code,received_quantity,remaining_quantity,unit_cost,received_at,expiration_date,status)
                      VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,?,'active')`,
-                    [storeId,activeBranchId,inventory[0].id,`STAFF-RCV-${task.id}`.slice(0,100),quantity,quantity,Number(inventory[0].cost_price),task.expiration_date]);
+                    [storeId,activeBranchId,inventory[0].id,`STAFF-RCV-${task.id}-${receiptEventId}`.slice(0,100),quantity,quantity,Number(inventory[0].cost_price),task.expiration_date]);
                 await connection.execute(
                     `INSERT INTO inventory_movements (store_id,branch_id,branch_inventory_id,movement_type,quantity_delta,quantity_before,quantity_after,
                                                       reference_type,reference_id,actor_id,actor_role,actor_name,notes)
                      VALUES (?,?,?,'STAFF_RECEIPT',?,?,?,'STAFF_RECEIVING_TASK',?,?,?,?,?)`,
-                    [storeId,activeBranchId,inventory[0].id,quantity,before,before+quantity,String(task.id),staffId,"staff",employee.name,`Delivery: ${task.delivery_reference}`]);
+                    [storeId,activeBranchId,inventory[0].id,quantity,before,before+quantity,String(task.id),staffId,"staff",employee.name,`Delivery: ${task.delivery_reference}${receivingNotes ? `; ${receivingNotes}` : ""}`]);
                 const variantName = variantId != null ? `Variant ${variantId}` : null;
                 await connection.execute(
                     `INSERT INTO restock_history (store_id,branch_id,product_id,product_name,variant_name,stock_before,quantity_added,current_stock,received_by)
                      VALUES (?,?,?,?,?,?,?,?,?)`,
                     [storeId,activeBranchId,task.product_id,product.name,variantName,before,quantity,before+quantity,employee.name]);
                 await connection.execute(
-                    `UPDATE staff_stock_receiving_tasks SET status='received',received_by=?,received_at=CURRENT_TIMESTAMP,request_key=? WHERE id=?`,
-                    [staffId,requestKey,taskId]);
+                    `UPDATE staff_stock_receiving_tasks
+                     SET received_quantity=received_quantity+?,
+                         status=CASE WHEN received_quantity+?>=authorized_quantity THEN 'received' ELSE 'pending' END,
+                         received_by=?,received_at=CURRENT_TIMESTAMP,request_key=?,last_receiving_notes=?
+                     WHERE id=?`,
+                    [quantity,quantity,staffId,requestKey,receivingNotes || null,taskId]);
                 await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,module:"Inventory",
                     referenceNumber:product.product_number,action:"Received authorized stock",referenceId:String(taskId),
-                    details:`Received ${quantity} units of ${product.name} for delivery ${task.delivery_reference}`});
+                    details:`Received ${quantity} units of ${product.name} for delivery ${task.delivery_reference}; ${remaining-quantity} pending${receivingNotes ? `; ${receivingNotes}` : ""}`});
                 await connection.commit();
-                return jsonResponse(200,headers,{success:true,quantity,reference:task.delivery_reference});
+                return jsonResponse(200,headers,{success:true,quantity,reference:task.delivery_reference,
+                    remainingQuantity:remaining-quantity,completed:quantity===remaining});
+            }
+
+            if (action === "report_staff_stock_condition") {
+                if (!["staff","manager"].includes(tokenRole)) return unauthorized(headers,"Only branch operations may report product conditions.");
+                const {productId,variantId,valid}=itemIdentity();
+                const issueType=String(body.issueType || "").trim().toLowerCase();
+                const notes=toSafeString(body.notes,500);
+                if (!valid || !["expired","expiring","damaged"].includes(issueType) || notes.length<5)
+                    return badRequest(headers,"Select a product, valid issue type, and at least 5 characters of notes.");
+                await connection.beginTransaction();
+                const [products] = await connection.execute(
+                    `SELECT id,has_variants,expiration_date,product_number,name FROM products
+                     WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
+                    [productId,storeId,activeBranchId]);
+                if (!products.length) {await safeRollback(connection);return notFound(headers,"Product not in this branch.");}
+                if (Boolean(products[0].has_variants)!==(variantId!==null)) {await safeRollback(connection);return badRequest(headers,"Select the correct product variant.");}
+                let expiry=products[0].expiration_date;
+                if (variantId!==null) {
+                    const [variants]=await connection.execute(`SELECT id,expiration_date FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`,[variantId,productId]);
+                    if (!variants.length) {await safeRollback(connection);return notFound(headers,"Variant unavailable.");}
+                    expiry=variants[0].expiration_date;
+                }
+                const nowParts=new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Manila",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date());
+                const bit=key=>nowParts.find(p=>p.type===key)?.value||"";
+                const today=`${bit("year")}-${bit("month")}-${bit("day")}`;
+                const thirty=new Date(`${today}T00:00:00Z`);
+                thirty.setUTCDate(thirty.getUTCDate()+30);
+                const soon=thirty.toISOString().slice(0,10);
+                const expiryKey=expiry instanceof Date ? expiry.toISOString().slice(0,10) : (expiry ? String(expiry).slice(0,10) : "");
+                if ((issueType==="expired" && (!expiryKey || expiryKey>=today)) ||
+                    (issueType==="expiring" && (!expiryKey || expiryKey<today || expiryKey>soon))) {
+                    await safeRollback(connection);return badRequest(headers,"The recorded expiration date does not match this report type.");
+                }
+                const [duplicate]=await connection.execute(
+                    `SELECT id FROM staff_stock_condition_reports WHERE store_id=? AND branch_id=? AND product_id=?
+                     AND variant_id <=> ? AND issue_type=? AND status='open' LIMIT 1`,
+                    [storeId,activeBranchId,productId,variantId,issueType]);
+                if (duplicate.length) {await safeRollback(connection);return jsonResponse(409,headers,{error:"This product condition is already reported and awaiting review."});}
+                const [created] = await connection.execute(
+                    `INSERT INTO staff_stock_condition_reports
+                     (store_id,branch_id,product_id,variant_id,issue_type,notes,reported_by)
+                     VALUES (?,?,?,?,?,?,?)`,
+                    [storeId,activeBranchId,productId,variantId,issueType,notes,employee.id]);
+                await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,module:"Inventory",
+                    referenceNumber:products[0].product_number,action:`Reported product condition: ${issueType}`,
+                    referenceId:String(created.insertId),details:notes});
+                await connection.commit();
+                return jsonResponse(201,headers,{success:true});
+            }
+            if (action === "resolve_staff_stock_condition") {
+                if (!["manager","owner"].includes(tokenRole)) return unauthorized(headers,"Manager review required.");
+                const reportId=Number(body.reportId);
+                if (!Number.isSafeInteger(reportId)||reportId<1) return badRequest(headers,"Invalid condition report.");
+                const [updated]=await connection.execute(
+                    `UPDATE staff_stock_condition_reports SET status='resolved',resolved_by=?,resolved_at=CURRENT_TIMESTAMP
+                     WHERE id=? AND store_id=? AND branch_id=? AND status='open'`,
+                    [employee.id,reportId,storeId,activeBranchId]);
+                if (!updated.affectedRows) return notFound(headers,"Report already resolved or unavailable.");
+                return jsonResponse(200,headers,{success:true});
             }
             if (action === "report_staff_stock_shortage") {
                 if (tokenRole !== "staff" && tokenRole !== "manager") return unauthorized(headers,"Not permitted.");
@@ -3537,8 +3651,8 @@ exports.handler = async (event) => {
 
 
         if (action === "get_stock_suppliers") {
-            if (!["owner", "manager", "staff"].includes(tokenRole)) {
-                return unauthorized(headers, "Inventory access required to view suppliers.");
+            if (!["owner", "manager"].includes(tokenRole)) {
+                return unauthorized(headers, "Supplier purchasing information is restricted to Managers and Owners.");
             }
             if (!activeBranchId) return badRequest(headers, "A branch is required.");
             const suppliers = new Set();
@@ -3559,10 +3673,11 @@ exports.handler = async (event) => {
            applying the manager's chosen selling price within the same transaction.
            Earlier supplier purchase amounts and variant definitions are untouched. */
         if (action === "receive_stock") {
-            // Staff inventory access is rechecked against staff.permissions above.
-            // Branch scope is always derived from the signed-in staff JWT.
-            if (!["owner", "manager", "staff"].includes(tokenRole)) {
-                return unauthorized(headers, "Inventory access required to receive stock.");
+            // This action creates supplier purchases, changes costs and can reprice stock.
+            // Staff may only complete a Manager-authorized physical receipt through
+            // complete_staff_stock_receipt; never permit the general purchasing path.
+            if (!["owner", "manager"].includes(tokenRole)) {
+                return unauthorized(headers, "Only a Manager or Owner may record supplier purchases and change pricing. Staff must use an authorized receiving task.");
             }
             const productId = Number(body.product_id ?? body.productId);
             if (!activeBranchId || !Number.isInteger(productId) || productId <= 0) {
@@ -4011,11 +4126,10 @@ exports.handler = async (event) => {
             return jsonResponse(200,headers,{success:true,productId,variantId,previousStock:current,newStock:target,totalStock:aggregateStock});
         }
         if (action === "get_product_editor_details") {
-            // Receive Stock requires current variant costs and saved pricing;
-            // staff with Inventory access can read these details without being
-            // granted update_product or supplier-payment privileges.
-            if (!["owner", "manager", "staff"].includes(tokenRole)) {
-                return unauthorized(headers, "Inventory access required to load receiving details.");
+            // Cost and pricing editor details are financial management data;
+            // Staff Inventory uses get_products with costs redacted.
+            if (!["owner", "manager"].includes(tokenRole)) {
+                return unauthorized(headers, "Only a Manager or Owner may access product cost and pricing editor details.");
             }
             const productId = Number(body.id);
             if (!Number.isInteger(productId) || productId <= 0) {

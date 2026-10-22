@@ -40,12 +40,15 @@ type ReceivingTask = {
     variantId: number | null;
     productName: string;
     variantValues?: Record<string, string> | string;
-    quantity: number;
+    quantity: number; // Remaining authorized units waiting for physical receipt.
+    authorizedQuantity?: number;
+    alreadyReceived?: number;
     deliveryReference: string;
     expirationDate?: string | null;
     notes?: string | null;
 };
 type ShortageReport = { id: number; productId: number; variantId: number | null; stockSnapshot: number; notes: string; };
+type ConditionReport = { id: number; productId: number; variantId: number | null; issueType: "expired" | "expiring" | "damaged"; notes: string; };
 type StockMovement = { id: number; at: string; productName: string; variantValues?: Record<string,string> | string;
     kind: string; quantity: number; reference?: string; actorName?: string; };
 function variantLabel(raw?: Record<string,string> | string) {
@@ -90,6 +93,15 @@ function isActivityFromToday(value: string, today: string) {
     return !Number.isNaN(parsed.getTime()) && dateInManila(parsed) === today;
 }
 
+function staffExpirationRisk(value?: string | null): "Expired" | "Expiring Soon" | null {
+    const date = String(value || "").slice(0,10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    const today = dateInManila();
+    if (date < today) return "Expired";
+    const [year,month,day] = today.split("-").map(Number);
+    const limit = new Date(Date.UTC(year, month-1, day+30)).toISOString().slice(0,10);
+    return date <= limit ? "Expiring Soon" : null;
+}
 function inventoryExpirationLabel(value?: string | null) {
     if (!value) return "—";
     const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00`);
@@ -184,8 +196,24 @@ export default function StaffInventory() {
     const [canReceive, setCanReceive] = React.useState(false);
     const [receivingTasks, setReceivingTasks] = React.useState<ReceivingTask[]>([]);
     const [shortageReports, setShortageReports] = React.useState<ShortageReport[]>([]);
+    const [conditionReports, setConditionReports] = React.useState<ConditionReport[]>([]);
+    const [conditionReportingSupported, setConditionReportingSupported] = React.useState(false);
+    const [conditionIssueType, setConditionIssueType] = React.useState<"expired"|"expiring"|"damaged">("damaged");
+    const [conditionNotes, setConditionNotes] = React.useState("");
     const [reportNotes, setReportNotes] = React.useState("");
     const [activeReceipt, setActiveReceipt] = React.useState<ReceivingTask | null>(null);
+    const [partialReceiptSupported, setPartialReceiptSupported] = React.useState(false);
+    const [receivingQuantity, setReceivingQuantity] = React.useState("");
+    const [receivingNotes, setReceivingNotes] = React.useState("");
+    // Keep the same key on a network retry so one physical receipt cannot be recorded twice.
+    const receiptRequestKey = React.useRef("");
+    const chooseReceipt = (task: ReceivingTask | null) => {
+        setActiveReceipt(task);
+        setReceivingQuantity(task ? String(task.quantity) : "");
+        setReceivingNotes("");
+        setActionError("");
+        receiptRequestKey.current = "";
+    };
     const [saving, setSaving] = React.useState(false);
     const [actionError, setActionError] = React.useState("");
     const [actionNotice, setActionNotice] = React.useState("");
@@ -223,6 +251,14 @@ export default function StaffInventory() {
         [attention, taskFilter]);
     const reportsByKey = React.useMemo(() => new Set(shortageReports.map(r=>`${r.productId}:${r.variantId ?? "regular"}`)),
         [shortageReports]);
+    const conditionAlreadyReported = (line: StockLine, issueType: string) =>
+        conditionReports.some(report => report.productId === line.product.id &&
+            (report.variantId ?? null) === line.variantId && report.issueType === issueType);
+    const openProductReview = (line: StockLine) => {
+        setDetails(line);setActionError("");setReportNotes("");setConditionNotes("");
+        const risk = staffExpirationRisk(line.expirationDate);
+        setConditionIssueType(risk === "Expired" ? "expired" : risk === "Expiring Soon" ? "expiring" : "damaged");
+    };
     const branch = inv.assignedBranchName || "Assigned Branch";
     const todayActivities = React.useMemo(() => {
         const today = dateInManila(now ?? new Date());
@@ -280,14 +316,19 @@ export default function StaffInventory() {
                 requireApiSuccess(response, data, "Unable to load stock activity.");
                 if (controller.signal.aborted) return;
                 setCanReceive(data.canReceiveStock === true);
+                // Older backends process the entire task even when a quantity is supplied.
+                // Enable the quantity input ONLY after the server advertises partial support.
+                setPartialReceiptSupported(data.supportsPartialReceiving === true);
                 setReceivingTasks(Array.isArray(data.receivingTasks) ? data.receivingTasks : []);
                 setShortageReports(Array.isArray(data.shortages) ? data.shortages : []);
+                setConditionReports(Array.isArray(data.conditionReports) ? data.conditionReports : []);
+                setConditionReportingSupported(data.supportsConditionReports === true);
                 setActivities(fromMovements(Array.isArray(data.movements) ? data.movements : []));
                 setTodayMovementCount(Number.isSafeInteger(data.todayMovementCount) && data.todayMovementCount >= 0
                     ? data.todayMovementCount : null);
             } catch (error) {
                 if (controller.signal.aborted) return;
-                setCanReceive(false); setReceivingTasks([]); setShortageReports([]); setActivities([]);
+                setCanReceive(false); setPartialReceiptSupported(false); setReceivingTasks([]); setShortageReports([]); setConditionReports([]); setConditionReportingSupported(false); setActivities([]);
                 setTodayMovementCount(null);
                 setActivityError(error instanceof Error ? error.message : "Unable to load stock activity.");
             } finally {if (!controller.signal.aborted) setActivityLoading(false);}
@@ -352,14 +393,43 @@ export default function StaffInventory() {
         } catch (error) {setActionError(error instanceof Error ? error.message : "Unable to report shortage.");}
         finally {setSaving(false);}
     };
-    const confirmReceipt = async (task: ReceivingTask) => {
-        if (saving || !canReceive) return;
+    const submitCondition = async (line: StockLine) => {
+        if (saving || !conditionReportingSupported || conditionAlreadyReported(line, conditionIssueType)) return;
+        if (conditionNotes.trim().length < 5) {setActionError("Provide at least 5 characters of notes.");return;}
         setSaving(true);setActionError("");setActionNotice("");
         try {
-            await sendInventoryAction({action:"complete_staff_stock_receipt",taskId:task.id,
-                requestKey:crypto.randomUUID()});
-            setActionNotice(`Recorded ${task.quantity} units for delivery ${task.deliveryReference}.`);
-            setActiveReceipt(null);setShowReceivingInfo(false);
+            await sendInventoryAction({action:"report_staff_stock_condition",productId:line.product.id,
+                variantId:line.variantId,issueType:conditionIssueType,notes:conditionNotes.trim()});
+            setActionNotice("Product condition reported to the Manager's inventory queue. Inventory quantities were not changed.");
+            setConditionNotes("");setDetails(null);setActivityKey(key=>key+1);
+        } catch(e) {setActionError(e instanceof Error ? e.message : "Unable to report condition.");}
+        finally {setSaving(false);}
+    };
+    const confirmReceipt = async (task: ReceivingTask) => {
+        if (saving || !canReceive) return;
+        const remaining = Number(task.quantity);
+        const received = partialReceiptSupported ? Number(receivingQuantity) : remaining;
+        if (!Number.isSafeInteger(remaining) || remaining < 1 ||
+            !Number.isSafeInteger(received) || received < 1 || received > remaining ||
+            (partialReceiptSupported && receivingQuantity.trim() === "")) {
+            setActionError(`Enter a whole-number quantity from 1 to ${remaining}.`);
+            return;
+        }
+        if (received < remaining && receivingNotes.trim().length < 5) {
+            setActionError("Explain the partial delivery in at least 5 characters. Unreceived units remain pending.");
+            return;
+        }
+        if (!receiptRequestKey.current) receiptRequestKey.current = crypto.randomUUID();
+        setSaving(true);setActionError("");setActionNotice("");
+        try {
+            const result = await sendInventoryAction({action:"complete_staff_stock_receipt", taskId:task.id,
+                requestKey:receiptRequestKey.current,
+                ...(partialReceiptSupported ? {receivedQuantity:received, receivingNotes:receivingNotes.trim()} : {})});
+            const outstanding = partialReceiptSupported ? Number(result.remainingQuantity ?? (remaining - received)) : 0;
+            setActionNotice(result.alreadyProcessed
+                ? `This receipt was already recorded for ${task.deliveryReference}.`
+                : `Received ${received} units for ${task.deliveryReference}.${outstanding > 0 ? ` ${outstanding} units remain pending.` : " Delivery completed."}`);
+            chooseReceipt(null);setShowReceivingInfo(false);
             await refreshAll();setActivityKey(k=>k+1);
         } catch (error) {setActionError(error instanceof Error ? error.message : "Stock receiving failed.");}
         finally {setSaving(false);}
@@ -409,6 +479,14 @@ export default function StaffInventory() {
                             <Stat label="Out of Stock" value={out.length} helper="Product variants with no available stock" color="bg-[#FFE7EB] text-[#CF3348]" icon={<Package size={19}/>}/>
                             <Stat label="Today's Stock Movements" value={activityLoading || activityError ? null : todayMovementCount} helper="Actual branch inventory movements today (PH time)" color="bg-[#E9F2FF] text-[#1E6FE8]" icon={<ArrowLeftRight size={19}/>}/>
                         </div>
+                        {canReceive && receivingTasks.length > 0 && <section aria-label="Deliveries to receive" className="flex flex-wrap items-center gap-3 rounded-xl border border-[#E7DFEC] bg-[#F5F1FF] px-4 py-3 shadow-sm">
+                            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#ECE3FF] text-[#5A35A5]"><PackagePlus size={19}/></span>
+                            <div className="min-w-0 flex-1">
+                                <h3 className="text-sm font-bold text-[#21132E]">Deliveries to Receive ({receivingTasks.length})</h3>
+                                <p className="mt-0.5 text-[11px] text-[#86778F]">Verify Manager-authorized products and record only the quantity physically received.</p>
+                            </div>
+                            <button type="button" className={`${outline} h-9 px-3 text-xs`} onClick={()=>{setActionError("");chooseReceipt(null);setShowReceivingInfo(true);}}>View Deliveries</button>
+                        </section>}
                         <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
                             {/* Manager-inspired table sizing, with Staff-only review actions. */}
                             <section className={`${card} flex h-[470px] min-h-0 min-w-0 flex-col`}>
@@ -438,7 +516,7 @@ export default function StaffInventory() {
                                                 </span>
                                             </td>
                                             <td className="px-1.5 py-2.5 text-center">
-                                                <button type="button" onClick={()=>setDetails(item)} className="inline-flex w-full max-w-[110px] items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-[10px] font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">Review</button>
+                                                <button type="button" onClick={()=>openProductReview(item)} className="inline-flex w-full max-w-[110px] items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-[10px] font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">Review</button>
                                             </td>
                                         </tr>)}</tbody>
                                     </table>
@@ -509,8 +587,9 @@ export default function StaffInventory() {
                                         <td className="px-2 py-2.5 text-center font-semibold">{item.stock}</td>
                                         <td className="px-2 py-2.5 text-center text-[#5F4E75]">{item.reorder}</td>
                                         <td className="break-words px-2 py-2.5 text-center text-[#5F4E75]">{inventoryExpirationLabel(item.expirationDate)}</td>
-                                        <td className="px-1 py-2.5 text-center"><span className={`inline-flex max-w-full items-center justify-center rounded-full px-2 py-1 text-center text-[10px] font-semibold leading-4 ${stockBadge(item.status)}`}>{item.status}</span></td>
-                                        <td className="px-1 py-2.5 text-center"><button type="button" className="inline-flex max-w-full items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-[10px] font-semibold text-[#5330B6] hover:bg-[#ECE3FF]" onClick={()=>setDetails(item)}>View</button></td>
+                                        <td className="px-1 py-2.5 text-center"><span className={`inline-flex max-w-full items-center justify-center rounded-full px-2 py-1 text-center text-[10px] font-semibold leading-4 ${stockBadge(item.status)}`}>{item.status}</span>
+                                            {staffExpirationRisk(item.expirationDate) && <span className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${staffExpirationRisk(item.expirationDate)==="Expired"?"bg-[#FFE7EA] text-[#BF2438]":"bg-[#FFF3D8] text-[#A56607]"}`}>{staffExpirationRisk(item.expirationDate)}</span>}</td>
+                                        <td className="px-1 py-2.5 text-center"><button type="button" className="inline-flex max-w-full items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-[10px] font-semibold text-[#5330B6] hover:bg-[#ECE3FF]" onClick={()=>openProductReview(item)}>View</button></td>
                                     </tr>)}</tbody>
                                 </table>
                                 {visible.length===0 && <p className="py-10 text-center text-sm text-[#806A8C]">No products match your search or filters.</p>}
@@ -577,20 +656,71 @@ export default function StaffInventory() {
                 {actionError && <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{actionError}</p>}
                 {details ? <div className="mt-4 space-y-3 text-sm"><p className="font-semibold">{details.name}</p><p className="text-[#806A8C]">{details.reference} · {details.category}</p>
                     <div className="grid grid-cols-2 gap-2"><p>Available: <strong>{details.stock}</strong></p><p>Reorder point: <strong>{details.reorder}</strong></p></div>
-                    <p>Status: <span className={`rounded-lg px-2 py-1 ${stockBadge(details.status)}`}>{details.status}</span></p>
+                    <p>Status: <span className={`rounded-lg px-2 py-1 ${stockBadge(details.status)}`}>{details.status}</span>
+                        {staffExpirationRisk(details.expirationDate) && <span className={`ml-2 rounded-lg px-2 py-1 ${staffExpirationRisk(details.expirationDate)==="Expired" ? "bg-[#FFE7EA] text-[#BF2438]":"bg-[#FFF3D8] text-[#A56607]"}`}>{staffExpirationRisk(details.expirationDate)}</span>}</p>
                     {details.status!=="In Stock" ? <>
                         {reportsByKey.has(details.key) ? <p className="rounded-xl bg-[#F7F3FC] p-3 text-xs text-[#6A5D6F]">A shortage report for this item is already open with the Manager.</p> : <>
                             <p className="rounded-xl bg-[#F7F3FC] p-3 text-xs leading-5 text-[#6A5D6F]">Verify the shelf or storage area and submit a shortage report. Staff cannot directly change inventory quantities or supplier payments.</p>
                             <label className="block text-xs font-semibold">Shortage Notes<textarea value={reportNotes} onChange={e=>setReportNotes(e.target.value)} maxLength={500} rows={3} placeholder="What did you verify? (5+ characters)" className="mt-1 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm"/></label>
                             <button type="button" disabled={saving || reportNotes.trim().length<5 || !!activityError} className={`${primary} disabled:opacity-40`} onClick={()=>void submitShortage(details)}>{saving ? "Reporting..." : "Report Shortage"}</button></>}
                     </> : <p className="rounded-xl bg-[#F7F3FC] p-3 text-xs text-[#6A5D6F]">This item is currently above its reorder point. Contact a Manager for corrections or catalog changes.</p>}
+                    <div className="space-y-2 border-t border-[#E9E1EE] pt-3">
+                        <h4 className="text-xs font-bold text-[#2B174C]">Report product condition</h4>
+                        <p className="text-[11px] text-[#806A8C]">Use this to report expired, expiring or damaged items. Reporting does not delete products or adjust stock; isolate unsafe items and alert the Manager.</p>
+                        {!conditionReportingSupported && <p className="rounded-lg bg-[#FFF3D8] p-2 text-[11px] text-[#926400]">Condition reporting needs the accompanying API update and migration before submission is enabled.</p>}
+                        <label className="block text-xs font-semibold">Condition
+                            <select value={conditionIssueType} onChange={e=>setConditionIssueType(e.target.value as typeof conditionIssueType)} className="mt-1 w-full rounded-xl border border-[#E6DDF0] bg-white p-2.5 text-sm">
+                                {staffExpirationRisk(details.expirationDate)==="Expired" && <option value="expired">Expired</option>}
+                                {staffExpirationRisk(details.expirationDate)==="Expiring Soon" && <option value="expiring">Expiring Soon</option>}
+                                <option value="damaged">Damaged / Unsellable</option>
+                            </select>
+                        </label>
+                        {conditionAlreadyReported(details,conditionIssueType) ? <p className="rounded-lg bg-[#F7F3FC] p-3 text-xs text-[#806A8C]">This type of condition report is already open with the Manager.</p> : <>
+                            <label className="block text-xs font-semibold">Inspection Notes
+                                <textarea value={conditionNotes} onChange={e=>setConditionNotes(e.target.value)} maxLength={500} rows={2} placeholder="What did you observe? (5+ characters)" className="mt-1 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm"/>
+                            </label>
+                            <button type="button" onClick={()=>void submitCondition(details)} disabled={!conditionReportingSupported || saving || conditionNotes.trim().length<5 || !!activityError} className={`${outline} h-9 px-3 text-xs disabled:opacity-40`}>Report Condition</button>
+                        </>}
+                    </div>
                 </div> : <div className="mt-4 space-y-3 text-sm">
                     <p className="text-[#5F4E75]">Confirm only deliveries physically received and already authorized by the Manager. Stock, POS batches and audit movements are updated together. Supplier pricing and payments cannot be changed here.</p>
                     {!canReceive ? <p role="alert">Your staff account is not authorized for stock receiving.</p> : receivingTasks.length===0 ?
                         <p className="rounded-xl bg-[#F7F3FC] p-3 text-xs">No Manager-authorized deliveries are waiting for receiving.</p> : <>
-                            <label className="block text-xs font-semibold">Pending Delivery<select className="mt-1 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm" value={activeReceipt?.id || ""} onChange={event=>setActiveReceipt(receivingTasks.find(t=>String(t.id)===event.target.value)||null)}><option value="">Select authorized delivery</option>{receivingTasks.map(t=><option key={t.id} value={t.id}>{t.deliveryReference} — {t.productName} ({t.quantity} units)</option>)}</select></label>
-                            {activeReceipt && <div className="space-y-1 rounded-xl bg-[#F7F3FC] p-3 text-xs"><p className="font-semibold">{activeReceipt.productName}{variantLabel(activeReceipt.variantValues) ? ` — ${variantLabel(activeReceipt.variantValues)}` : ""}</p><p>Quantity to receive: <strong>{activeReceipt.quantity}</strong></p><p>Delivery: {activeReceipt.deliveryReference}</p>{activeReceipt.expirationDate && <p>Batch expiry: {String(activeReceipt.expirationDate).slice(0,10)}</p>}{activeReceipt.notes && <p>Instructions: {activeReceipt.notes}</p>}</div>}
-                            <button type="button" disabled={!activeReceipt || saving} className={`${primary} disabled:opacity-40`} onClick={()=>activeReceipt && void confirmReceipt(activeReceipt)}>{saving ? "Recording..." : "Confirm Physical Receipt"}</button>
+                            <label className="block text-xs font-semibold">Pending Delivery<select className="mt-1 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm" value={activeReceipt?.id || ""} onChange={event=>chooseReceipt(receivingTasks.find(t=>String(t.id)===event.target.value)||null)}><option value="">Select authorized delivery</option>{receivingTasks.map(t=><option key={t.id} value={t.id}>{t.deliveryReference} — {t.productName} ({t.quantity} remaining)</option>)}</select></label>
+                            {activeReceipt && <div className="space-y-3">
+                                <div className="space-y-1 rounded-xl bg-[#F7F3FC] p-3 text-xs">
+                                    <p className="font-semibold">{activeReceipt.productName}{variantLabel(activeReceipt.variantValues) ? ` — ${variantLabel(activeReceipt.variantValues)}` : ""}</p>
+                                    <p>Delivery: {activeReceipt.deliveryReference}</p>
+                                    <div className="mt-2 grid grid-cols-3 gap-2">
+                                        <p>Authorized: <strong>{activeReceipt.authorizedQuantity ?? activeReceipt.quantity}</strong></p>
+                                        <p>Previously received: <strong>{activeReceipt.alreadyReceived ?? 0}</strong></p>
+                                        <p>Remaining: <strong>{activeReceipt.quantity}</strong></p>
+                                    </div>
+                                    {activeReceipt.expirationDate && <p>Batch expiry: {String(activeReceipt.expirationDate).slice(0,10)}</p>}
+                                    {activeReceipt.notes && <p>Instructions: {activeReceipt.notes}</p>}
+                                </div>
+                                <label className="block text-xs font-semibold text-[#2B174C]">Actual Acceptable Units Received
+                                    <input type="number" min="1" max={activeReceipt.quantity} step="1" required
+                                           disabled={!partialReceiptSupported || saving} value={partialReceiptSupported ? receivingQuantity : String(activeReceipt.quantity)}
+                                           onChange={e=>{setReceivingQuantity(e.target.value);receiptRequestKey.current="";}}
+                                           className="mt-1 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 py-2.5 text-sm text-[#2B174C] disabled:bg-[#F8F6FC]"/>
+                                </label>
+                                {!partialReceiptSupported && <p className="text-[11px] text-[#806A8C]">The current server supports full deliveries only. Apply the accompanying partial-receipt migration and API update to enter a smaller amount.</p>}
+                                {partialReceiptSupported && <>
+                                    <p className="text-[11px] text-[#806A8C]">Only count goods that arrived in sellable condition. Leave missing, damaged, or expired units unreceived; do not place those units in available stock.</p>
+                                    <label className="block text-xs font-semibold text-[#2B174C]">Receiving / discrepancy notes {Number(receivingQuantity) < activeReceipt.quantity ? "(required for partial receipt)" : "(optional)"}
+                                        <textarea maxLength={500} rows={2} value={receivingNotes}
+                                                  onChange={e=>{setReceivingNotes(e.target.value);receiptRequestKey.current="";}}
+                                                  placeholder="e.g. 5 units not yet delivered; notify Manager"
+                                                  className="mt-1 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm"/>
+                                    </label>
+                                    {receivingQuantity.trim() !== "" && Number.isSafeInteger(Number(receivingQuantity)) && Number(receivingQuantity)>0 && Number(receivingQuantity)<activeReceipt.quantity && <p className="rounded-lg bg-[#FFF3D8] px-3 py-2 text-xs text-[#926400]">Partial delivery: {activeReceipt.quantity-Number(receivingQuantity)} units will remain pending for the Manager to track.</p>}
+                                </>}
+                            </div>}
+                            <button type="button" disabled={!activeReceipt || saving ||
+                                (partialReceiptSupported && (receivingQuantity.trim()==="" || !Number.isSafeInteger(Number(receivingQuantity)) || Number(receivingQuantity)<1 || Number(receivingQuantity)>Number(activeReceipt.quantity) ||
+                                    (Number(receivingQuantity)<Number(activeReceipt.quantity) && receivingNotes.trim().length<5)))}
+                                    className={`${primary} disabled:opacity-40`} onClick={()=>activeReceipt && void confirmReceipt(activeReceipt)}>{saving ? "Recording..." : "Confirm Physical Receipt"}</button>
                         </>}
                 </div>}
             </section>

@@ -433,7 +433,8 @@ async function getBookingStatement(db,bookingId,storeId,branchId){
     const [bs]=await db.execute(`SELECT id,booking_reference AS reference,name,phone,booking_type AS bookingType,
                                         package_name AS packageName,DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate,
                                         status,agreed_price AS agreedPrice,package_price AS packagePrice,
-                                        required_down_payment AS downPayment,amount_paid AS bookingPayments,balance
+                                        required_down_payment AS downPayment,amount_paid AS bookingPayments,balance,
+                                        CONCAT(DATE_FORMAT(booking_dp_deadline,'%Y-%m-%dT%H:%i:%s'),'Z') AS dpDeadline
                                  FROM bookings WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,[bookingId,storeId,branchId]);
     if(!bs.length)throw rentalError('Booking not found in assigned branch.');
     const b=bs[0];
@@ -458,7 +459,8 @@ async function getBookingStatement(db,bookingId,storeId,branchId){
     const claimBalance=claims.reduce((sum,c)=>sum+Math.max(0,Number(c.amount)-Number(c.amountPaid)-Number(c.depositApplied)),0);
     return {booking:{id:b.id,reference:b.reference,name:b.name,eventDate:b.eventDate,status:b.status,
             bookingType:b.bookingType,packageName:b.packageName,agreedPrice:b.agreedPrice,
-            downPayment:Number(b.downPayment||0),bookingPayments:Number(b.bookingPayments||0),balance:Number(b.balance||0)},
+            downPayment:Number(b.downPayment||0),bookingPayments:Number(b.bookingPayments||0),balance:Number(b.balance||0),
+            dpDeadline:b.dpDeadline||null},
         ...numbers,salesSubtotal,agreedCharges,claimBalance,
         salesItems:salesItems.map(i=>({...i,quantity:Number(i.quantity),unitPrice:Number(i.unitPrice),amount:Number(i.amount)})),depositHeld:Math.max(0,numbers.depositCollected-numbers.depositApplied-numbers.depositRefunded),
         rentalItems:items.map(x=>({...x,quantity:Number(x.quantity),days:Number(x.days),dailyRate:Number(x.dailyRate),amount:Number(x.amount)})),
@@ -1152,7 +1154,9 @@ async function restoreBookingInventoryOnCancel(connection, options) {
 
         if (!productId || reservedQty <= 0) continue;
 
-        const usedQty = getUsedQuantityForItem(item, usedItems);
+        // Never restore units already physically issued through the Staff Sales queue,
+        // even if a caller supplies a lower manually reported used quantity.
+        const usedQty = Math.max(Number(item.used_quantity || 0), getUsedQuantityForItem(item, usedItems));
 
         const itemLabel = item.variant_name
             ? `${item.product_name} — ${item.variant_name}`
@@ -1342,14 +1346,15 @@ async function loadBookingApproval(connection, id, storeId, branchId) {
 async function inspectBookingForConfirmation(connection, {bookingId,storeId,branchId,lock=false}) {
     const [rows] = await connection.execute(
         `SELECT id,store_id,branch_id,status,booking_reference,name,booking_type,custom_order,
-                package_json,package_price,agreed_price,required_down_payment,amount_paid
+                package_json,package_price,agreed_price,required_down_payment,amount_paid,
+                CONCAT(DATE_FORMAT(booking_dp_deadline,'%Y-%m-%dT%H:%i:%s'),'Z') AS booking_dp_deadline,booking_no_dp_approved_by
          FROM bookings WHERE id=? AND store_id=? AND branch_id=? ${lock ? "FOR UPDATE" : ""}`,
         [bookingId,storeId,branchId]
     );
     const booking=rows[0];
     if(!booking)throw rentalError('Booking does not belong to your assigned branch.');
-    if(normalizeBookingStatus(booking.status)!=='Pending Review')
-        throw rentalError('Only a Pending Review booking can be confirmed.');
+    if(!['Pending Review','Awaiting Down Payment'].includes(normalizeBookingStatus(booking.status)))
+        throw rentalError('Only a reviewed, not-yet-confirmed booking can be approved or confirmed.');
 
     const reasons=[];
     const isCustom=String(booking.booking_type||'').toLowerCase().includes('custom');
@@ -1401,14 +1406,63 @@ async function inspectBookingForConfirmation(connection, {bookingId,storeId,bran
     const paid=Number(booking.amount_paid||0);
     if(!Number.isFinite(down)||down<0||down>agreed)
         reasons.push('Down-payment terms are invalid.');
-    else if(paid+0.005<down)
-        reasons.push('The required down payment has not been recorded.');
     if(!Number.isFinite(paid)||paid<0||paid>agreed+0.005)
         reasons.push('Recorded customer payment is invalid.');
     const approval=await loadBookingApproval(connection,bookingId,storeId,branchId);
     if(approval?.status==='pending')reasons.push('Staff escalated this request; Manager confirmation is required.');
     if(approval?.status==='rejected')reasons.push('Manager rejected this booking; Staff cannot confirm it.');
     return {booking,approval,reasons,baseline,standardEligible:reasons.length===0};
+}
+
+// The pre-payment review checks current stock without changing balances or allocations.
+// The authoritative reservation repeats these checks inside a locking transaction.
+async function checkAvailableBeforePayment(db,{bookingId,storeId,branchId}) {
+    const [bk]=await db.execute(`SELECT DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate
+                                 FROM bookings WHERE id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
+    if(!bk.length || !bk[0].eventDate)throw rentalError('Booking event date is missing.');
+    const [sales]=await db.execute(`SELECT product_id,variant_id,booked_quantity FROM booking_items
+                                    WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
+    for(const line of sales){
+        const [p]=await db.execute(`SELECT p.name,p.deleted_at,DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS pExpiry,
+                                           v.deleted_at AS vDeleted,DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS vExpiry,
+                                           bi.quantity_on_hand AS available
+                                    FROM products p LEFT JOIN product_variants v ON v.product_id=p.id AND v.id <=> ?
+            LEFT JOIN branch_inventory bi ON bi.product_id=p.id AND bi.variant_id <=> ?
+                                        AND bi.store_id=p.store_id AND bi.branch_id=p.branch_id AND bi.status='active'
+                                    WHERE p.id=? AND p.store_id=? AND p.branch_id=? LIMIT 1`,
+            [line.variant_id,line.variant_id,line.product_id,storeId,branchId]);
+        const row=p[0];
+        if(!row || row.deleted_at || row.vDeleted || Number(row.available||0)<Number(line.booked_quantity))
+            throw rentalError('Insufficient sales inventory for the requested booking inclusions.');
+        const expiry=String(row.vExpiry||row.pExpiry||'').slice(0,10);
+        if(expiry && expiry < bk[0].eventDate)throw rentalError(`${row.name} expires before the event date.`);
+    }
+    const [rentals]=await db.execute(`SELECT equipment_id,quantity,
+                                             DATE_FORMAT(start_date,'%Y-%m-%d') AS fromDate,
+                                             DATE_FORMAT(end_date,'%Y-%m-%d') AS toDate FROM booking_rental_items
+                                      WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
+    for(const line of rentals){
+        const [rows]=await db.execute(`SELECT total_units,maintenance_units,missing_units FROM rental_equipment
+                                       WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL`,
+            [line.equipment_id,storeId,branchId]);
+        if(!rows.length)throw rentalError('Requested rental equipment is no longer active.');
+        const overlaps=await rentalOverlapAllocations(db,{storeId,branchId,equipmentId:line.equipment_id,
+            from:line.fromDate,to:line.toDate});
+        const peak=rentalPeakReserved(overlaps,line.fromDate,line.toDate,rentalTodayManila());
+        if(Number(rows[0].total_units)-Number(rows[0].maintenance_units)-Number(rows[0].missing_units)-peak<Number(line.quantity))
+            throw rentalError('Rental equipment is no longer available for the requested date range.');
+    }
+}
+function requireBookingDeposit(booking){
+    const total=Number(booking.agreed_price??booking.package_price??0);
+    const dp=Number(booking.required_down_payment??0), paid=Number(booking.amount_paid??0);
+    if(!Number.isFinite(total)||total<=0||!Number.isFinite(dp)||dp<0||dp>total||!Number.isFinite(paid)||paid<0||paid>total+.005)
+        throw rentalError('The agreed booking price or payment terms are invalid.');
+    if(paid+.005<dp)throw rentalError('Verify and record the required down payment before confirming and allocating items.');
+    if(dp<=0 && !String(booking.booking_no_dp_approved_by||'').trim())
+        throw rentalError('No-DP reservations require an explicit Manager authorization.');
+    if(dp>0 && booking.booking_dp_deadline && new Date(booking.booking_dp_deadline).getTime()<Date.now())
+        throw rentalError('The down-payment deadline has passed. Ask the Manager to extend it before confirming.');
 }
 
 // Resolve operational access from the current database row, not a cached browser permission.
@@ -1460,6 +1514,26 @@ async function getOperationalAccess(connection, decoded, moduleName) {
     );
     if (!rows.length) return "none";
     return normalizeOperationalAccess(rows[0].permissions, moduleName, role);
+}
+
+// Use the inventory permission field saved by Staff Management. Booking
+// authorization does not control the Inventory module, and neither does POS.
+async function getStaffSalesInventoryAccess(connection, decoded) {
+    if(String(decoded?.role || '').toLowerCase()!=='staff') return 'none';
+    const storeId=Number(decoded?.store_id),branchId=Number(decoded?.branch_id),staffId=Number(decoded?.staff_id);
+    if(![storeId,branchId,staffId].every(value=>Number.isSafeInteger(value)&&value>0)) return 'none';
+    const [rows]=await connection.execute(`SELECT permissions FROM staff WHERE id=? AND store_id=?
+        AND branch_id=? AND LOWER(status)='active' LIMIT 1`,[staffId,storeId,branchId]);
+    if(!rows.length)return 'none';
+    let permissions=rows[0].permissions;
+    if(typeof permissions==='string'){
+        try{permissions=JSON.parse(permissions);}catch{return 'none';}
+    }
+    if(!permissions || typeof permissions!=='object')return 'none';
+    const access=permissions.inventory_access !== undefined ? permissions.inventory_access : permissions.inventory;
+    if(access===true||access===1||access==='true'||access==='full')return 'full';
+    if(access==='view'||access==='view_only'||access==='viewOnly')return 'view';
+    return 'none';
 }
 
 function verifyProtectedStore(event) {
@@ -1571,6 +1645,7 @@ function buildBookingReference(row, id) {
 // "Confirmed" mismatch.
 const CANONICAL_BOOKING_STATUSES = [
     "Pending Review",
+    "Awaiting Down Payment",
     "Confirmed",
     "Preparing",
     "Completed",
@@ -1718,6 +1793,7 @@ function bookingPageSelectFields() {
         COALESCE(bookings.package_price, 0)      AS packagePrice,
         COALESCE(bookings.required_down_payment, 0) AS required_down_payment,
         COALESCE(bookings.required_down_payment, 0) AS requiredDownPayment,
+        CONCAT(DATE_FORMAT(bookings.booking_dp_deadline,'%Y-%m-%dT%H:%i:%s'),'Z') AS downPaymentDeadline,
         COALESCE(bookings.amount_paid, 0)        AS amount_paid,
         COALESCE(bookings.amount_paid, 0)        AS amountPaid,
         COALESCE(bookings.balance, 0)            AS balance,
@@ -2335,18 +2411,27 @@ exports.handler = async (event) => {
             return response(403, { error: "Business account role required." });
         }
         const bookingAccess = await getOperationalAccess(connection, decodedToken, "bookings");
-        if (bookingAccess === "none") {
+        const salesQueueActions = new Set([
+            "get_staff_sales_booking_queue", "prepare_staff_sales_booking_item", "release_staff_sales_booking",
+        ]);
+        // Full Inventory permission suffices for physical Sales fulfillment, even
+        // when the Staff has no separate Booking Management write permission.
+        const salesInventoryAccess = salesQueueActions.has(action) && tokenRole === "staff"
+            ? await getStaffSalesInventoryAccess(connection, decodedToken) : "none";
+        if (bookingAccess === "none" && !(tokenRole === "staff" && salesQueueActions.has(action) &&
+            salesInventoryAccess !== "none")) {
             return response(403, { error: "Bookings access is not permitted for this account." });
         }
         const bookingReadActions = new Set([
-            "get_booking_page_bookings", "get_dashboard_bookings", "get_bookings", "get_booking_items", "get_booking_financial_statement", "get_booking_claim_sources", "get_booking_fee_policy",
+            "get_booking_page_bookings", "get_dashboard_bookings", "get_bookings", "get_booking_items", "get_booking_financial_statement", "get_booking_claim_sources", "get_booking_fee_policy", "get_staff_sales_booking_queue",
         ]);
         const standardStaffActions = new Set([
             'assess_booking_confirmation','confirm_standard_booking','request_booking_approval',
-            'advance_staff_booking',
+            'advance_staff_booking', 'prepare_staff_sales_booking_item', 'release_staff_sales_booking',
         ]);
         if (tokenRole === 'staff' && !bookingReadActions.has(action) &&
-            !(standardStaffActions.has(action) && ['standard','full'].includes(bookingAccess))) {
+            !(standardStaffActions.has(action) && ['standard','full'].includes(bookingAccess)) &&
+            !(salesQueueActions.has(action) && salesInventoryAccess === 'full')) {
             return response(403, { error: "Staff requires authorized Bookings operations access for this action." });
         }
         if(tokenRole === 'manager' && bookingAccess !== 'full' && !bookingReadActions.has(action)) {
@@ -2368,6 +2453,122 @@ exports.handler = async (event) => {
             }
             body.branch_id = tokenBranchId;
             body.branchId = tokenBranchId;
+        }
+
+        // Staff Sales Operations Queue: branch-scoped, existing confirmed bookings only.
+        // Read returns reserved CONSUMABLE product inclusions, never rental equipment.
+        if (salesQueueActions.has(action)) {
+            if (tokenRole !== 'staff') return response(403,{error:'Staff operations account required.'});
+            if (salesInventoryAccess === 'none') return response(403,{error:'Inventory access is required.'});
+            const branchId = Number(tokenBranchId);
+            if (action === 'get_staff_sales_booking_queue') {
+                const [rows] = await connection.execute(`SELECT b.id AS bookingId,b.booking_reference AS reference,
+                    b.name AS clientName,b.booking_type AS bookingType,b.package_name AS packageName,
+                    DATE_FORMAT(b.event_date,'%Y-%m-%d') AS eventDate,b.event_time AS eventTime,
+                    b.agreed_price AS bookingTotal,b.amount_paid AS amountPaid,b.balance,
+                    bi.id AS itemId,bi.product_name AS productName,bi.variant_name AS variantName,
+                    bi.booked_quantity AS quantity,
+                    f.prepared_at AS preparedAt,f.issued_at AS issuedAt
+                    FROM bookings b JOIN booking_items bi ON bi.booking_id=b.id
+                        AND bi.store_id=b.store_id AND bi.branch_id=b.branch_id
+                    LEFT JOIN booking_sales_fulfillment f ON f.booking_item_id=bi.id
+                        AND f.store_id=b.store_id AND f.branch_id=b.branch_id
+                    WHERE b.store_id=? AND b.branch_id=?
+                        AND LOWER(b.status) IN ('confirmed','preparing')
+                        AND bi.inventory_status='reserved' AND bi.product_id IS NOT NULL
+                        AND bi.booked_quantity>0 AND COALESCE(bi.used_quantity,0)=0
+                        AND f.issued_at IS NULL
+                    ORDER BY b.event_date,b.id,bi.id LIMIT 1000`,[store_id,branchId]);
+                const groups = new Map();
+                for(const row of rows){
+                    let booking=groups.get(Number(row.bookingId));
+                    if(!booking){
+                        booking={bookingId:Number(row.bookingId),reference:String(row.reference||''),
+                            clientName:String(row.clientName||'Customer'),bookingType:String(row.bookingType||''),
+                            packageName:String(row.packageName||''),eventDate:String(row.eventDate||''),
+                            eventTime:String(row.eventTime||''),bookingTotal:Number(row.bookingTotal),
+                            amountPaid:Number(row.amountPaid),balance:Number(row.balance),items:[]};
+                        groups.set(Number(row.bookingId),booking);
+                    }
+                    booking.items.push({itemId:Number(row.itemId),productName:String(row.productName||'Product'),
+                        variantName:String(row.variantName||''),quantity:Number(row.quantity),
+                        prepared:!!row.preparedAt,issued:!!row.issuedAt});
+                }
+                return response(200,{success:true,canOperateSalesQueue:salesInventoryAccess==='full',
+                    bookings:[...groups.values()]});
+            }
+            if(salesInventoryAccess!=='full')return response(403,{error:'Full Inventory access is required for physical booking preparation and handover.'});
+            const bookingId=Number(body.booking_id);
+            if(!Number.isSafeInteger(bookingId)||bookingId<1)return response(400,{error:'Valid booking ID required.'});
+            await connection.beginTransaction();
+            try {
+                const [bookings]=await connection.execute(`SELECT id,booking_reference,status,
+                    DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDay,
+                    agreed_price,amount_paid,balance FROM bookings
+                    WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,store_id,branchId]);
+                if(!bookings.length)throw rentalError('Booking is not in your assigned branch.');
+                const booking=bookings[0];
+                if(!['confirmed','preparing'].includes(String(booking.status||'').toLowerCase()))
+                    throw rentalError('Only confirmed or preparing bookings can be fulfilled.');
+                const [lines]=await connection.execute(`SELECT id,booked_quantity,reserved_quantity,
+                    used_quantity,inventory_status,unit_price,product_name
+                    FROM booking_items WHERE booking_id=? AND store_id=? AND branch_id=?
+                    AND product_id IS NOT NULL AND booked_quantity>0 ORDER BY id FOR UPDATE`,
+                    [bookingId,store_id,branchId]);
+                if(!lines.length)throw rentalError('This booking has no Sales inventory inclusions.');
+                if(lines.some(line=>String(line.inventory_status)!=='reserved'||
+                    Number(line.reserved_quantity)!==Number(line.booked_quantity)||
+                    Number(line.used_quantity||0)>0))
+                    throw rentalError('Sales inclusions have already been used, cancelled, or need reconciliation.');
+                const [records]=await connection.execute(`SELECT booking_item_id AS itemId,prepared_at AS preparedAt,
+                    issued_at AS issuedAt FROM booking_sales_fulfillment
+                    WHERE store_id=? AND branch_id=? AND booking_id=? FOR UPDATE`,[store_id,branchId,bookingId]);
+                const recordById=new Map(records.map(r=>[Number(r.itemId),r]));
+                const employee=await getActingEmployee(connection,decodedToken,tokenRole,store_id);
+                if(action==='prepare_staff_sales_booking_item'){
+                    const itemId=Number(body.item_id);
+                    const line=lines.find(item=>Number(item.id)===itemId);
+                    if(!line||!Number.isSafeInteger(itemId)||itemId<1)
+                        throw rentalError('Select a valid product inclusion in this booking.');
+                    if(recordById.get(itemId)?.preparedAt||recordById.get(itemId)?.issuedAt)
+                        throw rentalError('This product was already prepared or handed over.');
+                    await connection.execute(`INSERT INTO booking_sales_fulfillment
+                        (booking_item_id,booking_id,store_id,branch_id,prepared_at,prepared_by)
+                        VALUES (?,?,?,?,NOW(),?)`,[itemId,bookingId,store_id,branchId,employee.name]);
+                    await logEmployeeAction(connection,{storeId:store_id,branchId,employee,module:'Bookings',
+                        referenceNumber:String(booking.booking_reference),referenceId:String(bookingId),
+                        action:'Prepared Sales booking inclusion',details:`Prepared ${line.booked_quantity} × ${line.product_name}`});
+                }else{
+                    const total=Number(booking.agreed_price),paid=Number(booking.amount_paid),balance=Number(booking.balance);
+                    if(!Number.isFinite(total)||total<=0||!Number.isFinite(paid)||!Number.isFinite(balance)||
+                        paid+0.005<total||balance>0.005)throw rentalError('Full verified booking payment is required before Sales product handover.');
+                    const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+                    const eventDay=String(booking.eventDay||'');
+                    if(eventDay>today)throw rentalError('Sales products cannot be released before their scheduled event date.');
+                    if(lines.some(line=>!recordById.get(Number(line.id))?.preparedAt||recordById.get(Number(line.id))?.issuedAt))
+                        throw rentalError('Every Sales product inclusion must be prepared and not yet handed over.');
+                    for(const line of lines){
+                        const quantity=Number(line.booked_quantity);
+                        await connection.execute(`UPDATE booking_sales_fulfillment SET issued_at=NOW(),issued_by=?
+                            WHERE booking_item_id=? AND booking_id=? AND store_id=? AND branch_id=? AND issued_at IS NULL`,
+                            [employee.name,line.id,bookingId,store_id,branchId]);
+                        // Inventory was deducted at confirmation; only mark physical usage.
+                        await connection.execute(`UPDATE booking_items SET used_quantity=?,used_subtotal=?,updated_at=CURRENT_TIMESTAMP
+                            WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
+                            [quantity,Math.round(quantity*Number(line.unit_price||0)*100)/100,line.id,bookingId,store_id,branchId]);
+                    }
+                    await logEmployeeAction(connection,{storeId:store_id,branchId,employee,module:'Bookings',
+                        referenceNumber:String(booking.booking_reference),referenceId:String(bookingId),
+                        action:'Released complete Sales booking inclusions',
+                        details:`Physically handed over ${lines.length} Sales product lines; inventory was already reserved.`});
+                }
+                await connection.commit();
+                return response(200,{success:true,bookingReference:booking.booking_reference});
+            }catch(error){
+                await connection.rollback();
+                if(error.rentalValidation)return response(409,{error:error.message});
+                throw error;
+            }
         }
 
         // Owner-configured branch service fees and deposits (no client-supplied prices).
@@ -3038,16 +3239,33 @@ exports.handler = async (event) => {
                     return response(200,{success:true,approvalStatus:'pending'});
                 }
                 if(!result.standardEligible)throw rentalError('Manager approval required: '+result.reasons.join(' '));
-                const [updated]=await connection.execute(
-                    `UPDATE bookings SET status='Confirmed' WHERE id=? AND store_id=? AND branch_id=? AND status='Pending Review'`,
+                const stage=normalizeBookingStatus(result.booking.status);
+                if(stage==='Pending Review'){
+                    if(Number(result.booking.required_down_payment||0)<=0)
+                        throw rentalError('A zero-down-payment reservation requires Manager approval.');
+                    await checkAvailableBeforePayment(connection,{bookingId,storeId:store_id,branchId});
+                    const [updated]=await connection.execute(`UPDATE bookings
+                                                              SET status='Awaiting Down Payment',booking_dp_deadline=DATE_ADD(UTC_TIMESTAMP(),INTERVAL 24 HOUR)
+                                                              WHERE id=? AND store_id=? AND branch_id=? AND status='Pending Review'`,
+                        [bookingId,store_id,branchId]);
+                    if(updated.affectedRows!==1)throw rentalError('Booking status changed. Refresh and retry.');
+                    await logEmployeeAction(connection,{storeId:store_id,branchId,employee,module:'Bookings',
+                        referenceNumber:result.booking.booking_reference||String(bookingId),action:'Approved booking awaiting DP',
+                        referenceId:String(bookingId),details:`Reviewed standard catalog quotation: ₱${result.baseline.toFixed(2)}. No stock allocated.`});
+                    await connection.commit();
+                    return response(200,{success:true,status:'Awaiting Down Payment',reserved_items:0});
+                }
+                requireBookingDeposit(result.booking);
+                const [updated]=await connection.execute(`UPDATE bookings SET status='Confirmed'
+                                                          WHERE id=? AND store_id=? AND branch_id=? AND status='Awaiting Down Payment'`,
                     [bookingId,store_id,branchId]);
-                if(updated.affectedRows!==1)throw rentalError('Booking already changed. Refresh before confirming.');
+                if(updated.affectedRows!==1)throw rentalError('Booking status changed. Refresh and retry.');
                 const inventory=await reserveBookingInventory(connection,{bookingId,storeId:store_id,branchId,actor:employee});
                 if(!inventory.ok)throw rentalError(inventory.error||'Insufficient inventory for this booking.');
                 await confirmRentalAllocations(connection,{bookingId,storeId:store_id,branchId,price:result.booking.agreed_price});
                 await logEmployeeAction(connection,{storeId:store_id,branchId,employee,module:'Bookings',
-                    referenceNumber:result.booking.booking_reference||String(bookingId),action:'Confirmed standard booking',
-                    referenceId:String(bookingId),details:`Server-verified catalog quotation: ₱${result.baseline.toFixed(2)}`});
+                    referenceNumber:result.booking.booking_reference||String(bookingId),action:'Confirmed paid standard booking',
+                    referenceId:String(bookingId),details:`DP verified by Manager; items allocated.`});
                 await connection.commit();
                 return response(200,{success:true,status:'Confirmed',reserved_items:inventory.reservedCount||0});
             }catch(err){
@@ -3132,6 +3350,17 @@ exports.handler = async (event) => {
                         throw rentalError("Complete the booking on or after the last scheduled event day.");
                     if (paid + 0.005 < agreed)
                         throw rentalError("Record the remaining customer payment before completing the booking.");
+                    // Booking completion must not bypass the Staff Sales handover.
+                    const [pendingSales]=await connection.execute(`SELECT COUNT(*) AS pendingCount
+                        FROM booking_items bi LEFT JOIN booking_sales_fulfillment f
+                          ON f.booking_item_id=bi.id AND f.store_id=bi.store_id AND f.branch_id=bi.branch_id
+                        WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?
+                          AND bi.product_id IS NOT NULL AND bi.booked_quantity>0
+                          AND bi.inventory_status='reserved'
+                          AND (f.issued_at IS NULL OR COALESCE(bi.used_quantity,0)<bi.booked_quantity)`,
+                        [bookingId,store_id,branchId]);
+                    if(Number(pendingSales[0]?.pendingCount||0)>0)
+                        throw rentalError('Staff must hand over the complete Sales product inclusions before finishing this booking.');
                     await requireRentalReturnBeforeCompletion(connection,{bookingId,storeId:store_id,branchId});
                     if (rentals.length) {
                         const [finance] = await connection.execute(`SELECT refundable_deposit_required,deposit_collected
@@ -3161,6 +3390,18 @@ exports.handler = async (event) => {
             }
         }
 
+        if(action==='extend_booking_dp_deadline'){
+            if(tokenRole!=='manager')return response(403,{error:'Only the branch Manager may extend the DP deadline.'});
+            const bookingId=Number(body.booking_id);
+            if(!Number.isSafeInteger(bookingId)||bookingId<=0)return response(400,{error:'Invalid booking ID.'});
+            const [updated]=await connection.execute(`UPDATE bookings
+                                                      SET booking_dp_deadline=DATE_ADD(UTC_TIMESTAMP(),INTERVAL 24 HOUR)
+                                                      WHERE id=? AND store_id=? AND branch_id=? AND status='Awaiting Down Payment'`,
+                [bookingId,store_id,tokenBranchId]);
+            if(updated.affectedRows!==1)return response(409,{error:'Only an awaiting-payment booking can be extended.'});
+            return response(200,{success:true});
+        }
+
         // ── PROTECTED: update_status (enhanced) ────────────────────────────────
         if (tokenRole === 'owner' && new Set(['update_status','update_price','update_payment']).has(action)) {
             return response(403,{error:'Operational booking changes require an authorized Manager or Staff workflow.'});
@@ -3174,7 +3415,7 @@ exports.handler = async (event) => {
 
             if (!booking_id || !status) return response(400, { error: "Missing booking_id or status" });
 
-            const allowedStatuses = ["Pending Review","Confirmed","Preparing","Completed","Cancelled"];
+            const allowedStatuses = ["Pending Review","Awaiting Down Payment","Confirmed","Preparing","Completed","Cancelled"];
             const normalizedTargetStatus = normalizeBookingStatus(status);
             if (!normalizedTargetStatus || !allowedStatuses.includes(normalizedTargetStatus)) {
                 return response(400, { error: "Invalid booking status" });
@@ -3198,7 +3439,8 @@ exports.handler = async (event) => {
 
             const currentStatus = normalizeBookingStatus(rows[0].status) || "Pending Review";
             const allowedTransitions = {
-                "Pending Review": ["Confirmed","Cancelled"],
+                "Pending Review": ["Awaiting Down Payment","Confirmed","Cancelled"],
+                "Awaiting Down Payment": ["Confirmed","Cancelled"],
                 "Confirmed": ["Preparing","Cancelled"],
                 "Preparing": ["Completed","Cancelled"],
                 "Completed": [],
@@ -3225,7 +3467,7 @@ exports.handler = async (event) => {
 
             await connection.beginTransaction();
             try {
-                if(status==='Confirmed') {
+                if(status==='Awaiting Down Payment' || status==='Confirmed') {
                     const review=await inspectBookingForConfirmation(connection,{
                         bookingId:Number(booking_id),storeId:store_id,
                         branchId:Number(requestedBranchId||rows[0].branch_id),lock:true
@@ -3238,13 +3480,29 @@ exports.handler = async (event) => {
                     if(agreed_price!==undefined && Math.abs(Number(agreed_price)-Number(review.booking.agreed_price))>0.01)
                         throw rentalError('Save and review the agreed price first; do not override it during confirmation.');
                     if(review.approval?.status==='rejected')throw rentalError('Rejected approval request must be reviewed again before confirming.');
+                    if(status==='Awaiting Down Payment'){
+                        if(Number(review.booking.required_down_payment||0)<=0)
+                            throw rentalError('Use the Manager no-DP approval option for a booking with no down payment.');
+                        await checkAvailableBeforePayment(connection,{bookingId:Number(booking_id),storeId:store_id,
+                            branchId:Number(requestedBranchId||rows[0].branch_id)});
+                    } else if(currentStatus==='Pending Review'){
+                        const reason=String(body.noDpReason||'').trim();
+                        if(Number(review.booking.required_down_payment||0)!==0 || reason.length<10)
+                            throw rentalError('Direct confirmation requires a zero DP and a Manager waiver reason (10+ characters).');
+                        await connection.execute(`UPDATE bookings SET booking_no_dp_approved_by=?,booking_no_dp_reason=?
+                                                  WHERE id=? AND store_id=? AND branch_id=?`,
+                            [String(actingEmployee.name||'Manager'),reason,Number(booking_id),store_id,Number(requestedBranchId||rows[0].branch_id)]);
+                        review.booking.booking_no_dp_approved_by=String(actingEmployee.name||'Manager');
+                    }
+                    if(status==='Confirmed')requireBookingDeposit(review.booking);
                     await connection.execute(`UPDATE booking_approval_requests SET status='approved',reviewed_by=?,reviewed_at=NOW()
                                               WHERE booking_id=? AND store_id=? AND branch_id=? AND status='pending'`,
                         [String(actingEmployee.name||'Manager'),Number(booking_id),store_id,Number(requestedBranchId||rows[0].branch_id)]);
                 }
-                // 1️⃣ Update booking status
+                // 1️⃣ Update booking status. Approval does not allocate inventory.
                 let query = `UPDATE bookings SET status = ?`;
                 const params = [status];
+                if(status==='Awaiting Down Payment')query+=`, booking_dp_deadline=DATE_ADD(UTC_TIMESTAMP(),INTERVAL 24 HOUR)`;
                 if (agreed_price !== undefined && agreed_price !== null) {
                     const newPrice=financeCurrency(agreed_price,'Agreed booking price');
                     const [f]=await connection.execute('SELECT package_base,rental_subtotal,delivery_fee,setup_fee FROM booking_financial_details WHERE booking_id=?',[Number(booking_id)]);
@@ -3285,6 +3543,22 @@ exports.handler = async (event) => {
                     });
                 }
                 if(status === "Completed") {
+                    const [bill]=await connection.execute(`SELECT agreed_price,amount_paid FROM bookings
+                                                           WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                        [Number(booking_id),store_id,Number(requestedBranchId||rows[0].branch_id)]);
+                    if(!bill.length || Number(bill[0].agreed_price||0)<=0 ||
+                        Number(bill[0].amount_paid||0)+0.005<Number(bill[0].agreed_price))
+                        throw rentalError('Booking balance must be fully paid before completion.');
+                    const [pendingSales]=await connection.execute(`SELECT COUNT(*) AS pendingCount
+                        FROM booking_items bi LEFT JOIN booking_sales_fulfillment f
+                          ON f.booking_item_id=bi.id AND f.store_id=bi.store_id AND f.branch_id=bi.branch_id
+                        WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?
+                          AND bi.product_id IS NOT NULL AND bi.booked_quantity>0
+                          AND bi.inventory_status='reserved'
+                          AND (f.issued_at IS NULL OR COALESCE(bi.used_quantity,0)<bi.booked_quantity)`,
+                        [Number(booking_id),store_id,Number(requestedBranchId||rows[0].branch_id)]);
+                    if(Number(pendingSales[0]?.pendingCount||0)>0)
+                        throw rentalError('The Sales products must be physically handed over before completing this booking.');
                     await requireRentalReturnBeforeCompletion(connection,{
                         bookingId:Number(booking_id),storeId:store_id,branchId:requestedBranchId||rows[0].branch_id
                     });
@@ -3312,6 +3586,7 @@ exports.handler = async (event) => {
 
                 // The booking transition, Manager approval, and audit log commit together.
                 const statusActionLabels = {
+                    "Awaiting Down Payment": "Approved booking awaiting DP",
                     Confirmed: "Confirmed booking",
                     Preparing: "Started preparing booking",
                     Completed: "Marked booking as completed",

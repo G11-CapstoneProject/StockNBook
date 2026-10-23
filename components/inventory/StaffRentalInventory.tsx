@@ -9,15 +9,33 @@ import {
 } from "lucide-react";
 import { useStaffRentalInventory, type StaffRentalAllocation, type StaffRentalAction, type StaffRentalEquipmentSchedule } from "@/hooks/useRentalInventory";
 
-const panel = "overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-sm";
+const panel = "min-w-0 overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-sm";
 const action = "inline-flex h-[40px] items-center justify-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-4 text-xs font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50";
 const primary = "inline-flex h-[40px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-xs font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-50";
 const th = "px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]";
 
 type TaskType = "prepare" | "release" | "return" | "inspect" | "clean" | "damage";
 type TimeBucket = "all" | "today" | "upcoming" | "overdue";
-const timeBucketLabel: Record<Exclude<TimeBucket,"all">,string> = {
-    today:"Today", upcoming:"Upcoming", overdue:"Overdue",
+
+// Customer information is read from the existing branch-scoped rental workspace.
+// Older API responses remain compatible, but cannot show a customer name/type.
+type BookingQueueAllocation = StaffRentalAllocation & {
+    clientName?: string | null;
+    bookingType?: string | null;
+    packageName?: string | null;
+    eventDate?: string | null;
+    eventTime?: string | null;
+};
+type BookingQueueItem = { item: StaffRentalAllocation; type: TaskType | null };
+type BookingQueueGroup = {
+    reference: string;
+    clientName: string;
+    bookingType: string;
+    packageName: string;
+    scheduleDate: string;
+    returnDate: string;
+    eventTime: string;
+    tasks: BookingQueueItem[];
 };
 function taskDueDate(a:StaffRentalAllocation,type:TaskType) {
     return type==="return"?a.endDate:a.startDate;
@@ -31,6 +49,10 @@ function taskBucket(a:StaffRentalAllocation,type:TaskType,today:string):Exclude<
 const taskLabel: Record<TaskType, string> = {
     prepare: "Mark Prepared", release: "Release", return: "Receive Return",
     inspect: "Inspect Return", clean: "Mark Cleaned", damage: "Damage Reported",
+};
+// Keep operational state separate from the action the Staff will perform next.
+const taskStatusLabel: Partial<Record<TaskType, string>> = {
+    prepare: "Needs Preparation", release: "Prepared", return: "Out on Rental", inspect: "For Inspection",
 };
 // These are transaction stages, not editable equipment statuses. Only the next valid
 // operation is shown; the backend validates every transition and stock quantity.
@@ -65,6 +87,19 @@ function manilaDate() {
     const get = (type: string) => bits.find(x=>x.type===type)?.value || "";
     return `${get("year")}-${get("month")}-${get("day")}`;
 }
+function queueScheduleDate(value: string) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return value || "—";
+    return new Date(`${value}T12:00:00+08:00`).toLocaleDateString("en-US", {
+        timeZone: "Asia/Manila", month: "short", day: "numeric", year: "numeric",
+    });
+}
+function queueBookingType(raw: string) {
+    const label = raw.trim();
+    if (!label) return "Booking type unavailable";
+    if (label.toLowerCase().includes("custom")) return "Custom Inventory Booking";
+    if (label.toLowerCase().includes("package")) return "Package Booking";
+    return label;
+}
 function dateTime(s?: string | null) {
     if (!s) return "—";
     const parsed = new Date(s.includes("T") ? s : s.replace(" ", "T")+"+08:00");
@@ -87,7 +122,11 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const canOperate=inventoryPermission===true || inventoryPermission==="true" || inventoryPermission==="full";
     const [search,setSearch]=React.useState("");
     const [taskFilter,setTaskFilter]=React.useState<"all" | "prepare" | "release" | "return" | "inspect">("all");
-    const [timeFilter,setTimeFilter]=React.useState<TimeBucket>("all");
+    const [selectedQueueReference,setSelectedQueueReference]=React.useState<string|null>(null);
+    const [bookingOperation,setBookingOperation]=React.useState<"release"|"return"|null>(null);
+    const [bookingReturnMissing,setBookingReturnMissing]=React.useState<Record<number,string>>({});
+    const [bookingOperationNotes,setBookingOperationNotes]=React.useState("");
+    const [bookingOperationError,setBookingOperationError]=React.useState("");
     const [careFilter,setCareFilter]=React.useState<"all" | "cleaning" | "routine" | "repairs">("all");
     const [category,setCategory]=React.useState("all");
     const [selected,setSelected]=React.useState<StaffRentalAllocation|null>(null);
@@ -180,19 +219,98 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const cleaning=careTasks.filter(t=>t.kind==="cleaning").reduce((sum,t)=>sum+t.units,0);
     const visibleCareTasks=careTasks.filter(t=>careFilter==="all"||careFilter===t.kind);
     const bookingTasks=allTasks.filter(x=>x.type!=="clean"&&x.type!=="damage");
-    const visibleTasks=bookingTasks.filter(x=>{
-        const text=[x.item.equipmentName,x.item.bookingReference,x.item.equipmentNumber].join(" ").toLowerCase();
-        return text.includes(search.trim().toLowerCase()) && (taskFilter==="all"||taskFilter===x.type)
-            && (timeFilter==="all"||taskBucket(x.item,x.type!,today)===timeFilter);
-    }).sort((a,b)=>{
-        const priority={overdue:0,today:1,upcoming:2};
-        const pa=priority[taskBucket(a.item,a.type!,today)],pb=priority[taskBucket(b.item,b.type!,today)];
-        return pa-pb||taskDueDate(a.item,a.type!).localeCompare(taskDueDate(b.item,b.type!))||a.item.allocationId-b.item.allocationId;
+    // Show ONE row per booking. Keep every equipment line's existing workflow action
+    // in the selected booking checklist; no mutation or allocation logic changes.
+    const bookingGroups=React.useMemo(()=>{
+        const groups=new Map<string,BookingQueueGroup>();
+        bookingTasks.forEach(task=>{
+            const item=task.item as BookingQueueAllocation;
+            const reference=item.bookingReference;
+            let group=groups.get(reference);
+            if(!group){
+                group={reference,clientName:item.clientName?.trim()||"Customer name unavailable",
+                    bookingType:queueBookingType(item.bookingType||""),
+                    packageName:item.packageName?.trim()||"",
+                    scheduleDate:item.eventDate||item.startDate,
+                    returnDate:item.endDate,eventTime:item.eventTime?.trim()||"",tasks:[]};
+                groups.set(reference,group);
+            }
+            group.tasks.push(task);
+        });
+        const rank={overdue:0,today:1,upcoming:2};
+        return Array.from(groups.values()).sort((left,right)=>{
+            const urgency=(group:BookingQueueGroup)=>Math.min(...group.tasks.map(x=>rank[taskBucket(x.item,x.type!,today)]));
+            return urgency(left)-urgency(right)||left.scheduleDate.localeCompare(right.scheduleDate)||left.reference.localeCompare(right.reference);
+        });
+    },[bookingTasks,today]);
+    // Filter booking rows by their matching individual task; the selected checklist
+    // still shows ALL currently actionable equipment for that booking.
+    const queueQuery=search.trim().toLowerCase();
+    const visibleBookingGroups=bookingGroups.filter(group=>{
+        const text=[group.reference,group.clientName,group.bookingType,group.packageName,
+            ...group.tasks.flatMap(x=>[x.item.equipmentName,x.item.equipmentNumber])].join(" ").toLowerCase();
+        return text.includes(queueQuery)&&group.tasks.some(x=>taskFilter==="all"||taskFilter===x.type);
     });
+    const selectedQueueBooking=visibleBookingGroups.find(group=>group.reference===selectedQueueReference)||null;
+    const selectedQueuePayment=selectedQueueBooking?.tasks[0]?.item;
+    const selectedQueuePaid=!!selectedQueuePayment&&Number.isFinite(selectedQueuePayment.bookingTotal)
+        &&Number.isFinite(selectedQueuePayment.amountPaid)&&Number.isFinite(selectedQueuePayment.bookingBalance)
+        &&selectedQueuePayment.bookingTotal>0&&selectedQueuePayment.amountPaid+0.005>=selectedQueuePayment.bookingTotal
+        &&selectedQueuePayment.bookingBalance<=0.005;
+    React.useEffect(()=>{
+        if(!selectedQueueReference)return;
+        const onKeyDown=(event:KeyboardEvent)=>{
+            if(event.key==="Escape"&&!selected&&!stockTask&&!bookingOperation&&!rental.saving)setSelectedQueueReference(null);
+        };
+        window.addEventListener("keydown",onKeyDown);
+        return ()=>window.removeEventListener("keydown",onKeyDown);
+    },[selectedQueueReference,selected,stockTask,bookingOperation,rental.saving]);
+    const queueAllReserved=!!selectedQueueBooking&&selectedQueueBooking.tasks.length>0&&
+        selectedQueueBooking.tasks.every(x=>x.type==="prepare"||x.type==="release");
+    const queueAllPrepared=queueAllReserved&&selectedQueueBooking!.tasks.every(x=>x.type==="release");
+    const queueAllOut=!!selectedQueueBooking&&selectedQueueBooking.tasks.length>0&&
+        selectedQueueBooking.tasks.every(x=>x.type==="return");
+    const queueReleaseDateValid=!!selectedQueueBooking&&selectedQueueBooking.tasks.every(x=>x.item.startDate<=today);
+    const queueReleaseReady=queueAllPrepared&&selectedQueuePaid&&queueReleaseDateValid&&canOperate&&!rental.saving;
+    const startBookingOperation=(kind:"release"|"return")=>{
+        if(!selectedQueueBooking)return;
+        setBookingOperation(kind);setBookingOperationError("");setBookingOperationNotes("");
+        setBookingReturnMissing(Object.fromEntries(selectedQueueBooking.tasks.map(x=>[x.item.allocationId,"0"])));
+    };
+    const performBookingOperation=async()=>{
+        if(!selectedQueueBooking||!bookingOperation||rental.saving)return;
+        setBookingOperationError("");
+        try {
+            if(bookingOperation==="release") {
+                if(!queueReleaseReady)throw new Error("All items must be prepared, the booking fully paid, and the scheduled release date reached.");
+                await rental.actBooking({action:"release_rental_booking",bookingReference:selectedQueueBooking.reference});
+                setNotice(`All rental equipment released for ${selectedQueueBooking.reference}.`);
+            } else {
+                if(!queueAllOut||!canOperate)throw new Error("The booking must be fully out on rental before receiving all items.");
+                const returns=selectedQueueBooking.tasks.map(x=>({
+                    allocationId:x.item.allocationId,missingUnits:Number(bookingReturnMissing[x.item.allocationId]??"")
+                }));
+                if(returns.some((line,i)=>{
+                    const raw=bookingReturnMissing[line.allocationId];
+                    return raw==null||raw.trim()===""||!Number.isSafeInteger(line.missingUnits)||
+                        line.missingUnits<0||line.missingUnits>selectedQueueBooking.tasks[i].item.quantity;
+                }))throw new Error("Enter a valid missing quantity (0 allowed) for every equipment line.");
+                if(returns.some(x=>x.missingUnits>0)&&bookingOperationNotes.trim().length<5)
+                    throw new Error("Explain missing or unreturned equipment (at least five characters).");
+                await rental.actBooking({action:"return_rental_booking",bookingReference:selectedQueueBooking.reference,
+                    returns,notes:bookingOperationNotes.trim()});
+                setNotice(`Rental return recorded for ${selectedQueueBooking.reference}. Received items now await inspection.`);
+            }
+            setBookingOperation(null);setBookingOperationNotes("");
+        } catch(error) {
+            setBookingOperationError(error instanceof Error?error.message:"Unable to process this booking.");
+        }
+    };
     const categories=[...new Set(rental.equipment.map(e=>e.category))].sort();
     const visibleEquipment=rental.equipment.filter(e=>[e.name,e.category,e.equipmentNumber].join(" ").toLowerCase().includes(search.trim().toLowerCase())&&(category==="all"||e.category===category));
     const selectedEquipment=rental.equipment.find(e=>e.id===viewEquipment);
     const openRentalAction=(item:StaffRentalAllocation)=>{
+        if(taskType(item)==="release"||taskType(item)==="return")return;
         setSelected(item);setSubmitError("");setReturnMissing("0");
         setGoodUnits(String(item.returnedReceivedUnits??item.quantity));
         setCleaningUnits("0");setDamagedUnits("0");setNotes("");
@@ -217,15 +335,12 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         const kind=taskType(selected);
         const apiAction=kind&&taskToAction[kind];
         if(!apiAction)return;
+        if(kind==="release"||kind==="return"){
+            setSubmitError("Use the booking-level Release Booking / Receive Booking Return action.");return;
+        }
         setSubmitError("");setNotice("");
         try {
-            if(kind==="return"){
-                const missing=Number(returnMissing);
-                if(returnMissing.trim()===""||!Number.isSafeInteger(missing)||missing<0||missing>selected.quantity)
-                    throw new Error(`Missing units must be between 0 and ${selected.quantity}.`);
-                if(missing>0&&notes.trim().length<5)throw new Error("Explain missing units (at least 5 characters).");
-                await rental.act(apiAction,selected.allocationId,{missingUnits:missing,notes:notes.trim()});
-            }else if(kind==="inspect"){
+            if(kind==="inspect"){
                 const values=[goodUnits,cleaningUnits,damagedUnits];
                 const numbers=values.map(Number);
                 const returned=selected.returnedReceivedUnits ?? selected.quantity;
@@ -277,16 +392,16 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
             {title:"Pending Inspection",num:inspection,caption:`${inspectionUnits} units on hold · count shows tasks`,icon:<ClipboardCheck size={19}/>},
             {title:"Needs Cleaning",num:cleaning,caption:"Equipment held until cleaning is recorded",icon:<Sparkles size={19}/>},
         ].map(c=><div key={c.title} className="rounded-2xl border border-[#E6DDF0] bg-white p-3 shadow-sm"><div className="flex items-start justify-between gap-2"><p className="text-sm font-semibold text-[#21132E]">{c.title}</p><span className="rounded-full bg-[#F1EBFF] p-2 text-[#5A35A5]">{c.icon}</span></div><p className="mt-3 text-2xl font-bold text-[#2B174C]">{rental.connected?c.num:"—"}</p><p className="text-[11px] text-[#8A7D90]">{c.caption}</p></div>)}</div>
-        <div className="grid gap-4 xl:grid-cols-2">
+        <div className="grid min-w-0 items-stretch gap-4 xl:grid-cols-2">
             <section className={panel}>
                 <Header icon={<PackageCheck size={18}/>} title="Supplier Equipment Receiving"
                         subtitle="Confirm actual delivered units from Manager-recorded purchases"/>
-                <div className="max-h-[270px] overflow-auto">
-                    <table className="w-full text-xs"><thead className="bg-[#FFFDF8]"><tr>{["Purchase No.","Equipment","Pending","Action"].map(h=><th key={h} className={th}>{h}</th>)}</tr></thead>
+                <div className="max-h-[270px] overflow-y-auto overflow-x-hidden">
+                    <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]"><thead className="bg-[#FFFDF8]"><tr>{["Purchase No.","Equipment","Pending","Action"].map(h=><th key={h} className={th}>{h}</th>)}</tr></thead>
                         <tbody>{rental.pendingReceipts.map(r=><tr key={r.id} className="border-t border-[#F0EAF4] text-[#2B174C]">
                             <td className="px-3 py-3">{r.purchaseNumber}</td><td className="px-3 py-3">{r.equipmentName}</td>
                             <td className="px-3 py-3">{r.quantityExpected-r.quantityReceived}</td>
-                            <td className="px-3 py-3"><button type="button" className={action} disabled={!canOperate} onClick={()=>startStockTask({kind:"receive",id:r.id,label:r.equipmentName,max:r.quantityExpected-r.quantityReceived})}>Receive</button></td>
+                            <td className="px-2 py-3"><button type="button" className={`${action} h-auto min-h-9 max-w-full whitespace-normal break-words px-2 py-1.5 text-center`} disabled={!canOperate} onClick={()=>startStockTask({kind:"receive",id:r.id,label:r.equipmentName,max:r.quantityExpected-r.quantityReceived})}>Receive</button></td>
                         </tr>)}</tbody></table>
                     {rental.connected&&rental.pendingReceipts.length===0&&<Empty>No equipment deliveries awaiting confirmation.</Empty>}
                 </div>
@@ -316,8 +431,9 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                         {f.label} ({f.count})
                     </button>)}
                 </div>
-                <div className="max-h-[270px] overflow-auto">
-                    <table className="w-full min-w-[620px] text-xs">
+                <div className="max-h-[270px] overflow-y-auto overflow-x-hidden">
+                    <table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                        <colgroup><col className="w-[19%]"/><col className="w-[28%]"/><col className="w-[8%]"/><col className="w-[21%]"/><col className="w-[24%]"/></colgroup>
                         <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>
                             {["Equipment","Work Item / Reference","Units","Status","Action"].map(h=><th key={h} className={th}>{h}</th>)}
                         </tr></thead>
@@ -330,19 +446,19 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                             </td>
                             <td className="px-3 py-3 font-semibold tabular-nums">{task.units}</td>
                             <td className="px-3 py-3">
-                                {task.kind==="cleaning"?<span className="inline-flex rounded-full bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800">Needs Cleaning</span>:
-                                    task.kind==="routine"?<span className="inline-flex rounded-full bg-[#F1EBFF] px-2 py-1 text-[10px] font-semibold text-[#5330B6]">Routine Care</span>:
-                                        <span className="inline-flex rounded-full bg-[#FFF0EF] px-2 py-1 text-[10px] font-semibold text-[#A43D48]">
+                                {task.kind==="cleaning"?<span className="inline-flex max-w-full break-words rounded-full bg-amber-50 px-1.5 py-1 text-[10px] font-semibold text-amber-800">Needs Cleaning</span>:
+                                    task.kind==="routine"?<span className="inline-flex max-w-full break-words rounded-full bg-[#F1EBFF] px-1.5 py-1 text-[10px] font-semibold text-[#5330B6]">Routine Care</span>:
+                                        <span className="inline-flex max-w-full break-words rounded-full bg-[#FFF0EF] px-1.5 py-1 text-[10px] font-semibold text-[#A43D48]">
                                         {!task.maintenance.repairApproved?"Manager Approval":task.maintenance.pendingUnits>0?"Under Review":"Repair Approved"}
                                     </span>}
                             </td>
                             <td className="px-3 py-3">
-                                {task.kind==="cleaning"?<button type="button" className={action} disabled={!canOperate||rental.saving}
+                                {task.kind==="cleaning"?<button type="button" className={`${action} h-auto min-h-9 w-full max-w-full whitespace-normal break-words px-1.5 py-1.5 text-center`} disabled={!canOperate||rental.saving}
                                                                 onClick={()=>openRentalAction(task.allocation)}>Mark Cleaned</button>:
-                                    task.kind==="routine"?<button type="button" className={action} disabled={!canOperate||rental.saving||task.units<1}
+                                    task.kind==="routine"?<button type="button" className={`${action} h-auto min-h-9 w-full max-w-full whitespace-normal break-words px-1.5 py-1.5 text-center`} disabled={!canOperate||rental.saving||task.units<1}
                                                                   onClick={()=>startStockTask({kind:"routine",id:task.maintenance.id,label:task.equipmentName,max:task.units})}>Mark Care Done</button>:
                                         task.maintenance.repairApproved&&task.maintenance.pendingUnits===0&&task.units>0?
-                                            <button type="button" className={action} disabled={!canOperate||rental.saving}
+                                            <button type="button" className={`${action} h-auto min-h-9 w-full max-w-full whitespace-normal break-words px-1.5 py-1.5 text-center`} disabled={!canOperate||rental.saving}
                                                     onClick={()=>startStockTask({kind:"complete",id:task.maintenance.id,label:task.equipmentName,max:task.units})}>Report Complete</button>:
                                             <span className="text-[11px] text-[#86778F]">Awaiting Manager</span>}
                             </td>
@@ -357,47 +473,241 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
             </section>
         </div>
         {rental.error&&<p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">Rental operations unavailable: {rental.error} <button type="button" className="underline" onClick={()=>void rental.refresh(true)}>Retry</button></p>}
-        <div className="grid gap-4 xl:grid-cols-[1.2fr_1fr]">
-            <section className={panel}><Header icon={<ClipboardList size={18}/>} title="Rental Operations Queue" subtitle="Booking actions: prepare, release, receive return, then inspect"
-                                               right={<select aria-label="Filter rental tasks" className={action} value={taskFilter} onChange={e=>setTaskFilter(e.target.value as typeof taskFilter)}>
-                                                   <option value="all">All Tasks</option><option value="prepare">Prepare</option><option value="release">Release</option><option value="return">Returns</option><option value="inspect">Inspect</option>
-                                               </select>}/>
-                <div className="flex flex-wrap gap-2 border-b border-[#F0EAF4] px-4 py-3" aria-label="Filter booking tasks by urgency">
-                    {(["all","today","upcoming","overdue"] as const).map(bucket=>{
-                        const count=bookingTasks.filter(x=>bucket==="all"||taskBucket(x.item,x.type!,today)===bucket).length;
-                        return <button type="button" key={bucket} onClick={()=>setTimeFilter(bucket)} aria-pressed={timeFilter===bucket}
-                                       className={`rounded-full border px-3 py-1 text-[11px] font-semibold ${timeFilter===bucket
-                                           ?"border-[#2B174C] bg-[#2B174C] text-white":"border-[#E4D5FA] bg-white text-[#6F3FD3] hover:bg-[#F7F1FF]"}`}>
-                            {bucket==="all"?"All":timeBucketLabel[bucket]} ({count})
-                        </button>;
-                    })}
+        <div className="grid min-w-0 items-stretch gap-4 xl:grid-cols-2">
+            <section className={panel}>
+                <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
+                        <span className="shrink-0 rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]"><ClipboardList size={18}/></span>
+                        <div className="min-w-0">
+                            <h3 className="text-[15px] font-bold text-[#21132E]">Rental Operations Queue</h3>
+                            <p className="text-[11px] leading-4 text-[#86778F]">Review a booking, prepare each item, then release or receive the complete order</p>
+                        </div>
+                    </div>
+                    <select aria-label="Filter rental tasks" value={taskFilter}
+                            onChange={e=>setTaskFilter(e.target.value as typeof taskFilter)}
+                            className="h-9 w-[104px] shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-2 text-[11px] font-semibold text-[#2B174C] outline-none focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0 focus:border-[#E6DDF0]">
+                        <option value="all">All Tasks</option>
+                        <option value="prepare">Prepare</option>
+                        <option value="release">Release</option>
+                        <option value="return">Returns</option>
+                        <option value="inspect">Inspect</option>
+                    </select>
                 </div>
-                <div className="max-h-[350px] overflow-auto"><table className="w-full min-w-[560px] text-xs"><thead className="sticky top-0 bg-[#FFFDF8]"><tr>{["Booking Ref.","Equipment","Qty","Due","Task","Action"].map(h=><th className={th} key={h}>{h}</th>)}</tr></thead><tbody>
-                {visibleTasks.slice(0,50).map(({item,type})=><tr key={item.allocationId} className="border-t border-[#F0EAF4] text-[#2B174C]"><td className="px-3 py-3">{item.bookingReference}</td><td className="px-3 py-3 font-medium">{item.equipmentName}</td><td className="px-3 py-3">{item.quantity}</td><td className="px-3 py-3">{type==="return"?item.endDate:item.startDate}</td><td className="px-3 py-3">{type&&taskLabel[type]}</td><td className="px-3 py-3"><button type="button" className={action} disabled={!canOperate||(type==="release"&&item.startDate>today)}
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     title={type==="release"&&item.startDate>today?`Can release starting ${item.startDate}`:taskHelp[type||"prepare"]}
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     onClick={()=>openRentalAction(item)}>{type==="release"&&item.startDate>today?`Release ${item.startDate}`:taskLabel[type||"prepare"]}</button></td></tr>)}
-                </tbody></table>{rental.connected&&visibleTasks.length===0&&<Empty>No matching booking tasks. Select All Tasks and All urgency filters, or confirm a booking with rental equipment.</Empty>}</div>
-                <p className="border-t border-[#F0EAF4] px-4 py-2 text-[11px] text-[#806A8C]">Staff confirms booking movements through inspection. Returned units needing cleaning move into Equipment Care &amp; Maintenance; damaged units require Manager review. To report a problem before handover, use Report Issue.</p>
+
+                <div className="max-h-[470px] overflow-y-auto overflow-x-hidden">
+                    <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                        <colgroup><col className="w-[35%]"/><col className="w-[22%]"/><col className="w-[26%]"/><col className="w-[17%]"/></colgroup>
+                        <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>{["Client / Booking Ref","Schedule","Booking Type","Action"].map(h=><th className={th} key={h}>{h}</th>)}</tr></thead>
+                        <tbody>{visibleBookingGroups.slice(0,50).map(group=>{
+                            const active=selectedQueueReference===group.reference;
+                            const open=()=>setSelectedQueueReference(group.reference);
+                            return <tr key={group.reference} tabIndex={0} aria-selected={active}
+                                       onClick={open} onKeyDown={e=>{if(e.target===e.currentTarget&&(e.key==="Enter"||e.key===" ")){e.preventDefault();open();}}}
+                                       className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"bg-[#F1EBFF]":"hover:bg-[#FCF9FF]"}`}>
+                                <td className={`px-3 py-3 align-middle ${active?"border-l-4 border-[#6F3FD3] pl-2":""}`}>
+                                    <span className="block break-words font-semibold">{group.clientName}</span>
+                                    <span className="mt-1 block break-all text-[10px] text-[#806A8C]">{group.reference}</span>
+                                </td>
+                                <td className="px-3 py-3 align-middle">
+                                    <span className="block font-medium">{queueScheduleDate(group.scheduleDate)}</span>
+                                    {group.eventTime&&<span className="mt-1 block text-[10px] text-[#806A8C]">{group.eventTime}</span>}
+                                    {group.returnDate!==group.scheduleDate&&<span className="mt-1 block text-[10px] text-[#806A8C]">Return: {queueScheduleDate(group.returnDate)}</span>}
+                                </td>
+                                <td className="px-3 py-3 align-middle">
+                                    <span className="block break-words font-medium">{group.bookingType}</span>
+                                    <span className="mt-1 block text-[10px] text-[#806A8C]">{group.tasks.length} equipment {group.tasks.length===1?"line":"lines"}</span>
+                                </td>
+                                <td className="px-2 py-3 text-center align-middle">
+                                    <button type="button" aria-haspopup="dialog"
+                                            onClick={e=>{e.stopPropagation();open();}}
+                                            className={`inline-flex min-h-9 max-w-full items-center justify-center whitespace-nowrap rounded-xl border border-[#E6DDF0] bg-white px-2 py-1 text-center text-[11px] font-semibold text-[#2B174C] hover:bg-[#F7F1FF] ${active?"border-[#D9CDF0] bg-white text-[#5330B6]":""}`}>
+                                        View Items
+                                    </button>
+                                </td>
+                            </tr>;
+                        })}</tbody>
+                    </table>
+                    {rental.connected&&visibleBookingGroups.length===0&&<Empty>No matching booking tasks. Select All Tasks, or confirm a booking with rental equipment.</Empty>}
+                    {visibleBookingGroups.length>50&&<p className="border-t border-[#F0EAF4] px-3 py-2 text-[11px] text-[#806A8C]">Showing the first 50 bookings. Use the search or filters to find another booking.</p>}
+                </div>
+                <p className="border-t border-[#F0EAF4] px-4 py-2 text-[11px] text-[#806A8C]">Select View Items to open the booking equipment checklist. Returned units needing cleaning move into Equipment Care &amp; Maintenance; damaged units require Manager review. To report a problem before handover, use Report Issue.</p>
             </section>
             <section className={panel}><Header icon={<Clock3 size={18}/>} title="Recent Rental Activity" subtitle="Latest branch equipment movements (read-only)"/>
-                <div className="max-h-[350px] overflow-auto"><table className="w-full min-w-[420px] text-xs"><thead className="sticky top-0 bg-[#FFFDF8]"><tr>{["Time","Equipment","Activity","Qty","Booking Ref."].map(h=><th className={th} key={h}>{h}</th>)}</tr></thead><tbody>
+                <div className="max-h-[350px] overflow-y-auto overflow-x-hidden"><table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                    <colgroup><col className="w-[21%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[7%]"/><col className="w-[32%]"/></colgroup><thead className="sticky top-0 bg-[#FFFDF8]"><tr>{["Time","Equipment","Activity","Qty","Booking Ref."].map(h=><th className={th} key={h}>{h}</th>)}</tr></thead><tbody>
                 {rental.activity.slice(0,8).map(e=><tr key={e.id} className="border-t border-[#F0EAF4] text-[#2B174C]"><td className="px-3 py-3">{dateTime(e.occurredAt)}</td><td className="px-3 py-3">{e.equipmentName}</td><td className="px-3 py-3">{e.type.replaceAll("_"," ")}</td><td className="px-3 py-3">{e.quantity}</td><td className="px-3 py-3">{e.referenceNumber||"—"}</td></tr>)}
                 </tbody></table>{rental.connected&&rental.activity.length===0&&<Empty>No recorded equipment movements yet.</Empty>}</div>
             </section>
         </div>
-        <div className="flex flex-wrap items-center gap-2"><label className="relative min-w-[180px] flex-1"><span className="sr-only">Search rental equipment or booking</span><Search size={17} className="absolute left-3 top-3 text-[#806A8C]"/><input className="h-10 w-full rounded-xl border border-[#E6DDF0] bg-white pl-9 pr-3 text-sm" placeholder="Search equipment or booking..." value={search} onChange={e=>setSearch(e.target.value)}/></label>
-            <button type="button" className={action} disabled={rental.refreshing} onClick={()=>void rental.refresh(true)}><RefreshCw size={16} className={rental.refreshing?"animate-spin":""}/> Refresh</button>
-            <button type="button" className={action} onClick={()=>setTaskFilter("return")}><RotateCcw size={16}/> Returns</button>
-            <Link href="/bookings" className={primary}><CalendarClock size={16}/> Bookings</Link></div>
         <section className={panel}><Header icon={<PackageCheck size={18}/>} title="Branch Rental Equipment" subtitle={`Daily rental availability and condition · ${branchName}`}
                                            right={<select className={action} aria-label="Filter equipment category" value={category} onChange={e=>setCategory(e.target.value)}><option value="all">All Categories</option>{categories.map(c=><option key={c}>{c}</option>)}</select>}/>
-            <div className="max-h-[420px] overflow-auto"><table className="w-full min-w-[700px] text-xs"><thead className="sticky top-0 bg-[#FFFDF8]"><tr>{["Equipment No.","Equipment","Category","Total","Physically Available","Out","On Hold","Missing","Action"].map(h=><th className={th} key={h}>{h}</th>)}</tr></thead><tbody>{visibleEquipment.map(e=><tr key={e.id} className="border-t border-[#F0EAF4] text-[#2B174C]"><td className="px-3 py-3">{e.equipmentNumber||"—"}</td><td className="px-3 py-3 font-medium">{e.name}</td><td className="px-3 py-3">{e.category}</td><td className="px-3 py-3">{e.totalUnits}</td><td className="px-3 py-3">{Math.max(0,e.totalUnits-e.rentedOutUnits-e.maintenanceUnits-e.missingUnits)}</td><td className="px-3 py-3">{e.rentedOutUnits}</td><td className="px-3 py-3">{e.maintenanceUnits}</td><td className="px-3 py-3">{e.missingUnits}</td><td className="px-3 py-3"><button className={action} onClick={()=>setViewEquipment(e.id)}><Eye size={15}/> View</button>
-                <button type="button" className={`${action} ml-2`} onClick={()=>openSchedule(e.id)}><CalendarDays size={15}/> View Schedule</button>
-                <button type="button" className={`${action} ml-2`} disabled={!canOperate||e.totalUnits-e.rentedOutUnits-e.maintenanceUnits-e.missingUnits<=0}
-                        onClick={()=>startStockTask({kind:"issue",id:e.id,label:e.name,
-                            max:Math.max(0,e.totalUnits-e.rentedOutUnits-e.maintenanceUnits-e.missingUnits)})}>Report Issue</button></td></tr>)}</tbody></table>{rental.connected&&visibleEquipment.length===0&&<Empty>No rental equipment found in this branch.</Empty>}</div>
-            <p className="px-4 py-2 text-[11px] text-[#806A8C]">This table shows physical equipment belonging to the branch. On Hold includes inspection, cleaning, and repairs; Missing is tracked separately. View Schedule shows booking-date reservations, not physical release. Release equipment only through a confirmed booking.</p>
+            <div className="border-b border-[#E9E1EE] px-4 py-3">
+                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto_auto_auto] xl:items-center">
+                    <label className="relative min-w-0"><span className="sr-only">Search rental equipment or booking</span>
+                        <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
+                        <input className="h-[44px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]" placeholder="Search equipment or booking..." value={search} onChange={e=>setSearch(e.target.value)}/>
+                    </label>
+                    <button type="button" className={action} disabled={rental.refreshing} onClick={()=>void rental.refresh(true)}><RefreshCw size={16} className={rental.refreshing?"animate-spin":""}/> Refresh</button>
+                    <button type="button" className={action} onClick={()=>setTaskFilter("return")}><RotateCcw size={16}/> Returns</button>
+                    <Link href="/bookings" className={primary}><CalendarClock size={16}/> Bookings</Link>
+                </div>
+            </div>
+            <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Branch rental equipment list" tabIndex={0}>
+                <table className="w-full min-w-0 table-fixed text-[10px] xl:text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                    <colgroup><col className="w-[11%]"/><col className="w-[13%]"/><col className="w-[9%]"/><col className="w-[6%]"/><col className="w-[9%]"/><col className="w-[7%]"/><col className="w-[7%]"/><col className="w-[10%]"/><col className="w-[10%]"/><col className="w-[18%]"/></colgroup>
+                    <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
+                        {['Equipment No.','Rental Product','Category','Total Units','Ready Now','Rented Out','On Hold','Availability','Condition','Action'].map((label,index)=><th key={label} className={`break-words px-2 py-2.5 text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C] ${index===1||index===2?'text-left':'text-center'}`}>{label}</th>)}
+                    </tr></thead>
+                    <tbody>{visibleEquipment.map(e=>{
+                        const readyNow=Math.max(0,e.totalUnits-e.rentedOutUnits-e.maintenanceUnits-e.missingUnits);
+                        const availability=readyNow<=0?'Unavailable':e.alertLevel>0&&readyNow<=e.alertLevel?'Low Availability':readyNow===e.totalUnits?'Fully Available':'Available';
+                        const condition=[...(e.missingUnits>0?['Needs Review']:[]),...(e.maintenanceUnits>0?['On Hold']:[])];
+                        const availabilityColor=availability==='Fully Available'||availability==='Available'?'bg-[#E5F8EC] text-[#23834A]':availability==='Low Availability'?'bg-[#FFF2D3] text-[#A66A00]':'bg-[#FFE7EA] text-[#D92C3F]';
+                        return <tr key={e.id} className="h-14 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
+                            <td className="break-all px-2 py-2.5 text-center font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">{e.equipmentNumber||'—'}</td>
+                            <td className="break-words px-3 py-2.5 font-semibold">{e.name}</td>
+                            <td className="break-words px-2 py-2.5 text-[#5F4E75]">{e.category}</td>
+                            <td className="px-2 py-2.5 text-center font-semibold">{e.totalUnits}</td>
+                            <td className="px-2 py-2.5 text-center font-semibold">{readyNow}</td>
+                            <td className="px-2 py-2.5 text-center">{e.rentedOutUnits}</td>
+                            <td className="px-2 py-2.5 text-center">{e.maintenanceUnits}</td>
+                            <td className="px-1 py-2.5 text-center"><span className={`inline-flex max-w-full justify-center rounded-full px-2 py-1 text-center text-[10px] font-semibold leading-4 ${availabilityColor}`}>{availability}</span></td>
+                            <td className="px-1 py-2.5 text-center">{condition.length?<div className="flex flex-wrap justify-center gap-1">{condition.map(label=><span key={label} className={`inline-flex max-w-full rounded-full px-2 py-1 text-center text-[10px] font-semibold ${label==='Needs Review'?'bg-[#FFE7EA] text-[#D92C3F]':'bg-[#EEE8FF] text-[#6944C9]'}`}>{label}</span>)}
+                                {e.missingUnits>0&&<span className="block w-full text-[10px] text-[#9A4050]">{e.missingUnits} missing</span>}</div>:<span className="text-[#9B8AAA]">—</span>}</td>
+                            <td className="px-1 py-2.5 text-center"><div className="flex min-w-0 flex-wrap items-center justify-center gap-1">
+                                <button type="button" className={`${action} h-auto min-h-8 max-w-full px-2 py-1 text-[10px]`} onClick={()=>setViewEquipment(e.id)}><Eye size={12}/> View</button>
+                                <button type="button" className={`${action} h-auto min-h-8 max-w-full whitespace-normal px-2 py-1 text-[10px]`} onClick={()=>openSchedule(e.id)}><CalendarDays size={12}/> View Schedule</button>
+                                <button type="button" className={`${action} h-auto min-h-8 max-w-full whitespace-normal px-2 py-1 text-[10px]`} disabled={!canOperate||readyNow<=0}
+                                        onClick={()=>startStockTask({kind:'issue',id:e.id,label:e.name,max:readyNow})}>Report Issue</button>
+                            </div></td>
+                        </tr>;
+                    })}</tbody>
+                </table>
+                {rental.connected&&visibleEquipment.length===0&&<Empty>No rental equipment found in this branch.</Empty>}
+            </div>
+            <p className="px-4 py-2 text-[11px] text-[#806A8C]">This table shows physical equipment belonging to the branch. On Hold includes inspection, cleaning, and repairs; missing units appear under Condition. View Schedule shows booking-date reservations, not physical release. Release equipment only through a confirmed booking.</p>
         </section>
+        {/* Only the queue presentation changes: equipment actions still use their existing confirmation dialogs and API. */}
+        {selectedQueueBooking && <div role="presentation" className="fixed inset-0 z-[80] flex items-center justify-center bg-[#21132E]/55 p-4"
+                                      onMouseDown={e=>{if(e.target===e.currentTarget&&!rental.saving)setSelectedQueueReference(null);}}>
+            <section role="dialog" aria-modal="true" aria-labelledby="staff-rental-queue-dialog-title"
+                     className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-xl">
+                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E9E1EE] px-5 py-4">
+                    <div className="min-w-0">
+                        <h3 id="staff-rental-queue-dialog-title" className="text-lg font-bold text-[#21132E]">Equipment for this Booking</h3>
+                        <p className="mt-1 break-all text-xs text-[#806A8C]">{selectedQueueBooking.reference}</p>
+                    </div>
+                    <button type="button" aria-label="Close equipment checklist" className={`${action} h-9 px-3`}
+                            onClick={()=>setSelectedQueueReference(null)}><X size={16}/> Close</button>
+                </div>
+                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+                    <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF9FE] p-4">
+                        <div className="grid gap-3 sm:grid-cols-3">
+                            <div><p className="text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]">Client</p>
+                                <p className="mt-1 break-words text-sm font-semibold text-[#21132E]">{selectedQueueBooking.clientName}</p></div>
+                            <div><p className="text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]">Schedule</p>
+                                <p className="mt-1 text-sm font-semibold text-[#21132E]">{queueScheduleDate(selectedQueueBooking.scheduleDate)}{selectedQueueBooking.eventTime?` · ${selectedQueueBooking.eventTime}`:""}</p>
+                                {selectedQueueBooking.returnDate!==selectedQueueBooking.scheduleDate&&
+                                    <p className="mt-1 text-xs text-[#806A8C]">Return: {queueScheduleDate(selectedQueueBooking.returnDate)}</p>}</div>
+                            <div><p className="text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]">Booking Type</p>
+                                <p className="mt-1 text-sm font-semibold text-[#21132E]">{selectedQueueBooking.bookingType}</p>
+                                {selectedQueueBooking.packageName&&<p className="mt-1 text-xs text-[#806A8C]">{selectedQueueBooking.packageName}</p>}</div>
+                        </div>
+                    </div>
+                    <div className="overflow-hidden rounded-xl border border-[#E6DDF0]">
+                        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3">
+                            <div>
+                                <h4 className="text-sm font-bold text-[#21132E]">Rental Equipment Checklist</h4>
+                                <p className="mt-1 text-[11px] text-[#806A8C]">{selectedQueueBooking.tasks.length} equipment {selectedQueueBooking.tasks.length===1?"line":"lines"} · {selectedQueueBooking.tasks.reduce((sum,x)=>sum+x.item.quantity,0)} booked units</p>
+                                <p className="mt-1 text-[11px] text-[#806A8C]">{selectedQueueBooking.tasks.filter(x=>x.type!=="prepare").length} of {selectedQueueBooking.tasks.length} equipment lines prepared or further along</p>
+                            </div>
+                            <span className={`rounded-full px-3 py-1 text-[10px] font-semibold ${selectedQueuePaid?"bg-[#E5F7ED] text-[#218246]":"bg-[#FFF3D8] text-[#986408]"}`}>
+                                {selectedQueuePaid?"Fully Paid":selectedQueuePayment&&Number.isFinite(selectedQueuePayment.bookingBalance)?"Balance Pending":"Payment Unavailable"}
+                            </span>
+                        </div>
+                        <div className="min-w-0 overflow-x-hidden">
+                            <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                                <colgroup><col className="w-[39%]"/><col className="w-[11%]"/><col className="w-[23%]"/><col className="w-[27%]"/></colgroup>
+                                <thead className="bg-[#FFFDF8]"><tr>{["Equipment","Qty","Status","Action"].map(h=><th key={h} className={th}>{h}</th>)}</tr></thead>
+                                <tbody>{selectedQueueBooking.tasks.map(({item,type})=>{
+                                    const perItemAction=type==="prepare"||type==="inspect";
+                                    const nextLabel=type==="release"?"Ready for booking release":
+                                        type==="return"?"Include in booking return":taskLabel[type||"prepare"];
+                                    return <tr key={item.allocationId} className="border-t border-[#F0EAF4] text-[#2B174C]">
+                                        <td className="break-words px-3 py-3 font-medium">{item.equipmentName}</td>
+                                        <td className="px-2 py-3 text-center font-semibold tabular-nums">{item.quantity}</td>
+                                        <td className="px-2 py-3 text-[11px]">{taskStatusLabel[type||"prepare"]||taskLabel[type||"prepare"]}</td>
+                                        <td className="px-2 py-3 text-center">
+                                            {perItemAction?<button type="button" className={`${action} h-auto min-h-9 w-full break-words px-2 py-1.5 text-[11px]`}
+                                                                   disabled={!canOperate||rental.saving} title={taskHelp[type||"prepare"]}
+                                                                   onClick={()=>openRentalAction(item)}>{taskLabel[type||"prepare"]}</button>:
+                                                <span className="text-[11px] text-[#806A8C]">{nextLabel}</span>}
+                                        </td>
+                                    </tr>;
+                                })}</tbody>
+                            </table>
+                        </div>
+                        {queueAllReserved&&<div className="space-y-2 border-t border-[#F0EAF4] px-4 py-3">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                    <p className="text-xs font-semibold text-[#2B174C]">Release the complete booking</p>
+                                    <p className="mt-1 text-[11px] text-[#806A8C]">All equipment must be prepared, the entire bill paid, and the scheduled date reached.</p>
+                                </div>
+                                <button type="button" className={`${primary} disabled:cursor-not-allowed disabled:opacity-40`}
+                                        disabled={!queueReleaseReady} onClick={()=>startBookingOperation("release")}>Release Booking</button>
+                            </div>
+                            {!queueAllPrepared&&<p className="text-[11px] text-[#986408]">Prepare every equipment line before releasing the booking.</p>}
+                            {queueAllPrepared&&!selectedQueuePaid&&<p className="text-[11px] text-[#986408]">Full payment has not been recorded; Release Booking remains disabled.</p>}
+                            {queueAllPrepared&&selectedQueuePaid&&!queueReleaseDateValid&&<p className="text-[11px] text-[#986408]">Release is available on or after the scheduled rental start date.</p>}
+                        </div>}
+                        {queueAllOut&&<div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#F0EAF4] px-4 py-3">
+                            <p className="text-xs text-[#5A476A]">Receive all booked equipment in one return transaction, with missing quantities recorded separately.</p>
+                            <button type="button" className={primary} disabled={!canOperate||rental.saving}
+                                    onClick={()=>startBookingOperation("return")}>Receive Booking Return</button>
+                        </div>}
+                        {!queueAllReserved&&!queueAllOut&&selectedQueueBooking.tasks.some(x=>x.type==="return")&&
+                            <p className="border-t border-[#F0EAF4] px-4 py-3 text-[11px] text-[#986408]">This booking has mixed rental stages from an older partial handover. Ask the Manager to reconcile it before a booking-wide return.</p>}
+                    </div>
+                    <p className="text-[11px] text-[#806A8C]">Prepare and inspect equipment separately. Release or receive all rental equipment for a booking together. Damage and cleaning remain in the existing workflow.</p>
+                </div>
+                <div className="flex justify-end border-t border-[#E9E1EE] px-5 py-3">
+                    <button type="button" className={`${action} h-9 px-4`} onClick={()=>setSelectedQueueReference(null)}>Close</button>
+                </div>
+            </section>
+        </div>}
+        {bookingOperation&&selectedQueueBooking&&<div role="presentation" className="fixed inset-0 z-[95] flex items-center justify-center bg-[#21132E]/65 p-4"
+                                                      onMouseDown={e=>{if(e.target===e.currentTarget&&!rental.saving)setBookingOperation(null);}}>
+            <section role="dialog" aria-modal="true" aria-label={bookingOperation==="release"?"Confirm complete booking release":"Receive complete booking return"}
+                     className="max-h-[88vh] w-full max-w-xl space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
+                <div className="flex items-center justify-between gap-2">
+                    <div><h3 className="text-lg font-bold text-[#21132E]">{bookingOperation==="release"?"Release Booking":"Receive Booking Return"}</h3>
+                        <p className="mt-1 break-all text-xs text-[#806A8C]">{selectedQueueBooking.reference}</p></div>
+                    <button type="button" className={action} disabled={rental.saving} onClick={()=>setBookingOperation(null)}><X size={16}/> Close</button>
+                </div>
+                {bookingOperation==="release"?<div className="rounded-xl bg-[#F7F3FC] p-3 text-xs text-[#5A476A]">
+                    Confirm the complete physical handover of <strong>{selectedQueueBooking.tasks.reduce((sum,x)=>sum+x.item.quantity,0)} units</strong> across {selectedQueueBooking.tasks.length} equipment lines. All must be ready and the booking fully paid. This updates each rental allocation together.
+                </div>:<>
+                    <p className="text-xs text-[#5A476A]">Count every item physically returned. Enter 0 if none are missing. Unreturned units will be reported to the Manager; received units await inspection.</p>
+                    <div className="space-y-2">{selectedQueueBooking.tasks.map(({item})=><label key={item.allocationId} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E6DDF0] p-3 text-xs">
+                        <span className="min-w-[180px] flex-1"><strong className="block text-[#2B174C]">{item.equipmentName}</strong>
+                            <span className="mt-1 block text-[#806A8C]">Booked: {item.quantity} units</span></span>
+                        <span className="flex items-center gap-2 font-semibold text-[#5A476A]">Missing
+                            <input type="number" min="0" max={item.quantity} step="1" required value={bookingReturnMissing[item.allocationId]??"0"}
+                                   onChange={e=>setBookingReturnMissing(prev=>({...prev,[item.allocationId]:e.target.value}))}
+                                   disabled={rental.saving} className="w-20 rounded-lg border border-[#E6DDF0] p-2 text-sm"/></span>
+                    </label>)}</div>
+                    <label className="block text-xs font-semibold text-[#2B174C]">Return notes (required if anything is missing)
+                        <textarea rows={3} maxLength={400} value={bookingOperationNotes} onChange={e=>setBookingOperationNotes(e.target.value)}
+                                  disabled={rental.saving} className="mt-2 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm" placeholder="Any missing accessories or return details..."/></label>
+                </>}
+                {bookingOperationError&&<p role="alert" className="rounded-xl bg-red-50 p-3 text-xs text-red-700">{bookingOperationError}</p>}
+                <div className="flex justify-end gap-2 border-t border-[#E9E1EE] pt-3">
+                    <button type="button" className={action} disabled={rental.saving} onClick={()=>setBookingOperation(null)}>Cancel</button>
+                    <button type="button" className={primary} disabled={rental.saving} onClick={()=>void performBookingOperation()}>
+                        {rental.saving?"Saving...":bookingOperation==="release"?"Confirm Full Release":"Confirm Complete Return"}</button>
+                </div>
+            </section>
+        </div>}
         {scheduleEquipmentId!==null&&<div role="presentation" className="fixed inset-0 z-[100] flex items-center justify-center bg-[#21132E]/50 p-4"
                                           onMouseDown={e=>{if(e.target===e.currentTarget)setScheduleEquipmentId(null);}}>
             <section role="dialog" aria-modal="true" aria-label="Rental equipment booking schedule"
@@ -451,7 +761,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                         stockTask.kind==="routine"?"Complete Routine Care":"Report Repair Completion"}
                 </h3><button type="button" disabled={rental.saving} onClick={()=>setStockTask(null)} aria-label="Close"><X size={19}/></button></div>
                 <p className="text-sm text-[#5A476A]">{stockTask.label}</p>
-                {stockTask.kind==="issue"&&stockTask.bookingReference&&<p className="rounded-lg bg-[#F7F1FF] p-2 text-xs text-[#56378B]">Found while preparing booking <strong>{stockTask.bookingReference}</strong>. The issue is recorded against available equipment; the booking's allocated quantity is not silently changed.</p>}
+                {stockTask.kind==="issue"&&stockTask.bookingReference&&<p className="rounded-lg bg-[#F7F1FF] p-2 text-xs text-[#56378B]">Found while preparing booking <strong>{stockTask.bookingReference}</strong>. The issue is recorded against available equipment; the booking&apos;s allocated quantity is not silently changed.</p>}
                 <label className="block space-y-1 text-xs font-semibold text-[#5A476A]">Quantity (maximum {stockTask.max})
                     <input type="number" min={1} max={stockTask.max} step={1} value={stockQuantity} onChange={e=>setStockQuantity(e.target.value)}
                            className="w-full rounded-xl border border-[#E6DDF0] p-3 text-sm"/></label>

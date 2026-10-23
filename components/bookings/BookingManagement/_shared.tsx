@@ -11,6 +11,11 @@ import {
     Palette,
     PhilippinePeso,
     StickyNote,
+    UserRound,
+    CalendarDays,
+    Clock3,
+    ShieldCheck,
+    Download,
 } from "lucide-react";
 import BookingFinancialPanel from "./BookingFinancialPanel";
 
@@ -19,6 +24,7 @@ export type BookingAccess = "none" | "view" | "standard" | "full";
 export type FilterType =
     | "All"
     | "Pending Review"
+    | "Awaiting Down Payment"
     | "Confirmed"
     | "Preparing"
     | "Completed"
@@ -27,6 +33,7 @@ export type FilterType =
 export const TABS: FilterType[] = [
     "All",
     "Pending Review",
+    "Awaiting Down Payment",
     "Confirmed",
     "Preparing",
     "Completed",
@@ -82,6 +89,9 @@ export type Booking = {
 
     required_down_payment?: number | string | null;
     requiredDownPayment?: number | string | null;
+    downPaymentDeadline?: string | null;
+    down_payment_deadline?: string | null;
+    booking_dp_deadline?: string | null;
 
     down_payment_amount?: number | string | null;
     downPaymentAmount?: number | string | null;
@@ -135,6 +145,7 @@ type CalendarDropdownProps = {
 const STATUS_STYLE: Record<string, string> = {
     "Pending Review": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
     "Awaiting Down Payment": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
+    Approved: "border-[#D8CBE7] bg-[#F5EEFF] text-[#5930A4]",
     Confirmed: "border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]",
     Preparing: "border-[#D8CBE7] bg-[#F7F1FF] text-[#4E2C66]",
     Completed: "border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]",
@@ -228,6 +239,7 @@ export function normalizeBookingStatus(value?: string | null) {
     if (raw === "pending" || raw === "pending review") return "Pending Review";
 
     if (
+        raw === "approved" ||
         raw === "awaiting down payment" ||
         raw === "waiting down payment" ||
         raw === "awaiting payment" ||
@@ -293,6 +305,34 @@ export function getBookingItemLabel(booking: Booking) {
         booking.package_name ||
         "Package Booking"
     );
+}
+
+// Display-only classification for the Manager booking screen. Never replace
+// the actual bookingType value: API requests and pricing need the original data.
+export function getManagerBookingTypeLabel(booking: Booking): "Custom" | "Package" {
+    const rawType = String(booking.bookingType || booking.booking_type || "").trim().toLowerCase();
+    // Honor the booking choice saved by the public customer portal first.
+    if (rawType.includes("custom")) return "Custom";
+    if (rawType.includes("package")) return "Package";
+    return isCustomBooking(booking) ? "Custom" : "Package";
+}
+
+// The persisted status remains "Awaiting Down Payment" to keep the existing API
+// and inventory reservation workflow compatible. Only the manager UI says Approved.
+export function getManagerBookingStatusLabel(status?: string | null) {
+    const normalized = normalizeBookingStatus(status);
+    return normalized === "Awaiting Down Payment" ? "Approved" : normalized;
+}
+
+// Manager-facing payment label only: retain all backend payment states,
+// amounts, thresholds, and booking-transition rules unchanged.
+export function getManagerPaymentLabel(booking: Booking): "Unpaid" | "Down Payment Paid" | "Fully Paid" {
+    const current = getPaymentStatus(booking);
+    if (current === "Fully Paid") return "Fully Paid";
+    if (current === "Down Payment Paid") return "Down Payment Paid";
+    // Includes the former "Down Payment Required" and "Partial" labels.
+    // The amounts remain visible so any partial receipt is never hidden.
+    return "Unpaid";
 }
 
 export function getBookingItemSubtext(booking: Booking) {
@@ -395,6 +435,7 @@ export function normalizeBooking(
             rawValue(raw, "down_payment_amount") ??
             rawValue(raw, "downPaymentAmount") ??
             0,
+        downPaymentDeadline: rawString(raw,"downPaymentDeadline") || rawString(raw,"booking_dp_deadline") || rawString(raw,"down_payment_deadline") || null,
         amount_paid: rawValue(raw, "amount_paid") ?? rawValue(raw, "amountPaid") ?? 0,
         balance: rawValue(raw, "balance") ?? null,
         payment_status: normalizePaymentStatus(
@@ -798,10 +839,17 @@ export function getNextStatusConfig(displayStatus: string, downPaymentPaid: bool
     switch (displayStatus) {
         case "Pending Review":
             return {
-                nextStatus: "Confirmed",
-                nextStatusLabel: "Confirm Booking", // ← first button
+                nextStatus: "Awaiting Down Payment",
+                nextStatusLabel: "Approve & Request DP",
                 statusActionDisabled: false,
-                statusHelper: "Booking must be confirmed before preparation."
+                statusHelper: "Review availability before requesting payment. No stock is allocated yet."
+            };
+        case "Awaiting Down Payment":
+            return {
+                nextStatus: "Confirmed",
+                nextStatusLabel: "Confirm & Reserve",
+                statusActionDisabled: !downPaymentPaid,
+                statusHelper: downPaymentPaid ? "Recheck availability and reserve the items." : "Manager must verify the required DP first."
             };
         case "Confirmed":
             return {
@@ -862,6 +910,7 @@ type BookingRowProps = {
     hideSummaryRow?: boolean;
     expandedByDefault?: boolean;
     detailTab?: BookingDetailTab;
+    managerView?: boolean;
 };
 
 export function BookingRow({
@@ -869,6 +918,7 @@ export function BookingRow({
                                hideSummaryRow = false,
                                expandedByDefault = false,
                                detailTab = "Overview",
+                               managerView = false,
                                ownerView = false,
                                canManage = true,
                                onUpdateStatus,
@@ -888,6 +938,9 @@ export function BookingRow({
     const [itemsLoading, setItemsLoading] = useState(false);
     const [itemsLoaded, setItemsLoaded] = useState(false);
     const [itemsError, setItemsError] = useState("");
+    const [estimatedBookingPrice, setEstimatedBookingPrice] = useState<number | null>(null);
+    const [estimateLoading, setEstimateLoading] = useState(false);
+    const [estimateError, setEstimateError] = useState(false);
     const [open, setOpen] = useState(expandedByDefault);
 
     // Status transitions change rental allocations; reload the displayed
@@ -895,6 +948,39 @@ export function BookingRow({
     useEffect(() => { setItemsLoaded(false); }, [b.status]);
 
     const isCustom = isCustomBooking(b);
+    // Read the saved estimate without treating it as the manager's final agreed price.
+    // This endpoint totals catalog-verified custom consumables and rental lines,
+    // plus the branch's saved optional charges, when applicable.
+    useEffect(() => {
+        if (!hideSummaryRow || !managerView || detailTab !== "Overview" || !open) return;
+        const token = sessionStorage.getItem("token");
+        if (!token) { setEstimateError(true); return; }
+        let cancelled = false;
+        setEstimatedBookingPrice(null);
+        setEstimateError(false);
+        setEstimateLoading(true);
+        const branchId = b.branchId || b.branch_id;
+        void (async () => {
+            try {
+                const res = await fetch("/api/bookings", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ action: "get_booking_financial_statement", booking_id: b.id,
+                        ...(branchId ? { branch_id: Number(branchId) } : {}) }),
+                });
+                const result = await res.json();
+                const estimate = Number(result.statement?.agreedCharges);
+                if (!res.ok || result.error || !Number.isFinite(estimate) || estimate < 0 ||
+                    result.statement?.agreedCharges == null) throw new Error("Quote unavailable");
+                if (!cancelled) setEstimatedBookingPrice(estimate);
+            } catch {
+                if (!cancelled) setEstimateError(true);
+            } finally {
+                if (!cancelled) setEstimateLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [b.id, b.status, b.branchId, b.branch_id, hideSummaryRow, managerView, detailTab, open]);
     const total = getTotalPrice(b);
     const requiredDp = getRequiredDownPayment(b);
     const paid = getAmountPaid(b);
@@ -903,9 +989,9 @@ export function BookingRow({
     const displayStatus = normalizeBookingStatus(b.status);
 
     const customNeedsTerms = isCustom && total <= 0;
-    const canRecordPayment = total > 0 && requiredDp > 0;
-    const downPaymentPaid = requiredDp > 0 && paid >= requiredDp;
-    const fullyPaid = total > 0 && balance <= 0;
+    // Custom quotations are locked immediately after manager approval.
+    const canEditPaymentTerms = displayStatus === "Pending Review" && b.approvalStatus !== "approved";
+    const downPaymentPaid = requiredDp > 0 && paid + 0.005 >= requiredDp;
 
     const statusClass =
         STATUS_STYLE[displayStatus] ||
@@ -921,6 +1007,10 @@ export function BookingRow({
         statusActionDisabled,
         statusHelper,
     } = getNextStatusConfig(displayStatus, downPaymentPaid);
+    const managerNoDp = canManage && requiredDp === 0 && displayStatus === "Pending Review";
+    const actionNextStatus = managerNoDp ? "Confirmed" : nextStatus;
+    const actionLabel = managerNoDp ? "Approve No-DP & Reserve" :
+        managerView && displayStatus === "Pending Review" ? "Approve Booking" : nextStatusLabel;
 
     useEffect(() => {
         if (!open || itemsLoaded || (hideSummaryRow && detailTab !== "Items")) return;
@@ -1007,6 +1097,95 @@ export function BookingRow({
         b.branchId,
         b.branch_id,
     ]);
+
+    // Only the Manager uses the redesigned overview. Keep the existing
+    // BookingRow actions, Billing, Items and Notes for the other views.
+    if (hideSummaryRow && managerView && detailTab === "Overview") {
+        const infoLabel = "text-xs font-medium text-[#887B99]";
+        const infoValue = "text-right text-xs font-semibold text-[#261940] break-words";
+        const card = "min-w-0 rounded-xl border border-[#E8E1F1] bg-white p-3.5 sm:p-4";
+        const action = "inline-flex min-h-10 items-center justify-center rounded-lg px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50";
+        return (
+            <tr><td colSpan={6} className="p-0">
+                <div className="space-y-3 text-[#25153D]">
+                    <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+                        <section className={card}>
+                            <h3 className="mb-4 flex items-center gap-2 text-sm font-bold"><UserRound size={17} className="text-[#6536D4]"/>Customer Information</h3>
+                            <div className="space-y-3">
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Name</span><span className={infoValue}>{b.name}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Contact Number</span><span className={infoValue}>{b.phone || "—"}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Email</span><span className={infoValue}>{b.email || "—"}</span></div>
+                            </div>
+                        </section>
+                        <section className={card}>
+                            <h3 className="mb-4 flex items-center gap-2 text-sm font-bold"><CalendarDays size={17} className="text-[#6536D4]"/>Event Details</h3>
+                            <div className="space-y-3">
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Event Date</span><span className={infoValue}>{formatDate(b.date)}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Event Time</span><span className={infoValue}>{b.eventTime || b.event_time || "—"}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Booking Type</span><span className={infoValue}>{getManagerBookingTypeLabel(b)}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Event Type</span><span className={infoValue}>{b.eventType || b.event_type || "—"}</span></div>
+                            </div>
+                        </section>
+                        <section className={card}>
+                            <h3 className="mb-4 flex items-center gap-2 text-sm font-bold"><CreditCard size={17} className="text-[#6536D4]"/>Payment Summary</h3>
+                            <div className="space-y-3">
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Estimated Price</span>
+                                    <span className={infoValue}>{estimateLoading ? "Loading..." : estimateError || estimatedBookingPrice === null ? "Unavailable" : peso(estimatedBookingPrice)}</span></div>
+                                <p className="text-[11px] leading-4 text-[#887B99]">Original itemized estimate; subject to manager review.</p>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Agreed Price</span><span className={infoValue}>{total > 0 ? peso(total) : "Not set"}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Required Down Payment</span><span className={infoValue}>{requiredDp > 0 ? peso(requiredDp) : isCustom && total <= 0 ? "Not set" : "No down payment required"}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Amount Paid</span><span className={infoValue}>{peso(paid)}</span></div>
+                                <div className="flex justify-between gap-3 border-t border-[#EAE4F0] pt-3"><span className="text-xs font-bold">Remaining Balance</span><strong className="text-sm text-[#351263]">{isCustom && total <= 0 ? "Not set" : peso(balance)}</strong></div>
+                            </div>
+                        </section>
+                        <section className={card}>
+                            <h3 className="mb-4 flex items-center gap-2 text-sm font-bold"><Clock3 size={17} className="text-[#6536D4]"/>Status &amp; Schedule</h3>
+                            <div className="space-y-3">
+                                <div className="flex items-center justify-between gap-3"><span className={infoLabel}>Current Status</span><span className={`rounded-full border px-2 py-1 text-[11px] font-semibold ${statusClass}`}>{managerView ? getManagerBookingStatusLabel(displayStatus) : displayStatus}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Next Step</span><span className={infoValue}>{!statusActionDisabled || managerNoDp ? actionLabel : downPaymentPaid ? actionLabel : "Verify payment first"}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Payment Status</span><span className={infoValue}>{getManagerPaymentLabel(b)}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Event Schedule</span><span className={infoValue}>{formatDate(b.date)}</span></div>
+                            </div>
+                        </section>
+                    </div>
+                    <section className={`${card} !bg-[#FCFAFF]`}>
+                        <h3 className="mb-3 flex items-center gap-2 text-sm font-bold"><ShieldCheck size={17} className="text-[#6536D4]"/>Quick Actions</h3>
+                        {!canManage || ownerView ? (
+                            <div className="rounded-lg border border-[#E8E1F1] bg-white p-3 text-xs text-[#847492]">You have view-only access to booking actions.</div>
+                        ) : (
+                            <div className="grid gap-2 sm:grid-cols-2">
+                                {isCustom && customNeedsTerms && canEditPaymentTerms ? (
+                                    <button type="button" className={`${action} bg-[#4D2A96] text-white hover:bg-[#371C72]`} onClick={() => onSetPrice?.(b)}>Set Price &amp; Down Payment</button>
+                                ) : displayStatus === "Pending Review" ? (
+                                    <span className="flex items-center justify-center rounded-lg border border-[#E8DCF4] bg-white px-3 py-2 text-center text-xs font-semibold text-[#806D92]">Approve booking before recording payment</span>
+                                ) : displayStatus === "Cancelled" ? (
+                                    <span className="flex items-center justify-center rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-center text-xs font-semibold text-red-700">Cancelled booking — payments disabled</span>
+                                ) : total > 0 && balance > 0 ? (
+                                    <button type="button" className={`${action} border border-[#D6C4F8] bg-[#F3EEFF] text-[#4D2A96] hover:bg-[#ECE2FF]`}
+                                            onClick={() => requiredDp > 0 && paid < requiredDp ? onRecordDownPayment?.(b) : onMarkFullyPaid?.(b)}>
+                                        {requiredDp > 0 && paid < requiredDp ? "Verify & Record Down Payment" : "Record Remaining Payment"}
+                                    </button>
+                                ) : <span className="flex items-center justify-center rounded-lg border border-[#D6EDDC] bg-[#EFF9F1] px-3 py-2 text-xs font-semibold text-[#18854C]">{total <= 0 ? "Payment terms missing" : "Payment completed"}</span>}
+                                {isCustom && !customNeedsTerms && canEditPaymentTerms &&
+                                    <button type="button" className={`${action} border border-[#D6C4F8] bg-white text-[#4D2A96] hover:bg-[#F3EEFF]`} onClick={() => onSetPrice?.(b)}>Edit Custom Price &amp; DP</button>}
+                                <button type="button" disabled={statusActionDisabled && !managerNoDp} onClick={() => { if (!statusActionDisabled || managerNoDp) onUpdateStatus?.(b.id, actionNextStatus); }}
+                                        className={`${action} border border-[#D6C4F8] bg-[#F3EEFF] text-[#4D2A96] hover:bg-[#ECE2FF]`}>
+                                    {actionLabel}
+                                </button>
+                                {!(["Completed", "Cancelled"].includes(displayStatus)) && onUpdateStatus &&
+                                    <button type="button" onClick={() => onCancelBooking ? onCancelBooking(b) : onUpdateStatus?.(b.id, "Cancelled")}
+                                            className={`${action} border border-red-200 bg-red-50 text-red-700 hover:bg-red-100`}>Cancel Booking</button>}
+                            </div>
+                        )}
+                        {!canEditPaymentTerms && isCustom && <p className="mt-3 rounded-lg border border-[#E7DDF5] bg-[#F8F4FF] p-3 text-xs text-[#674A8E]">Custom price and required down payment are locked after approval.</p>}
+                        {b.approvalStatus === "pending" && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-900"><strong>Manager approval requested:</strong> {b.approvalReason || "Awaiting review."}</p>}
+                        <p className="mt-3 text-xs leading-5 text-[#847492]">{statusHelper} Recording money does not automatically confirm a booking.</p>
+                    </section>
+                    {customNeedsTerms && <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900">Agree on custom pricing and the down payment before collecting payment.</p>}
+                </div>
+            </td></tr>
+        );
+    }
 
     return (
         <>
@@ -1298,9 +1477,15 @@ export function BookingRow({
                                             </p>
                                         </div>
 
-                                        <p className="text-sm leading-6 text-[#7A6A84]">
-                                            {b.notes || "No notes provided."}
+                                        <p className="whitespace-pre-wrap text-sm leading-6 text-[#7A6A84]">
+                                            {b.notes || "No general notes provided."}
                                         </p>
+                                        {(b.customOrder || b.custom_order) && (
+                                            <div className="mt-3 border-t border-[#E6DDF0] pt-3">
+                                                <p className="mb-1 text-xs font-bold text-[#2B174C]">Additional Custom Request</p>
+                                                <p className="whitespace-pre-wrap text-sm leading-6 text-[#7A6A84]">{b.customOrder || b.custom_order}</p>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -1317,7 +1502,11 @@ export function BookingRow({
                                             <div className="rounded-xl border border-[#E6DDF0] bg-white px-3 py-3 text-center text-xs font-semibold text-[#7A6A84]">
                                                 View-only booking record.
                                             </div>
-                                        ) : isCustom && customNeedsTerms ? (
+                                        ) : managerView && displayStatus === "Pending Review" && !customNeedsTerms ? (
+                                            <div className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-3 py-3 text-center text-xs font-semibold text-[#6E5B83]">Approve booking before recording payment.</div>
+                                        ) : managerView && displayStatus === "Cancelled" ? (
+                                            <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-3 text-center text-xs font-semibold text-red-700">Cancelled booking — payments disabled.</div>
+                                        ) : isCustom && customNeedsTerms && canEditPaymentTerms ? (
                                             <button
                                                 onClick={(e) => {
                                                     e.stopPropagation();
@@ -1354,7 +1543,7 @@ export function BookingRow({
                                                 type="button"
                                                 className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                                             >
-                                                Mark Down Payment Paid
+                                                Verify & Record Down Payment
                                             </button>
                                         ) : (
                                             <button
@@ -1369,7 +1558,7 @@ export function BookingRow({
                                             </button>
                                         )}
 
-                                        {isCustom && !customNeedsTerms && canManage && !ownerView && (
+                                        {isCustom && !customNeedsTerms && canManage && !ownerView && canEditPaymentTerms && (
                                             <button
                                                 onClick={(e) => {
                                                     e.stopPropagation();
@@ -1397,13 +1586,13 @@ export function BookingRow({
 
                                             <SummaryLine
                                                 label="Next Step"
-                                                value={nextStatusLabel}
+                                                value={actionLabel}
                                             />
                                         </div>
 
                                         {ownerView || (!canManage && !(canOperateBookings && (displayStatus === "Confirmed" || displayStatus === "Preparing"))) ? (
                                             <div className="rounded-xl border border-[#E6DDF0] bg-white px-3 py-3 text-center text-xs font-semibold text-[#7A6A84]">
-                                                {canConfirmStandard && displayStatus === "Pending Review"
+                                                {canConfirmStandard && ["Pending Review","Awaiting Down Payment"].includes(displayStatus)
                                                     ? "Staff may confirm a catalog-priced booking below or request Manager review."
                                                     : "View-only booking status."}
                                             </div>
@@ -1425,11 +1614,11 @@ export function BookingRow({
                                             <>
                                                 {/* Next Step Button */}
                                                 <button
-                                                    onClick={(e) => { e.stopPropagation(); if (!statusActionDisabled) onUpdateStatus?.(b.id, nextStatus); }}
-                                                    disabled={statusActionDisabled}
+                                                    onClick={(e) => { e.stopPropagation(); if (!statusActionDisabled || managerNoDp) onUpdateStatus?.(b.id, actionNextStatus); }}
+                                                    disabled={statusActionDisabled && !managerNoDp}
                                                     className="mb-2 inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:bg-[#D8CBE7] disabled:text-[#806A8C]"
                                                 >
-                                                    {b.approvalStatus === "pending" && nextStatus === "Confirmed" ? "Approve & Confirm Booking" : nextStatusLabel}
+                                                    {actionLabel}
                                                 </button>
 
                                                 {/* Cancel Button */}
@@ -1460,14 +1649,15 @@ export function BookingRow({
                                                 <p className="mt-1">{b.approvalReason || "Awaiting review of this booking exception."}</p>
                                             </div>
                                         )}
-                                        {canConfirmStandard && displayStatus === "Pending Review" && (
+                                        {canConfirmStandard && ["Pending Review","Awaiting Down Payment"].includes(displayStatus) && (
                                             <div className="mt-3 flex flex-col gap-2">
-                                                {b.approvalStatus !== "pending" ? (
+                                                {b.approvalStatus !== "pending" && requiredDp > 0 ? (
                                                     <button type="button" onClick={(e)=>{e.stopPropagation(); onConfirmStandard?.(b)}}
                                                             className="min-h-[42px] rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white hover:bg-[#1B0D31]">
-                                                        Confirm Standard Booking
+                                                        {displayStatus==="Pending Review"?"Approve Standard Booking":"Confirm Paid Standard Booking"}
                                                     </button>
                                                 ) : null}
+                                                {displayStatus==="Pending Review" && requiredDp===0 && <p className="rounded-lg bg-[#FFF8E8] px-3 py-2 text-xs text-[#A56607]">A no-DP reservation needs Manager authorization. Use Request Manager Approval below.</p>}
                                                 <button type="button" onClick={(e)=>{e.stopPropagation(); onRequestApproval?.(b)}}
                                                         className="min-h-[42px] rounded-xl border border-[#D8CBE7] bg-white px-4 text-sm font-semibold text-[#2B174C] hover:bg-[#F7F1FF]">
                                                     {b.approvalStatus === "pending" ? "Update Approval Request" : "Request Manager Approval"}
@@ -1476,7 +1666,7 @@ export function BookingRow({
                                         )}
                                         {canManage && !ownerView && displayStatus === "Pending Review" && b.approvalStatus === "pending" && (
                                             <p className="mt-2 text-center text-xs font-semibold text-amber-900">
-                                                Confirm Booking will record Manager approval and reserve the equipment.
+                                                Manager approval starts payment collection; allocation happens only after confirmation.
                                             </p>
                                         )}
                                         <p className="mt-3 text-center text-xs text-[#7A6A84]">
@@ -1494,54 +1684,59 @@ export function BookingRow({
 }
 
 
-// One selected booking at a time: no row checkboxes or pagination.
-// BookingRow remains the single source of truth for all existing booking actions.
-export function BookingWorkspace({ bookings, ownerView = false, ...bookingActions }: Omit<BookingRowProps,
-    "b" | "hideSummaryRow" | "expandedByDefault" | "detailTab"> & { bookings: Booking[] }) {
+// Select one booking from the scrollable list; reuse BookingRow for status and API actions.
+export function BookingWorkspace({
+                                     bookings, ownerView = false, managerView = false, listToolbar,
+                                     onExportSelected, ...bookingActions
+                                 }: Omit<BookingRowProps, "b" | "hideSummaryRow" | "expandedByDefault" | "detailTab" | "managerView"> & {
+    bookings: Booking[];
+    managerView?: boolean;
+    listToolbar?: ReactNode;
+    onExportSelected?: (booking: Booking, format: "pdf" | "excel") => void;
+}) {
     const [selectedId, setSelectedId] = useState<number | null>(null);
     const [detailTab, setDetailTab] = useState<BookingDetailTab>("Overview");
+    const [exportOpen, setExportOpen] = useState(false);
     const selectedBooking = bookings.find(booking => booking.id === selectedId) ?? bookings[0];
-
-    if (!selectedBooking) {
-        return <div className="rounded-2xl border border-[#E6DDF0] bg-white p-8 text-center text-sm text-[#806A8C]">No bookings found.</div>;
-    }
-
     const tabs: BookingDetailTab[] = ["Overview", "Billing", "Items", "Notes"];
+
     return (
-        <div className="grid min-w-0 gap-3 2xl:grid-cols-[minmax(0,1.12fr)_minmax(0,0.88fr)]">
+        <div className={`grid min-w-0 gap-3 ${managerView ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" : "2xl:grid-cols-[minmax(0,1.12fr)_minmax(0,0.88fr)]"}`}>
             <section aria-label="Booking list" className="min-w-0 overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm">
-                <div className="max-h-[640px] overflow-auto overscroll-contain">
-                    <table role="grid" aria-label="Bookings" className="w-full min-w-[650px] border-collapse">
+                {managerView && <div className="px-3 pt-3 sm:px-4">
+                    {listToolbar}
+                </div>}
+                <div className={`${managerView ? "h-[600px]" : "max-h-[640px]"} overflow-auto overscroll-contain`}>
+                    <table role="grid" aria-label="Bookings" className="w-full min-w-[590px] border-collapse">
                         <thead className="sticky top-0 z-10 bg-[#FFFDF8]">
                         <tr className="border-b border-[#E6DDF0] text-left text-[11px] font-semibold text-[#806A8C]">
-                            <th className="px-3 py-3">Client / Booking Ref</th>
+                            <th className="px-3 py-3">Customer / Booking Ref</th>
                             <th className="px-3 py-3">Schedule</th>
-                            <th className="px-3 py-3">Booking Type</th>
+                            <th className="px-3 py-3">Type</th>
                             <th className="px-3 py-3">Payment</th>
                             <th className="px-3 py-3">Status</th>
                         </tr>
                         </thead>
                         <tbody>
                         {bookings.map(booking => {
-                            const selected = booking.id === selectedBooking.id;
+                            const selected = booking.id === selectedBooking?.id;
                             const total = getTotalPrice(booking);
                             const paid = getAmountPaid(booking);
-                            const payment = getPaymentStatus(booking);
+                            const payment = managerView ? getManagerPaymentLabel(booking) : getPaymentStatus(booking);
+                            const bookingTypeLabel = managerView ? getManagerBookingTypeLabel(booking) : getBookingItemLabel(booking);
                             const status = normalizeBookingStatus(booking.status);
                             return (
                                 <tr key={booking.id}
-                                    onClick={() => {setSelectedId(booking.id); setDetailTab("Overview");}}
+                                    onClick={() => { setSelectedId(booking.id); setDetailTab("Overview"); setExportOpen(false); }}
                                     onKeyDown={event => {
                                         if (event.key === "Enter" || event.key === " ") {
-                                            event.preventDefault(); setSelectedId(booking.id); setDetailTab("Overview");
+                                            event.preventDefault(); setSelectedId(booking.id); setDetailTab("Overview"); setExportOpen(false);
                                         }
                                     }}
                                     tabIndex={0} aria-selected={selected}
-                                    className={`cursor-pointer border-b border-[#EFE7F4] text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6C3AD6] ${
-                                        selected ? "bg-[#F1E9FF] shadow-[inset_4px_0_0_#6C3AD6]" : "bg-white hover:bg-[#FAF6FF]"
-                                    }`}>
-                                    <td className="max-w-[190px] px-3 py-3 align-top">
-                                        <p className="truncate font-bold text-[#1A1220]" title={booking.name}>{booking.name}</p>
+                                    className={`cursor-pointer border-b border-[#EFE7F4] text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6C3AD6] ${selected ? "bg-[#F1E9FF] shadow-[inset_4px_0_0_#6C3AD6]" : "bg-white hover:bg-[#FAF6FF]"}`}>
+                                    <td className="max-w-[165px] px-3 py-3 align-top">
+                                        <p className="truncate text-xs font-bold text-[#1A1220]" title={booking.name}>{booking.name}</p>
                                         <p className="mt-1 truncate text-[11px] text-[#806A8C]">{booking.bookingReference || `#${booking.id}`}</p>
                                         {ownerView && <p className="mt-1 truncate text-[11px] text-[#806A8C]">{getBranchGroupName(booking)}</p>}
                                     </td>
@@ -1549,54 +1744,57 @@ export function BookingWorkspace({ bookings, ownerView = false, ...bookingAction
                                         <p className="font-semibold">{formatDate(booking.date)}</p>
                                         {booking.eventTime && <p className="mt-1 text-[#806A8C]">{booking.eventTime}</p>}
                                     </td>
-                                    <td className="max-w-[145px] px-3 py-3 align-top">
-                                        <p className="line-clamp-2 text-xs font-semibold text-[#1A1220]" title={getBookingItemLabel(booking)}>{getBookingItemLabel(booking)}</p>
+                                    <td className="max-w-[110px] px-3 py-3 align-top">
+                                        <p className="line-clamp-2 text-[11px] font-semibold text-[#1A1220]" title={bookingTypeLabel}>{bookingTypeLabel}</p>
                                     </td>
                                     <td className="whitespace-nowrap px-3 py-3 align-top">
                                         <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${PAYMENT_STYLE[payment] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{payment}</span>
                                         <p className="mt-1 text-[11px] text-[#806A8C]">{peso(paid)} / {total > 0 ? peso(total) : "Not set"}</p>
                                     </td>
-                                    <td className="px-3 py-3 align-top">
-                                        <span className={`inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-[11px] font-semibold ${STATUS_STYLE[status] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{status}</span>
-                                    </td>
+                                    <td className="px-3 py-3 align-top"><span className={`inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-[11px] font-semibold ${STATUS_STYLE[status] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{managerView ? getManagerBookingStatusLabel(status) : status}</span></td>
                                 </tr>
                             );
                         })}
                         </tbody>
                     </table>
+                    {bookings.length === 0 && <p className="p-8 text-center text-sm text-[#806A8C]">No bookings match the selected filters.</p>}
                 </div>
+                {managerView && <div className="border-t border-[#EFE7F4] px-4 py-2 text-xs text-[#806A8C]">Showing {bookings.length} booking{bookings.length === 1 ? "" : "s"}</div>}
             </section>
-
-            <section aria-label="Selected booking details" className="flex min-w-0 max-h-[640px] flex-col overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm">
-                <div className="shrink-0 border-b border-[#EFE7F4] px-4 py-3">
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="min-w-0">
-                            <h2 className="truncate text-[18px] font-bold text-[#1A1220]">{selectedBooking.name}</h2>
-                            <p className="mt-0.5 text-xs font-semibold text-[#806A8C]">{selectedBooking.bookingReference || `Booking #${selectedBooking.id}`}</p>
+            <section aria-label="Selected booking details" className="flex min-w-0 max-h-[760px] flex-col overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm">
+                {selectedBooking ? <>
+                    <div className="shrink-0 border-b border-[#EFE7F4] px-4 py-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="min-w-0">
+                                <h2 className="truncate text-[18px] font-bold text-[#1A1220]">{selectedBooking.name}</h2>
+                                <p className="mt-0.5 text-xs font-semibold text-[#806A8C]">{selectedBooking.bookingReference || `Booking #${selectedBooking.id}`}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span className={`inline-flex shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${STATUS_STYLE[normalizeBookingStatus(selectedBooking.status)] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{managerView ? getManagerBookingStatusLabel(selectedBooking.status) : normalizeBookingStatus(selectedBooking.status)}</span>
+                                {managerView && onExportSelected && <div className="relative">
+                                    <button type="button" aria-label="Export selected booking" title="Export selected booking" onClick={() => setExportOpen(v => !v)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D9C9EB] text-[#43217A] hover:bg-[#F3EEFF]"><Download size={16}/></button>
+                                    {exportOpen && <div className="absolute right-0 top-10 z-30 w-40 rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-xl">
+                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "pdf");setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">PDF (Print)</button>
+                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "excel");setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Excel (CSV)</button>
+                                    </div>}
+                                </div>}
+                            </div>
                         </div>
-                        <span className={`inline-flex shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${STATUS_STYLE[normalizeBookingStatus(selectedBooking.status)] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{normalizeBookingStatus(selectedBooking.status)}</span>
+                        {!managerView && <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#5F4E75]">
+                            <span>{formatDate(selectedBooking.date)}{selectedBooking.eventTime ? ` · ${selectedBooking.eventTime}` : ""}</span>
+                            <span className="max-w-full truncate">{getBranchGroupName(selectedBooking)}</span>
+                            <span className="max-w-full truncate" title={getBookingItemLabel(selectedBooking)}>{getBookingItemLabel(selectedBooking)}</span>
+                        </div>}
+                        <div className="mt-3 grid grid-cols-4 gap-1 rounded-xl bg-[#F7F1FF] p-1" role="tablist" aria-label="Booking detail sections">
+                            {tabs.map(tab => <button key={tab} type="button" role="tab" aria-selected={tab === detailTab} onClick={() => setDetailTab(tab)} className={`min-w-0 rounded-lg px-1.5 py-2 text-[11px] font-semibold transition ${tab === detailTab ? "bg-white text-[#2B174C] shadow-sm" : "text-[#806A8C] hover:bg-white/60"}`}>{tab}</button>)}
+                        </div>
                     </div>
-                    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#5F4E75]">
-                        <span>{formatDate(selectedBooking.date)}{selectedBooking.eventTime ? ` · ${selectedBooking.eventTime}` : ""}</span>
-                        <span className="max-w-full truncate">{getBranchGroupName(selectedBooking)}</span>
-                        <span className="max-w-full truncate" title={getBookingItemLabel(selectedBooking)}>{getBookingItemLabel(selectedBooking)}</span>
+                    <div role="tabpanel" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
+                        <table className="w-full table-fixed border-collapse"><tbody>
+                        <BookingRow key={selectedBooking.id} b={selectedBooking} ownerView={ownerView} managerView={managerView} {...bookingActions} hideSummaryRow expandedByDefault detailTab={detailTab}/>
+                        </tbody></table>
                     </div>
-                    <div className="mt-3 grid grid-cols-4 gap-1 rounded-xl bg-[#F7F1FF] p-1" role="tablist" aria-label="Booking detail sections">
-                        {tabs.map(tab => (
-                            <button key={tab} type="button" role="tab" aria-selected={tab === detailTab}
-                                    onClick={() => setDetailTab(tab)}
-                                    className={`min-w-0 rounded-lg px-1.5 py-2 text-[11px] font-semibold transition ${tab === detailTab ? "bg-white text-[#2B174C] shadow-sm" : "text-[#806A8C] hover:bg-white/60"}`}>
-                                {tab}
-                            </button>
-                        ))}
-                    </div>
-                </div>
-                <div role="tabpanel" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
-                    <table className="w-full table-fixed border-collapse"><tbody>
-                    <BookingRow key={selectedBooking.id} b={selectedBooking} ownerView={ownerView}
-                                {...bookingActions} hideSummaryRow expandedByDefault detailTab={detailTab}/>
-                    </tbody></table>
-                </div>
+                </> : <div className="p-8 text-center text-sm text-[#806A8C]">No booking selected.</div>}
             </section>
         </div>
     );
@@ -1637,3 +1835,4 @@ function SummaryLine({
         </div>
     );
 }
+

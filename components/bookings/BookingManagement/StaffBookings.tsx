@@ -299,7 +299,7 @@ export default function StaffBookings() {
             setConfirmModal(null);
             setReviewAcknowledged(false);
             setApprovalReason("");
-            setActionMessage(action==="confirm_standard_booking" ? "Catalog-priced booking confirmed and allocated." : "Manager approval requested.");
+            setActionMessage(action==="confirm_standard_booking" ? (data.status==="Confirmed" ? "Down payment verified. Booking confirmed and inclusions reserved." : "Request approved. Customer must pay the required DP before confirmation and allocation.") : "Manager approval requested.");
             await loadBookings();
         }catch(error){
             setActionMessage(error instanceof Error ? error.message : "Could not complete booking action.");
@@ -561,11 +561,7 @@ export default function StaffBookings() {
                             balance: newBalance,
                             payment_status: "Down Payment Paid",
                             paymentStatus: "Down Payment Paid",
-                            status:
-                                b.status === "Pending Review" ||
-                                b.status === "Awaiting Down Payment"
-                                    ? "Confirmed"
-                                    : b.status,
+                            status: b.status,
                         }
                         : b
                 )
@@ -921,7 +917,7 @@ export default function StaffBookings() {
             {confirmModal && canConfirmStandard && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4" role="dialog" aria-modal="true" aria-label="Confirm Eligible Booking">
                     <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
-                        <h2 className="text-lg font-bold text-[#2B174C]">Confirm Eligible Booking</h2>
+                        <h2 className="text-lg font-bold text-[#2B174C]">{confirmModal.status==="Awaiting Down Payment"?"Confirm Verified Booking":"Approve Eligible Booking"}</h2>
                         <p className="mt-2 text-sm text-[#7A6A84]">{confirmModal.bookingReference || `Booking #${confirmModal.id}`}</p>
                         <p className="mt-3 text-sm text-[#5F4E75]">Confirm only catalog-priced items and routine package inclusions. Any special service, requested discount, changed scope, or negotiated terms must go to Manager.</p>
                         <label className="mt-4 flex items-start gap-2 text-sm text-[#2B174C]">
@@ -934,7 +930,7 @@ export default function StaffBookings() {
                             <button type="button" disabled={!reviewAcknowledged||actionBusy}
                                     onClick={()=>void staffBookingAction(confirmModal,"confirm_standard_booking")}
                                     className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
-                                {actionBusy ? "Checking..." : "Confirm & Reserve"}
+                                {actionBusy ? "Checking..." : confirmModal.status==="Awaiting Down Payment"?"Confirm & Reserve":"Approve & Request DP"}
                             </button>
                         </div>
                     </div>

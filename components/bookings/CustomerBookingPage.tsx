@@ -98,6 +98,7 @@ type SelectedCustomItem = CustomInventoryItem & {
 type RentalCatalogItem = {
     id: number;
     name: string;
+    category?: string;
     dailyRate: number;
     physicallyAvailable: number;
     // Null until the customer chooses a valid event date range.
@@ -156,6 +157,7 @@ const categories = [
 ];
 
 const STATUS_MAP: Record<string, { color: string; icon: React.ReactNode }> = {
+    "Awaiting Down Payment": { color: "border border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]", icon: <Clock size={13} /> },
     "Pending Review": { color: "border border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]", icon: <Clock size={13} /> },
     "Confirmed":      { color: "border border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]", icon: <Check size={13} /> },
     "Preparing":      { color: "border border-[#D8CBE7] bg-[#F7F1FF] text-[#4E2C66]", icon: <Clock size={13} /> },
@@ -163,7 +165,7 @@ const STATUS_MAP: Record<string, { color: string; icon: React.ReactNode }> = {
     "Cancelled":      { color: "border border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]", icon: <X size={13} /> },
 };
 
-const TIMELINE_STEPS = ["Pending Review", "Confirmed", "Preparing", "Completed"];
+const TIMELINE_STEPS = ["Pending Review", "Awaiting Down Payment", "Confirmed", "Preparing", "Completed"];
 
 function getPackageCoverImage(
     pkg: Pick<PackageItem, "name" | "description" | "category" | "cover_image">
@@ -424,7 +426,7 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
         rentalItems:{name:string;quantity:number;days:number;dailyRate:number;amount:number}[];
         deliveryFee:number;setupFee:number;agreedCharges:number;depositRequired:number;depositCollected:number;
         depositApplied:number;depositRefunded:number;depositHeld:number;claimBalance:number;
-        booking:{agreedPrice:number|null;bookingPayments:number;balance:number};
+        booking:{agreedPrice:number|null;downPayment:number;dpDeadline:string|null;bookingPayments:number;balance:number};
     }>(null);
     const [statementError,setStatementError] = useState("");
 
@@ -827,6 +829,13 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
                                 <div className="flex justify-between"><span>Setup</span><strong>₱{Number(statement.setupFee).toFixed(2)}</strong></div>
                                 <div className="flex justify-between border-t pt-2 font-bold"><span>Saved itemized charge subtotal</span><strong>₱{Number(statement.agreedCharges).toFixed(2)}</strong></div>
                                 <div className="flex justify-between"><span>Agreed booking charge</span><strong>{statement.booking.agreedPrice!=null?`₱${Number(statement.booking.agreedPrice).toFixed(2)}`:'Awaiting agreement'}</strong></div>
+                                <div className="flex justify-between"><span>Required down payment</span><strong>₱{Number(statement.booking.downPayment||0).toFixed(2)}</strong></div>
+                                {displayBooking.status==="Awaiting Down Payment" && <div className="rounded-xl bg-[#F7F1FF] p-3 text-[#5330B6]">
+                                    <strong>Booking approved — payment needed before reservation</strong>
+                                    <p className="mt-1">Contact the store for its verified payment instructions. After paying, provide your booking reference and request payment verification. Do not pay to an unverified account.</p>
+                                    {statement.booking.dpDeadline && <p className="mt-1">DP deadline: {new Date(statement.booking.dpDeadline).toLocaleString("en-PH",{timeZone:"Asia/Manila",dateStyle:"medium",timeStyle:"short"})}</p>}
+                                    <p className="mt-1">Equipment is not guaranteed until the store confirms payment and reserves it.</p>
+                                </div>}
                                 <div className="flex justify-between"><span>Booking payments recorded</span><strong>₱{Number(statement.booking.bookingPayments).toFixed(2)}</strong></div>
                                 <div className="flex justify-between"><span>Booking balance</span><strong>₱{Number(statement.booking.balance).toFixed(2)}</strong></div>
                                 <div className="flex justify-between"><span>Refundable security deposit required</span><strong>₱{Number(statement.depositRequired).toFixed(2)}</strong></div>
@@ -953,6 +962,58 @@ function CustomerPortalSkeleton() {
     );
 }
 
+// Quantity is editable by typing as well as using +/-.
+// The caller remains the source of truth and enforces real stock/rental limits.
+function QuantityStepper({ value, max, onChange, label, inputDisabled = false, plusDisabled = false }: {
+    value: number;
+    max: number;
+    onChange: (quantity: number) => void;
+    label: string;
+    inputDisabled?: boolean;
+    plusDisabled?: boolean;
+}) {
+    const [draft, setDraft] = useState(String(value));
+    useEffect(() => { setDraft(String(value)); }, [value]);
+
+    function applyDraft() {
+        const cleaned = draft.trim();
+        const amount = Number(cleaned);
+        if (!cleaned || !Number.isSafeInteger(amount) || amount < 0) {
+            setDraft(String(value));
+            return;
+        }
+        if (amount > max) {
+            // Use the original item handler (rental warnings or stock caps).
+            onChange(amount);
+            setDraft(String(value));
+            return;
+        }
+        onChange(amount);
+        setDraft(String(amount));
+    }
+    return (
+        <div className="inline-flex h-9 items-center overflow-hidden rounded-lg border border-[#E6DDF0] bg-white" role="group" aria-label={label}>
+            <button type="button" aria-label={`Decrease ${label}`} disabled={value <= 0}
+                    onClick={() => onChange(value - 1)} className="h-full w-9 font-bold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-35">−</button>
+            <input type="number" inputMode="numeric" min={0} max={max} step={1} value={draft}
+                   aria-label={`Enter ${label}`} disabled={inputDisabled}
+                   onChange={event => {
+                       const text = event.target.value;
+                       setDraft(text);
+                       if (/^\d+$/.test(text)) {
+                           const amount = Number(text);
+                           if (Number.isSafeInteger(amount) && amount <= max) onChange(amount);
+                       }
+                   }}
+                   onBlur={applyDraft}
+                   onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); }}
+                   className="h-full w-14 border-x border-[#E6DDF0] bg-white px-1 text-center text-xs font-semibold text-[#2B174C] outline-none focus:bg-[#F7F1FF] focus:ring-1 focus:ring-inset focus:ring-[#7654BC] disabled:bg-[#F8F6FA] disabled:opacity-70" />
+            <button type="button" aria-label={`Increase ${label}`} disabled={inputDisabled || plusDisabled || value >= max}
+                    onClick={() => onChange(value + 1)} className="h-full w-9 font-bold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-35">+</button>
+        </div>
+    );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function CustomerBookingPage() {
@@ -992,20 +1053,23 @@ export default function CustomerBookingPage() {
     const [inventoryItems, setInventoryItems] = useState<CustomInventoryItem[]>([]);
     const [loadingInventory, setLoadingInventory] = useState(false);
     const [inventorySearch, setInventorySearch] = useState("");
+    // The custom picker has two categories only: consumables and rentals.
+    const [activeGoodsTab, setActiveGoodsTab] = useState<"consumable" | "rental">("consumable");
     const [inventoryCategory, setInventoryCategory] = useState("All");
     const [selectedCustomItems, setSelectedCustomItems] = useState<SelectedCustomItem[]>([]);
-    const [customItemQty, setCustomItemQty] = useState<Record<string, number>>({});
     const [rentalCatalog, setRentalCatalog] = useState<RentalCatalogItem[]>([]);
     const [rentalCatalogLoading, setRentalCatalogLoading] = useState(false);
     const [rentalCatalogError, setRentalCatalogError] = useState("");
     const [rentalCatalogPeriodKey, setRentalCatalogPeriodKey] = useState("");
     const [rentalAvailabilityWarning, setRentalAvailabilityWarning] = useState<RentalAvailabilityWarning | null>(null);
     const [rentalSearch, setRentalSearch] = useState("");
+    const [rentalCategory, setRentalCategory] = useState("All");
+    const rentalCategories = useMemo(() => ["All", ...Array.from(new Set(rentalCatalog.map(item => item.category || "Other")))], [rentalCatalog]);
     const [selectedRentalItems, setSelectedRentalItems] = useState<SelectedRentalItem[]>([]);
     const [rentalEndDate, setRentalEndDate] = useState("");
     const [eventDurationType, setEventDurationType] = useState<"single" | "multiple">("single");
-    const [serviceDelivery, setServiceDelivery] = useState(false);
-    const [serviceSetup, setServiceSetup] = useState(false);
+    const serviceDelivery = false; // Delivery & setup are not offered in this booking form.
+    const serviceSetup = false;
     const [feePolicy, setFeePolicy] = useState({deliveryFee:0,setupFee:0,refundableDeposit:0,
         deliveryIncludedPackage:false,setupIncludedPackage:false});
 
@@ -1150,54 +1214,27 @@ export default function CustomerBookingPage() {
         setFieldErrors((prev) => ({ ...prev, [key]: "" }));
     }
 
-    function getCustomQty(itemKey: string) {
-        return customItemQty[itemKey] || 1;
-    }
-
-    function setCustomQtyForItem(itemKey: string, quantity: number) {
-        const safeQty = Math.max(1, quantity || 1);
-
-        setCustomItemQty((prev) => ({
-            ...prev,
-            [itemKey]: safeQty,
-        }));
-    }
-
-    function addCustomItem(item: CustomInventoryItem) {
-        const qty = getCustomQty(item.key);
-
-        if (item.stock <= 0) return;
-
-        setSelectedCustomItems((prev) => {
-            const existing = prev.find((selected) => selected.key === item.key);
-            const currentQty = existing?.quantity || 0;
-            const nextQty = Math.min(currentQty + qty, item.stock);
-
-            if (existing) {
-                return prev.map((selected) =>
-                    selected.key === item.key
-                        ? { ...selected, quantity: nextQty }
-                        : selected
-                );
-            }
-
-            return [...prev, { ...item, quantity: nextQty }];
+    // A quantity of zero means this consumable product is not selected.
+    // Reuse the existing booking-items payload and stock validation.
+    function setConsumableQuantity(item: CustomInventoryItem, requested: number) {
+        const quantity = Math.min(Math.max(0, requested), Math.max(0, Number(item.stock) || 0));
+        setSelectedCustomItems(prev => {
+            if (quantity === 0) return prev.filter(selected => selected.key !== item.key);
+            const existing = prev.find(selected => selected.key === item.key);
+            return existing
+                ? prev.map(selected => selected.key === item.key ? { ...selected, quantity } : selected)
+                : [...prev, { ...item, quantity }];
         });
-
         clearError("selection");
     }
 
     function updateSelectedCustomQty(itemKey: string, quantity: number) {
-        setSelectedCustomItems((prev) =>
-            prev.map((item) =>
-                item.key === itemKey
-                    ? {
-                        ...item,
-                        quantity: Math.min(Math.max(1, quantity), item.stock),
-                    }
-                    : item
-            )
-        );
+        setSelectedCustomItems(prev => {
+            if (quantity <= 0) return prev.filter(item => item.key !== itemKey);
+            return prev.map(item => item.key === itemKey
+                ? { ...item, quantity: Math.min(quantity, Math.max(1, item.stock)) }
+                : item);
+        });
     }
 
     function removeSelectedCustomItem(itemKey: string) {
@@ -1457,6 +1494,11 @@ export default function CustomerBookingPage() {
     }
 
     function updateRentalQuantity(item: RentalCatalogItem, requested: number) {
+        if (requested === 0) {
+            setSelectedRentalItems(prev => prev.filter(selected => selected.id !== item.id));
+            clearError('selection');
+            return;
+        }
         if (!rentalAvailabilityReady) {
             setFieldErrors(prev => ({...prev, selection: 'Choose your event dates and wait for the rental availability check.'}));
             return;
@@ -1474,7 +1516,7 @@ export default function CustomerBookingPage() {
     }
 
     useEffect(() => {
-        setInventoryItems([]); setSelectedCustomItems([]);setCustomItemQty({});
+        setInventoryItems([]); setSelectedCustomItems([]);
         if (!store || !customBranchId || !branches.some(b=>b.id===customBranchId)) {
             setLoadingInventory(false);
             return;
@@ -1517,8 +1559,8 @@ export default function CustomerBookingPage() {
 
     function resetForm() {
         setBookingType("package");
-        setSelectedPackage(""); setCustomOrder(""); setSelectedCustomItems([]); setCustomItemQty({});
-        setSelectedRentalItems([]); setRentalEndDate(""); setEventDurationType("single"); setServiceDelivery(false); setServiceSetup(false); setName(""); setFacebookName("");
+        setSelectedPackage(""); setCustomOrder(""); setSelectedCustomItems([]);
+        setSelectedRentalItems([]); setRentalEndDate(""); setEventDurationType("single"); setName(""); setFacebookName("");
         setPhone(""); setEmail(""); setDate(""); setEventTime("");
         setEventType(""); setTheme(""); setVenue(""); setNotes("");
     }
@@ -1663,6 +1705,151 @@ export default function CustomerBookingPage() {
             ? `${Number(detailsPackage.discount_value || 0)}%`
             : peso(detailsPackage.discount_value || 0)
         : "";
+
+
+    // Display-only catalog selector. Reuses the existing catalog and inventory state.
+    // The "All" booking-goods tab is intentionally omitted.
+    function renderConsumablePicker() {
+        return (
+            <div className="min-w-0">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                        <h4 className="text-sm font-bold text-[#2B174C]">Consumable Goods</h4>
+                        <p className="mt-1 text-xs text-[#806A8C]">Type a quantity or use + / − to select items.</p>
+                    </div>
+                    <span className="rounded-full bg-[#F7F1FF] px-3 py-1 text-xs font-semibold text-[#4E2C66]">
+                        {filteredInventoryItems.length} products
+                    </span>
+                </div>
+                <div className="mb-3 flex flex-col gap-2 sm:flex-row">
+                    <label className="relative min-w-0 flex-1">
+                        <span className="sr-only">Search consumable goods</span>
+                        <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#806A8C]" />
+                        <input type="search" value={inventorySearch} onChange={event => setInventorySearch(event.target.value)}
+                               placeholder="Search consumable goods..." className="h-11 w-full rounded-xl border border-[#E6DDF0] bg-white pl-9 pr-3 text-sm outline-none focus:border-[#2B174C]" />
+                    </label>
+                    <div className="flex items-center gap-2">
+                        <label className="sr-only" htmlFor="consumable-category">Consumable category</label>
+                        <select id="consumable-category" value={inventoryCategory} onChange={event => setInventoryCategory(event.target.value)}
+                                className="h-11 min-w-0 flex-1 rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs text-[#2B174C] sm:w-48">
+                            <option value="All">Filter by category</option>
+                            {customInventoryCategories.filter(category => category !== "All").map(category =>
+                                <option key={category} value={category}>{category}</option>)}
+                        </select>
+                        {inventoryCategory !== "All" && <button type="button" onClick={() => setInventoryCategory("All")}
+                                                                className="text-xs font-semibold text-[#5A35A5] hover:underline">Clear</button>}
+                    </div>
+                </div>
+                <div className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
+                    <div className="hidden grid-cols-[minmax(0,1.6fr)_100px_120px_162px] gap-3 border-b border-[#E6DDF0] bg-[#FBF8FD] px-4 py-3 text-[11px] font-bold text-[#806A8C] md:grid">
+                        <span>Product</span><span>Price</span><span>Availability</span><span>Quantity</span>
+                    </div>
+                    <div className="max-h-[420px] divide-y divide-[#F1EAF5] overflow-y-auto overscroll-contain">
+                        {loadingInventory ? <div role="status" className="p-5 text-center text-sm text-[#806A8C]">Loading consumable goods...</div>
+                            : filteredInventoryItems.length === 0 ? <p className="p-5 text-center text-sm text-[#806A8C]">
+                                {customBranchId ? "No consumable goods match your search." : "Select a branch to view consumable goods."}
+                            </p> : filteredInventoryItems.map(item => {
+                                const qty = selectedCustomItems.find(selected => selected.key === item.key)?.quantity ?? 0;
+                                const unavailable = item.stock <= 0;
+                                return <div key={item.key} className="grid min-w-0 gap-3 px-4 py-3 md:grid-cols-[minmax(0,1.6fr)_100px_120px_162px] md:items-center">
+                                    <div className="min-w-0">
+                                        <p className="break-words text-sm font-semibold text-[#24153B]">{item.displayName}</p>
+                                        <p className="mt-0.5 text-xs text-[#806A8C]">{item.category}</p>
+                                    </div>
+                                    <p className="text-xs font-semibold text-[#2B174C] md:text-sm">{peso(item.salesPrice)} <span className="font-normal text-[#806A8C]">/ item</span></p>
+                                    <div><span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${unavailable ? "bg-red-50 text-red-700" : item.stock <= 5 ? "bg-amber-50 text-amber-700" : "bg-green-50 text-green-700"}`}>
+                                    {unavailable ? "Unavailable" : item.stock <= 5 ? "Low stock" : "Available"}
+                                </span></div>
+                                    <QuantityStepper value={qty} max={Math.max(0, item.stock)}
+                                                     label={`${item.displayName} quantity`}
+                                                     onChange={quantity => setConsumableQuantity(item, quantity)}
+                                                     plusDisabled={unavailable} />
+                                </div>;
+                            })}
+                    </div>
+                </div>
+                {fieldErrors.selection && <p role="alert" className="mt-2 text-xs text-red-600">{fieldErrors.selection}</p>}
+            </div>
+        );
+    }
+
+    function renderRentalPicker(isPackageExtra = false) {
+        const matching = rentalCatalog.filter(item =>
+            (rentalCategory === "All" || (item.category || "Other") === rentalCategory) &&
+            item.name.toLowerCase().includes(rentalSearch.toLowerCase())
+        );
+        return (
+            <div className="min-w-0">
+                <div className="mb-3">
+                    <h4 className="text-sm font-bold text-[#2B174C]">{isPackageExtra ? "Additional Rental Goods (optional)" : "Rental Goods"}</h4>
+                    <p className="mt-1 text-xs leading-5 text-[#806A8C]">
+                        {isPackageExtra ? "Add equipment beyond the items already included in your package. " : "Choose rental equipment for your event. "}
+                        Rates are per item, per day. Items are only reserved after confirmation.
+                    </p>
+                    <p className="mt-2 text-xs font-medium text-[#5A35A5]" aria-live="polite">
+                        {!date ? "Choose your event date above to check rental availability."
+                            : eventDurationType === "multiple" && !rentalEndDate ? "Choose your event end date above."
+                                : rentalDuration > 0 ? `Rental duration: ${rentalDuration} ${rentalDuration === 1 ? "day" : "days"}.` : "Choose valid event dates above."}
+                    </p>
+                </div>
+                {rentalSelectionConflict && <p role="alert" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                    {rentalSelectionConflict.name}: selected {rentalSelectionConflict.quantity}, but fewer units are available for the selected dates.
+                </p>}
+                <div className="mb-3 flex flex-col gap-2 sm:flex-row">
+                    <label className="relative min-w-0 flex-1">
+                        <span className="sr-only">Search rental goods</span>
+                        <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#806A8C]" />
+                        <input type="search" value={rentalSearch} onChange={event => setRentalSearch(event.target.value)}
+                               placeholder="Search rental goods..." className="h-11 w-full rounded-xl border border-[#E6DDF0] bg-white pl-9 pr-3 text-sm outline-none focus:border-[#2B174C]" />
+                    </label>
+                    <div className="flex items-center gap-2">
+                        <label className="sr-only" htmlFor={isPackageExtra ? "package-rental-category" : "rental-category"}>Rental category</label>
+                        <select id={isPackageExtra ? "package-rental-category" : "rental-category"} value={rentalCategory}
+                                onChange={event => setRentalCategory(event.target.value)}
+                                className="h-11 min-w-0 flex-1 rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs text-[#2B174C] sm:w-48">
+                            <option value="All">Filter by category</option>
+                            {rentalCategories.filter(category => category !== "All").map(category =>
+                                <option key={category} value={category}>{category}</option>)}
+                        </select>
+                        {rentalCategory !== "All" && <button type="button" onClick={() => setRentalCategory("All")}
+                                                             className="text-xs font-semibold text-[#5A35A5] hover:underline">Clear</button>}
+                    </div>
+                </div>
+                {rentalCatalogError && <p role="alert" className="mb-2 text-xs text-red-600">{rentalCatalogError}</p>}
+                <div className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
+                    <div className="hidden grid-cols-[minmax(0,1.6fr)_100px_120px_162px] gap-3 border-b border-[#E6DDF0] bg-[#FBF8FD] px-4 py-3 text-[11px] font-bold text-[#806A8C] md:grid">
+                        <span>Product</span><span>Rate</span><span>Availability</span><span>Quantity</span>
+                    </div>
+                    <div className="max-h-[420px] divide-y divide-[#F1EAF5] overflow-y-auto overscroll-contain" aria-busy={rentalCatalogLoading}>
+                        {rentalCatalogLoading ? <div role="status" className="p-5 text-center text-sm text-[#806A8C]">Checking rental availability...</div>
+                            : matching.length === 0 ? <p className="p-5 text-center text-sm text-[#806A8C]">
+                                {customBranchId ? "No rental goods match your search." : "Select a booking branch to view rental goods."}
+                            </p> : matching.map(item => {
+                                const chosen = selectedRentalItems.find(x => x.id === item.id);
+                                const available = item.availableForDates;
+                                const canAdd = rentalAvailabilityReady && available != null && available > 0;
+                                const maxQty = Math.max(0, available ?? 0);
+                                const qty = chosen?.quantity ?? 0;
+                                const conflict = !!chosen && rentalAvailabilityReady && (available == null || chosen.quantity > available);
+                                return <div key={item.id} className={`grid min-w-0 gap-3 px-4 py-3 md:grid-cols-[minmax(0,1.6fr)_100px_120px_162px] md:items-center ${conflict ? "bg-amber-50" : ""}`}>
+                                    <div className="min-w-0"><p className="break-words text-sm font-semibold text-[#24153B]">{item.name}</p>
+                                        <p className="mt-0.5 text-xs text-[#806A8C]">Rental equipment</p></div>
+                                    <p className="text-xs font-semibold text-[#2B174C] md:text-sm">{peso(item.dailyRate)} <span className="font-normal text-[#806A8C]">/ day</span></p>
+                                    <div><span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${!rentalAvailabilityReady ? "bg-[#F7F1FF] text-[#674A8E]" : canAdd ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>
+                                    {!rentalAvailabilityReady ? "Choose dates" : canAdd ? "Available" : "Unavailable"}
+                                </span>{rentalAvailabilityReady && <p className="mt-1 text-[11px] text-[#806A8C]">{available ?? 0} for selected dates</p>}</div>
+                                    <QuantityStepper value={qty} max={maxQty} label={`${item.name} quantity`}
+                                                     onChange={quantity => updateRentalQuantity(item, quantity)}
+                                                     inputDisabled={!rentalAvailabilityReady}
+                                                     plusDisabled={!canAdd} />
+                                </div>;
+                            })}
+                    </div>
+                </div>
+
+            </div>
+        );
+    }
 
     if (loading) return <CustomerPortalSkeleton />;
 
@@ -1948,22 +2135,19 @@ export default function CustomerBookingPage() {
                     ref={formRef}
                     className="overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white shadow-sm"
                 >
-                    <div className="border-b border-[#E6DDF0] bg-[#FFFDF8] px-6 py-6 sm:px-8">
-                        <div className="flex flex-wrap items-start gap-3">
-                            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#EFE8F8] text-[#4E2C66]">
-                                <CalendarDays size={20} />
-                            </div>
-                            <div>
-                                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#806A8C]">
-                                    Booking request
-                                </p>
-                                <h2 className="mt-1 text-[27px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                                    Book your event
-                                </h2>
-                                <p className="mt-2 max-w-2xl text-sm leading-6 text-[#7A6A84]">
-                                    Submit your details and the store will review your request. Save your booking
-                                    reference number to follow up or track the status at any time.
-                                </p>
+                    <div className="bg-white px-4 py-4 sm:px-5 sm:py-5">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="flex items-start gap-3">
+                                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F0EAFE] text-[#4E2C66]">
+                                    <CalendarDays size={20} />
+                                </span>
+                                <div>
+                                    <h2 className="text-[19px] font-bold tracking-tight text-[#1A1220]">Book your event</h2>
+                                    <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
+                                        Submit your details and the store will review your request. Save your booking
+                                        reference number to follow up or track the status at any time.
+                                    </p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1980,7 +2164,7 @@ export default function CustomerBookingPage() {
                             </h3>
                             <p className="mx-auto mt-3 max-w-2xl text-sm leading-6 text-[#7A6A84]">
                                 Save your booking reference number below. You can check your status anytime using the
-                                <strong className="text-[#2B174C]"> Track booking</strong> button at the top.
+                                <strong className="text-[#2B174C]"> Check Booking Status</strong> button at the top.
                             </p>
 
                             <div className="mx-auto mt-7 max-w-md rounded-[18px] border border-[#D8CBE7] bg-[#F7F1FF] p-5">
@@ -1989,10 +2173,11 @@ export default function CustomerBookingPage() {
                                 </p>
                                 <div className="mt-3 flex items-center justify-center gap-3">
                                     <p className="text-[22px] font-bold tracking-wide text-[#2B174C]">
-                                        {bookingReference}
+                                        {bookingReference || "Reference unavailable — contact the store using your phone number and event date."}
                                     </p>
                                     <button
                                         type="button"
+                                        disabled={!bookingReference}
                                         onClick={copyReference}
                                         className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#D8CBE7] bg-white text-[#2B174C] shadow-sm transition hover:bg-[#F0EAFE]"
                                         title="Copy reference number"
@@ -2003,7 +2188,7 @@ export default function CustomerBookingPage() {
                             </div>
 
                             <div className="mx-auto mt-5 max-w-lg rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-4 text-sm leading-6 text-[#7A6A84]">
-                                Your booking is now in the store&apos;s admin system for review. The store can confirm,
+                                Your request is Pending Review. The store can confirm,
                                 prepare, complete, or cancel the booking from their admin dashboard.
                             </div>
 
@@ -2032,16 +2217,48 @@ export default function CustomerBookingPage() {
                             </button>
                         </div>
                     ) : (
-                        <div className="grid gap-8 p-6 sm:p-8 lg:grid-cols-[minmax(0,1fr)_360px]">
 
-                            {/* ── Top error banner ── */}
-                            {Object.keys(fieldErrors).some((k) => fieldErrors[k]) && (
-                                <div className="col-span-full rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-sm font-medium text-[#C32F2F]">
-                                    Please fix the highlighted fields before submitting.
+                        <div className="space-y-5 px-4 pb-4 pt-1 sm:px-5 sm:pb-5 sm:pt-1">
+                            {Object.keys(fieldErrors).some(key => Boolean(fieldErrors[key])) && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">Please fix the highlighted fields before submitting.</p>}
+                            {/* 1. Customer information */}
+                            <section className="rounded-2xl border border-[#E6DDF0] bg-white p-4 sm:p-6" aria-labelledby="customer-info-heading">
+                                <h3 id="customer-info-heading" className="mb-4 text-lg font-bold text-[#2B174C]">1. Customer information</h3>
+                                <div className="grid gap-5 md:grid-cols-2">
+                                    <Input
+                                        label="Full Name"
+                                        value={name}
+                                        onChange={(v) => { setName(v); clearError("name"); }}
+                                        placeholder="Your full name"
+                                        error={fieldErrors.name}
+                                    />
+                                    <Input
+                                        label="Facebook / Messenger Name"
+                                        value={facebookName}
+                                        onChange={(v) => { setFacebookName(v); clearError("facebookName"); }}
+                                        placeholder="Name used in Messenger"
+                                        error={fieldErrors.facebookName}
+                                    />
+                                    <Input
+                                        label="Phone Number"
+                                        value={phone}
+                                        onChange={(v) => { setPhone(v); clearError("phone"); }}
+                                        placeholder="09XXXXXXXXX"
+                                        error={fieldErrors.phone}
+                                    />
+                                    <Input
+                                        label="Email Address"
+                                        value={email}
+                                        onChange={(v) => { setEmail(v); clearError("email"); }}
+                                        placeholder="Optional"
+                                        error={fieldErrors.email}
+                                    />
+
                                 </div>
-                            )}
+                            </section>
 
-                            <div>
+                            {/* 2. Booking type and branch */}
+                            <section className="rounded-2xl border border-[#E6DDF0] bg-white p-4 sm:p-6" aria-labelledby="booking-type-heading">
+                                <h3 id="booking-type-heading" className="mb-4 text-lg font-bold text-[#2B174C]">2. Booking type &amp; branch</h3>
                                 {/* Booking Type */}
                                 <div>
                                     <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
@@ -2074,7 +2291,7 @@ export default function CustomerBookingPage() {
                                             }`}
                                         >
                                             <div className="text-sm font-semibold text-[#1A1220]">
-                                                Custom request
+                                                Custom booking
                                             </div>
                                             <div className="mt-1 text-xs leading-5 text-[#7A6A84]">
                                                 Personalized event setup
@@ -2082,439 +2299,39 @@ export default function CustomerBookingPage() {
                                         </button>
                                     </div>
                                 </div>
+                                {bookingType === "package" ? (
+                                    <label className="mt-4 block text-xs font-semibold text-[#2B174C]">Select booking branch
+                                        <select value={effectivePackageBranchFilter} disabled={!!urlBranchId || branchesLoading} onChange={event => changePackageBranchFilter(event.target.value)}
+                                                className="mt-2 h-11 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm">
+                                            {!urlBranchId && <option value="all">All branches (select a package to assign a branch)</option>}
+                                            {branches.filter(b => !urlBranchId || b.id === urlBranchId).map(branch => <option key={branch.id} value={String(branch.id)}>{branch.name}</option>)}
+                                        </select>
+                                    </label>
+                                ) : (
+                                    <div className="mt-4">
+                                        <label htmlFor="public-booking-branch" className="block text-xs font-semibold text-[#2B174C]">Select booking branch</label>
+                                        <select id="public-booking-branch" value={selectedCustomBranchId || ''}
+                                                disabled={!!urlBranchId} onChange={e => {
+                                            const next = e.target.value ? Number(e.target.value) : null;
+                                            setSelectedCustomBranchId(next);
+                                            setSelectedCustomItems([]); setSelectedRentalItems([]);
+                                            clearError('selection');
+                                        }}
+                                                className="mt-2 h-11 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm text-[#1A1220] disabled:bg-[#F7F1FF]">
+                                            <option value="">Choose a branch</option>
+                                            {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                                        </select>
+                                        {branchesError && <p className="mt-2 text-xs text-red-600">{branchesError}</p>}
+                                        {branchesLoading && <div role="status" aria-label="Loading branches" className="mt-3 h-3 w-44 animate-pulse rounded bg-[#EEE8F3]" />}
+                                        {!branchesLoading && !branches.length && !branchesError && <p className="mt-2 text-xs text-[#806A8C]">No booking branches available.</p>}
+                                    </div>
+                                )}
+                            </section>
 
-                                {/* Package / Custom */}
-                                <div className="mt-6">
-                                    {bookingType === "package" ? (
-                                        <>
-                                            <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
-                                                Select package
-                                            </label>
-                                            <select
-                                                value={selectedPackage}
-                                                onChange={(e) => { setSelectedPackage(e.target.value); clearError("selection"); }}
-                                                className={`h-[48px] w-full rounded-xl border bg-[#FFFDF8] px-3 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${
-                                                    fieldErrors.selection
-                                                        ? "border-[#F2C4C4] bg-[#FFF0F0]"
-                                                        : "border-[#E6DDF0]"
-                                                }`}
-                                            >
-                                                <option value="">Choose a package</option>
-                                                {packages.filter(pkg => effectivePackageBranchFilter === "all" ||
-                                                    Number(pkg.branch_id ?? pkg.branchId) === Number(effectivePackageBranchFilter)).map((pkg) => (
-                                                    <option key={pkg.id} value={String(pkg.id)}>
-                                                        {pkg.name} - {peso(pkg.package_price)} · {branches.find(b=>b.id===Number(pkg.branch_id??pkg.branchId))?.name||`Branch #${pkg.branch_id??pkg.branchId}`}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                            {packagesLoading && <p className="mt-2 text-xs text-[#806A8C]">Loading package options...</p>}
-                                            {selectedPackageData && (
-                                                <p className="mt-2 text-xs text-[#806A8C]">Handled by: <strong>{selectedBranchName || `Branch #${packageBranchId}`}</strong></p>
-                                            )}
-                                            {fieldErrors.selection && (
-                                                <p className="mt-1.5 text-xs font-medium text-red-500">{fieldErrors.selection}</p>
-                                            )}
-
-                                        </>
-                                    ) : (
-                                        <>
-                                            <div className="mb-4 rounded-2xl border border-[#E6DDF0] bg-[#FFFDF8] p-4">
-                                                <label htmlFor="public-booking-branch" className="mb-2 block text-sm font-semibold text-[#1A1220]">Select booking branch</label>
-                                                <p className="mb-3 text-xs text-[#806A8C]">Sales products, rental equipment, services and booking assignment will use this branch.</p>
-                                                <select id="public-booking-branch" value={selectedCustomBranchId||''}
-                                                        disabled={!!urlBranchId} onChange={e=>{
-                                                    const next=e.target.value?Number(e.target.value):null;
-                                                    setSelectedCustomBranchId(next);
-                                                    setSelectedCustomItems([]);setSelectedRentalItems([]);
-                                                    clearError('selection');
-                                                }}
-                                                        className="h-12 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm text-[#1A1220] disabled:bg-[#F7F1FF]">
-                                                    <option value="">Choose a branch</option>
-                                                    {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
-                                                </select>
-                                                {branchesError && <p className="mt-2 text-xs text-red-600">{branchesError}</p>}
-                                                {branchesLoading && <div role="status" aria-label="Loading branches" className="mt-3 h-3 w-44 animate-pulse rounded bg-[#EEE8F3]" />}
-                                                {!branchesLoading && !branches.length && !branchesError && <p className="mt-2 text-xs text-[#806A8C]">No booking branches available.</p>}
-                                            </div>
-                                            <div className="rounded-[16px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-                                                <div className="mb-3">
-                                                    <label className="block text-sm font-bold text-[#1A1220]">
-                                                        Choose inventory items
-                                                    </label>
-                                                    <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                                        Search available items and add them to your custom event request.
-                                                    </p>
-                                                </div>
-
-                                                <div className="relative">
-                                                    <Search
-                                                        size={15}
-                                                        className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]"
-                                                    />
-                                                    <input
-                                                        value={inventorySearch}
-                                                        onChange={(event) => setInventorySearch(event.target.value)}
-                                                        placeholder="Search inventory items..."
-                                                        className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 pl-10 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                                                    />
-                                                </div>
-
-                                                <div className="mt-3 overflow-x-auto pb-1">
-                                                    <div className="flex min-w-max gap-2">
-                                                        {customInventoryCategories.map((category) => {
-                                                            const active = inventoryCategory === category;
-
-                                                            return (
-                                                                <button
-                                                                    key={category}
-                                                                    type="button"
-                                                                    onClick={() => setInventoryCategory(category)}
-                                                                    className={`rounded-xl px-3.5 py-2 text-xs font-semibold transition ${
-                                                                        active
-                                                                            ? "bg-[#2B174C] text-white shadow-sm"
-                                                                            : "border border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#F7F1FF]"
-                                                                    }`}
-                                                                >
-                                                                    {category}
-                                                                </button>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                </div>
-
-                                                <div className="mt-3">
-                                                    {loadingInventory ? (
-                                                        <div role="status" aria-label="Loading inventory items" className="space-y-2 rounded-xl border border-[#E6DDF0] bg-white p-3">
-                                                            {[0, 1, 2, 3].map(index => <div key={index} className="h-12 animate-pulse rounded-lg bg-[#EEE8F3]" />)}
-                                                        </div>
-                                                    ) : filteredInventoryItems.length === 0 ? (
-                                                        <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFDF8] px-4 py-6 text-center text-sm text-[#7A6A84]">
-                                                            {customBranchId ? "No inventory items found for this branch." : "Select a branch to view available products."}
-                                                        </div>
-                                                    ) : (
-                                                        <div className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
-                                                            <div className="hidden grid-cols-[minmax(0,1.5fr)_140px_110px_115px_170px] gap-3 border-b border-[#E6DDF0] bg-[#FBF8FD] px-4 py-3 text-[11px] font-bold uppercase tracking-[0.08em] text-[#806A8C] md:grid">
-                                                                <span>Item</span>
-                                                                <span>Category</span>
-                                                                <span>Price</span>
-                                                                <span>Status</span>
-                                                                <span>Quantity</span>
-                                                            </div>
-
-                                                            <div className="max-h-[420px] overflow-y-auto">
-                                                                {filteredInventoryItems.map((item) => {
-                                                                    const qty = getCustomQty(item.key);
-                                                                    const unavailable = item.stock <= 0;
-
-                                                                    return (
-                                                                        <div
-                                                                            key={item.key}
-                                                                            className="border-b border-[#F1EAF5] px-4 py-4 last:border-b-0"
-                                                                        >
-                                                                            <div className="space-y-3 md:hidden">
-                                                                                <div className="flex items-start justify-between gap-3">
-                                                                                    <div className="min-w-0">
-                                                                                        <p className="text-sm font-bold text-[#1A1220]">
-                                                                                            {item.displayName}
-                                                                                        </p>
-                                                                                        <p className="mt-1 text-xs text-[#806A8C]">
-                                                                                            {item.category}
-                                                                                        </p>
-                                                                                        <p className="mt-1 text-sm font-bold text-[#2B174C]">
-                                                                                            {peso(item.salesPrice)}
-                                                                                        </p>
-                                                                                    </div>
-
-                                                                                    <span
-                                                                                        className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                                                                                            unavailable
-                                                                                                ? "bg-[#FFF0F0] text-[#C32F2F]"
-                                                                                                : item.stock <= 5
-                                                                                                    ? "bg-[#FFF8E8] text-[#A56607]"
-                                                                                                    : "bg-[#EDFBF1] text-[#138342]"
-                                                                                        }`}
-                                                                                    >
-                                {unavailable
-                                    ? "Unavailable"
-                                    : item.stock <= 5
-                                        ? "Low stock"
-                                        : "Available"}
-                            </span>
-                                                                                </div>
-
-                                                                                <div className="flex items-center gap-2">
-                                                                                    <div className="flex h-[36px] items-center overflow-hidden rounded-lg border border-[#E6DDF0] bg-white">
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            disabled={unavailable}
-                                                                                            onClick={() =>
-                                                                                                setCustomQtyForItem(item.key, qty - 1)
-                                                                                            }
-                                                                                            className="h-full w-10 text-sm font-bold text-[#2B174C] disabled:opacity-40"
-                                                                                        >
-                                                                                            −
-                                                                                        </button>
-
-                                                                                        <span className="flex h-full min-w-10 items-center justify-center border-x border-[#E6DDF0] px-2 text-sm font-semibold">
-                                    {qty}
-                                </span>
-
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            disabled={unavailable || qty >= item.stock}
-                                                                                            onClick={() =>
-                                                                                                setCustomQtyForItem(item.key, qty + 1)
-                                                                                            }
-                                                                                            className="h-full w-10 text-sm font-bold text-[#2B174C] disabled:opacity-40"
-                                                                                        >
-                                                                                            +
-                                                                                        </button>
-                                                                                    </div>
-
-                                                                                    <button
-                                                                                        type="button"
-                                                                                        disabled={unavailable}
-                                                                                        onClick={() => addCustomItem(item)}
-                                                                                        className="h-[36px] flex-1 rounded-lg bg-[#2B174C] px-3 text-sm font-semibold text-white transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-50"
-                                                                                    >
-                                                                                        Add
-                                                                                    </button>
-                                                                                </div>
-                                                                            </div>
-
-                                                                            <div className="hidden md:grid md:grid-cols-[minmax(0,1.5fr)_140px_110px_115px_170px] md:items-center md:gap-3">
-                                                                                <div className="min-w-0">
-                                                                                    <p className="text-sm font-bold leading-5 text-[#1A1220] break-words">
-                                                                                        {item.displayName}
-                                                                                    </p>
-                                                                                </div>
-
-                                                                                <p className="truncate text-sm text-[#806A8C]">
-                                                                                    {item.category}
-                                                                                </p>
-
-                                                                                <p className="text-sm font-bold text-[#2B174C]">
-                                                                                    {peso(item.salesPrice)}
-                                                                                </p>
-
-                                                                                <div>
-                            <span
-                                className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                                    unavailable
-                                        ? "bg-[#FFF0F0] text-[#C32F2F]"
-                                        : item.stock <= 5
-                                            ? "bg-[#FFF8E8] text-[#A56607]"
-                                            : "bg-[#EDFBF1] text-[#138342]"
-                                }`}
-                            >
-                                {unavailable
-                                    ? "Unavailable"
-                                    : item.stock <= 5
-                                        ? "Low stock"
-                                        : "Available"}
-                            </span>
-                                                                                </div>
-
-                                                                                <div className="flex items-center gap-2">
-                                                                                    <div className="flex h-[36px] items-center overflow-hidden rounded-lg border border-[#E6DDF0] bg-white">
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            disabled={unavailable}
-                                                                                            onClick={() =>
-                                                                                                setCustomQtyForItem(item.key, qty - 1)
-                                                                                            }
-                                                                                            className="h-full w-9 text-sm font-bold text-[#2B174C] disabled:opacity-40"
-                                                                                        >
-                                                                                            −
-                                                                                        </button>
-
-                                                                                        <span className="flex h-full min-w-10 items-center justify-center border-x border-[#E6DDF0] px-2 text-sm font-semibold">
-                                    {qty}
-                                </span>
-
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            disabled={unavailable || qty >= item.stock}
-                                                                                            onClick={() =>
-                                                                                                setCustomQtyForItem(item.key, qty + 1)
-                                                                                            }
-                                                                                            className="h-full w-9 text-sm font-bold text-[#2B174C] disabled:opacity-40"
-                                                                                        >
-                                                                                            +
-                                                                                        </button>
-                                                                                    </div>
-
-                                                                                    <button
-                                                                                        type="button"
-                                                                                        disabled={unavailable}
-                                                                                        onClick={() => addCustomItem(item)}
-                                                                                        className="h-[36px] rounded-lg bg-[#2B174C] px-4 text-sm font-semibold text-white transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-50"
-                                                                                    >
-                                                                                        Add
-                                                                                    </button>
-                                                                                </div>
-                                                                            </div>
-                                                                        </div>
-                                                                    );
-                                                                })}
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-
-                                                <div className="mt-4 rounded-xl border border-[#E6DDF0] bg-white">
-                                                    <div className="border-b border-[#E6DDF0] px-3 py-2.5">
-                                                        <p className="text-sm font-bold text-[#1A1220]">
-                                                            Selected items
-                                                        </p>
-                                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                            You can still adjust quantity after adding.
-                                                        </p>
-                                                    </div>
-
-                                                    {selectedCustomItems.length === 0 ? (
-                                                        <p className="px-3 py-5 text-center text-xs text-[#7A6A84]">
-                                                            No custom items added yet.
-                                                        </p>
-                                                    ) : (
-                                                        <div className="divide-y divide-[#EFE7F4]">
-                                                            {selectedCustomItems.map((item) => (
-                                                                <div
-                                                                    key={item.key}
-                                                                    className="grid gap-3 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_110px_34px] sm:items-center"
-                                                                >
-                                                                    <div className="min-w-0">
-                                                                        <p className="text-sm font-bold text-[#1A1220]">
-                                                                            {item.displayName}
-                                                                        </p>
-                                                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                                            {item.category} · {peso(item.salesPrice)} each
-                                                                        </p>
-                                                                    </div>
-
-                                                                    <div className="flex h-[34px] w-fit items-center overflow-hidden rounded-lg border border-[#E6DDF0] bg-white">
-                                                                        <button
-                                                                            type="button"
-                                                                            onClick={() =>
-                                                                                updateSelectedCustomQty(
-                                                                                    item.key,
-                                                                                    item.quantity - 1
-                                                                                )
-                                                                            }
-                                                                            className="h-full w-8 text-sm font-bold text-[#2B174C]"
-                                                                        >
-                                                                            −
-                                                                        </button>
-
-                                                                        <span className="flex h-full min-w-9 items-center justify-center border-x border-[#E6DDF0] px-2 text-sm font-semibold">
-                                    {item.quantity}
-                                </span>
-
-                                                                        <button
-                                                                            type="button"
-                                                                            disabled={item.quantity >= item.stock}
-                                                                            onClick={() =>
-                                                                                updateSelectedCustomQty(
-                                                                                    item.key,
-                                                                                    item.quantity + 1
-                                                                                )
-                                                                            }
-                                                                            className="h-full w-8 text-sm font-bold text-[#2B174C] disabled:opacity-40"
-                                                                        >
-                                                                            +
-                                                                        </button>
-                                                                    </div>
-
-                                                                    <p className="text-sm font-bold text-[#2B174C]">
-                                                                        {peso(item.salesPrice * item.quantity)}
-                                                                    </p>
-
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => removeSelectedCustomItem(item.key)}
-                                                                        className="flex h-8 w-8 items-center justify-center rounded-lg text-red-500 hover:bg-[#FFF0F0]"
-                                                                    >
-                                                                        <Trash2 size={15} />
-                                                                    </button>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-
-                                                    {selectedCustomItems.length > 0 && (
-                                                        <div className="flex items-center justify-between border-t border-[#E6DDF0] bg-[#FFFDF8] px-3 py-3">
-                                                            <div>
-                                                                <span className="block text-xs font-semibold text-[#806A8C]">
-                                                                    Estimated item subtotal
-                                                                </span>
-                                                                <span className="mt-0.5 block text-[11px] leading-4 text-[#9B8AAA]">
-                                                                    Final amount will be confirmed after discussion.
-                                                                </span>
-                                                            </div>
-
-                                                            <span className="text-sm font-bold text-[#2B174C]">
-                                                                {peso(selectedCustomTotal)}
-                                                            </span>
-                                                        </div>
-                                                    )}
-                                                </div>
-
-                                                {fieldErrors.selection && (
-                                                    <p className="mt-2 text-xs font-medium text-red-500">
-                                                        {fieldErrors.selection}
-                                                    </p>
-                                                )}
-                                            </div>
-
-                                            <div className="mt-5">
-                                                <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
-                                                    Additional custom request
-                                                </label>
-                                                <textarea
-                                                    value={customOrder}
-                                                    onChange={(e) => {
-                                                        setCustomOrder(e.target.value);
-                                                        clearError("selection");
-                                                    }}
-                                                    placeholder="Theme details, colors, setup preferences, or special instructions..."
-                                                    className="min-h-[110px] w-full resize-none rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3 text-sm text-[#1A1220] outline-none transition placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                                                />
-                                            </div>
-                                        </>
-                                    )}
-                                </div>
-
-                                {/* Contact & Event Details */}
-                                <div className="mt-6 grid gap-5 md:grid-cols-2">
-                                    <Input
-                                        label="Full Name"
-                                        value={name}
-                                        onChange={(v) => { setName(v); clearError("name"); }}
-                                        placeholder="Your full name"
-                                        error={fieldErrors.name}
-                                    />
-                                    <Input
-                                        label="Facebook / Messenger Name"
-                                        value={facebookName}
-                                        onChange={(v) => { setFacebookName(v); clearError("facebookName"); }}
-                                        placeholder="Name used in Messenger"
-                                        error={fieldErrors.facebookName}
-                                    />
-                                    <Input
-                                        label="Phone Number"
-                                        value={phone}
-                                        onChange={(v) => { setPhone(v); clearError("phone"); }}
-                                        placeholder="09XXXXXXXXX"
-                                        error={fieldErrors.phone}
-                                    />
-                                    <Input
-                                        label="Email Address"
-                                        value={email}
-                                        onChange={(v) => { setEmail(v); clearError("email"); }}
-                                        placeholder="Optional"
-                                        error={fieldErrors.email}
-                                    />
-
+                            {/* 3. Event details and schedule */}
+                            <section className="rounded-2xl border border-[#E6DDF0] bg-white p-4 sm:p-6" aria-labelledby="event-details-heading">
+                                <h3 id="event-details-heading" className="mb-4 text-lg font-bold text-[#2B174C]">3. Event details &amp; schedule</h3>
+                                <div className="grid gap-5">
                                     {/* Shared event schedule for packages and custom requests. */}
                                     <div className="md:col-span-2 rounded-2xl border border-[#E6DDF0] bg-[#FFFDF8] p-4">
                                         <div className="mb-3 flex items-center gap-2">
@@ -2573,7 +2390,6 @@ export default function CustomerBookingPage() {
                                     </div>
 
                                 </div>
-
                                 <div className="mt-6 grid gap-5 md:grid-cols-2">
                                     {bookingType === "custom" && (
                                         <Input
@@ -2592,78 +2408,143 @@ export default function CustomerBookingPage() {
                                         error={fieldErrors.venue}
                                     />
                                 </div>
+                            </section>
 
-                                {/* Rental equipment comes after event scheduling for both booking types. */}
-                                <div className="mt-6 rounded-2xl border border-[#E6DDF0] bg-[#FFFDF8] p-4">
-                                    <h3 className="text-sm font-bold text-[#2B174C]">{bookingType === "package" ? "Additional rental equipment (optional)" : "Rental equipment (optional)"}</h3>
-                                    <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                        {bookingType === "package"
-                                            ? "Add equipment beyond what your package includes. Package inclusions stay in the package price."
-                                            : "Choose tables, chairs, tents, or other equipment for your event."}
-                                        {" "}Rates are per item, per day. Equipment is reserved after booking confirmation.
-                                    </p>
-                                    <p className="mt-2 text-xs font-medium text-[#4E2C66]" aria-live="polite">
-                                        {!date ? "Select your event date in Event Schedule above to see the rental estimate."
-                                            : eventDurationType === "multiple" && !rentalEndDate ? "Select the event end date above to calculate multi-day rentals."
-                                                : rentalDuration > 0 ? `Rental duration: ${rentalDuration} ${rentalDuration === 1 ? "day" : "days"}.`
-                                                    : "Choose valid event dates above."}
-                                    </p>
-                                    {rentalDuration > 0 && !rentalAvailabilityReady &&
-                                        <p className="mt-2 text-xs text-[#806A8C]" aria-live="polite">
-                                            {rentalCatalogLoading ? 'Checking confirmed reservations for your event dates…' : rentalCatalogError || 'Date-specific availability is not ready yet.'}
-                                        </p>}
-                                    {rentalSelectionConflict && <div role="alert" className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                        {rentalSelectionConflict.name}: the requested {rentalSelectionConflict.quantity} units exceed what remains for {date} to {eventEndDate}. Reduce the quantity or choose different dates.
-                                    </div>}
-                                    <input type="search" value={rentalSearch} onChange={e => setRentalSearch(e.target.value)}
-                                           placeholder="Search rental equipment..." aria-label="Search rental equipment"
-                                           className="mt-3 h-11 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm outline-none focus:border-[#2B174C]" />
-                                    {rentalCatalogError && <p className="mt-2 text-xs text-red-600">{rentalCatalogError}</p>}
-                                    <div className="mt-2 max-h-52 space-y-2 overflow-y-auto" aria-busy={rentalCatalogLoading}>
-                                        {rentalCatalogLoading && <div role="status" aria-label="Loading rental equipment" className="space-y-2">
-                                            {[0, 1, 2].map(index => <div key={index} className="h-14 animate-pulse rounded-lg bg-[#EEE8F3]" />)}
-                                        </div>}
-                                        {!rentalCatalogLoading && rentalCatalog.filter(item => item.name.toLowerCase().includes(rentalSearch.toLowerCase())).map(item => {
-                                            const chosen = selectedRentalItems.find(x => x.id === item.id);
-                                            const available = item.availableForDates;
-                                            const isUnavailable = rentalAvailabilityReady && available === 0;
-                                            const chosenExceedsAvailability = !!chosen && rentalAvailabilityReady &&
-                                                (available == null || chosen.quantity > available);
-                                            return <div key={item.id} className={`flex items-center justify-between gap-2 rounded-lg border bg-white p-2 ${chosenExceedsAvailability ? 'border-amber-400' : 'border-[#E6DDF0]'}`}>
-                                                <div className="min-w-0 text-xs">
-                                                    <p className="font-semibold text-[#2B174C]">{item.name}</p>
-                                                    <p className="text-[#806A8C]">{peso(item.dailyRate)} / item / day · {item.physicallyAvailable} units currently ready at this branch</p>
-                                                    {rentalAvailabilityReady && <p className={`mt-1 font-semibold ${isUnavailable || chosenExceedsAvailability ? 'text-[#B45309]' : 'text-[#138342]'}`}>
-                                                        {available} available for your selected dates
-                                                    </p>}
-                                                    {chosenExceedsAvailability && <p className="mt-1 text-amber-700">Selected {chosen.quantity}, but only {available} remain. Reduce quantity or change dates.</p>}
-                                                </div>
-                                                <div className="flex shrink-0 items-center gap-2">
-                                                    <input type="number" aria-label={`Quantity of ${item.name}`} min={1}
-                                                           max={available ?? undefined}
-                                                           disabled={!rentalAvailabilityReady}
-                                                           value={chosen?.quantity || 1}
-                                                           onChange={e => updateRentalQuantity(item, Number(e.target.value))}
-                                                           className="w-16 rounded-lg border border-[#E6DDF0] p-1.5 text-sm disabled:opacity-50" />
-                                                    <button type="button" onClick={() => {
-                                                        if (chosen) { setSelectedRentalItems(prev => prev.filter(x => x.id !== item.id));clearError('selection'); }
-                                                        else updateRentalQuantity(item, 1);
-                                                    }} disabled={!chosen && !rentalAvailabilityReady}
-                                                            className="rounded-lg border border-[#E6DDF0] px-2 py-1.5 text-xs font-semibold text-[#2B174C] disabled:opacity-50">
-                                                        {chosen ? 'Remove' : 'Add'}
-                                                    </button>
-                                                </div>
-                                            </div>;
-                                        })}
-                                        {!rentalCatalogLoading && !rentalCatalog.length && !rentalCatalogError && <p className="py-2 text-xs text-[#806A8C]">{!customBranchId ? "Choose a package or booking branch to view rental equipment." : "No priced rental equipment in this branch yet."}</p>}
+                            {/* 4. Product & package selection — the rest of the portal stays unchanged. */}
+                            <section className="min-w-0 rounded-2xl border border-[#E6DDF0] bg-white p-4 sm:p-6" aria-labelledby="choose-products-heading">
+                                <h3 id="choose-products-heading" className="mb-2 text-lg font-bold text-[#2B174C]">4. Choose products or packages</h3>
+                                {bookingType === "package" ? (
+                                    <div className="space-y-4">
+                                        <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FD] p-3">
+                                            <label htmlFor="booking-package-choice" className="mb-2 block text-sm font-semibold text-[#1A1220]">Select package</label>
+                                            <select id="booking-package-choice" value={selectedPackage}
+                                                    onChange={event => {setSelectedPackage(event.target.value);clearError("selection");}}
+                                                    className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] ${fieldErrors.selection ? "border-red-300" : "border-[#E6DDF0]"}`}>
+                                                <option value="">Choose a package</option>
+                                                {packages.filter(pkg => effectivePackageBranchFilter === "all" ||
+                                                    Number(pkg.branch_id ?? pkg.branchId) === Number(effectivePackageBranchFilter)).map(pkg => (
+                                                    <option key={pkg.id} value={String(pkg.id)}>
+                                                        {pkg.name} - {peso(pkg.package_price)} · {branches.find(b => b.id === Number(pkg.branch_id ?? pkg.branchId))?.name || `Branch #${pkg.branch_id ?? pkg.branchId}`}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            {selectedPackageData && <p className="mt-2 text-xs text-[#806A8C]">Handled by: <strong>{selectedBranchName || `Branch #${packageBranchId}`}</strong></p>}
+                                            {fieldErrors.selection && <p className="mt-2 text-xs text-red-600">{fieldErrors.selection}</p>}
+                                        </div>
+                                        <p className="text-xs text-[#806A8C]">You can also select a package from the Available packages cards above.</p>
+                                        {renderRentalPicker(true)}
                                     </div>
-                                    {selectedRentalItems.length > 0 && <div className="mt-3 border-t border-[#E6DDF0] pt-3 text-sm text-[#2B174C]">
-                                        <p className="font-semibold">Rental subtotal: {peso(selectedRentalTotal)}</p>
-                                        <p className="mt-1 text-xs text-[#7A6A84]">The final price and availability are confirmed by the business before approval.</p>
-                                    </div>}
-                                </div>
+                                ) : (
+                                    <div>
+                                        <p className="mb-4 text-sm text-[#806A8C]">Add items to your custom event booking. Choose Consumable Goods or Rental Goods below.</p>
+                                        <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-[#F7F1FF] p-1.5" role="tablist" aria-label="Choose inventory type">
+                                            <button type="button" role="tab" aria-selected={activeGoodsTab === "consumable"}
+                                                    onClick={() => setActiveGoodsTab("consumable")}
+                                                    className={`min-h-10 rounded-lg px-3 py-2 text-sm font-semibold transition ${activeGoodsTab === "consumable" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#5F4E75] hover:bg-white"}`}>
+                                                Consumable Goods
+                                            </button>
+                                            <button type="button" role="tab" aria-selected={activeGoodsTab === "rental"}
+                                                    onClick={() => setActiveGoodsTab("rental")}
+                                                    className={`min-h-10 rounded-lg px-3 py-2 text-sm font-semibold transition ${activeGoodsTab === "rental" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#5F4E75] hover:bg-white"}`}>
+                                                Rental Goods
+                                            </button>
+                                        </div>
+                                        <div role="tabpanel" aria-label={activeGoodsTab === "consumable" ? "Consumable goods" : "Rental goods"}>
+                                            {activeGoodsTab === "consumable" ? renderConsumablePicker() : renderRentalPicker()}
+                                        </div>
+                                        <p className="mt-4 text-xs text-[#806A8C]">Selected items from both tabs appear in the Selected Booking Items section below.</p>
+                                    </div>
+                                )}
+                            </section>
 
-                                {/* Theme */}
+                            {/* 5. Selected booking items */}
+                            <section className="rounded-2xl border border-[#E6DDF0] bg-white p-4 sm:p-6" aria-labelledby="selected-items-heading">
+                                <h3 id="selected-items-heading" className="mb-4 text-lg font-bold text-[#2B174C]">5. Selected booking items</h3>
+                                {bookingType === "package" ? (
+                                    <div className="rounded-xl border border-[#E6DDF0] p-4 text-sm">
+                                        <strong>{selectedPackageData?.name || "No package selected"}</strong>
+                                        {(selectedPackageData?.inclusions || []).map((item, index) =>
+                                            <p key={`${item.productId}-${index}`} className="mt-2 text-xs">{item.productName}{item.variantName ? ` — ${item.variantName}` : ""} × {item.quantity}</p>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
+                                        <div className="border-b border-[#E6DDF0] px-3 py-2.5">
+                                            <h4 className="text-sm font-bold text-[#1A1220]">Selected consumable goods</h4>
+                                            <p className="mt-0.5 text-xs text-[#7A6A84]">Type a quantity or use + / − above to update your selection.</p>
+                                        </div>
+                                        {selectedCustomItems.length === 0 ? (
+                                            <p className="px-3 py-5 text-center text-xs text-[#7A6A84]">No consumable goods selected yet.</p>
+                                        ) : (
+                                            <div className="divide-y divide-[#EFE7F4]">
+                                                {selectedCustomItems.map(item => (
+                                                    <div key={item.key} className="grid gap-3 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_110px_34px] sm:items-center">
+                                                        <div className="min-w-0">
+                                                            <p className="break-words text-sm font-bold text-[#1A1220]">{item.displayName}</p>
+                                                            <p className="mt-0.5 text-xs text-[#7A6A84]">{item.category} · {peso(item.salesPrice)} each</p>
+                                                        </div>
+                                                        <QuantityStepper value={item.quantity} max={Math.max(0, item.stock)}
+                                                                         label={`${item.displayName} selected quantity`}
+                                                                         onChange={quantity => updateSelectedCustomQty(item.key, quantity)} />
+                                                        <p className="text-sm font-bold text-[#2B174C]">{peso(item.salesPrice * item.quantity)}</p>
+                                                        <button type="button" aria-label={`Remove ${item.displayName}`} onClick={() => removeSelectedCustomItem(item.key)}
+                                                                className="flex h-8 w-8 items-center justify-center rounded-lg text-red-500 hover:bg-[#FFF0F0]"><Trash2 size={15} /></button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                <div className="mt-4 overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
+                                    <div className="border-b border-[#E6DDF0] px-3 py-2.5">
+                                        <h4 className="text-sm font-bold text-[#1A1220]">Selected rental goods</h4>
+                                        <p className="mt-0.5 text-xs text-[#7A6A84]">Type a quantity or use + / − above to update your selection.</p>
+                                    </div>
+                                    {selectedRentalItems.length === 0 ? (
+                                        <p className="px-3 py-5 text-center text-xs text-[#7A6A84]">No rental equipment selected yet.</p>
+                                    ) : (
+                                        <div className="divide-y divide-[#EFE7F4]">
+                                            {selectedRentalItems.map(item => (
+                                                <div key={item.id} className="grid gap-3 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_110px_34px] sm:items-center">
+                                                    <div className="min-w-0">
+                                                        <p className="break-words text-sm font-bold text-[#1A1220]">{item.name}</p>
+                                                        <p className="mt-0.5 text-xs text-[#7A6A84]">{peso(item.dailyRate)} / item / day · {rentalDuration} day(s)</p>
+                                                    </div>
+                                                    <QuantityStepper value={item.quantity}
+                                                                     max={Math.max(0, rentalCatalog.find(x => x.id === item.id)?.availableForDates ?? 0)}
+                                                                     label={`${item.name} selected quantity`}
+                                                                     onChange={quantity => updateRentalQuantity(rentalCatalog.find(x => x.id === item.id) ?? item, quantity)}
+                                                                     inputDisabled={!rentalAvailabilityReady} />
+                                                    <p className="text-sm font-bold text-[#2B174C]">{peso(item.dailyRate * item.quantity * rentalDuration)}</p>
+                                                    <button type="button" aria-label={`Remove ${item.name}`}
+                                                            onClick={() => setSelectedRentalItems(prev => prev.filter(x => x.id !== item.id))}
+                                                            className="flex h-8 w-8 items-center justify-center rounded-lg text-red-500 hover:bg-[#FFF0F0]"><Trash2 size={15} /></button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </section>
+
+                            {/* 6. Customization & requests */}
+                            <section className="rounded-2xl border border-[#E6DDF0] bg-white p-4 sm:p-6" aria-labelledby="requests-heading">
+                                <h3 id="requests-heading" className="mb-4 text-lg font-bold text-[#2B174C]">6. Customization &amp; special requests</h3>
+                                {bookingType === "custom" && <div className="mb-4">
+                                    <div className="mt-5">
+                                        <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
+                                            Additional custom request
+                                        </label>
+                                        <textarea
+                                            value={customOrder}
+                                            onChange={(e) => {
+                                                setCustomOrder(e.target.value);
+                                                clearError("selection");
+                                            }}
+                                            placeholder="Theme details, colors, setup preferences, or special instructions..."
+                                            className="min-h-[110px] w-full resize-none rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3 text-sm text-[#1A1220] outline-none transition placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                        />
+                                    </div>
+                                </div>}
                                 <div className="mt-6">
                                     <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
                                         Theme / motif request
@@ -2687,8 +2568,6 @@ export default function CustomerBookingPage() {
                                         You may request any theme, color motif, or design inspiration. Final design can be confirmed with the store.
                                     </p>
                                 </div>
-
-                                {/* Notes */}
                                 <div className="mt-6">
                                     <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
                                         Additional notes
@@ -2702,196 +2581,175 @@ export default function CustomerBookingPage() {
                                         }`}
                                     />
                                 </div>
-                            </div>
+                            </section>
 
-                            {/* Booking Summary Sidebar */}
-                            <aside>
-                                <div className="sticky top-24 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                                    <div className="bg-[#2B174C] px-5 py-5 text-white">
-                                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-white/70">
-                                            Your request
-                                        </p>
-                                        <h3 className="mt-1 text-[22px] font-bold">
-                                            Booking summary
-                                        </h3>
-                                        <p className="mt-2 text-sm leading-5 text-white/75">
-                                            Review your event details before submitting.
-                                        </p>
-                                    </div>
-
-                                    <div className="p-5">
-                                        <div className="space-y-4">
-                                            <SummaryItem
-                                                label="Booking type"
-                                                value={
-                                                    bookingType === "package"
-                                                        ? "Package booking"
-                                                        : "Custom request"
-                                                }
-                                            />
-                                            {selectedPackage && (
-                                                <SummaryItem
-                                                    label="Package"
-                                                    value={selectedPackageData?.name || ""}
-                                                />
-                                            )}
-                                            {bookingType === "custom" && selectedCustomItems.length > 0 && (
-                                                <div className="rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3">
-                                                    <div className="mb-2 flex items-center justify-between gap-3">
-                                                        <p className="text-xs font-bold text-[#1A1220]">
-                                                            Selected items
-                                                        </p>
-                                                        <span className="text-xs font-semibold text-[#806A8C]">
-                {selectedCustomItems.length} item
-                                                            {selectedCustomItems.length === 1 ? "" : "s"}
-            </span>
-                                                    </div>
-
-                                                    <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
-                                                        {selectedCustomItems.map((item) => (
-                                                            <div
-                                                                key={item.key}
-                                                                className="rounded-lg border border-[#EFE7F4] bg-white px-3 py-2"
-                                                            >
-                                                                <div className="flex items-start justify-between gap-3">
-                                                                    <div className="min-w-0">
-                                                                        <p className="text-xs font-bold leading-5 text-[#1A1220] break-words">
-                                                                            {item.displayName}
-                                                                        </p>
-                                                                        <p className="mt-0.5 text-[11px] text-[#806A8C]">
-                                                                            Qty: {item.quantity} · {peso(item.salesPrice)} each
-                                                                        </p>
-                                                                    </div>
-
-                                                                    <p className="shrink-0 text-xs font-bold text-[#2B174C]">
-                                                                        {peso(item.salesPrice * item.quantity)}
-                                                                    </p>
-                                                                </div>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-
-                                                    <div className="mt-3 border-t border-[#E6DDF0] pt-3">
-                                                        <div className="flex items-center justify-between gap-4">
-        <span className="text-xs font-semibold text-[#806A8C]">
-            Estimated item subtotal
-        </span>
-
-                                                            <span className="text-sm font-bold text-[#2B174C]">
-            {peso(selectedCustomTotal)}
-        </span>
-                                                        </div>
-
-                                                        <p className="mt-1 text-[11px] leading-4 text-[#9B8AAA]">
-                                                            Final amount will be confirmed after discussion.
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {customOrder && bookingType === "custom" && (
-                                                <SummaryItem
-                                                    label="Additional request"
-                                                    value={customOrder}
-                                                />
-                                            )}
-
-                                            {name && (
-                                                <SummaryItem
-                                                    label="Customer"
-                                                    value={name}
-                                                />
-                                            )}
-                                            {facebookName && (
-                                                <SummaryItem
-                                                    label="Messenger name"
-                                                    value={facebookName}
-                                                />
-                                            )}
-                                            {bookingType === "custom" &&
-                                                eventType && (
-                                                    <SummaryItem
-                                                        label="Event type"
-                                                        value={eventType}
-                                                    />
-                                                )}
-                                            {theme && (
-                                                <SummaryItem
-                                                    label="Theme / motif"
-                                                    value={theme}
-                                                />
-                                            )}
-                                            {venue && (
-                                                <SummaryItem
-                                                    label="Venue"
-                                                    value={venue}
-                                                />
-                                            )}
-                                            {date && (
-                                                <SummaryItem
-                                                    label={eventDurationType === "multiple" ? "Event dates" : "Date"}
-                                                    value={eventDurationType === "multiple" && eventEndDate && eventEndDate >= date
-                                                        ? `${date} to ${eventEndDate} (${rentalDuration} days)` : date}
-                                                />
-                                            )}
-                                            {eventTime && (
-                                                <SummaryItem
-                                                    label="Event time"
-                                                    value={eventTime}
-                                                />
-                                            )}
-                                        </div>
-
-                                        <div className="mt-5 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-4 text-xs text-[#2B174C]">
-                                            <h4 className="mb-2 text-sm font-bold">Itemized booking quotation · Estimate</h4>
-                                            {bookingType==='package' && <div className="flex justify-between py-1"><span>Package (included items)</span><strong>{peso(Number(estimatedBase))}</strong></div>}
-                                            {bookingType==='custom' && <div className="flex justify-between py-1"><span>Requested sales items (estimate)</span><strong>{peso(selectedCustomTotal)}</strong></div>}
-                                            {selectedRentalItems.length > 0 && rentalDuration === 0 && <p className="py-2 text-xs text-[#806A8C]">Choose your event dates above to calculate the rental charges.</p>}
-                                            {selectedRentalItems.map(item=><div key={item.id} className="flex justify-between gap-3 py-1"><span>{item.name} · {item.quantity} × {rentalDuration} day(s)</span><strong>{peso(item.dailyRate*item.quantity*rentalDuration)}</strong></div>)}
-                                            <div className="mt-2 border-t border-[#E6DDF0] pt-2 space-y-2">
-                                                <label className="flex justify-between gap-2"><span><input type="checkbox" checked={serviceDelivery} onChange={e=>setServiceDelivery(e.target.checked)}/> Delivery & pickup</span><strong>{bookingType==='package'&&feePolicy.deliveryIncludedPackage?'Included':peso(feePolicy.deliveryFee)}</strong></label>
-                                                <label className="flex justify-between gap-2"><span><input type="checkbox" checked={serviceSetup} onChange={e=>setServiceSetup(e.target.checked)}/> Setup assistance</span><strong>{bookingType==='package'&&feePolicy.setupIncludedPackage?'Included':peso(feePolicy.setupFee)}</strong></label>
-                                            </div>
-                                            <div className="mt-2 flex justify-between border-t border-[#E6DDF0] pt-2 font-bold"><span>Estimated booking charge</span><span>{peso(estimatedBase+(bookingType==='custom'?selectedCustomTotal:0)+selectedRentalTotal+estimatedDelivery+estimatedSetup)}</span></div>
-                                            <div className="mt-2 flex justify-between"><span>Refundable security deposit (held separately)</span><strong>{peso(feePolicy.refundableDeposit)}</strong></div>
-                                            <p className="mt-2 text-[#806A8C]">Booking charges, required down payment and refundable deposit are distinct. Final custom prices and availability require business confirmation. This quotation is not a tax invoice.</p>
-                                            <button type="button" onClick={()=>window.print()} className="mt-3 rounded-lg border border-[#D8CBE7] px-3 py-2 font-semibold">Print quotation</button>
-                                        </div>
-                                        <div className="mt-5 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3">
-                                            <p className="text-xs font-semibold text-[#1A1220]">
-                                                After submission
+                            {/* 7. Final booking summary (not a sticky sidebar) */}
+                            <section aria-label="Final booking summary" className="min-w-0">
+                                <aside>
+                                    <div className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                                        <div className="bg-[#2B174C] px-5 py-5 text-white">
+                                            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-white/70">
+                                                Your request
                                             </p>
-                                            <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                                Save your booking reference number, then use{" "}
-                                                <span className="font-semibold text-[#2B174C]">
+                                            <h3 className="mt-1 text-[22px] font-bold">
+                                                Booking summary
+                                            </h3>
+                                            <p className="mt-2 text-sm leading-5 text-white/75">
+                                                Review your event details before submitting.
+                                            </p>
+                                        </div>
+
+                                        <div className="space-y-4 p-4 sm:p-6">
+                                            {/* Match the order of the Book your event form. */}
+                                            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4" aria-label="Summary customer information">
+                                                <h4 className="mb-3 text-sm font-bold text-[#2B174C]">1. Customer information</h4>
+                                                <div className="space-y-2.5">
+                                                    <SummaryItem label="Full name" value={name || "Not entered"} />
+                                                    <SummaryItem label="Facebook / Messenger" value={facebookName || "Not entered"} />
+                                                    <SummaryItem label="Phone number" value={phone || "Not entered"} />
+                                                    <SummaryItem label="Email address" value={email || "Optional"} />
+                                                </div>
+                                            </section>
+
+                                            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4" aria-label="Summary booking type and branch">
+                                                <h4 className="mb-3 text-sm font-bold text-[#2B174C]">2. Booking type &amp; branch</h4>
+                                                <div className="space-y-2.5">
+                                                    <SummaryItem label="Booking type" value={bookingType === "package" ? "Package booking" : "Custom booking"} />
+                                                    <SummaryItem label="Booking branch" value={selectedBranchName || "Not selected"} />
+                                                    {bookingType === "package" && <SummaryItem label="Package" value={selectedPackageData?.name || "Not selected"} />}
+                                                </div>
+                                            </section>
+
+                                            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4" aria-label="Summary event details">
+                                                <h4 className="mb-3 text-sm font-bold text-[#2B174C]">3. Event details &amp; schedule</h4>
+                                                <div className="space-y-2.5">
+                                                    <SummaryItem label="Event duration" value={eventDurationType === "multiple" ? "Multi-day event" : "One-day event"} />
+                                                    <SummaryItem label={eventDurationType === "multiple" ? "Event dates" : "Event date"}
+                                                                 value={!date ? "Not selected" : eventDurationType === "multiple" && eventEndDate && eventEndDate >= date
+                                                                     ? `${date} to ${eventEndDate} (${rentalDuration} days)` : date} />
+                                                    <SummaryItem label="Event time" value={eventTime || "Not selected"} />
+                                                    {bookingType === "custom" && <SummaryItem label="Event type" value={eventType || "Not entered"} />}
+                                                    <SummaryItem label="Venue / location" value={venue || "Not entered"} />
+                                                </div>
+                                            </section>
+
+                                            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4" aria-label="Summary products or package">
+                                                <h4 className="mb-3 text-sm font-bold text-[#2B174C]">4. Choose products or packages</h4>
+                                                <p className="text-xs leading-5 text-[#806A8C]">
+                                                    {bookingType === "package" ? (selectedPackageData?.name || "Choose a package above")
+                                                        : `${selectedCustomItems.length} consumable product(s), ${selectedRentalItems.length} rental product(s) selected`}
+                                                </p>
+                                            </section>
+
+                                            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4" aria-label="Summary selected booking items">
+                                                <h4 className="mb-3 text-sm font-bold text-[#2B174C]">5. Selected booking items</h4>
+                                                {bookingType === "package" && (
+                                                    <div className="mb-3 rounded-lg bg-[#FBF9FD] p-3">
+                                                        <p className="text-xs font-bold text-[#2B174C]">Package inclusions</p>
+                                                        {!selectedPackageData?.inclusions?.length ? <p className="mt-2 text-xs text-[#806A8C]">No package selected.</p> :
+                                                            selectedPackageData.inclusions.map((item, index) =>
+                                                                <div key={`${item.productId}-${index}`} className="mt-2 flex justify-between gap-3 text-xs">
+                                                                    <span className="break-words">{item.productName}{item.variantName ? ` — ${item.variantName}` : ""}</span>
+                                                                    <span className="shrink-0 font-semibold">× {item.quantity}</span>
+                                                                </div>)}
+                                                    </div>
+                                                )}
+                                                {bookingType === "custom" && (
+                                                    <div className="mb-3">
+                                                        <p className="mb-2 text-xs font-bold text-[#2B174C]">Consumable goods</p>
+                                                        {!selectedCustomItems.length ? <p className="text-xs text-[#806A8C]">No consumable items selected.</p> :
+                                                            <div className="max-h-44 space-y-2 overflow-y-auto pr-1">
+                                                                {selectedCustomItems.map(item =>
+                                                                    <div key={item.key} className="flex items-center justify-between gap-3 rounded-lg border border-[#EFE7F4] px-3 py-2 text-xs">
+                                                                        <div className="min-w-0"><p className="break-words font-semibold">{item.displayName}</p>
+                                                                            <p className="text-[#806A8C]">{item.quantity} × {peso(item.salesPrice)}</p></div>
+                                                                        <strong className="shrink-0 text-[#2B174C]">{peso(item.salesPrice * item.quantity)}</strong>
+                                                                    </div>)}
+                                                            </div>}
+                                                        <div className="mt-3 flex items-center justify-between gap-3 border-t border-[#E6DDF0] pt-3 text-xs">
+                                                            <span className="font-semibold text-[#806A8C]">Estimated consumable subtotal</span>
+                                                            <strong className="text-[#2B174C]">{peso(selectedCustomTotal)}</strong>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                <div className={bookingType === "custom" ? "border-t border-[#E6DDF0] pt-3" : ""}>
+                                                    <p className="mb-2 text-xs font-bold text-[#2B174C]">Rental goods</p>
+                                                    {!selectedRentalItems.length ? <p className="text-xs text-[#806A8C]">No rental goods selected.</p> :
+                                                        <div className="max-h-40 space-y-2 overflow-y-auto pr-1">
+                                                            {selectedRentalItems.map(item =>
+                                                                <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-[#EFE7F4] px-3 py-2 text-xs">
+                                                                    <div className="min-w-0"><p className="break-words font-semibold">{item.name}</p>
+                                                                        <p className="text-[#806A8C]">{item.quantity} × {rentalDuration} day(s) · {peso(item.dailyRate)} / day</p></div>
+                                                                    <strong className="shrink-0 text-[#2B174C]">{peso(item.dailyRate * item.quantity * rentalDuration)}</strong>
+                                                                </div>)}
+                                                        </div>}
+                                                </div>
+                                            </section>
+
+                                            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4" aria-label="Summary customization requests">
+                                                <h4 className="mb-3 text-sm font-bold text-[#2B174C]">6. Customization &amp; special requests</h4>
+                                                <div className="space-y-2.5">
+                                                    <SummaryItem label="Theme / motif" value={theme || "Not entered"} />
+                                                    {bookingType === "custom" && <SummaryItem label="Additional custom request" value={customOrder || "None"} />}
+                                                    <SummaryItem label="Additional notes" value={notes || "None"} />
+                                                </div>
+                                            </section>
+
+                                            <section className="rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-4" aria-label="Estimated quotation">
+                                                <h4 className="mb-3 text-sm font-bold text-[#2B174C]">7. Estimated booking quotation</h4>
+                                                <div className="space-y-2 text-xs text-[#4E2C66]">
+                                                    {bookingType === "package" && <div className="flex justify-between gap-3"><span>Package price</span><strong>{peso(estimatedBase)}</strong></div>}
+                                                    {bookingType === "custom" && <div className="flex justify-between gap-3"><span>Consumable goods subtotal</span><strong>{peso(selectedCustomTotal)}</strong></div>}
+                                                    <div className="flex justify-between gap-3"><span>Rental goods subtotal</span><strong>{peso(selectedRentalTotal)}</strong></div>
+                                                    {selectedRentalItems.length > 0 && !rentalDuration && <p className="text-[#806A8C]">Choose event dates to calculate the rental estimate.</p>}
+                                                    <div className="flex justify-between gap-3 border-t border-[#E6DDF0] pt-3 text-sm font-bold text-[#2B174C]">
+                                                        <span>Estimated booking total</span>
+                                                        <span>{peso(estimatedBase + (bookingType === "custom" ? selectedCustomTotal : 0) + selectedRentalTotal + estimatedDelivery + estimatedSetup)}</span>
+                                                    </div>
+                                                    <p className="text-[11px] leading-5 text-[#806A8C]">Final amount will be confirmed after discussion.</p>
+                                                </div>
+                                                {bookingType === "custom" && (
+                                                    <p className="mt-3 rounded-lg border border-[#E1D2F3] bg-[#F7F1FF] p-3 text-xs leading-5 text-[#4E2C66]">
+                                                        <strong>Important booking notice:</strong> This is an estimate only. The store will review the requested items, availability, and special requests. The final agreed price will be discussed with you before payment is required.
+                                                    </p>
+                                                )}
+                                            </section>
+                                            <div className="mt-5 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3">
+                                                <p className="text-xs font-semibold text-[#1A1220]">
+                                                    After submission
+                                                </p>
+                                                <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
+                                                    Save your booking reference number, then use{" "}
+                                                    <span className="font-semibold text-[#2B174C]">
                                                     Track booking
                                                 </span>{" "}
-                                                to check the status anytime.
-                                            </p>
+                                                    to check the status anytime.
+                                                </p>
+                                            </div>
+
+                                            <a
+                                                href={`https://m.me/${STORE_MESSENGER}`}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="mt-5 inline-flex h-[42px] w-full items-center justify-center rounded-xl border border-[#D8CBE7] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
+                                            >
+                                                Continue on Messenger
+                                            </a>
+
+                                            <button
+                                                type="button"
+                                                onClick={handleSubmit}
+                                                disabled={submitting}
+                                                className="mt-3 inline-flex h-[46px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                                            >
+                                                {submitting
+                                                    ? "Submitting..."
+                                                    : "Submit booking request"}
+                                            </button>
                                         </div>
-
-                                        <a
-                                            href={`https://m.me/${STORE_MESSENGER}`}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            className="mt-5 inline-flex h-[42px] w-full items-center justify-center rounded-xl border border-[#D8CBE7] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
-                                        >
-                                            Continue on Messenger
-                                        </a>
-
-                                        <button
-                                            type="button"
-                                            onClick={handleSubmit}
-                                            disabled={submitting}
-                                            className="mt-3 inline-flex h-[46px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
-                                        >
-                                            {submitting
-                                                ? "Submitting..."
-                                                : "Submit booking request"}
-                                        </button>
                                     </div>
-                                </div>
-                            </aside>
+                                </aside>
+                            </section>
                         </div>
                     )}
                 </div>

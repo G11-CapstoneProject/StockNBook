@@ -489,6 +489,7 @@ export type StaffRentalAllocation = {
     allocationId: number; bookingReference: string; equipmentId: number;
     equipmentName: string; equipmentNumber: string; quantity: number;
     startDate: string; endDate: string;
+    bookingTotal: number; amountPaid: number; bookingBalance: number;
     status: "reserved" | "checked_out" | "returned" | "cancelled";
     preparedAt: string | null; returnedAt: string | null;
     returnedReceivedUnits: number; // Returned physically (not missing)
@@ -512,6 +513,10 @@ export type StaffRentalStockAction =
     | { action:"staff_report_equipment_issue"; equipmentId:number; quantity:number; reason:string; issueType:"routine"|"damage"|"missing" }
     | { action:"staff_submit_repair_completion"; maintenanceId:number; quantity:number; notes:string }
     | { action:"staff_complete_routine_maintenance"; maintenanceId:number; quantity:number; notes:string };
+export type StaffRentalBookingAction =
+    | {action:"release_rental_booking"; bookingReference:string}
+    | {action:"return_rental_booking"; bookingReference:string;
+    returns:Array<{allocationId:number;missingUnits:number}>;notes:string};
 export type StaffRentalAction =
     "prepare_rental_allocation" | "release_rental_allocation" |
     "return_rental_allocation" | "inspect_rental_allocation" | "clean_rental_allocation";
@@ -626,6 +631,16 @@ export function useStaffRentalInventory() {
             return response;
         } finally { setSaving(false); }
     }, [refresh, saving]);
+    // Atomic, idempotent booking-wide handover/return (not per-equipment API loops).
+    const actBooking=React.useCallback(async(mutation:StaffRentalBookingAction)=>{
+        if(saving)throw new Error("Please wait for the current operation to finish.");
+        setSaving(true);
+        try {
+            const result=await rentalRequest({...mutation,requestKey:crypto.randomUUID()});
+            await refresh(true);
+            return result;
+        } finally {setSaving(false);}
+    },[saving,refresh]);
     const actStock=React.useCallback(async (mutation:StaffRentalStockAction)=>{
         if(saving)throw new Error("Please wait for the current operation to finish.");
         setSaving(true);
@@ -642,5 +657,5 @@ export function useStaffRentalInventory() {
         return response.schedule;
     },[]);
     return { equipment, allocations, activity, pendingReceipts, maintenanceTasks,
-        loading, refreshing, saving, error, connected, refresh, act, actStock, getEquipmentSchedule };
+        loading, refreshing, saving, error, connected, refresh, act, actBooking, actStock, getEquipmentSchedule };
 }

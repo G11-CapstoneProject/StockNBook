@@ -89,11 +89,18 @@ export type RentalMaintenanceRecord = {
     pendingCompletionId: number | null;
     pendingCompletionUnits: number | null;
     pendingCompletionNotes?: string | null;
+    bookingReference?: string | null;
+};
+
+// Read-only preliminary observations: not Manager-approved repair or billing claims.
+export type RentalPendingDamageObservation = {
+    allocationId:number; bookingReference:string; equipmentName:string;
+    observedDamagedUnits:number; notes:string|null; reportedAt:string;
 };
 
 export type RentalMissingReport = {
     id:number; equipmentId:number; equipmentName:string; quantity:number;
-    reason:string; reportedAt:string; reportedBy:string;
+    reason:string; reportedAt:string; reportedBy:string; bookingReference?:string|null;
 };
 
 export type RentalPendingReceipt = {
@@ -295,7 +302,8 @@ function normalizeMaintenanceRecord(value: unknown): RentalMaintenanceRecord | n
         repairApproved:raw.repairApproved===true || raw.repairApproved===1,
         pendingCompletionId:raw.pendingCompletionId==null?null:Number(raw.pendingCompletionId),
         pendingCompletionUnits:raw.pendingCompletionUnits==null?null:Number(raw.pendingCompletionUnits),
-        pendingCompletionNotes:typeof raw.pendingCompletionNotes==="string"?raw.pendingCompletionNotes:null };
+        pendingCompletionNotes:typeof raw.pendingCompletionNotes==="string"?raw.pendingCompletionNotes:null,
+        bookingReference:typeof raw.bookingReference==="string"?raw.bookingReference:null };
 }
 
 export type RentalMutation =
@@ -318,7 +326,8 @@ export type RentalMutation =
 
 type ApiResponse = { success?: boolean; error?: string; equipment?: unknown; activity?: unknown;
     availability?: unknown; referenceNumber?: string; categories?: unknown; bookingSyncConnected?: boolean;
-    maintenanceRecords?: unknown; pendingReceipts?: unknown; missingReports?: unknown };
+    maintenanceRecords?: unknown; pendingDamageObservations?: unknown;
+    pendingReceipts?: unknown; missingReports?: unknown };
 
 async function requestRental(action: Record<string, unknown>, signal?: AbortSignal): Promise<ApiResponse> {
     const token = typeof window !== "undefined" ? sessionStorage.getItem("token") : null;
@@ -346,6 +355,7 @@ export function useRentalInventory(branchId?: number) {
     const [equipment, setEquipment] = React.useState<RentalEquipment[]>([]);
     const [recentActivity, setRecentActivity] = React.useState<RentalActivity[]>([]);
     const [maintenanceRecords, setMaintenanceRecords] = React.useState<RentalMaintenanceRecord[]>([]);
+    const [pendingDamageObservations,setPendingDamageObservations] = React.useState<RentalPendingDamageObservation[]>([]);
     const [pendingReceipts,setPendingReceipts] = React.useState<RentalPendingReceipt[]>([]);
     const [missingReports,setMissingReports] = React.useState<RentalMissingReport[]>([]);
     const [maintenanceDataReady, setMaintenanceDataReady] = React.useState(false);
@@ -369,7 +379,7 @@ export function useRentalInventory(branchId?: number) {
             setError("The selected rental branch is invalid. Choose a valid branch.");
             setLoading(false); setRefreshing(false);
             setConnected(false); setBookingSyncConnected(false);
-            setEquipment([]); setRecentActivity([]); setMaintenanceRecords([]);setPendingReceipts([]);setMissingReports([]);
+            setEquipment([]); setRecentActivity([]); setMaintenanceRecords([]);setPendingDamageObservations([]);setPendingReceipts([]);setMissingReports([]);
             setMaintenanceDataReady(false); setSavedCategories([]);
             return;
         }
@@ -399,6 +409,12 @@ export function useRentalInventory(branchId?: number) {
                 setEquipment(normalized as RentalEquipment[]);
                 setMaintenanceDataReady(maintenanceAvailable);
                 setMaintenanceRecords(normalizedMaintenance as RentalMaintenanceRecord[]);
+                setPendingDamageObservations(Array.isArray(result.pendingDamageObservations)
+                    ? (result.pendingDamageObservations as RentalPendingDamageObservation[]).filter(item =>
+                        Number.isSafeInteger(Number(item.allocationId)) && Number(item.allocationId)>0 &&
+                        Number.isSafeInteger(Number(item.observedDamagedUnits)) && Number(item.observedDamagedUnits)>0 &&
+                        typeof item.bookingReference==='string' && typeof item.equipmentName==='string')
+                    : []);
                 setPendingReceipts(Array.isArray(result.pendingReceipts)
                     ? (result.pendingReceipts as RentalPendingReceipt[]).filter(x => Number.isSafeInteger(x.id) && x.id>0) : []);
                 setMissingReports(Array.isArray(result.missingReports)?result.missingReports as RentalMissingReport[]:[]);
@@ -416,7 +432,7 @@ export function useRentalInventory(branchId?: number) {
                 setError(cause instanceof Error ? cause.message : "Could not load rental inventory.");
                 // If a refresh fails, retain previously loaded data, but never show it as live.
                 if (!loaded.current) { setConnected(false); setBookingSyncConnected(false); setEquipment([]); setRecentActivity([]);
-                    setMaintenanceRecords([]);setPendingReceipts([]);setMissingReports([]);setMaintenanceDataReady(false); }
+                    setMaintenanceRecords([]);setPendingDamageObservations([]);setPendingReceipts([]);setMissingReports([]);setMaintenanceDataReady(false); }
             }
         } finally {
             if (inFlight.current === controller) inFlight.current = null;
@@ -427,7 +443,7 @@ export function useRentalInventory(branchId?: number) {
     React.useEffect(() => {
         loaded.current = false;
         setConnected(false); setBookingSyncConnected(false); setEquipment([]); setRecentActivity([]);
-        setMaintenanceRecords([]);setPendingReceipts([]);setMissingReports([]); setMaintenanceDataReady(false); setSavedCategories([]); setLoading(true);
+        setMaintenanceRecords([]);setPendingDamageObservations([]);setPendingReceipts([]);setMissingReports([]); setMaintenanceDataReady(false); setSavedCategories([]); setLoading(true);
         void refresh();
         const onFocus = () => { if (document.visibilityState === "visible") void refresh(); };
         window.addEventListener("focus", onFocus);
@@ -471,7 +487,7 @@ export function useRentalInventory(branchId?: number) {
     const categories = React.useMemo(() => [...new Set([
         ...savedCategories, ...equipment.map(item => item.category),
     ])].sort((a,b) => a.localeCompare(b)), [savedCategories, equipment]);
-    return { equipment, recentActivity, maintenanceRecords, pendingReceipts, missingReports, maintenanceDataReady,
+    return { equipment, recentActivity, maintenanceRecords, pendingDamageObservations, pendingReceipts, missingReports, maintenanceDataReady,
         categories, summary, actions, loading, refreshing, saving,
         connected, bookingSyncConnected, error, refresh, mutate, checkAvailability };
 }
@@ -516,7 +532,7 @@ export type StaffRentalStockAction =
 export type StaffRentalBookingAction =
     | {action:"release_rental_booking"; bookingReference:string}
     | {action:"return_rental_booking"; bookingReference:string;
-    returns:Array<{allocationId:number;missingUnits:number}>;notes:string};
+    returns:Array<{allocationId:number;missingUnits:number;damagedUnitsObserved?:number}>;notes:string;conditionChecked?:boolean;inspectionDeferred?:boolean};
 export type StaffRentalAction =
     "prepare_rental_allocation" | "release_rental_allocation" |
     "return_rental_allocation" | "inspect_rental_allocation" | "clean_rental_allocation";
@@ -622,7 +638,8 @@ export function useStaffRentalInventory() {
 
     const act = React.useCallback(async (action: StaffRentalAction, allocationId: number,
                                          options: { condition?: "good" | "cleaning" | "damaged"; notes?: string;
-                                             missingUnits?: number; goodUnits?: number; cleaningUnits?: number; damagedUnits?: number } = {}) => {
+                                             missingUnits?: number; goodUnits?: number; cleaningUnits?: number; damagedUnits?: number;
+                                             useRecordedReturn?: boolean } = {}) => {
         if (saving) throw new Error("Please wait for the current operation to finish.");
         setSaving(true);
         try {

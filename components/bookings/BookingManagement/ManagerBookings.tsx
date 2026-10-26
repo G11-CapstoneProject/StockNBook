@@ -36,6 +36,316 @@ import {
     peso,
 } from "./_shared";
 
+// Download PDF and Excel directly. Kept in this component to avoid adding another project file.
+/**
+ * Manager-only, browser-based file downloads. No print dialog, pop-up window,
+ * added dependencies, booking API calls, or changes to financial calculations.
+ */
+export type ManagerBookingExportContext = {
+    storeName: string;
+    storeId: string;
+    branchName: string;
+    branchId: string;
+    exportedAt: Date;
+    selected: boolean;
+};
+
+function safeFilename(value: unknown) {
+    return String(value ?? "").replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 90) || "booking";
+}
+
+function filename(context: ManagerBookingExportContext, rows: Booking[]) {
+    const prefix = context.selected && rows.length === 1
+        ? `StockNBook_Booking_${safeFilename(rows[0].bookingReference || rows[0].id)}`
+        : "StockNBook_Manager_Booking_List";
+    return `${prefix}_${context.exportedAt.toISOString().slice(0, 10)}`;
+}
+
+function downloadBlob(blob: Blob, downloadName: string) {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = downloadName;
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    // Revoking immediately can cancel downloads in some browsers.
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function money(value: number) {
+    return `PHP ${value.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// Excel XLSX (not CSV): a single-sheet Open XML workbook, packaged with an
+// uncompressed ZIP writer so no external XLSX library is required.
+const encoder = new TextEncoder();
+function xml(value: unknown) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&apos;")
+        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
+}
+function colName(index: number) {
+    let n = index + 1, name = "";
+    while (n > 0) { n--; name = String.fromCharCode(65 + n % 26) + name; n = Math.floor(n / 26); }
+    return name;
+}
+function xlsxCell(value: string | number, row: number, column: number) {
+    const address = `${colName(column)}${row}`;
+    if (typeof value === "number" && Number.isFinite(value)) {
+        return `<c r="${address}"><v>${value}</v></c>`;
+    }
+    // Inline text is never interpreted as an Excel formula, including user inputs.
+    return `<c r="${address}" t="inlineStr"><is><t xml:space="preserve">${xml(value)}</t></is></c>`;
+}
+function xlsxRows(rows: Array<Array<string | number>>) {
+    return rows.map((cells, index) => {
+        const rowNumber = index + 1;
+        return `<row r="${rowNumber}">${cells.map((cell, j) => xlsxCell(cell, rowNumber, j)).join("")}</row>`;
+    }).join("");
+}
+
+const crcTable = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let j = 0; j < 8; j++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+        table[i] = c >>> 0;
+    }
+    return table;
+})();
+function crc32(bytes: Uint8Array) {
+    let crc = 0xFFFFFFFF;
+    for (const byte of bytes) crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+function zipStored(files: Array<[string, string]>): Blob {
+    const local: Uint8Array[] = [];
+    const central: Uint8Array[] = [];
+    let offset = 0;
+    for (const [path, content] of files) {
+        const name = encoder.encode(path);
+        const data = encoder.encode(content);
+        const checksum = crc32(data);
+        const head = new Uint8Array(30 + name.length);
+        const h = new DataView(head.buffer);
+        h.setUint32(0, 0x04034B50, true);
+        h.setUint16(4, 20, true);
+        h.setUint16(8, 0, true); // stored (no compression)
+        h.setUint32(14, checksum, true);
+        h.setUint32(18, data.length, true);
+        h.setUint32(22, data.length, true);
+        h.setUint16(26, name.length, true);
+        head.set(name, 30);
+        local.push(head, data);
+        const record = new Uint8Array(46 + name.length);
+        const r = new DataView(record.buffer);
+        r.setUint32(0, 0x02014B50, true);
+        r.setUint16(4, 20, true);
+        r.setUint16(6, 20, true);
+        r.setUint32(16, checksum, true);
+        r.setUint32(20, data.length, true);
+        r.setUint32(24, data.length, true);
+        r.setUint16(28, name.length, true);
+        r.setUint32(42, offset, true);
+        record.set(name, 46);
+        central.push(record);
+        offset += head.length + data.length;
+    }
+    const centralLength = central.reduce((sum, bytes) => sum + bytes.length, 0);
+    const end = new Uint8Array(22);
+    const v = new DataView(end.buffer);
+    v.setUint32(0, 0x06054B50, true);
+    v.setUint16(8, files.length, true);
+    v.setUint16(10, files.length, true);
+    v.setUint32(12, centralLength, true);
+    v.setUint32(16, offset, true);
+    return new Blob([...local, ...central, end].map(bytes => new Uint8Array(bytes).buffer), { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+}
+
+export function downloadManagerBookingsExcel(bookings: Booking[], context: ManagerBookingExportContext) {
+    const header = [
+        "Store", "Store ID", "Branch", "Branch ID", "Booking Reference", "Customer Name",
+        "Phone", "Email", "Booking Type", "Event Date", "Event Time", "Event Type",
+        "Theme", "Venue", "Booking Status", "Payment Status", "Agreed Price (PHP)",
+        "Required Down Payment (PHP)", "Amount Paid (PHP)", "Remaining Balance (PHP)",
+        "Custom Request", "Notes",
+    ];
+    const data: Array<Array<string | number>> = bookings.map(b => [
+        context.storeName, context.storeId, getBranchGroupName(b) === "Unassigned Branch" ? context.branchName : getBranchGroupName(b),
+        String(b.branchId ?? b.branch_id ?? context.branchId), b.bookingReference || `#${b.id}`,
+        b.name || "", b.phone || "", b.email || "", getManagerBookingTypeLabel(b), dateKey(b.date),
+        b.eventTime || b.event_time || "", b.eventType || b.event_type || "", b.theme || "",
+        b.venue || "", getManagerBookingStatusLabel(b.status), getManagerPaymentLabel(b),
+        getTotalPrice(b), getRequiredDownPayment(b), getAmountPaid(b), getBalance(b),
+        b.customOrder || b.custom_order || "", b.notes || "",
+    ]);
+    const rows: Array<Array<string | number>> = [
+        ["StockNBook — Manager Booking Export"],
+        [`Store: ${context.storeName} (ID: ${context.storeId})`],
+        [`Branch: ${context.branchName} (ID: ${context.branchId})`],
+        [`Generated: ${context.exportedAt.toLocaleString("en-PH")}`],
+        [`Records exported: ${bookings.length}`], header, ...data,
+    ];
+    const last = Math.max(rows.length, 6);
+    const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
+        `<dimension ref="A1:V${last}"/><sheetViews><sheetView workbookViewId="0">` +
+        `<pane ySplit="6" topLeftCell="A7" activePane="bottomLeft" state="frozen"/>` +
+        `</sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/>` +
+        `<cols>${header.map((_, i) => `<col min="${i + 1}" max="${i + 1}" width="${i === 5 || i === 20 || i === 21 ? 28 : 19}" customWidth="1"/>`).join("")}</cols>` +
+        `<sheetData>${xlsxRows(rows)}</sheetData>` +
+        `<autoFilter ref="A6:V${last}"/></worksheet>`;
+    const files: Array<[string, string]> = [
+        ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`],
+        ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
+        ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Bookings" sheetId="1" r:id="rId1"/></sheets></workbook>`],
+        ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`],
+        ["xl/worksheets/sheet1.xml", worksheet],
+    ];
+    downloadBlob(zipStored(files), `${filename(context, bookings)}.xlsx`);
+}
+
+// Native A4 landscape PDF download, drawn directly into PDF page streams.
+// This works in browsers without requiring print(), pop-ups, or an extra library.
+const PDF_W = 842;
+const PDF_H = 595;
+function pdfSafe(value: unknown) {
+    return String(value ?? "").normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "").replace(/₱/g, "PHP ")
+        .replace(/[—–]/g, "-").replace(/[“”]/g, '"').replace(/[‘’]/g, "'")
+        .replace(/[^\x20-\x7e]/g, "?").replace(/[\\()]/g, match => `\\${match}`);
+}
+function pdfText(value: unknown, x: number, y: number, size = 9, bold = false) {
+    return `BT /${bold ? "F2" : "F1"} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfSafe(value)}) Tj ET\n`;
+}
+function shortText(value: unknown, max: number) {
+    const raw = String(value ?? "");
+    return raw.length <= max ? raw : raw.slice(0, Math.max(0, max - 3)) + "...";
+}
+function pageLine(x1: number, y1: number, x2: number, y2: number) {
+    return `0.86 0.83 0.9 RG 0.5 w ${x1} ${y1} m ${x2} ${y2} l S\n`;
+}
+function renderPdfPages(rows: Booking[], context: ManagerBookingExportContext) {
+    const pages: string[][] = [];
+    let commands: string[] = [];
+    let y = 0;
+    const heading = context.selected ? "Selected Booking Details" : "Manager Booking List";
+    function startPage() {
+        commands = [];
+        pages.push(commands);
+        commands.push("0.17 0.10 0.29 rg\n");
+        commands.push(pdfText(`StockNBook  |  ${heading}`, 38, PDF_H - 43, 17, true));
+        commands.push(pdfText(`Store: ${context.storeName}   (ID: ${context.storeId})`, 38, PDF_H - 65, 10));
+        commands.push(pdfText(`Branch: ${context.branchName}   (ID: ${context.branchId})`, 38, PDF_H - 80, 10));
+        commands.push(pdfText(`Generated: ${context.exportedAt.toLocaleString("en-PH")}   |   ${rows.length} record(s)`, 38, PDF_H - 95, 9));
+        commands.push(pageLine(38, PDF_H - 106, PDF_W - 38, PDF_H - 106));
+        y = PDF_H - 124;
+    }
+    function ensureSpace(height: number) {
+        if (y - height < 47) startPage();
+    }
+    function field(label: string, value: unknown) {
+        const text = String(value ?? "-") || "-";
+        const maxChars = 112;
+        const chunks = text.match(/.{1,112}/g) || ["-"];
+        ensureSpace(17 * chunks.length + 4);
+        commands.push(pdfText(label, 43, y, 9, true));
+        chunks.forEach((part, i) => {
+            commands.push(pdfText(part, 205, y - i * 15, 9));
+        });
+        y -= chunks.length * 17 + 4;
+    }
+    startPage();
+    if (context.selected && rows.length === 1) {
+        const b = rows[0];
+        const fields: Array<[string, unknown]> = [
+            ["Booking reference", b.bookingReference || `#${b.id}`],
+            ["Customer name", b.name], ["Phone number", b.phone || "-"],
+            ["Email", b.email || "-"], ["Facebook / Messenger", b.facebookName || b.facebook_name || "-"],
+            ["Booking type", getManagerBookingTypeLabel(b)],
+            ["Booking branch", getBranchGroupName(b) === "Unassigned Branch" ? context.branchName : getBranchGroupName(b)],
+            ["Event date", formatDate(b.date)], ["Event time", b.eventTime || b.event_time || "-"],
+            ["Event type", b.eventType || b.event_type || "-"],
+            ["Theme", b.theme || "-"], ["Venue", b.venue || "-"],
+            ["Booking status", getManagerBookingStatusLabel(b.status)],
+            ["Payment status", getManagerPaymentLabel(b)],
+            ["Agreed price", money(getTotalPrice(b))],
+            ["Required down payment", money(getRequiredDownPayment(b))],
+            ["Amount paid", money(getAmountPaid(b))],
+            ["Remaining balance", money(getBalance(b))],
+            ["Additional custom request", b.customOrder || b.custom_order || "-"],
+            ["Notes", b.notes || "-"],
+        ];
+        for (const [label, value] of fields) field(label, value);
+    } else {
+        const cols = [
+            { label: "Booking reference", x: 38, size: 29 },
+            { label: "Customer", x: 200, size: 21 },
+            { label: "Type", x: 332, size: 10 },
+            { label: "Event date", x: 395, size: 12 },
+            { label: "Status", x: 487, size: 19 },
+            { label: "Agreed (PHP)", x: 604, size: 14 },
+            { label: "Paid (PHP)", x: 694, size: 15 },
+        ];
+        function drawHeader() {
+            ensureSpace(22);
+            commands.push("0.34 0.23 0.5 rg\n");
+            cols.forEach(c => commands.push(pdfText(c.label, c.x, y, 8, true)));
+            y -= 7;
+            commands.push(pageLine(38, y, PDF_W - 38, y));
+            commands.push("0.17 0.10 0.29 rg\n");
+            y -= 17;
+        }
+        drawHeader();
+        rows.forEach((b, index) => {
+            if (y < 54) { startPage(); drawHeader(); }
+            const values = [
+                b.bookingReference || `#${b.id}`, b.name, getManagerBookingTypeLabel(b),
+                formatDate(b.date), getManagerBookingStatusLabel(b.status),
+                money(getTotalPrice(b)).replace("PHP ", ""), money(getAmountPaid(b)).replace("PHP ", ""),
+            ];
+            values.forEach((v, i) => commands.push(pdfText(shortText(v, cols[i].size), cols[i].x, y, 8)));
+            y -= 19;
+            if (index % 2 === 0) commands.push(pageLine(38, y + 7, PDF_W - 38, y + 7));
+        });
+    }
+    pages.forEach((page, index) => {
+        page.push("0.39 0.32 0.48 rg\n");
+        page.push(pdfText(`Page ${index + 1} of ${pages.length}`, PDF_W - 110, 26, 8));
+    });
+    return pages.map(p => p.join(""));
+}
+function pdfBlob(streams: string[]) {
+    const objects: string[] = [];
+    objects.push("<< /Type /Catalog /Pages 2 0 R >>");
+    const pageIds = streams.map((_, i) => `${5 + i * 2} 0 R`).join(" ");
+    objects.push(`<< /Type /Pages /Kids [${pageIds}] /Count ${streams.length} >>`);
+    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
+    streams.forEach((stream, i) => {
+        const streamId = 6 + i * 2;
+        objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PDF_W} ${PDF_H}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${streamId} 0 R >>`);
+        objects.push(`<< /Length ${encoder.encode(stream).length} >>\nstream\n${stream}endstream`);
+    });
+    let raw = "%PDF-1.4\n";
+    const positions = [0];
+    objects.forEach((value, index) => {
+        positions.push(encoder.encode(raw).length);
+        raw += `${index + 1} 0 obj\n${value}\nendobj\n`;
+    });
+    const crossReference = encoder.encode(raw).length;
+    raw += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (const position of positions.slice(1)) raw += `${String(position).padStart(10, "0")} 00000 n \n`;
+    raw += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${crossReference}\n%%EOF\n`;
+    return new Blob([encoder.encode(raw)], { type: "application/pdf" });
+}
+export function downloadManagerBookingsPdf(bookings: Booking[], context: ManagerBookingExportContext) {
+    downloadBlob(pdfBlob(renderPdfPages(bookings, context)), `${filename(context, bookings)}.pdf`);
+}
+
 type BookingInventoryItem = {
     id: number;
     booking_id?: number;
@@ -190,6 +500,7 @@ export default function ManagerBookings() {
 
         if (value === "confirmed") return "Confirmed";
         if (value === "preparing") return "Preparing";
+        if (value === "released") return "Released";
         if (value === "completed") return "Completed";
         if (value === "cancelled" || value === "canceled") return "Cancelled";
 
@@ -299,22 +610,37 @@ export default function ManagerBookings() {
         if (!booking) return false;
 
         const cleanStatus = normalizeStatus(newStatus);
+        const oldStatus = normalizeStatus(booking.status);
+        if (cleanStatus !== "Cancelled" &&
+            !(oldStatus === "Pending Review" && cleanStatus === "Awaiting Down Payment") &&
+            !(oldStatus === "Awaiting Down Payment" && cleanStatus === "Confirmed")) {
+            setBookingActionError("Only Staff may advance preparation, release and completion. Managers approve and confirm bookings.");
+            return false;
+        }
+        if (cleanStatus === "Confirmed") {
+            const needed = getRequiredDownPayment(booking) > 0 ? getRequiredDownPayment(booking) : getTotalPrice(booking);
+            if (getTotalPrice(booking) <= 0 || getAmountPaid(booking) + 0.005 < needed) {
+                setBookingActionError("Verify the required down payment (or full price when no down payment is required) before confirming.");
+                return false;
+            }
+        }
 
         // Allow cancel anytime except completed/cancelled
         if (cleanStatus === "Cancelled") {
             const currentStatus = normalizeStatus(booking.status);
 
-            if (["Completed", "Cancelled"].includes(currentStatus)) {
+            if (["Released", "Completed", "Cancelled"].includes(currentStatus)) {
                 console.warn("Cannot cancel completed or already cancelled booking.");
                 return false;
             }
         } else {
             const { nextStatus } = getNextStatusConfig(
                 normalizeStatus(booking.status),
-                getAmountPaid(booking) >= getRequiredDownPayment(booking)
+                getTotalPrice(booking) > 0 && getAmountPaid(booking) + 0.005 >=
+                (getRequiredDownPayment(booking) > 0 ? getRequiredDownPayment(booking) : getTotalPrice(booking))
             );
 
-            if (cleanStatus !== nextStatus && !(cleanStatus === "Confirmed" && normalizeStatus(booking.status) === "Pending Review" && getRequiredDownPayment(booking) === 0)) {
+            if (cleanStatus !== nextStatus) {
                 console.warn(`Cannot jump to ${cleanStatus}. Next valid status is ${nextStatus}`);
                 return false;
             }
@@ -331,11 +657,6 @@ export default function ManagerBookings() {
             };
 
             if (branchId) body.branch_id = Number(branchId);
-            if (cleanStatus === "Confirmed" && normalizeStatus(booking.status) === "Pending Review") {
-                const reason = window.prompt("No down payment is required. Enter a Manager approval reason (at least 10 characters):");
-                if (!reason || reason.trim().length < 10) return false;
-                body.noDpReason = reason.trim();
-            }
             if (price !== undefined) body.agreed_price = price;
             if (usedItems) body.used_items = usedItems;
 
@@ -459,7 +780,8 @@ export default function ManagerBookings() {
     async function updateCustomPaymentTerms(
         booking: Booking,
         agreedPrice: number,
-        requiredDownPayment: number
+        requiredDownPayment: number,
+        refundableDeposit: number
     ) {
         const latest = bookings.find(b => b.id === booking.id) ?? booking;
         if (normalizeStatus(latest.status) !== "Pending Review" || latest.approvalStatus === "approved") {
@@ -474,6 +796,9 @@ export default function ManagerBookings() {
                 booking_id: booking.id,
                 agreed_price: agreedPrice,
                 required_down_payment: requiredDownPayment,
+                // Requires the backend update_price action to persist this value atomically
+                // for the selected booking; it must not overwrite the branch-wide policy.
+                refundable_deposit: refundableDeposit,
             };
 
             if (branchId) body.branch_id = Number(branchId);
@@ -489,12 +814,27 @@ export default function ManagerBookings() {
 
             const data = await res.json();
 
-            if (!res.ok || data.success === false) {
+            if (!res.ok || data.success === false || data.error) {
                 throw new Error(
                     data.message ||
                     data.error ||
                     "Failed to update custom payment terms."
                 );
+            }
+
+            // Do not claim success when an older API silently ignores refundable_deposit.
+            // The statement reads the persisted booking deposit independently of the quote.
+            const verificationResponse = await fetch("/api/bookings", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ action: "get_booking_financial_statement", booking_id: booking.id,
+                    ...(branchId ? { branch_id: Number(branchId) } : {}) }),
+            });
+            const verification = await verificationResponse.json();
+            const savedDeposit = verification.statement?.depositRequired;
+            if (!verificationResponse.ok || verification.error || savedDeposit == null ||
+                !Number.isFinite(Number(savedDeposit)) || Math.abs(Number(savedDeposit) - refundableDeposit) > 0.005) {
+                throw new Error("Security deposit was not verified as saved. The booking API must persist refundable_deposit per booking in update_price, then return it as depositRequired in the financial statement. The price or DP may have saved; refresh and verify before approving.");
             }
 
             const currentPaid = getAmountPaid(booking);
@@ -514,6 +854,8 @@ export default function ManagerBookings() {
                 agreedPrice: agreedPrice,
                 required_down_payment: requiredDownPayment,
                 requiredDownPayment: requiredDownPayment,
+                refundable_deposit: refundableDeposit,
+                refundableDeposit: refundableDeposit,
                 balance: newBalance,
                 payment_status: newPaymentStatus,
                 paymentStatus: newPaymentStatus,
@@ -529,16 +871,13 @@ export default function ManagerBookings() {
 
     async function handlePriceConfirm(
         agreedPrice: number,
-        requiredDownPayment: number
+        requiredDownPayment: number,
+        refundableDeposit: number
     ) {
         if (!priceModal) return;
-
-        try {
-            await updateCustomPaymentTerms(priceModal, agreedPrice, requiredDownPayment);
-            setPriceModal(null);
-        } catch {
-            // Keep the editor open and display the error above the booking list.
-        }
+        // Let PriceModal show any API/persistence error without closing the editor.
+        await updateCustomPaymentTerms(priceModal, agreedPrice, requiredDownPayment, refundableDeposit);
+        setPriceModal(null);
     }
 
     // Persist the ACTUAL amount received rather than silently assigning the
@@ -645,39 +984,32 @@ export default function ManagerBookings() {
     }, {} as Record<string, number>);
 
     const bookingTypes = ["Custom", "Package"] as const;
-    const approvalsPending = bookings.filter(b => b.approvalStatus === "pending" && normalizeStatus(b.status) === "Pending Review").length;
 
-    // Workbook-compatible UTF-8 CSV. Prefix formula-like values so customer data
-    // can never run as a spreadsheet formula when opened in Excel.
-    function csvField(value: unknown) {
-        const raw = String(value ?? "");
-        const safe = /^[\s]*[=+@-]/.test(raw) ? `'${raw}` : raw;
-        return `"${safe.replace(/"/g, '""')}"`;
-    }
-    function exportExcel(rows: Booking[], filename: string) {
-        const columns = ["Booking Reference", "Customer", "Booking Type", "Schedule", "Time", "Status", "Payment Status", "Agreed Price", "Required Down Payment", "Amount Paid", "Balance", "Event Type", "Contact Number", "Email", "Notes", "Additional Custom Request"];
-        const cells = rows.map(b => [b.bookingReference || String(b.id), b.name, getManagerBookingTypeLabel(b), dateKey(b.date), b.eventTime || "", getManagerBookingStatusLabel(b.status), getManagerPaymentLabel(b), getTotalPrice(b), getRequiredDownPayment(b), getAmountPaid(b), getBalance(b), b.eventType || "", b.phone || "", b.email || "", b.notes || "", b.customOrder || b.custom_order || ""]);
-        const csv = "\uFEFF" + [columns, ...cells].map(row => row.map(csvField).join(",")).join("\r\n");
-        const url = URL.createObjectURL(new Blob([csv], {type: "text/csv;charset=utf-8;"}));
-        const a = document.createElement("a"); a.href = url; a.download = `${filename}.csv`; a.click();
-        URL.revokeObjectURL(url);
-    }
-    function exportPDF(rows: Booking[], title: string) {
-        const htmlEscape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, symbol => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[symbol] || symbol));
-        const popup = window.open("", "_blank");
-        if (!popup) { setBookingActionError("Allow pop-ups to open the printable PDF export."); return; }
-        const tableRows = rows.map(b => `<tr><td>${htmlEscape(b.bookingReference || b.id)}</td><td>${htmlEscape(b.name)}</td><td>${htmlEscape(getManagerBookingTypeLabel(b))}</td><td>${htmlEscape(formatDate(b.date))}</td><td>${htmlEscape(getManagerBookingStatusLabel(b.status))}</td><td>${htmlEscape(peso(getAmountPaid(b)))}</td><td>${htmlEscape(peso(getBalance(b)))}</td></tr>`).join("");
-        const selected = title === "Selected Booking" && rows.length === 1 ? rows[0] : null;
-        const extra = selected ? `<div style="margin-bottom:18px;font-size:12px;line-height:1.6"><p><b>Contact:</b> ${htmlEscape(selected.phone || "—")} &nbsp;&nbsp; <b>Email:</b> ${htmlEscape(selected.email || "—")}</p><p><b>Agreed Price:</b> ${htmlEscape(peso(getTotalPrice(selected)))} &nbsp;&nbsp; <b>Required DP:</b> ${htmlEscape(peso(getRequiredDownPayment(selected)))}</p><p><b>Event:</b> ${htmlEscape(selected.eventType || selected.event_type || "—")}</p><p><b>Notes:</b> ${htmlEscape(selected.notes || "—")}</p><p><b>Additional Custom Request:</b> ${htmlEscape(selected.customOrder || selected.custom_order || "—")}</p></div>` : "";
-        popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(title)}</title><style>body{font-family:Arial,sans-serif;color:#261940;padding:24px}h1{font-size:20px}p{font-size:12px;color:#6c6181}table{width:100%;border-collapse:collapse;font-size:11px}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background:#f2ecfc}@page{size:landscape;margin:12mm}</style></head><body><h1>${htmlEscape(title)}</h1><p>StockNBook · ${htmlEscape(branchName)} · ${new Date().toLocaleDateString("en-PH")}</p>${extra}<table><thead><tr><th>Booking Ref</th><th>Customer</th><th>Type</th><th>Event Date</th><th>Status</th><th>Paid</th><th>Balance</th></tr></thead><tbody>${tableRows}</tbody></table></body></html>`);
-        popup.document.close();
-        popup.focus();
-        popup.print();
-    }
+    // Direct PDF / Excel (.xlsx) download. Never opens a print window.
     function exportBookings(rows: Booking[], fileType: "pdf" | "excel", selected = false) {
-        const filename = selected ? `StockNBook_Booking_${rows[0]?.bookingReference || rows[0]?.id || "selected"}` : "StockNBook_Manager_Bookings";
-        if (fileType === "excel") exportExcel(rows, filename);
-        else exportPDF(rows, selected ? "Selected Booking" : "Manager Booking List");
+        const savedStoreId = getStoreId() || "Not available";
+        const savedBranchId = getBranchId() || "Not available";
+        const savedStoreName = [
+            sessionStorage.getItem("store_name"),
+            sessionStorage.getItem("stocknbook_store_name"),
+            sessionStorage.getItem("business_name"),
+            sessionStorage.getItem("storeName"),
+        ].find(value => Boolean(value?.trim())) || `Store ${savedStoreId}`;
+        const context: ManagerBookingExportContext = {
+            storeName: savedStoreName,
+            storeId: savedStoreId,
+            branchName,
+            branchId: savedBranchId,
+            exportedAt: new Date(),
+            selected,
+        };
+        try {
+            if (fileType === "pdf") downloadManagerBookingsPdf(rows, context);
+            else downloadManagerBookingsExcel(rows, context);
+            showBookingToast("success", "Booking export downloaded", `${rows.length} booking(s) exported as ${fileType === "pdf" ? "PDF" : "Excel"}.`);
+        } catch (err) {
+            setBookingActionError(err instanceof Error ? err.message : "Unable to download booking export.");
+        }
     }
     function clearFilters() {
         setSearch(""); setFilter("All"); setApprovalOnly(false);
@@ -727,18 +1059,33 @@ export default function ManagerBookings() {
             </header>
 
             <section className="px-4 py-4 sm:px-6">
-                <div className="mb-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                {/* Four booking totals — match Manager Dashboard's white metric cards. */}
+                <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     {([
-                        {status: "Pending Review" as FilterType, title:"Pending Review", sub:"Requests to review", icon:<ClipboardCheck size={25}/>, bg:"bg-[#FFF9EE] border-[#F5E4BE]", ibg:"bg-[#FFF0D6] text-[#BA7608]"},
-                        {status: "Awaiting Down Payment" as FilterType, title:"Approved", sub:"Approved, awaiting down payment", icon:<Wallet size={25}/>, bg:"bg-[#F9F6FF] border-[#E8DCFF]", ibg:"bg-[#ECE2FF] text-[#6135C6]"},
-                        {status: "Confirmed" as FilterType, title:"Confirmed", sub:"Secured bookings", icon:<BadgeCheck size={25}/>, bg:"bg-[#EEFCF6] border-[#D2F1E0]", ibg:"bg-[#D8FAE8] text-[#15904E]"},
-                        {status: "Preparing" as FilterType, title:"Preparing", sub:"Items being prepared", icon:<PackageCheck size={25}/>, bg:"bg-[#F0F6FF] border-[#D4E4FF]", ibg:"bg-[#DBE9FF] text-[#276BD3]"},
-                    ]).map(m => <button type="button" key={m.status} onClick={() => {setFilter(m.status);setApprovalOnly(false);}}
-                                        className={`flex min-h-[114px] items-center gap-3 rounded-2xl border p-4 text-left shadow-sm transition hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#6536D4] ${m.bg} ${filter === m.status && !approvalOnly ? "ring-2 ring-[#6A3FE1] ring-offset-1" : ""}`}>
-                        <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${m.ibg}`}>{m.icon}</span>
-                        <span className="min-w-0 flex-1"><span className="block text-xs font-semibold text-[#2D1D52]">{m.title}</span><strong className="mt-1 block text-2xl text-[#241347]">{counts[m.status]}</strong><span className="mt-1 block text-[11px] text-[#82729C]">{m.sub}</span></span>
-                        <span aria-hidden="true" className="text-xl text-[#6742A2]">›</span>
-                    </button>)}
+                        { status: "Pending Review" as FilterType, title: "Pending Review", sub: "Requests to review", icon: <ClipboardCheck size={24} />, iconStyle: "bg-[#FFF0E5] text-[#E66B20]" },
+                        { status: "Awaiting Down Payment" as FilterType, title: "Approved", sub: "Approved, awaiting down payment", icon: <Wallet size={24} />, iconStyle: "bg-[#F1EBFF] text-[#6D35D4]" },
+                        { status: "Confirmed" as FilterType, title: "Confirmed", sub: "Secured bookings", icon: <BadgeCheck size={24} />, iconStyle: "bg-[#E6F7EE] text-[#159455]" },
+                        { status: "Preparing" as FilterType, title: "Preparing", sub: "Items being prepared", icon: <PackageCheck size={24} />, iconStyle: "bg-[#EAF1FF] text-[#2563EB]" },
+                    ]).map((metric) => (
+                        <button
+                            type="button"
+                            key={metric.status}
+                            onClick={() => { setFilter(metric.status); setApprovalOnly(false); }}
+                            aria-pressed={filter === metric.status && !approvalOnly}
+                            className={`flex min-h-[116px] w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm transition hover:border-[#D7C9E3] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#D9C6F5] ${filter === metric.status && !approvalOnly ? "border-[#A68BCB] ring-1 ring-[#D9C6F5]" : ""}`}
+                        >
+                            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${metric.iconStyle}`}>
+                                {metric.icon}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{metric.title}</span>
+                                <span className="mt-1 block text-[28px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
+                                    {counts[metric.status].toLocaleString("en-PH")}
+                                </span>
+                                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{metric.sub}</span>
+                            </span>
+                        </button>
+                    ))}
                 </div>
 
                 {loading && bookings.length === 0 ? <ModuleSkeleton variant="bookings" /> :
@@ -747,14 +1094,13 @@ export default function ManagerBookings() {
                         listToolbar={<div className="space-y-3 pb-3">
                             <div className="flex items-center justify-between gap-2">
                                 <div className="flex flex-wrap items-center gap-2">
-                                    <h2 className="text-lg font-bold text-[#25143F]">Booking List <span className="ml-1 text-sm font-medium text-[#663BC6]">({filtered.length})</span></h2>
-                                    <button type="button" onClick={() => {setApprovalOnly(v=>!v);setFilter("All");}} className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${approvalOnly ? "bg-amber-100 text-amber-900 ring-1 ring-amber-300" : "bg-[#F6F1FF] text-[#5F3DB1] hover:bg-[#EDE3FF]"}`}>Manager Approval ({approvalsPending})</button>
+                                    <h2 className="text-lg font-bold text-[#25143F]">Booking List</h2>
                                 </div>
                                 <div className="relative shrink-0">
                                     <button type="button" aria-label="Export booking list" title="Export booking list" onClick={() => setListExportOpen(v => !v)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D9C9EB] text-[#43217A] hover:bg-[#F3EEFF]"><Download size={17}/></button>
                                     {listExportOpen && <div className="absolute right-0 top-10 z-30 w-40 rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-xl">
-                                        <button type="button" onClick={() => {exportBookings(filtered,"pdf");setListExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">PDF (Print)</button>
-                                        <button type="button" onClick={() => {exportBookings(filtered,"excel");setListExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Excel (CSV)</button>
+                                        <button type="button" onClick={() => {exportBookings(filtered,"pdf");setListExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download PDF</button>
+                                        <button type="button" onClick={() => {exportBookings(filtered,"excel");setListExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download Excel (.xlsx)</button>
                                     </div>}
                                 </div>
                             </div>
@@ -786,7 +1132,7 @@ export default function ManagerBookings() {
                         onExportSelected={(b,type)=>exportBookings([b],type,true)}
                         onUpdateStatus={canManage ? (id, status, price) => {
                             const booking = bookings.find(item => item.id === id);
-                            if (status === "Awaiting Down Payment" && booking && normalizeStatus(booking.status) === "Pending Review" && getRequiredDownPayment(booking) > 0) {
+                            if (status === "Awaiting Down Payment" && booking && normalizeStatus(booking.status) === "Pending Review") {
                                 setApprovalError("");
                                 setApprovalModal(booking);
                                 return;
@@ -904,13 +1250,58 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
 }) {
     const [agreed, setAgreed] = useState(false);
     const [validation, setValidation] = useState("");
+    const [depositRequired, setDepositRequired] = useState<number | null>(null);
+    const [depositError, setDepositError] = useState("");
+    const [hasRental, setHasRental] = useState<boolean | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        void (async () => {
+            try {
+                const token = sessionStorage.getItem("token");
+                if (!token) throw new Error("Login required.");
+                const response = await fetch("/api/bookings", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ action: "get_booking_financial_statement", booking_id: booking.id,
+                        branch_id: Number(booking.branchId || booking.branch_id) || undefined }),
+                });
+                const itemsResponse = await fetch("/api/bookings", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ action: "get_booking_items", booking_id: booking.id,
+                        branch_id: Number(booking.branchId || booking.branch_id) || undefined }),
+                });
+                const [data, itemsData] = await Promise.all([response.json(), itemsResponse.json()]);
+                const deposit = Number(data.statement?.depositRequired);
+                if (!response.ok || data.error || data.statement?.depositRequired == null || !Number.isFinite(deposit) ||
+                    !itemsResponse.ok || itemsData.error || !Array.isArray(itemsData.rentalItems) ||
+                    !Array.isArray(data.statement?.rentalItems))
+                    throw new Error(data.error || itemsData.error || "Security deposit or rental items are unavailable.");
+                if (!cancelled) {
+                    setDepositRequired(Math.max(0, deposit));
+                    setHasRental(itemsData.rentalItems.length > 0 || data.statement.rentalItems.length > 0);
+                }
+            } catch (error) {
+                if (!cancelled) setDepositError(error instanceof Error ? error.message : "Unable to read deposit terms.");
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [booking.id, booking.branchId, booking.branch_id]);
     function submit() {
+        if (depositRequired === null) {
+            setValidation("Load the refundable security deposit before approving the quotation.");
+            return;
+        }
+        if (hasRental === null || (hasRental && depositRequired <= 0)) {
+            setValidation("Rental bookings require a refundable security deposit greater than ₱0.00. Set it in Custom Payment Terms before approval.");
+            return;
+        }
         if (!agreed) {
             setValidation("Confirm that the manager and customer agreed on the payment terms.");
             return;
         }
-        if (getTotalPrice(booking) <= 0 || getRequiredDownPayment(booking) <= 0) {
-            setValidation("Set an agreed price and required down payment before approving.");
+        if (getTotalPrice(booking) <= 0 || getRequiredDownPayment(booking) > getTotalPrice(booking)) {
+            setValidation("Set a valid agreed price and a down payment no greater than the booking price before approving.");
             return;
         }
         setValidation("");
@@ -928,16 +1319,19 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
             <div className="mt-4 space-y-2 rounded-xl border border-[#EAE0F4] bg-[#FCFAFF] p-3 text-sm">
                 <div className="flex justify-between gap-3"><span>Final Agreed Price</span><strong>{peso(getTotalPrice(booking))}</strong></div>
                 <div className="flex justify-between gap-3"><span>Required Down Payment</span><strong>{peso(getRequiredDownPayment(booking))}</strong></div>
+                <div className="flex justify-between gap-3"><span>Refundable Security Deposit</span><strong>{depositRequired === null ? "Loading…" : peso(depositRequired)}</strong></div>
+                {hasRental && depositRequired === 0 && <p role="alert" className="text-xs text-red-600">Rental items require a refundable security deposit greater than ₱0.00 before approval.</p>}
+                {depositError && <p role="alert" className="text-xs text-red-600">{depositError}</p>}
             </div>
             <label className="mt-4 flex items-start gap-2 text-xs leading-5 text-[#4F4162]">
                 <input type="checkbox" checked={agreed} onChange={e=>{setAgreed(e.target.checked);setValidation("");}} disabled={busy} className="mt-1 accent-[#673DC8]"/>
-                <span>I confirm that the manager and customer agreed to the final price and required down payment.</span>
+                <span>I confirm that the customer agrees to the final booking price, required down payment, and separate refundable security deposit.</span>
             </label>
             <p className="mt-3 text-xs leading-5 text-[#816E93]">Approved bookings are not yet inventory reservations. Price and down payment are locked after approval.</p>
             {(validation || error) && <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{validation || error}</p>}
             <div className="mt-5 flex justify-end gap-2">
                 <button type="button" disabled={busy} onClick={onClose} className="rounded-xl border border-[#E2D6EF] px-4 py-2.5 text-sm font-semibold text-[#47246E]">Back</button>
-                <button type="button" disabled={busy || !agreed} onClick={submit} className="rounded-xl bg-[#432078] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Approving..." : "Approve Booking"}</button>
+                <button type="button" disabled={busy || !agreed || depositRequired === null || hasRental === null || (hasRental && depositRequired <= 0)} onClick={submit} className="rounded-xl bg-[#432078] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Approving..." : "Approve Booking"}</button>
             </div>
         </div>
     </div>;

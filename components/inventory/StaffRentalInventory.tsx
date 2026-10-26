@@ -48,23 +48,23 @@ function taskBucket(a:StaffRentalAllocation,type:TaskType,today:string):Exclude<
 }
 const taskLabel: Record<TaskType, string> = {
     prepare: "Mark Prepared", release: "Release", return: "Receive Return",
-    inspect: "Inspect Return", clean: "Mark Cleaned", damage: "Damage Reported",
+    inspect: "Finalize Recorded Return", clean: "Mark Cleaned", damage: "Damage Reported",
 };
 // Keep operational state separate from the action the Staff will perform next.
 const taskStatusLabel: Partial<Record<TaskType, string>> = {
-    prepare: "Needs Preparation", release: "Prepared", return: "Out on Rental", inspect: "For Inspection",
+    prepare: "Needs Preparation", release: "Prepared", return: "Out on Rental", inspect: "Previous Return Pending",
 };
 // These are transaction stages, not editable equipment statuses. Only the next valid
 // operation is shown; the backend validates every transition and stock quantity.
-const workflowStages = ["Prepare", "Release", "Receive Return", "Inspect", "Equipment care if needed"] as const;
+const workflowStages = ["Prepare", "Release", "Receive Return", "Equipment care if needed"] as const;
 const stageForTask: Record<Exclude<TaskType, "damage">, number> = {
-    prepare: 0, release: 1, return: 2, inspect: 3, clean: 4,
+    prepare: 0, release: 1, return: 2, inspect: 2, clean: 3,
 };
 const taskHelp: Record<TaskType, string> = {
     prepare: "Confirm equipment has been checked and gathered for this booking. This does not mark it as rented out.",
     release: "Confirm physical handover to the customer. Only then will Out on Rental increase.",
-    return: "Count what the customer physically returned. Returned units stay on hold until inspection.",
-    inspect: "Record how many units are good, need cleaning, or are damaged. Good units return to Available.",
+    return: "Record missing or damaged units; verify routine care, or defer condition checking until later.",
+    inspect: "One-time closeout of a previously recorded return; reuses the original damaged quantity and notes without entering them again.",
     clean: "Finish the cleaning task in Equipment Care & Maintenance. Cleaned units return to Available; damaged units stay on hold.",
     damage: "Damaged equipment remains on hold. The Manager must authorize significant repairs and safe release.",
 };
@@ -125,6 +125,8 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const [selectedQueueReference,setSelectedQueueReference]=React.useState<string|null>(null);
     const [bookingOperation,setBookingOperation]=React.useState<"release"|"return"|null>(null);
     const [bookingReturnMissing,setBookingReturnMissing]=React.useState<Record<number,string>>({});
+    const [bookingReturnDamaged,setBookingReturnDamaged]=React.useState<Record<number,string>>({});
+    const [returnConditionChecked,setReturnConditionChecked]=React.useState(false);
     const [bookingOperationNotes,setBookingOperationNotes]=React.useState("");
     const [bookingOperationError,setBookingOperationError]=React.useState("");
     const [careFilter,setCareFilter]=React.useState<"all" | "cleaning" | "routine" | "repairs">("all");
@@ -137,9 +139,6 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const [scheduleError,setScheduleError]=React.useState("");
     const [scheduleLoading,setScheduleLoading]=React.useState(false);
     const [returnMissing,setReturnMissing]=React.useState("0");
-    const [goodUnits,setGoodUnits]=React.useState("0");
-    const [cleaningUnits,setCleaningUnits]=React.useState("0");
-    const [damagedUnits,setDamagedUnits]=React.useState("0");
     const [notes,setNotes]=React.useState("");
     const [submitError,setSubmitError]=React.useState("");
     const [notice,setNotice]=React.useState("");
@@ -161,7 +160,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const inspectionTasks=allTasks.filter(x=>x.type==="inspect");
     const inspection=inspectionTasks.length;
     const inspectionUnits=inspectionTasks.reduce((sum,x)=>sum+(x.item.returnedReceivedUnits??x.item.quantity),0);
-    // The booking queue stops after inspection. Cleaning is an equipment-care
+    // The booking queue stops after return checks. Cleaning is an equipment-care
     // task, using the SAME allocation and clean_rental_allocation API action.
     // Do not create a second maintenance record for the same returned units.
     const careTasks=React.useMemo(()=>[
@@ -276,6 +275,8 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         if(!selectedQueueBooking)return;
         setBookingOperation(kind);setBookingOperationError("");setBookingOperationNotes("");
         setBookingReturnMissing(Object.fromEntries(selectedQueueBooking.tasks.map(x=>[x.item.allocationId,"0"])));
+        setBookingReturnDamaged(Object.fromEntries(selectedQueueBooking.tasks.map(x=>[x.item.allocationId,"0"])));
+        setReturnConditionChecked(false);
     };
     const performBookingOperation=async()=>{
         if(!selectedQueueBooking||!bookingOperation||rental.saving)return;
@@ -288,18 +289,26 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
             } else {
                 if(!queueAllOut||!canOperate)throw new Error("The booking must be fully out on rental before receiving all items.");
                 const returns=selectedQueueBooking.tasks.map(x=>({
-                    allocationId:x.item.allocationId,missingUnits:Number(bookingReturnMissing[x.item.allocationId]??"")
+                    allocationId:x.item.allocationId,
+                    missingUnits:Number(bookingReturnMissing[x.item.allocationId]??""),
+                    // Confirmed immediately when Staff finishes the condition check; otherwise deferred.
+                    damagedUnitsObserved:Number(bookingReturnDamaged[x.item.allocationId]??"")
                 }));
                 if(returns.some((line,i)=>{
-                    const raw=bookingReturnMissing[line.allocationId];
-                    return raw==null||raw.trim()===""||!Number.isSafeInteger(line.missingUnits)||
-                        line.missingUnits<0||line.missingUnits>selectedQueueBooking.tasks[i].item.quantity;
-                }))throw new Error("Enter a valid missing quantity (0 allowed) for every equipment line.");
-                if(returns.some(x=>x.missingUnits>0)&&bookingOperationNotes.trim().length<5)
-                    throw new Error("Explain missing or unreturned equipment (at least five characters).");
+                    const missingRaw=bookingReturnMissing[line.allocationId];
+                    const damagedRaw=bookingReturnDamaged[line.allocationId];
+                    return missingRaw==null||missingRaw.trim()===""||damagedRaw==null||damagedRaw.trim()===""||
+                        !Number.isSafeInteger(line.missingUnits)||!Number.isSafeInteger(line.damagedUnitsObserved)||
+                        line.missingUnits<0||line.damagedUnitsObserved<0||
+                        line.missingUnits+line.damagedUnitsObserved>selectedQueueBooking.tasks[i].item.quantity;
+                }))throw new Error("Enter valid missing and observed damaged quantities; together they cannot exceed the booked quantity.");
+                if(returns.some(x=>x.missingUnits>0||x.damagedUnitsObserved>0)&&bookingOperationNotes.trim().length<5)
+                    throw new Error("Describe missing or damaged equipment (at least five characters).");
+                if(!returnConditionChecked)
+                    throw new Error("Confirm you checked the returned units and completed necessary routine care before recording the return.");
                 await rental.actBooking({action:"return_rental_booking",bookingReference:selectedQueueBooking.reference,
-                    returns,notes:bookingOperationNotes.trim()});
-                setNotice(`Rental return recorded for ${selectedQueueBooking.reference}. Received items now await inspection.`);
+                    returns,notes:bookingOperationNotes.trim(),conditionChecked:true,inspectionDeferred:false});
+                setNotice(`Rental return and condition check recorded for ${selectedQueueBooking.reference}. Damaged units were sent for Manager review.`);
             }
             setBookingOperation(null);setBookingOperationNotes("");
         } catch(error) {
@@ -312,8 +321,27 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const openRentalAction=(item:StaffRentalAllocation)=>{
         if(taskType(item)==="release"||taskType(item)==="return")return;
         setSelected(item);setSubmitError("");setReturnMissing("0");
-        setGoodUnits(String(item.returnedReceivedUnits??item.quantity));
-        setCleaningUnits("0");setDamagedUnits("0");setNotes("");
+        setNotes("");
+    };
+    // Compatibility for returns already awaiting the former second inspection.
+    // The original Staff report is retained; a one-time confirmation releases
+    // only non-damaged units and creates at most one Manager damage case.
+    const finalizeRecordedReturn=async(item:StaffRentalAllocation)=>{
+        if(!canOperate||rental.saving||taskType(item)!=="inspect")return;
+        const received=item.returnedReceivedUnits??item.quantity;
+        const reported=Math.max(0,Number(item.damagedUnits||0));
+        const accepted=window.confirm(
+            `Finish the previously recorded return for ${item.equipmentName}?\n\n`+
+            `Physically returned: ${received}\nRecorded damaged: ${reported}\n\n`+
+            `Confirm you have checked these units, the recorded damage is accurate, and routine care is complete for all other returned units. `+
+            `A Manager will review damaged units. No customer charge is created automatically.`
+        );
+        if(!accepted)return;
+        setSubmitError("");setNotice("");
+        try{
+            await rental.act("inspect_rental_allocation",item.allocationId,{useRecordedReturn:true});
+            setNotice(`Previous return finalized for ${item.bookingReference}. Existing damage notes were retained.`);
+        }catch(error){setNotice("");setSubmitError(error instanceof Error?error.message:"Unable to finalize the previous return.");}
     };
     const reportIssueBeforeRelease=(allocation:StaffRentalAllocation)=>{
         if(!canOperate)return;
@@ -340,17 +368,10 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         }
         setSubmitError("");setNotice("");
         try {
-            if(kind==="inspect"){
-                const values=[goodUnits,cleaningUnits,damagedUnits];
-                const numbers=values.map(Number);
-                const returned=selected.returnedReceivedUnits ?? selected.quantity;
-                if(values.some(v=>v.trim()==="")||numbers.some(n=>!Number.isSafeInteger(n)||n<0)||
-                    numbers.reduce((a,n)=>a+n,0)!==returned)
-                    throw new Error(`Good, cleaning, and damaged quantities must total ${returned} returned units.`);
-                if(numbers[2]>0&&notes.trim().length<5)throw new Error("Describe the damage (at least 5 characters).");
-                await rental.act(apiAction,selected.allocationId,{goodUnits:numbers[0],cleaningUnits:numbers[1],
-                    damagedUnits:numbers[2],notes:notes.trim()});
-            }else await rental.act(apiAction,selected.allocationId,{notes:notes.trim()});
+            // Previously returned equipment is finalized using the recorded return,
+            // not by re-entering damaged counts or notes in a second dialog.
+            if(kind==="inspect")throw new Error("Use Finalize Recorded Return in the booking checklist.");
+            await rental.act(apiAction,selected.allocationId,{notes:notes.trim()});
             setNotice(`${taskLabel[kind]} recorded for ${selected.bookingReference}.`);
             setSelected(null);setNotes("");
         } catch(error) {setSubmitError(error instanceof Error?error.message:"Unable to save rental action.");}
@@ -389,7 +410,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[
             {title:"Ready for Release",num:ready,caption:`${readyTasks.reduce((s,x)=>s+x.item.quantity,0)} units prepared for handover`,icon:<Truck size={19}/>},
             {title:"For Return Today / Overdue",num:forReturn,caption:`${returnTasks.reduce((s,x)=>s+x.item.quantity,0)} units due · count shows tasks`,icon:<CalendarClock size={19}/>},
-            {title:"Pending Inspection",num:inspection,caption:`${inspectionUnits} units on hold · count shows tasks`,icon:<ClipboardCheck size={19}/>},
+            {title:"Previous Returns To Finalize",num:inspection,caption:`${inspectionUnits} previously returned units on hold`,icon:<ClipboardCheck size={19}/>},
             {title:"Needs Cleaning",num:cleaning,caption:"Equipment held until cleaning is recorded",icon:<Sparkles size={19}/>},
         ].map(c=><div key={c.title} className="rounded-2xl border border-[#E6DDF0] bg-white p-3 shadow-sm"><div className="flex items-start justify-between gap-2"><p className="text-sm font-semibold text-[#21132E]">{c.title}</p><span className="rounded-full bg-[#F1EBFF] p-2 text-[#5A35A5]">{c.icon}</span></div><p className="mt-3 text-2xl font-bold text-[#2B174C]">{rental.connected?c.num:"—"}</p><p className="text-[11px] text-[#8A7D90]">{c.caption}</p></div>)}</div>
         <div className="grid min-w-0 items-stretch gap-4 xl:grid-cols-2">
@@ -490,7 +511,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                         <option value="prepare">Prepare</option>
                         <option value="release">Release</option>
                         <option value="return">Returns</option>
-                        <option value="inspect">Inspect</option>
+                        <option value="inspect">Previous Returns</option>
                     </select>
                 </div>
 
@@ -640,13 +661,14 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                         <td className="px-2 py-3 text-center">
                                             {perItemAction?<button type="button" className={`${action} h-auto min-h-9 w-full break-words px-2 py-1.5 text-[11px]`}
                                                                    disabled={!canOperate||rental.saving} title={taskHelp[type||"prepare"]}
-                                                                   onClick={()=>openRentalAction(item)}>{taskLabel[type||"prepare"]}</button>:
+                                                                   onClick={()=>type==="inspect"?void finalizeRecordedReturn(item):openRentalAction(item)}>{taskLabel[type||"prepare"]}</button>:
                                                 <span className="text-[11px] text-[#806A8C]">{nextLabel}</span>}
                                         </td>
                                     </tr>;
                                 })}</tbody>
                             </table>
                         </div>
+                        {submitError&&<p role="alert" className="border-t border-[#F0EAF4] bg-red-50 px-4 py-2 text-xs text-red-700">{submitError}</p>}
                         {queueAllReserved&&<div className="space-y-2 border-t border-[#F0EAF4] px-4 py-3">
                             <div className="flex flex-wrap items-center justify-between gap-3">
                                 <div>
@@ -668,7 +690,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                         {!queueAllReserved&&!queueAllOut&&selectedQueueBooking.tasks.some(x=>x.type==="return")&&
                             <p className="border-t border-[#F0EAF4] px-4 py-3 text-[11px] text-[#986408]">This booking has mixed rental stages from an older partial handover. Ask the Manager to reconcile it before a booking-wide return.</p>}
                     </div>
-                    <p className="text-[11px] text-[#806A8C]">Prepare and inspect equipment separately. Release or receive all rental equipment for a booking together. Damage and cleaning remain in the existing workflow.</p>
+                    <p className="px-4 py-2 text-[11px] text-[#806A8C]">Prepare and release equipment by booking. On return, Staff records missing/damaged units and confirms the condition check once. Only damaged units remain on hold for Manager review. Older returns have a one-time closeout action.</p>
                 </div>
                 <div className="flex justify-end border-t border-[#E9E1EE] px-5 py-3">
                     <button type="button" className={`${action} h-9 px-4`} onClick={()=>setSelectedQueueReference(null)}>Close</button>
@@ -687,18 +709,37 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                 {bookingOperation==="release"?<div className="rounded-xl bg-[#F7F3FC] p-3 text-xs text-[#5A476A]">
                     Confirm the complete physical handover of <strong>{selectedQueueBooking.tasks.reduce((sum,x)=>sum+x.item.quantity,0)} units</strong> across {selectedQueueBooking.tasks.length} equipment lines. All must be ready and the booking fully paid. This updates each rental allocation together.
                 </div>:<>
-                    <p className="text-xs text-[#5A476A]">Count every item physically returned. Enter 0 if none are missing. Unreturned units will be reported to the Manager; received units await inspection.</p>
-                    <div className="space-y-2">{selectedQueueBooking.tasks.map(({item})=><label key={item.allocationId} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E6DDF0] p-3 text-xs">
-                        <span className="min-w-[180px] flex-1"><strong className="block text-[#2B174C]">{item.equipmentName}</strong>
-                            <span className="mt-1 block text-[#806A8C]">Booked: {item.quantity} units</span></span>
-                        <span className="flex items-center gap-2 font-semibold text-[#5A476A]">Missing
-                            <input type="number" min="0" max={item.quantity} step="1" required value={bookingReturnMissing[item.allocationId]??"0"}
-                                   onChange={e=>setBookingReturnMissing(prev=>({...prev,[item.allocationId]:e.target.value}))}
-                                   disabled={rental.saving} className="w-20 rounded-lg border border-[#E6DDF0] p-2 text-sm"/></span>
-                    </label>)}</div>
-                    <label className="block text-xs font-semibold text-[#2B174C]">Return notes (required if anything is missing)
+                    <p className="text-xs text-[#5A476A]">Record only missing or damaged quantities. Zero means no issue was reported. Staff checks the returned units and completes necessary routine care before confirming this return. Customer charges always require Manager review.</p>
+                    <div className="space-y-2">{selectedQueueBooking.tasks.map(({item})=>{
+                        const missing=Number(bookingReturnMissing[item.allocationId]??"0");
+                        const observedDamage=Number(bookingReturnDamaged[item.allocationId]??"0");
+                        const received=Number.isSafeInteger(missing)&&missing>=0?Math.max(0,item.quantity-missing):null;
+                        return <div key={item.allocationId} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E6DDF0] p-3 text-xs">
+                            <span className="min-w-[155px] flex-1"><strong className="block text-[#2B174C]">{item.equipmentName}</strong>
+                                <span className="mt-1 block text-[#806A8C]">Booked: {item.quantity} units · Returned: {received??"—"}</span></span>
+                            <div className="flex flex-wrap items-center gap-3">
+                                <label className="flex items-center gap-2 font-semibold text-[#5A476A]">Missing
+                                    <input type="number" min="0" max={item.quantity} step="1" required value={bookingReturnMissing[item.allocationId]??"0"}
+                                           onChange={e=>setBookingReturnMissing(prev=>({...prev,[item.allocationId]:e.target.value}))}
+                                           disabled={rental.saving} className="w-16 rounded-lg border border-[#E6DDF0] p-2 text-sm"/></label>
+                                <label className="flex items-center gap-2 font-semibold text-[#5A476A]">Damaged
+                                    <input type="number" min="0" max={received??item.quantity} step="1" required value={bookingReturnDamaged[item.allocationId]??"0"}
+                                           onChange={e=>setBookingReturnDamaged(prev=>({...prev,[item.allocationId]:e.target.value}))}
+                                           disabled={rental.saving} className="w-16 rounded-lg border border-[#E6DDF0] p-2 text-sm"/></label>
+                            </div>
+                            {Number.isSafeInteger(missing)&&Number.isSafeInteger(observedDamage)&&missing+observedDamage>item.quantity&&
+                                <p role="alert" className="w-full text-red-700">Missing + damaged cannot exceed {item.quantity} units.</p>}
+                        </div>;
+                    })}</div>
+                    <label className="block text-xs font-semibold text-[#2B174C]">Return notes (required if anything is missing or visibly damaged)
                         <textarea rows={3} maxLength={400} value={bookingOperationNotes} onChange={e=>setBookingOperationNotes(e.target.value)}
-                                  disabled={rental.saving} className="mt-2 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm" placeholder="Any missing accessories or return details..."/></label>
+                                  disabled={rental.saving} className="mt-2 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm" placeholder="Describe missing units, visible damage or return details..."/></label>
+                    <div className="space-y-2 rounded-xl border border-[#E6DDF0] bg-[#FBF9FE] p-3 text-xs text-[#4F3A5A]">
+                        <label className="flex items-start gap-2"><input type="checkbox" checked={returnConditionChecked}
+                                                                         onChange={e=>setReturnConditionChecked(e.target.checked)} disabled={rental.saving} className="mt-0.5"/>
+                            <span><strong>I checked the returned items and completed necessary routine care for all units not reported damaged.</strong> Other returned units can now be rented again. Only damaged units remain On Hold.</span></label>
+                    </div>
+                    <p className="text-[11px] text-[#806A8C]">Missing items go to Manager investigation. Confirmed damage creates a Manager maintenance case, but customer billing still requires a separate Manager decision. No second inspection is needed when the condition check is completed here.</p>
                 </>}
                 {bookingOperationError&&<p role="alert" className="rounded-xl bg-red-50 p-3 text-xs text-red-700">{bookingOperationError}</p>}
                 <div className="flex justify-end gap-2 border-t border-[#E9E1EE] pt-3">
@@ -806,29 +847,15 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                 onClick={()=>reportIssueBeforeRelease(selected)}><AlertTriangle size={14}/> Report Equipment Issue</button>
                     </div>}
                     {taskType(selected)==="return"&&<div className="space-y-2 rounded-xl bg-amber-50 p-3 text-xs">
-                        <p>Enter any units missing when the equipment is returned. Everything else will be held for inspection, not immediately available.</p>
+                        <p>Use Receive Booking Return to record missing/damaged units and finish the return condition check for the complete booking.</p>
                         <label className="block font-semibold">Missing units on return (0–{selected.quantity})
                             <input type="number" min={0} max={selected.quantity} step={1} value={returnMissing}
                                    onChange={e=>setReturnMissing(e.target.value)} className="mt-1 w-full rounded-lg border p-2 text-sm"/>
-                        </label><p>The Manager must resolve missing-unit reports. Returned equipment will not become available until inspected.</p>
-                    </div>}
-                    {taskType(selected)==="inspect"&&<div className="space-y-2 rounded-xl border border-[#E6DDF0] p-3">
-                        <p className="text-xs font-semibold">Record condition of {selected.returnedReceivedUnits??selected.quantity} returned units</p>
-                        <p className="text-xs text-[#86778F]">Split the items between good, cleaning, and damaged. The quantities must add up to the returned units.</p>
-                        <div className="grid grid-cols-3 gap-2">{([
-                            {label:"Good",value:goodUnits,set:setGoodUnits},
-                            {label:"Needs Cleaning",value:cleaningUnits,set:setCleaningUnits},
-                            {label:"Damaged",value:damagedUnits,set:setDamagedUnits},
-                        ] as const).map(field=><label key={field.label} className="block text-[11px] font-semibold">{field.label}
-                            <input type="number" min={0} max={selected.returnedReceivedUnits??selected.quantity} step={1}
-                                   value={field.value} onChange={e=>field.set(e.target.value)}
-                                   className="mt-1 w-full rounded-lg border border-[#E6DDF0] p-2 text-sm"/>
-                        </label>)}</div>
-                        <p className="text-xs text-[#86778F]">Good units become available. Cleaning and damaged units remain on hold. Damaged units require Manager approval before release.</p>
+                        </label><p>The Manager must resolve missing-unit reports. Staff checks returned items during Receive Booking Return; damaged units remain On Hold for Manager review.</p>
                     </div>}
                     {taskType(selected)==="damage"&&<div className="rounded-lg bg-amber-50 p-3 text-xs"><AlertTriangle size={16} className="inline"/> Damaged units remain on hold until Manager approval and repair completion.</div>}
                     {taskType(selected)!=="damage"&&<label className="block text-xs font-semibold">Notes
-                        {(taskType(selected)==="inspect"&&Number(damagedUnits)>0)||(taskType(selected)==="return"&&Number(returnMissing)>0)?" (required for damaged/missing units)":" (optional)"}
+                        {taskType(selected)==="return"&&Number(returnMissing)>0?" (required for missing units)":" (optional)"}
                         <textarea className="mt-1 w-full rounded-xl border p-3 text-sm" maxLength={400} rows={3}
                                   value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Condition, missing accessories, handover notes..."/></label>}
                     {submitError&&<p role="alert" className="rounded-xl bg-red-50 p-3 text-xs text-red-700">{submitError}</p>}
@@ -848,7 +875,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                 {other>0&&<span className="col-span-2">Other holds / older records: <strong>{other}</strong></span>}
                             </div>
                             {known>selectedEquipment.maintenanceUnits&&<p role="alert" className="mt-2 text-red-700">Hold task quantities exceed the equipment hold total. Ask the Manager to reconcile records.</p>}
-                            <p className="mt-2 text-[#86778F]">Known tasks from the current workspace; older or additional records may require Manager review. Returned equipment stays in the booking queue until inspected.</p>
+                            <p className="mt-2 text-[#86778F]">Known tasks from the current workspace. Previous returns may need a one-time confirmation; new returns have their condition check completed when received.</p>
                         </div>;
                     })()}
                     <p>Missing: {selectedEquipment.missingUnits}</p>

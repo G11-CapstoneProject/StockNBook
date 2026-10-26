@@ -27,6 +27,7 @@ export type FilterType =
     | "Awaiting Down Payment"
     | "Confirmed"
     | "Preparing"
+    | "Released"
     | "Completed"
     | "Cancelled";
 
@@ -36,6 +37,7 @@ export const TABS: FilterType[] = [
     "Awaiting Down Payment",
     "Confirmed",
     "Preparing",
+    "Released",
     "Completed",
     "Cancelled",
 ];
@@ -76,6 +78,14 @@ export type Booking = {
     theme?: string;
     venue?: string;
     notes?: string;
+    additional_custom_request?: string;
+    additionalCustomRequest?: string;
+    theme_motif_request?: string;
+    themeMotifRequest?: string;
+    additional_notes?: string;
+    additionalNotes?: string;
+    refundable_deposit?: number | string | null;
+    refundableDeposit?: number | string | null;
 
     status: string;
     approvalStatus?: "pending" | "approved" | "rejected" | null;
@@ -117,6 +127,9 @@ type BookingRentalItem = {
     end_date: string;
     billable_days: number | string;
     allocation_status: string;
+    daily_rate?: number | string | null;
+    rental_rate?: number | string | null;
+    amount?: number | string | null;
 };
 
 type BookingInventoryItem = {
@@ -132,6 +145,15 @@ type BookingInventoryItem = {
     used_quantity?: number | string;
     restored_quantity?: number | string;
     inventory_status?: string;
+    unit_price?: number | string | null;
+    total_price?: number | string | null;
+};
+
+type BookingItemizedStatement = {
+    salesItems: { name: string; variantName?: string; quantity: number; unitPrice: number; amount: number }[];
+    rentalItems: { name: string; quantity: number; days: number; dailyRate: number; amount: number }[];
+    salesSubtotal?: number;
+    rentalSubtotal?: number;
 };
 
 type CalendarDropdownProps = {
@@ -148,6 +170,7 @@ const STATUS_STYLE: Record<string, string> = {
     Approved: "border-[#D8CBE7] bg-[#F5EEFF] text-[#5930A4]",
     Confirmed: "border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]",
     Preparing: "border-[#D8CBE7] bg-[#F7F1FF] text-[#4E2C66]",
+    Released: "border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]",
     Completed: "border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]",
     Cancelled: "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]",
 };
@@ -250,6 +273,7 @@ export function normalizeBookingStatus(value?: string | null) {
 
     if (raw === "confirmed") return "Confirmed";
     if (raw === "preparing") return "Preparing";
+    if (raw === "released") return "Released";
     if (raw === "completed") return "Completed";
     if (raw === "cancelled" || raw === "canceled") return "Cancelled";
 
@@ -428,6 +452,7 @@ export function normalizeBooking(
         approvalStatus: (rawValue(raw, "approvalStatus") || null) as Booking["approvalStatus"],
         approvalReason: String(rawValue(raw,"approvalReason") || "") || null,
         agreed_price: rawValue(raw, "agreed_price") ?? rawValue(raw, "agreedPrice") ?? null,
+        refundable_deposit: rawValue(raw, "refundable_deposit") ?? rawValue(raw, "refundableDeposit") ?? null,
         package_price: rawValue(raw, "package_price") ?? rawValue(raw, "packagePrice") ?? null,
         required_down_payment:
             rawValue(raw, "required_down_payment") ??
@@ -682,153 +707,126 @@ export function PriceModal({
                                onClose,
                            }: {
     booking: Booking;
-    onConfirm: (agreedPrice: number, requiredDownPayment: number) => void;
+    onConfirm: (agreedPrice: number, requiredDownPayment: number, refundableDeposit: number) => void | Promise<void>;
     onClose: () => void;
 }) {
-    const [price, setPrice] = useState(
-        String(booking.agreed_price ?? booking.agreedPrice ?? "")
-    );
-
-    const [downPayment, setDownPayment] = useState(
-        String(
-            booking.required_down_payment ??
-            booking.requiredDownPayment ??
-            booking.down_payment_amount ??
-            booking.downPaymentAmount ??
-            ""
-        )
-    );
-
+    const [price, setPrice] = useState(String(booking.agreed_price ?? booking.agreedPrice ?? ""));
+    const [downPayment, setDownPayment] = useState(String(
+        booking.required_down_payment ?? booking.requiredDownPayment ?? booking.down_payment_amount ?? booking.downPaymentAmount ?? ""
+    ));
+    const [refundableDeposit, setRefundableDeposit] = useState(String(
+        booking.refundable_deposit ?? booking.refundableDeposit ?? ""
+    ));
+    const [hasRental, setHasRental] = useState<boolean | null>(null);
+    const [termsLoading, setTermsLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
     const isCustom = isCustomBooking(booking);
 
-    function handleConfirm() {
-        const parsedPrice = parseFloat(price);
-        const parsedDownPayment = parseFloat(downPayment);
+    // Identify rental equipment from the actual booking rather than guessing from booking type.
+    // The financial statement also holds the existing refundable-deposit amount.
+    useEffect(() => {
+        let cancelled = false;
+        const token = sessionStorage.getItem("token");
+        if (!token) { setError("Login required to review booking items."); setTermsLoading(false); return; }
+        const branchId = booking.branchId ?? booking.branch_id;
+        const body = (action: string) => JSON.stringify({ action, booking_id: booking.id,
+            ...(branchId ? { branch_id: Number(branchId) } : {}) });
+        void (async () => {
+            try {
+                const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+                const [itemsResponse, statementResponse] = await Promise.all([
+                    fetch("/api/bookings", { method: "POST", headers, body: body("get_booking_items") }),
+                    fetch("/api/bookings", { method: "POST", headers, body: body("get_booking_financial_statement") }),
+                ]);
+                const [itemsData, financeData] = await Promise.all([itemsResponse.json(), statementResponse.json()]);
+                if (!itemsResponse.ok || itemsData.error || itemsData.success === false ||
+                    !statementResponse.ok || financeData.error || financeData.success === false || !financeData.statement) {
+                    throw new Error(itemsData.error || financeData.error || "Could not verify booking rental items and security deposit.");
+                }
+                if (!Array.isArray(itemsData.rentalItems) || !Array.isArray(financeData.statement.rentalItems)) {
+                    throw new Error("The booking API did not provide the rental-item information required to set the security deposit.");
+                }
+                const rental = itemsData.rentalItems.length > 0 || financeData.statement.rentalItems.length > 0;
+                const saved = financeData.statement.depositRequired;
+                if (saved == null || !Number.isFinite(Number(saved)) || Number(saved) < 0) {
+                    throw new Error("The booking API did not provide a valid current refundable security deposit.");
+                }
+                if (!cancelled) {
+                    setHasRental(rental);
+                    setRefundableDeposit(String(saved));
+                }
+            } catch (err) {
+                if (!cancelled) setError(err instanceof Error ? err.message : "Could not check rental items.");
+            } finally {
+                if (!cancelled) setTermsLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [booking.id, booking.branchId, booking.branch_id]);
 
-        if (!isCustom) {
-            setError("Agreed price is only used for custom bookings.");
-            return;
+    async function handleConfirm() {
+        if (saving || termsLoading || hasRental === null) return;
+        const parsedPrice = Number(price);
+        const parsedDownPayment = Number(downPayment);
+        const parsedDeposit = Number(refundableDeposit);
+        const isMoney = (value: string, n: number) => value.trim() !== "" &&
+            Number.isFinite(n) && Math.abs(n * 100 - Math.round(n * 100)) < 0.001;
+        if (!isCustom) { setError("Agreed price is only used for custom bookings."); return; }
+        if (!isMoney(price, parsedPrice) || parsedPrice <= 0) { setError("Enter a valid agreed price."); return; }
+        if (!isMoney(downPayment, parsedDownPayment) || parsedDownPayment < 0 || parsedDownPayment > parsedPrice) {
+            setError("Down payment must be between ₱0.00 and the agreed booking price."); return;
         }
-
-        if (!price || Number.isNaN(parsedPrice) || parsedPrice <= 0) {
-            setError("Please enter a valid agreed price.");
-            return;
+        if (!isMoney(refundableDeposit, parsedDeposit) || parsedDeposit < 0) {
+            setError("Enter a valid refundable security deposit amount."); return;
         }
-
-        if (
-            !downPayment ||
-            Number.isNaN(parsedDownPayment) ||
-            parsedDownPayment < 0
-        ) {
-            setError("Please enter a valid required down payment.");
-            return;
+        if (hasRental && parsedDeposit <= 0) {
+            setError("A security deposit greater than ₱0.00 is required because this booking includes rental equipment."); return;
         }
-
-        if (parsedDownPayment > parsedPrice) {
-            setError("Required down payment cannot exceed agreed price.");
-            return;
-        }
-
-        onConfirm(parsedPrice, parsedDownPayment);
+        setSaving(true); setError("");
+        try { await onConfirm(parsedPrice, parsedDownPayment, parsedDeposit); }
+        catch (err) { setError(err instanceof Error ? err.message : "Could not save payment terms."); }
+        finally { setSaving(false); }
     }
 
+    const inputStyle = "h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 pl-10 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10";
     return (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
-            <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-[18px] border border-[#E6DDF0] bg-white p-5 font-sans shadow-2xl">
-                <h3 className="text-[20px] font-bold text-[#1A1220]">
-                    Set Custom Payment Terms
-                </h3>
-
-                <p className="mt-1 text-sm leading-6 text-[#7A6A84]">
-                    Enter the agreed price and required down payment for{" "}
-                    <span className="font-semibold text-[#1A1220]">
-                        {booking.name}
-                    </span>
-                    .
-                </p>
-
+            <div role="dialog" aria-modal="true" aria-label="Set Custom Payment Terms" className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-[18px] border border-[#E6DDF0] bg-white p-5 font-sans shadow-2xl">
+                <h3 className="text-[20px] font-bold text-[#1A1220]">Set Custom Payment Terms</h3>
+                <p className="mt-1 text-sm leading-6 text-[#7A6A84]">Enter the agreed price, required down payment, and refundable security deposit for <strong className="text-[#1A1220]">{booking.name}</strong>.</p>
                 <div className="mt-4 space-y-3">
-                    <div>
-                        <label className="mb-2 block text-sm font-medium text-[#1A1220]">
-                            Agreed Price (₱)
-                        </label>
-
-                        <div className="relative">
-                            <PhilippinePeso
-                                size={15}
-                                className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                            />
-
-                            <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={price}
-                                onChange={(e) => {
-                                    setPrice(e.target.value);
-                                    setError("");
-                                }}
-                                placeholder="0.00"
-                                className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 pl-10 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                            />
+                    {([
+                        { label: "Agreed Price (₱)", value: price, set: setPrice },
+                        { label: "Required Down Payment (₱)", value: downPayment, set: setDownPayment },
+                        { label: "Refundable Security Deposit (₱)", value: refundableDeposit, set: setRefundableDeposit },
+                    ] as const).map(field => <label key={field.label} className="block text-sm font-medium text-[#1A1220]">
+                        {field.label}
+                        <div className="relative mt-2">
+                            <PhilippinePeso size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
+                            <input aria-label={field.label} type="number" min="0" step="0.01" required
+                                   disabled={termsLoading || saving} value={field.value}
+                                   onChange={e => { field.set(e.target.value); setError(""); }} placeholder="0.00" className={inputStyle} />
                         </div>
-                    </div>
-
-                    <div>
-                        <label className="mb-2 block text-sm font-medium text-[#1A1220]">
-                            Required Down Payment (₱)
-                        </label>
-
-                        <div className="relative">
-                            <PhilippinePeso
-                                size={15}
-                                className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                            />
-
-                            <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={downPayment}
-                                onChange={(e) => {
-                                    setDownPayment(e.target.value);
-                                    setError("");
-                                }}
-                                placeholder="0.00"
-                                className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 pl-10 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                            />
-                        </div>
-                    </div>
-
-                    {error && (
-                        <p className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-3 py-2 text-xs font-medium text-[#C32F2F]">{error}</p>
-                    )}
-                </div>
-
-                <div className="mt-4 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3 text-sm text-[#7A6A84]">
-                    <p className="font-semibold text-[#1A1220]">
-                        Custom Request:
+                    </label>)}
+                    <p className="text-xs leading-5 text-[#806A8C]">
+                        {termsLoading ? "Checking rental equipment and existing deposit..." : hasRental === null
+                            ? "Rental equipment could not be verified. Saving is disabled."
+                            : hasRental ? "Required: this booking contains rental items. The Manager must enter a security deposit greater than ₱0.00."
+                                : "Optional: no rental items were found. Enter ₱0.00 if no security deposit is needed."}
+                        {" "}The security deposit is refundable and is not included in the agreed booking price.
                     </p>
-                    <p className="mt-1">{getBookingItemSubtext(booking)}</p>
+                    {price !== "" && downPayment !== "" && refundableDeposit !== "" &&
+                        Number.isFinite(Number(price)) && Number.isFinite(Number(downPayment)) && Number.isFinite(Number(refundableDeposit)) &&
+                        <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FF] p-3 text-xs text-[#2B174C]">
+                            <div className="flex justify-between"><span>Remaining booking balance after DP</span><strong>{peso(Math.max(0, Number(price) - Number(downPayment)))}</strong></div>
+                            <div className="mt-1 flex justify-between"><span>Before-release amount (if deposit not yet collected)</span><strong>{peso(Math.max(0, Number(price) - Number(downPayment)) + Number(refundableDeposit))}</strong></div>
+                        </div>}
+                    {error && <p role="alert" className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-3 py-2 text-xs font-medium text-[#C32F2F]">{error}</p>}
                 </div>
-
                 <div className="mt-5 flex gap-3">
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
-                    >
-                        Cancel
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={handleConfirm}
-                        className="flex-1 rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                    >
-                        Save Terms
-                    </button>
+                    <button type="button" disabled={saving} onClick={onClose} className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:opacity-50">Cancel</button>
+                    <button type="button" disabled={saving || termsLoading || hasRental === null} onClick={() => void handleConfirm()} className="flex-1 rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-50">{saving ? "Saving..." : "Save Terms"}</button>
                 </div>
             </div>
         </div>
@@ -860,10 +858,17 @@ export function getNextStatusConfig(displayStatus: string, downPaymentPaid: bool
             };
         case "Preparing":
             return {
-                nextStatus: "Completed",
-                nextStatusLabel: "Complete Booking", // ← third button
+                nextStatus: "Released",
+                nextStatusLabel: "Release Items",
                 statusActionDisabled: false,
-                statusHelper: "Mark this booking completed when service is done."
+                statusHelper: "Staff can release prepared items only after full booking payment and the refundable security deposit have been collected."
+            };
+        case "Released":
+            return {
+                nextStatus: "Completed",
+                nextStatusLabel: "Complete Booking",
+                statusActionDisabled: false,
+                statusHelper: "After rental returns, inspection, claim settlement, and deposit refund, staff can complete the booking."
             };
         case "Completed":
             return {
@@ -889,6 +894,28 @@ export function getNextStatusConfig(displayStatus: string, downPaymentPaid: bool
     }
 }
 
+// Customer-only details; the public portal currently may append its free-text request
+// after generated inventory lines inside customOrder. Never display those product lines as notes.
+function getCustomerCustomRequest(booking: Booking): string {
+    const explicit = String(booking.additional_custom_request || booking.additionalCustomRequest || "").trim();
+    if (explicit) return explicit;
+    const saved = String(booking.customOrder || booking.custom_order || "").trim();
+    if (!saved) return "";
+    if (!/selected inventory items:|^additional request:/im.test(saved)) return saved;
+    const marker = /(?:^|\n)\s*Additional request:\s*/ig;
+    let found: RegExpExecArray | null, after = "";
+    while ((found = marker.exec(saved)) !== null) after = saved.slice(marker.lastIndex).trim();
+    if (!after) return "";
+    // The legacy portal writes rental item lines first, followed by a blank line and
+    // the customer's typed request. Do not confuse a rental line with customer text.
+    const blocks = after.split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
+    if (blocks.length > 1) return blocks[blocks.length - 1];
+    if (/\b(?:\d+\s*[x×]\s*\d+|₱\s*[\d,.]+|rental equipment)\b/i.test(after)) return "";
+    return after;
+}
+
+function itemNameKey(name: string) { return String(name || "").trim().replace(/\s+/g, " ").toLowerCase(); }
+
 export type BookingDetailTab = "Overview" | "Billing" | "Items" | "Notes";
 
 type BookingRowProps = {
@@ -904,7 +931,7 @@ type BookingRowProps = {
     onConfirmStandard?: (b: Booking) => void;
     onRequestApproval?: (b: Booking) => void;
     canOperateBookings?: boolean;
-    onOperateBooking?: (id: number, status: "Preparing" | "Completed") => void;
+    onOperateBooking?: (id: number, status: "Preparing" | "Released" | "Completed") => void;
     operationsBusy?: boolean;
     // Only used by the non-paginated selectable booking workspace.
     hideSummaryRow?: boolean;
@@ -935,10 +962,13 @@ export function BookingRow({
                            }: BookingRowProps) {
     const [bookingItems, setBookingItems] = useState<BookingInventoryItem[]>([]);
     const [bookingRentalItems, setBookingRentalItems] = useState<BookingRentalItem[]>([]);
+    const [itemizedPrices, setItemizedPrices] = useState<BookingItemizedStatement | null>(null);
     const [itemsLoading, setItemsLoading] = useState(false);
     const [itemsLoaded, setItemsLoaded] = useState(false);
     const [itemsError, setItemsError] = useState("");
     const [estimatedBookingPrice, setEstimatedBookingPrice] = useState<number | null>(null);
+    // Existing financial-statement API supplies the booking-specific, refundable deposit.
+    const [securityDeposit, setSecurityDeposit] = useState<{ required: number; collected: number } | null>(null);
     const [estimateLoading, setEstimateLoading] = useState(false);
     const [estimateError, setEstimateError] = useState(false);
     const [open, setOpen] = useState(expandedByDefault);
@@ -957,6 +987,7 @@ export function BookingRow({
         if (!token) { setEstimateError(true); return; }
         let cancelled = false;
         setEstimatedBookingPrice(null);
+        setSecurityDeposit(null);
         setEstimateError(false);
         setEstimateLoading(true);
         const branchId = b.branchId || b.branch_id;
@@ -969,6 +1000,13 @@ export function BookingRow({
                         ...(branchId ? { branch_id: Number(branchId) } : {}) }),
                 });
                 const result = await res.json();
+                if (res.ok && !result.error && result.statement && !cancelled) {
+                    const required = Number(result.statement.depositRequired);
+                    const collected = Number(result.statement.depositCollected);
+                    if (Number.isFinite(required) && Number.isFinite(collected)) {
+                        setSecurityDeposit({ required: Math.max(0, required), collected: Math.max(0, collected) });
+                    }
+                }
                 const estimate = Number(result.statement?.agreedCharges);
                 if (!res.ok || result.error || !Number.isFinite(estimate) || estimate < 0 ||
                     result.statement?.agreedCharges == null) throw new Error("Quote unavailable");
@@ -980,7 +1018,7 @@ export function BookingRow({
             }
         })();
         return () => { cancelled = true; };
-    }, [b.id, b.status, b.branchId, b.branch_id, hideSummaryRow, managerView, detailTab, open]);
+    }, [b.id, b.status, b.branchId, b.branch_id, b.refundable_deposit, b.refundableDeposit, b.agreed_price, hideSummaryRow, managerView, detailTab, open]);
     const total = getTotalPrice(b);
     const requiredDp = getRequiredDownPayment(b);
     const paid = getAmountPaid(b);
@@ -991,7 +1029,8 @@ export function BookingRow({
     const customNeedsTerms = isCustom && total <= 0;
     // Custom quotations are locked immediately after manager approval.
     const canEditPaymentTerms = displayStatus === "Pending Review" && b.approvalStatus !== "approved";
-    const downPaymentPaid = requiredDp > 0 && paid + 0.005 >= requiredDp;
+    // For a no-DP booking, the whole booking price must be paid before confirmation.
+    const downPaymentPaid = total > 0 && paid + 0.005 >= (requiredDp > 0 ? requiredDp : total);
 
     const statusClass =
         STATUS_STYLE[displayStatus] ||
@@ -1007,10 +1046,9 @@ export function BookingRow({
         statusActionDisabled,
         statusHelper,
     } = getNextStatusConfig(displayStatus, downPaymentPaid);
-    const managerNoDp = canManage && requiredDp === 0 && displayStatus === "Pending Review";
-    const actionNextStatus = managerNoDp ? "Confirmed" : nextStatus;
-    const actionLabel = managerNoDp ? "Approve No-DP & Reserve" :
-        managerView && displayStatus === "Pending Review" ? "Approve Booking" : nextStatusLabel;
+    const actionNextStatus = nextStatus;
+    const actionLabel = managerView && displayStatus === "Pending Review" ? "Approve Booking" : nextStatusLabel;
+    const managerCanAdvance = displayStatus === "Pending Review" || displayStatus === "Awaiting Down Payment";
 
     useEffect(() => {
         if (!open || itemsLoaded || (hideSummaryRow && detailTab !== "Items")) return;
@@ -1031,6 +1069,7 @@ export function BookingRow({
         async function loadBookingItems() {
             setItemsLoading(true);
             setItemsError("");
+            setItemizedPrices(null);
 
             try {
                 const body: Record<string, unknown> = {
@@ -1055,6 +1094,28 @@ export function BookingRow({
                     throw new Error(data.message || data.error || "Failed to load booking items.");
                 }
 
+                // Itemized prices come from the same financial statement used by Billing.
+                // Do not invent unit prices when a product is missing from the statement.
+                try {
+                    const financialResponse = await fetch("/api/bookings", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ action: "get_booking_financial_statement", booking_id: b.id,
+                            ...(branchId ? { branch_id: Number(branchId) } : {}) }),
+                    });
+                    const financialData = await financialResponse.json();
+                    const statement = financialData.statement;
+                    if (financialResponse.ok && !financialData.error && statement && !cancelled) {
+                        setItemizedPrices({
+                            salesItems: Array.isArray(statement.salesItems) ? statement.salesItems : [],
+                            rentalItems: Array.isArray(statement.rentalItems) ? statement.rentalItems : [],
+                            salesSubtotal: Number.isFinite(Number(statement.salesSubtotal)) && statement.salesSubtotal != null ? Number(statement.salesSubtotal) : undefined,
+                            rentalSubtotal: Number.isFinite(Number(statement.rentalSubtotal)) && statement.rentalSubtotal != null ? Number(statement.rentalSubtotal) : undefined,
+                        });
+                    }
+                } catch {
+                    // The inventory remains visible; prices are marked unavailable instead of guessed.
+                }
                 if (!cancelled) {
                     setBookingItems(
                         Array.isArray(data.items)
@@ -1134,6 +1195,9 @@ export function BookingRow({
                                 <p className="text-[11px] leading-4 text-[#887B99]">Original itemized estimate; subject to manager review.</p>
                                 <div className="flex justify-between gap-3"><span className={infoLabel}>Agreed Price</span><span className={infoValue}>{total > 0 ? peso(total) : "Not set"}</span></div>
                                 <div className="flex justify-between gap-3"><span className={infoLabel}>Required Down Payment</span><span className={infoValue}>{requiredDp > 0 ? peso(requiredDp) : isCustom && total <= 0 ? "Not set" : "No down payment required"}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Refundable Security Deposit</span><span className={infoValue}>{securityDeposit ? peso(securityDeposit.required) : "Unavailable"}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Security Deposit Collected</span><span className={infoValue}>{securityDeposit ? peso(securityDeposit.collected) : "Unavailable"}</span></div>
+                                {securityDeposit && <div className="flex justify-between gap-3"><span className={infoLabel}>Total Due Before Release</span><span className={infoValue}>{peso(balance + Math.max(0, securityDeposit.required - securityDeposit.collected))}</span></div>}
                                 <div className="flex justify-between gap-3"><span className={infoLabel}>Amount Paid</span><span className={infoValue}>{peso(paid)}</span></div>
                                 <div className="flex justify-between gap-3 border-t border-[#EAE4F0] pt-3"><span className="text-xs font-bold">Remaining Balance</span><strong className="text-sm text-[#351263]">{isCustom && total <= 0 ? "Not set" : peso(balance)}</strong></div>
                             </div>
@@ -1142,7 +1206,7 @@ export function BookingRow({
                             <h3 className="mb-4 flex items-center gap-2 text-sm font-bold"><Clock3 size={17} className="text-[#6536D4]"/>Status &amp; Schedule</h3>
                             <div className="space-y-3">
                                 <div className="flex items-center justify-between gap-3"><span className={infoLabel}>Current Status</span><span className={`rounded-full border px-2 py-1 text-[11px] font-semibold ${statusClass}`}>{managerView ? getManagerBookingStatusLabel(displayStatus) : displayStatus}</span></div>
-                                <div className="flex justify-between gap-3"><span className={infoLabel}>Next Step</span><span className={infoValue}>{!statusActionDisabled || managerNoDp ? actionLabel : downPaymentPaid ? actionLabel : "Verify payment first"}</span></div>
+                                <div className="flex justify-between gap-3"><span className={infoLabel}>Next Step</span><span className={infoValue}>{managerCanAdvance ? (statusActionDisabled ? "Verify booking payment first" : actionLabel) : "Staff: " + nextStatusLabel}</span></div>
                                 <div className="flex justify-between gap-3"><span className={infoLabel}>Payment Status</span><span className={infoValue}>{getManagerPaymentLabel(b)}</span></div>
                                 <div className="flex justify-between gap-3"><span className={infoLabel}>Event Schedule</span><span className={infoValue}>{formatDate(b.date)}</span></div>
                             </div>
@@ -1155,7 +1219,7 @@ export function BookingRow({
                         ) : (
                             <div className="grid gap-2 sm:grid-cols-2">
                                 {isCustom && customNeedsTerms && canEditPaymentTerms ? (
-                                    <button type="button" className={`${action} bg-[#4D2A96] text-white hover:bg-[#371C72]`} onClick={() => onSetPrice?.(b)}>Set Price &amp; Down Payment</button>
+                                    <button type="button" className={`${action} bg-[#4D2A96] text-white hover:bg-[#371C72]`} onClick={() => onSetPrice?.(b)}>Set Price, DP &amp; Deposit</button>
                                 ) : displayStatus === "Pending Review" ? (
                                     <span className="flex items-center justify-center rounded-lg border border-[#E8DCF4] bg-white px-3 py-2 text-center text-xs font-semibold text-[#806D92]">Approve booking before recording payment</span>
                                 ) : displayStatus === "Cancelled" ? (
@@ -1167,17 +1231,19 @@ export function BookingRow({
                                     </button>
                                 ) : <span className="flex items-center justify-center rounded-lg border border-[#D6EDDC] bg-[#EFF9F1] px-3 py-2 text-xs font-semibold text-[#18854C]">{total <= 0 ? "Payment terms missing" : "Payment completed"}</span>}
                                 {isCustom && !customNeedsTerms && canEditPaymentTerms &&
-                                    <button type="button" className={`${action} border border-[#D6C4F8] bg-white text-[#4D2A96] hover:bg-[#F3EEFF]`} onClick={() => onSetPrice?.(b)}>Edit Custom Price &amp; DP</button>}
-                                <button type="button" disabled={statusActionDisabled && !managerNoDp} onClick={() => { if (!statusActionDisabled || managerNoDp) onUpdateStatus?.(b.id, actionNextStatus); }}
-                                        className={`${action} border border-[#D6C4F8] bg-[#F3EEFF] text-[#4D2A96] hover:bg-[#ECE2FF]`}>
-                                    {actionLabel}
-                                </button>
-                                {!(["Completed", "Cancelled"].includes(displayStatus)) && onUpdateStatus &&
+                                    <button type="button" className={`${action} border border-[#D6C4F8] bg-white text-[#4D2A96] hover:bg-[#F3EEFF]`} onClick={() => onSetPrice?.(b)}>Edit Price, DP &amp; Deposit</button>}
+                                {managerCanAdvance ? (
+                                    <button type="button" disabled={statusActionDisabled || total <= 0} onClick={() => { if (!statusActionDisabled && total > 0) onUpdateStatus?.(b.id, actionNextStatus); }}
+                                            className={`${action} border border-[#D6C4F8] bg-[#F3EEFF] text-[#4D2A96] hover:bg-[#ECE2FF]`}>
+                                        {actionLabel}
+                                    </button>
+                                ) : <span className="flex items-center justify-center rounded-lg border border-[#E8DCF4] bg-white px-3 py-2 text-center text-xs font-semibold text-[#806D92]">Preparation, release and completion are handled by Staff.</span>}
+                                {!(["Released", "Completed", "Cancelled"].includes(displayStatus)) && onUpdateStatus &&
                                     <button type="button" onClick={() => onCancelBooking ? onCancelBooking(b) : onUpdateStatus?.(b.id, "Cancelled")}
                                             className={`${action} border border-red-200 bg-red-50 text-red-700 hover:bg-red-100`}>Cancel Booking</button>}
                             </div>
                         )}
-                        {!canEditPaymentTerms && isCustom && <p className="mt-3 rounded-lg border border-[#E7DDF5] bg-[#F8F4FF] p-3 text-xs text-[#674A8E]">Custom price and required down payment are locked after approval.</p>}
+                        {!canEditPaymentTerms && isCustom && <p className="mt-3 rounded-lg border border-[#E7DDF5] bg-[#F8F4FF] p-3 text-xs text-[#674A8E]">Custom price, required down payment and refundable security deposit are locked after approval.</p>}
                         {b.approvalStatus === "pending" && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-900"><strong>Manager approval requested:</strong> {b.approvalReason || "Awaiting review."}</p>}
                         <p className="mt-3 text-xs leading-5 text-[#847492]">{statusHelper} Recording money does not automatically confirm a booking.</p>
                     </section>
@@ -1351,7 +1417,7 @@ export function BookingRow({
                                             </div>
                                         </div>
 
-                                        {!hideSummaryRow && <BookingFinancialPanel bookingId={b.id} branchId={Number(b.branchId||b.branch_id||0)} ownerView={ownerView} editable={canManage}/>}
+                                        {!hideSummaryRow && <BookingFinancialPanel bookingId={b.id} branchId={Number(b.branchId||b.branch_id||0)} ownerView={ownerView} editable={canManage || canOperateBookings}/>}
 
                                         {customNeedsTerms && (
                                             <p className="mt-3 rounded-xl bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700">
@@ -1368,7 +1434,7 @@ export function BookingRow({
                                 )}
 
                                 {hideSummaryRow && detailTab === "Billing" && (
-                                    <BookingFinancialPanel bookingId={b.id} branchId={Number(b.branchId||b.branch_id||0)} ownerView={ownerView} editable={canManage}/>
+                                    <BookingFinancialPanel bookingId={b.id} branchId={Number(b.branchId||b.branch_id||0)} ownerView={ownerView} editable={canManage || canOperateBookings}/>
                                 )}
 
                                 {(!hideSummaryRow || detailTab === "Items") && (
@@ -1387,7 +1453,7 @@ export function BookingRow({
                                                     <div className="mb-3 flex items-center justify-between gap-2">
                                                         <div className="flex items-center gap-2">
                                                             <Package size={14} className="shrink-0 text-[#6C3AD6]" />
-                                                            <h3 className="text-[16px] font-bold text-[#1A1220]">Inclusions</h3>
+                                                            <h3 className="text-[16px] font-bold text-[#1A1220]">Consumable Items</h3>
                                                         </div>
                                                         <span className="shrink-0 rounded-full bg-[#F0E9FF] px-2.5 py-1 text-[11px] font-bold text-[#5A35A5]">
                                                             {bookingItems.length} {bookingItems.length === 1 ? "item" : "items"}
@@ -1395,7 +1461,7 @@ export function BookingRow({
                                                     </div>
                                                     {bookingItems.length === 0 ? (
                                                         <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-white px-3 py-4 text-center text-xs text-[#7A6A84]">
-                                                            No sales inventory inclusions for this booking.
+                                                            No consumable items for this booking.
                                                         </div>
                                                     ) : (
                                                         <div className="max-h-[245px] space-y-2 overflow-y-auto overscroll-contain pr-1">
@@ -1404,8 +1470,18 @@ export function BookingRow({
                                                                     ? `${item.product_name} — ${item.variant_name}`
                                                                     : item.product_name;
                                                                 const quantity = Number(item.booked_quantity || item.reserved_quantity || 0);
+                                                                const priced = itemizedPrices?.salesItems.find(line =>
+                                                                    itemNameKey(line.name) === itemNameKey(item.product_name) &&
+                                                                    itemNameKey(line.variantName || "") === itemNameKey(item.variant_name || "") &&
+                                                                    Number(line.quantity) === quantity);
+                                                                const fallbackUnit = item.unit_price == null ? null : Number(item.unit_price);
+                                                                const unitPrice = priced && Number.isFinite(Number(priced.unitPrice)) ? Number(priced.unitPrice)
+                                                                    : fallbackUnit !== null && Number.isFinite(fallbackUnit) ? fallbackUnit : null;
+                                                                const lineTotal = priced && Number.isFinite(Number(priced.amount)) ? Number(priced.amount)
+                                                                    : item.total_price != null && Number.isFinite(Number(item.total_price)) ? Number(item.total_price)
+                                                                        : unitPrice == null ? null : unitPrice * quantity;
                                                                 return (
-                                                                    <div key={item.id} className="flex items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
+                                                                    <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
                                                                         <div className="min-w-0">
                                                                             <p className="truncate text-sm font-semibold text-[#1A1220]" title={itemLabel}>
                                                                                 {itemLabel}
@@ -1415,12 +1491,19 @@ export function BookingRow({
                                                                                 {item.inventory_status ? ` · ${item.inventory_status}` : ""}
                                                                             </p>
                                                                         </div>
-                                                                        <span className="shrink-0 rounded-full bg-[#F7F1FF] px-2.5 py-1 text-xs font-bold text-[#4E2C66]">
-                                                                            x{quantity}
-                                                                        </span>
+                                                                        <div className="flex shrink-0 flex-wrap items-center gap-3 text-right text-xs text-[#4E2C66]">
+                                                                            <div><p className="text-[10px] text-[#806A8C]">Quantity</p><strong>{quantity}</strong></div>
+                                                                            <div><p className="text-[10px] text-[#806A8C]">Unit Price</p><strong>{unitPrice !== null ? peso(unitPrice) : "Unavailable"}</strong></div>
+                                                                            <div><p className="text-[10px] text-[#806A8C]">Total Price</p><strong>{lineTotal !== null ? peso(lineTotal) : "Unavailable"}</strong></div>
+                                                                        </div>
                                                                     </div>
                                                                 );
                                                             })}
+                                                        </div>
+                                                    )}
+                                                    {itemizedPrices?.salesSubtotal != null && (
+                                                        <div className="mt-3 flex justify-between border-t border-[#E6DDF0] pt-2 text-xs font-bold text-[#2B174C]">
+                                                            <span>Consumable Items Subtotal</span><strong>{peso(itemizedPrices.salesSubtotal)}</strong>
                                                         </div>
                                                     )}
                                                 </section>
@@ -1428,7 +1511,7 @@ export function BookingRow({
                                                     <div className="mb-3 flex items-center justify-between gap-2">
                                                         <div className="flex min-w-0 items-center gap-2">
                                                             <Package size={14} className="shrink-0 text-[#6C3AD6]" />
-                                                            <h3 className="text-[16px] font-bold text-[#1A1220]">Additional Rental Equipment</h3>
+                                                            <h3 className="text-[16px] font-bold text-[#1A1220]">Rental Items</h3>
                                                         </div>
                                                         <span className="shrink-0 rounded-full bg-[#F0E9FF] px-2.5 py-1 text-[11px] font-bold text-[#5A35A5]">
                                                             {bookingRentalItems.length} {bookingRentalItems.length === 1 ? "item" : "items"}
@@ -1436,12 +1519,22 @@ export function BookingRow({
                                                     </div>
                                                     {bookingRentalItems.length === 0 ? (
                                                         <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-white px-3 py-4 text-center text-xs text-[#7A6A84]">
-                                                            No additional rental equipment for this booking.
+                                                            No rental items for this booking.
                                                         </div>
                                                     ) : (
                                                         <div className="max-h-[245px] space-y-2 overflow-y-auto overscroll-contain pr-1">
-                                                            {bookingRentalItems.map((item) => (
-                                                                <div key={`rental-${item.id}`} className="flex items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
+                                                            {bookingRentalItems.map((item) => {
+                                                                const quantity = Number(item.quantity || 0);
+                                                                const priced = itemizedPrices?.rentalItems.find(line =>
+                                                                    itemNameKey(line.name) === itemNameKey(item.equipment_name) &&
+                                                                    Number(line.quantity) === quantity);
+                                                                const days = priced ? Number(priced.days) : Number(item.billable_days || 1);
+                                                                const rawRate = priced?.dailyRate ?? item.daily_rate ?? item.rental_rate;
+                                                                const rate = rawRate == null || !Number.isFinite(Number(rawRate)) ? null : Number(rawRate);
+                                                                const totalPrice = priced && Number.isFinite(Number(priced.amount)) ? Number(priced.amount)
+                                                                    : item.amount != null && Number.isFinite(Number(item.amount)) ? Number(item.amount)
+                                                                        : rate == null ? null : rate * quantity * days;
+                                                                return <div key={`rental-${item.id}`} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
                                                                     <div className="min-w-0">
                                                                         <p className="truncate text-sm font-semibold text-[#1A1220]" title={item.equipment_name}>
                                                                             {item.equipment_name}
@@ -1451,11 +1544,19 @@ export function BookingRow({
                                                                             {" · "}{item.start_date === item.end_date ? item.start_date : `${item.start_date} – ${item.end_date}`}
                                                                         </p>
                                                                     </div>
-                                                                    <span className="shrink-0 rounded-full bg-[#F7F1FF] px-2.5 py-1 text-xs font-bold text-[#4E2C66]">
-                                                                        x{Number(item.quantity)}
-                                                                    </span>
-                                                                </div>
-                                                            ))}
+                                                                    <div className="flex shrink-0 flex-wrap items-center gap-3 text-right text-xs text-[#4E2C66]">
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Quantity</p><strong>{quantity}</strong></div>
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Days</p><strong>{Number.isFinite(days) ? days : "Unavailable"}</strong></div>
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Rate/Day</p><strong>{rate !== null ? peso(rate) : "Unavailable"}</strong></div>
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Total Price</p><strong>{totalPrice !== null ? peso(totalPrice) : "Unavailable"}</strong></div>
+                                                                    </div>
+                                                                </div>;
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                    {itemizedPrices?.rentalSubtotal != null && (
+                                                        <div className="mt-3 flex justify-between border-t border-[#E6DDF0] pt-2 text-xs font-bold text-[#2B174C]">
+                                                            <span>Rental Items Subtotal</span><strong>{peso(itemizedPrices.rentalSubtotal)}</strong>
                                                         </div>
                                                     )}
                                                 </section>
@@ -1477,15 +1578,19 @@ export function BookingRow({
                                             </p>
                                         </div>
 
-                                        <p className="whitespace-pre-wrap text-sm leading-6 text-[#7A6A84]">
-                                            {b.notes || "No general notes provided."}
-                                        </p>
-                                        {(b.customOrder || b.custom_order) && (
-                                            <div className="mt-3 border-t border-[#E6DDF0] pt-3">
-                                                <p className="mb-1 text-xs font-bold text-[#2B174C]">Additional Custom Request</p>
-                                                <p className="whitespace-pre-wrap text-sm leading-6 text-[#7A6A84]">{b.customOrder || b.custom_order}</p>
-                                            </div>
-                                        )}
+                                        <p className="mb-3 text-xs text-[#806A8C]">Customization &amp; Special Requests submitted by the customer</p>
+                                        <div className="space-y-3">
+                                            {([
+                                                ["Additional Custom Request", getCustomerCustomRequest(b)],
+                                                ["Theme / Motif Request", b.theme_motif_request || b.themeMotifRequest || b.theme || ""],
+                                                ["Additional Notes", b.additional_notes || b.additionalNotes || b.notes || ""],
+                                            ] as Array<[string, string]>).map(([label, value]) => (
+                                                <div key={label} className="border-t border-[#E6DDF0] pt-2">
+                                                    <p className="mb-1 text-xs font-bold text-[#2B174C]">{label}</p>
+                                                    <p className="whitespace-pre-wrap text-sm leading-6 text-[#7A6A84]">{String(value).trim() || "None provided."}</p>
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -1515,7 +1620,7 @@ export function BookingRow({
                                                 type="button"
                                                 className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                                             >
-                                                Set Price & Down Payment
+                                                Set Price, DP & Security Deposit
                                             </button>
                                         ) : total <= 0 ? (
                                             <div
@@ -1567,7 +1672,7 @@ export function BookingRow({
                                                 type="button"
                                                 className="mt-3 inline-flex h-[42px] w-full items-center justify-center rounded-xl border border-[#E6DDF0] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
                                             >
-                                                Edit Custom Price & DP
+                                                Edit Price, DP & Security Deposit
                                             </button>
                                         )}
                                     </div>
@@ -1590,10 +1695,10 @@ export function BookingRow({
                                             />
                                         </div>
 
-                                        {ownerView || (!canManage && !(canOperateBookings && (displayStatus === "Confirmed" || displayStatus === "Preparing"))) ? (
+                                        {ownerView || (!canManage && !(canOperateBookings && (displayStatus === "Confirmed" || displayStatus === "Preparing" || displayStatus === "Released"))) ? (
                                             <div className="rounded-xl border border-[#E6DDF0] bg-white px-3 py-3 text-center text-xs font-semibold text-[#7A6A84]">
                                                 {canConfirmStandard && ["Pending Review","Awaiting Down Payment"].includes(displayStatus)
-                                                    ? "Staff may confirm a catalog-priced booking below or request Manager review."
+                                                    ? "Manager approval and payment confirmation are required before Staff can prepare items."
                                                     : "View-only booking status."}
                                             </div>
                                         ) : !canManage ? (
@@ -1602,8 +1707,8 @@ export function BookingRow({
                                                 disabled={operationsBusy || !onOperateBooking}
                                                 onClick={(e) => {
                                                     e.stopPropagation();
-                                                    if (displayStatus === "Confirmed" || displayStatus === "Preparing") {
-                                                        onOperateBooking?.(b.id, displayStatus === "Confirmed" ? "Preparing" : "Completed");
+                                                    if (displayStatus === "Confirmed" || displayStatus === "Preparing" || displayStatus === "Released") {
+                                                        onOperateBooking?.(b.id, displayStatus === "Confirmed" ? "Preparing" : displayStatus === "Preparing" ? "Released" : "Completed");
                                                     }
                                                 }}
                                                 className="inline-flex min-h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-50"
@@ -1614,15 +1719,15 @@ export function BookingRow({
                                             <>
                                                 {/* Next Step Button */}
                                                 <button
-                                                    onClick={(e) => { e.stopPropagation(); if (!statusActionDisabled || managerNoDp) onUpdateStatus?.(b.id, actionNextStatus); }}
-                                                    disabled={statusActionDisabled && !managerNoDp}
+                                                    onClick={(e) => { e.stopPropagation(); if (managerCanAdvance && !statusActionDisabled && total > 0) onUpdateStatus?.(b.id, actionNextStatus); }}
+                                                    disabled={!managerCanAdvance || statusActionDisabled || total <= 0}
                                                     className="mb-2 inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:bg-[#D8CBE7] disabled:text-[#806A8C]"
                                                 >
                                                     {actionLabel}
                                                 </button>
 
                                                 {/* Cancel Button */}
-                                                {!["Completed", "Cancelled"].includes(displayStatus) && onUpdateStatus && (
+                                                {!["Released", "Completed", "Cancelled"].includes(displayStatus) && onUpdateStatus && (
                                                     <button
                                                         type="button"
                                                         onClick={(e) => {
@@ -1702,11 +1807,11 @@ export function BookingWorkspace({
 
     return (
         <div className={`grid min-w-0 gap-3 ${managerView ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" : "2xl:grid-cols-[minmax(0,1.12fr)_minmax(0,0.88fr)]"}`}>
-            <section aria-label="Booking list" className="min-w-0 overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm">
+            <section aria-label="Booking list" className={`flex min-w-0 flex-col overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm ${managerView ? "h-[700px] xl:h-[760px]" : ""}`}>
                 {managerView && <div className="px-3 pt-3 sm:px-4">
                     {listToolbar}
                 </div>}
-                <div className={`${managerView ? "h-[600px]" : "max-h-[640px]"} overflow-auto overscroll-contain`}>
+                <div className={`${managerView ? "min-h-0 flex-1" : "max-h-[640px]"} overflow-auto overscroll-contain`}>
                     <table role="grid" aria-label="Bookings" className="w-full min-w-[590px] border-collapse">
                         <thead className="sticky top-0 z-10 bg-[#FFFDF8]">
                         <tr className="border-b border-[#E6DDF0] text-left text-[11px] font-semibold text-[#806A8C]">
@@ -1761,7 +1866,7 @@ export function BookingWorkspace({
                 </div>
                 {managerView && <div className="border-t border-[#EFE7F4] px-4 py-2 text-xs text-[#806A8C]">Showing {bookings.length} booking{bookings.length === 1 ? "" : "s"}</div>}
             </section>
-            <section aria-label="Selected booking details" className="flex min-w-0 max-h-[760px] flex-col overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm">
+            <section aria-label="Selected booking details" className={`flex min-w-0 flex-col overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm ${managerView ? "h-[700px] xl:h-[760px]" : "max-h-[760px]"}`}>
                 {selectedBooking ? <>
                     <div className="shrink-0 border-b border-[#EFE7F4] px-4 py-3">
                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1774,8 +1879,8 @@ export function BookingWorkspace({
                                 {managerView && onExportSelected && <div className="relative">
                                     <button type="button" aria-label="Export selected booking" title="Export selected booking" onClick={() => setExportOpen(v => !v)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D9C9EB] text-[#43217A] hover:bg-[#F3EEFF]"><Download size={16}/></button>
                                     {exportOpen && <div className="absolute right-0 top-10 z-30 w-40 rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-xl">
-                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "pdf");setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">PDF (Print)</button>
-                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "excel");setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Excel (CSV)</button>
+                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "pdf");setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download PDF</button>
+                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "excel");setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download Excel (.xlsx)</button>
                                     </div>}
                                 </div>}
                             </div>

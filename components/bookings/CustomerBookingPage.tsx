@@ -426,6 +426,7 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
         rentalItems:{name:string;quantity:number;days:number;dailyRate:number;amount:number}[];
         deliveryFee:number;setupFee:number;agreedCharges:number;depositRequired:number;depositCollected:number;
         depositApplied:number;depositRefunded:number;depositHeld:number;claimBalance:number;
+        claims:{id:number;sourceType:string;quantity:number;reason:string;amount:number;amountPaid:number;depositApplied:number;status:string}[];
         booking:{agreedPrice:number|null;downPayment:number;dpDeadline:string|null;bookingPayments:number;balance:number};
     }>(null);
     const [statementError,setStatementError] = useState("");
@@ -840,6 +841,14 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
                                 <div className="flex justify-between"><span>Booking balance</span><strong>₱{Number(statement.booking.balance).toFixed(2)}</strong></div>
                                 <div className="flex justify-between"><span>Refundable security deposit required</span><strong>₱{Number(statement.depositRequired).toFixed(2)}</strong></div>
                                 <div className="flex justify-between"><span>Deposit currently held</span><strong>₱{Number(statement.depositHeld).toFixed(2)}</strong></div>
+                                {(statement.claims||[]).length>0&&<div className="border-t pt-2">
+                                    <p className="mb-1 font-bold">Post-return equipment decisions</p>
+                                    {statement.claims.map(claim=><div key={claim.id} className="mb-2 rounded-lg bg-[#FAF7FF] p-2">
+                                        <div className="flex justify-between gap-2"><span>{claim.sourceType==='missing'?'Missing equipment':'Damaged equipment'} · {claim.quantity} unit(s)</span><strong>{claim.status==='waived'?'Waived':`₱${Number(claim.amount).toFixed(2)}`}</strong></div>
+                                        <p className="mt-1 text-[#806A8C]">{claim.reason}</p>
+                                        {claim.status!=='waived'&&<p className="mt-1">Remaining after payments/deposit: ₱{Math.max(0,Number(claim.amount)-Number(claim.amountPaid)-Number(claim.depositApplied)).toFixed(2)}</p>}
+                                    </div>)}
+                                </div>}
                                 <div className="flex justify-between"><span>Outstanding approved equipment claims</span><strong>₱{Number(statement.claimBalance).toFixed(2)}</strong></div>
                                 <button type="button" onClick={()=>window.print()} className="rounded-lg border border-[#D8CBE7] px-3 py-2">Print statement</button>
                             </div>}

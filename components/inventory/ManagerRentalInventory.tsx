@@ -11,6 +11,7 @@ import {
 import {
     useRentalInventory, availableNow, hasRentalStockDiscrepancy,
     type RentalEquipment, type RentalActivity, type RentalMaintenanceRecord,
+    type RentalPendingDamageObservation,
     type RentalMutation, type RentalSummary, type RentalImportRow, type RentalPurchaseDetails,
     type RentalBulkPurchase, type RentalPricingMethod,
     calculateCostBasedRentalRate,
@@ -92,7 +93,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         resetDates();
         setNotice(mutation.action === "resolve_missing_equipment"
             ? mutation.resolution === "found"
-                ? "Missing equipment marked as found. The missing-unit report has been resolved."
+                ? "Missing equipment recovered. Staff must inspect and complete the recovery-care task before units become ready."
                 : "Permanent loss confirmed. The equipment stock has been adjusted."
             : mutation.action === "approve_maintenance_repair"
                 ? "Repair authorized. Equipment stays on hold until Staff completes repairs and the Manager approves stock release."
@@ -178,13 +179,18 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                             {rental.maintenanceRecords.filter(needsManagerMaintenanceDecision).length} for Manager approval
                         </span>}
                     </div>
+                    {/* Preliminary Staff damage observations and confirmed maintenance cases
+                        share the same standard table. Observations remain view-only; only
+                        confirmed repairs can receive Manager approval. */}
                     {rental.loading ? <PanelSkeleton/> : !rental.connected ?
                         <EmptyPanel label="Connect rental inventory to see maintenance records."/> :
                         !rental.maintenanceDataReady ?
                             <EmptyPanel label="The rental backend needs the maintenance records response. Apply the accompanying Lambda and SQL update."/> :
-                            rental.maintenanceRecords.length === 0 ?
+                            rental.maintenanceRecords.length===0 && rental.pendingDamageObservations.length===0 ?
                                 <EmptyPanel label="No open repair or damage cases. Routine return inspections and cleaning are managed by Staff."/> :
-                                <MaintenanceRecordsTable records={rental.maintenanceRecords} saving={rental.saving} canManage={canManage} onSave={onSaved}/>}
+                                <MaintenanceRecordsTable records={rental.maintenanceRecords}
+                                                         pendingObservations={rental.pendingDamageObservations}
+                                                         saving={rental.saving} canManage={canManage} onSave={onSaved}/>}
                     {rental.connected && rental.maintenanceDataReady && rental.maintenanceRecords.length>0 && <div className="shrink-0 border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-[11px] text-[#786887]">
                         Repair approval authorizes the work, but units stay on hold. Staff reports completion before the Manager approves stock release.
                     </div>}
@@ -469,8 +475,10 @@ function MaintenanceStageBadge({record}:{record:RentalMaintenanceRecord}) {
                 "bg-[#F1EBFF] text-[#5330B6]"
     }`}>{stage==="release"?"Awaiting Stock Release":stage==="approve"?"Awaiting Repair Approval":"Repair Authorized"}</span>;
 }
-function MaintenanceRecordsTable({records,saving,canManage,onSave}:{
-    records:RentalMaintenanceRecord[];saving:boolean;canManage:boolean;
+function MaintenanceRecordsTable({records,pendingObservations,saving,canManage,onSave}:{
+    records:RentalMaintenanceRecord[];
+    pendingObservations:RentalPendingDamageObservation[];
+    saving:boolean;canManage:boolean;
     onSave:(mutation:RentalMutation)=>Promise<void>;
 }) {
     const [approvalError,setApprovalError]=React.useState("");
@@ -511,13 +519,34 @@ function MaintenanceRecordsTable({records,saving,canManage,onSave}:{
                 <th className="px-2 py-3 font-semibold">Approval Status</th>
                 <th className="px-3 py-3 text-center font-semibold">Action</th>
             </tr></thead>
-            <tbody>{prioritized.map(record=>{
+            <tbody>
+            {pendingObservations.map(observation=><tr key={`observed-${observation.allocationId}`}
+                                                      className="border-b border-[#EFE8F2] align-top last:border-0">
+                <td className="px-3 py-3">
+                    <p className="font-semibold text-[#2B174C]">{observation.equipmentName}</p>
+                    <p className="mt-1 text-[#776887]">{observation.observedDamagedUnits} possibly damaged {observation.observedDamagedUnits===1?"unit":"units"}</p>
+                    <p className="mt-1 break-all text-[10px] text-[#5330B6]">Booking: {observation.bookingReference}</p>
+                </td>
+                <td className="px-3 py-3 text-[#5F4E75]">
+                    <p className="break-words">Damage observed at return (not yet confirmed)</p>
+                    {observation.notes&&<p className="mt-1 break-words text-[10px] text-[#86778F]" title={observation.notes}>{observation.notes}</p>}
+                    <p className="mt-1 text-[10px] text-[#86778F]">Reported: <MaintenanceDate value={observation.reportedAt}/></p>
+                </td>
+                <td className="px-2 py-3">
+                    <span className="inline-flex rounded-md bg-[#FFF2D7] px-2 py-1 text-[10px] font-semibold text-[#995F00]">Pending Staff Inspection</span>
+                </td>
+                <td className="px-3 py-3 text-center">
+                    <span className="text-[11px] text-[#86778F]">Waiting for Staff inspection</span>
+                </td>
+            </tr>)}
+            {prioritized.map(record=>{
                 const stage=managerMaintenanceStage(record);
                 return <tr key={record.id} className="border-b border-[#EFE8F2] align-top last:border-0">
                     <td className="px-3 py-3">
                         <p className="font-semibold text-[#2B174C]">{record.equipmentName}</p>
                         <p className="mt-1 text-[#776887]">{record.units} unit(s) on hold</p>
                         <p className="mt-0.5 text-[#9B8AAA]">Record #{record.id}</p>
+                        {record.bookingReference&&<p className="mt-1 break-all text-[10px] text-[#5330B6]" title="Customer charge decisions are made from the booking's Billing tab">Booking: {record.bookingReference}</p>}
                     </td>
                     <td className="px-3 py-3 text-[#5F4E75]">
                         <p className="max-w-[210px] break-words" title={record.reason}>{record.reason||"No reason provided"}</p>
@@ -614,6 +643,7 @@ function MissingReviewRow({report,saving,canManage,onSave}:{
         <div className="min-w-0 flex-1">
             <strong className="text-[#2B174C]">{report.equipmentName} · {report.quantity} missing {report.quantity===1?"unit":"units"}</strong>
             <p className="mt-1 break-words text-[#86778F]">{report.reason}</p>
+            {report.bookingReference&&<p className="mt-1 break-all text-[10px] text-[#5330B6]">Booking: {report.bookingReference} · After resolving the missing equipment, review any customer charge or waiver in Bookings → Billing.</p>}
         </div>
         <div className="flex items-center gap-3">
             <span className="rounded-full bg-[#FFF2DB] px-2.5 py-1 text-[10px] font-semibold text-[#996000]" style={{backgroundColor:"#FFDBE5",color:"#A52646"}}>Needs Review</span>

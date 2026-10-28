@@ -8,7 +8,6 @@ import {
     RefreshCw,
 } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
-import BookingFeePolicySettings from "./BookingFeePolicySettings";
 import {
     Booking,
     BookingWorkspace,
@@ -48,9 +47,6 @@ export default function OwnerBookings() {
     const [openBranch, setOpenBranch] = useState("");
     const [openInsight, setOpenInsight] = useState<InsightPanel>("");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
-
-    const branchOptions=useMemo(()=>[...new Map(bookings.filter(b=>b.branchId||b.branch_id)
-        .map(b=>[Number(b.branchId||b.branch_id),{id:Number(b.branchId||b.branch_id),name:b.branchName||b.branch_name||'Branch'}])).values()], [bookings]);
 
     const [financeSummary,setFinanceSummary]=useState<null|{deliveryFees:number;setupFees:number;refundableDepositsHeld:number;approvedClaims:number;cashRecovered:number;depositsApplied:number;outstandingClaims:number}>(null);
     useEffect(()=>{let cancelled=false;void (async()=>{try{
@@ -427,7 +423,6 @@ export default function OwnerBookings() {
                             ['Claims recovered in cash',financeSummary.cashRecovered],['Deposits applied to claims',financeSummary.depositsApplied]].map(([label,val])=><div key={String(label)}><p className="text-[#806A8C]">{label}</p><strong>{peso(Number(val))}</strong></div>)}
                     </div><p className="mt-2 text-[#806A8C]">Customer deposits held are liabilities, not revenue. Approved claims are tracked separately from rental income.</p>
                 </div>}
-                <BookingFeePolicySettings branches={branchOptions}/>
                 {loading && bookings.length === 0 ? (
                     <ModuleSkeleton variant="bookings" />
                 ) : bookings.length === 0 ? (

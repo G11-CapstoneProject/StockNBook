@@ -6,7 +6,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
     Boxes, CalendarClock, CheckCircle2,
     PackagePlus, Pencil, Plus, Search, Settings2, Wrench, X, Trash2,
-    Download, Upload, ChevronDown, Wallet, ArrowRight, AlertTriangle, Truck,
+    Download, Upload, ChevronDown, Wallet, ArrowRight, Truck,
 } from "lucide-react";
 import {
     useRentalInventory, availableNow, hasRentalStockDiscrepancy,
@@ -138,22 +138,6 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     <button type="button" onClick={() => setNotice("")} aria-label="Dismiss missing equipment update"><X size={16}/></button>
                 </div>
             ) : null}
-            {rental.missingReports.length>0&&<section className="rounded-xl border border-[#E7DFEC] bg-white p-4 shadow-sm" style={{backgroundColor:"#FFF8F9"}} aria-label="Missing equipment review">
-                <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                        <div className="flex items-center gap-2">
-                            <AlertTriangle size={17} className="text-[#AA6A00]" style={{color:"#BD3652"}} aria-hidden="true"/>
-                            <h3 className="text-sm font-bold text-[#21132E]">Missing Equipment Review</h3>
-                        </div>
-                        <p className="mt-1 text-xs text-[#86778F]">Review missing equipment reported by Staff and record the outcome.</p>
-                    </div>
-                    <span className="rounded-full bg-[#FFF2DB] px-3 py-1.5 text-[11px] font-semibold text-[#996000]" style={{backgroundColor:"#FFE5EC",color:"#AA2847"}}>
-                        {rental.missingReports.length} pending
-                    </span>
-                </div>
-                <div className="space-y-2">{rental.missingReports.map(report=><MissingReviewRow key={report.id} report={report}
-                                                                                                saving={rental.saving} canManage={canManage} onSave={onSaved}/>)}</div>
-            </section>}
             {rental.pendingReceipts.length>0&&<section aria-label="Deliveries awaiting staff confirmation" className="flex flex-wrap items-center gap-3 rounded-xl border border-[#E7DFEC] bg-[#FAF8FC] px-4 py-3 text-xs text-[#4F3A5A]" style={{backgroundColor:"#F5F1FF"}}>
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-[#665679]" style={{backgroundColor:"#ECE3FF",color:"#5A35A5"}} aria-hidden="true"><Truck size={19}/></span>
                 <div className="min-w-0 flex-1">
@@ -569,154 +553,6 @@ function MaintenanceRecordsTable({records,pendingObservations,saving,canManage,o
         </table>
     </div>;
 }
-function MissingReviewRow({report,saving,canManage,onSave}:{
-    report:import("@/hooks/useRentalInventory").RentalMissingReport;saving:boolean;canManage:boolean;
-    onSave:(mutation:RentalMutation)=>Promise<void>;
-}) {
-    const [reviewOpen,setReviewOpen]=React.useState(false);
-    const [resolution,setResolution]=React.useState<"found"|"writeoff"|null>(null);
-    const [notes,setNotes]=React.useState("");
-    const [confirmPermanentLoss,setConfirmPermanentLoss]=React.useState(false);
-    const [error,setError]=React.useState("");
-    const [submitting,setSubmitting]=React.useState(false);
-    const reviewButtonRef=React.useRef<HTMLButtonElement>(null);
-    const dialogRef=React.useRef<HTMLDivElement>(null);
-    const closeButtonRef=React.useRef<HTMLButtonElement>(null);
-
-    const close=()=>{
-        if(submitting||saving)return;
-        setReviewOpen(false);
-        setError("");
-        reviewButtonRef.current?.focus();
-    };
-    const open=()=>{
-        if(!canManage||saving)return;
-        setResolution(null);
-        setNotes("");
-        setConfirmPermanentLoss(false);
-        setError("");
-        setReviewOpen(true);
-    };
-    React.useEffect(()=>{
-        if(reviewOpen)closeButtonRef.current?.focus();
-    },[reviewOpen]);
-    React.useEffect(()=>{
-        if(!reviewOpen)return;
-        const onKeyDown=(event:KeyboardEvent)=>{
-            if(event.key==="Escape"){
-                event.preventDefault();
-                if(!submitting&&!saving){setReviewOpen(false);setError("");reviewButtonRef.current?.focus();}
-            }
-            if(event.key==="Tab"&&dialogRef.current){
-                const controls=Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
-                    'button:not(:disabled), input:not(:disabled), textarea:not(:disabled)'
-                )).filter(control=>control.getClientRects().length>0);
-                if(!controls.length)return;
-                const first=controls[0],last=controls[controls.length-1];
-                if(event.shiftKey && document.activeElement===first){event.preventDefault();last.focus();}
-                else if(!event.shiftKey && document.activeElement===last){event.preventDefault();first.focus();}
-            }
-        };
-        document.addEventListener("keydown",onKeyDown);
-        return ()=>document.removeEventListener("keydown",onKeyDown);
-    },[reviewOpen,submitting,saving]);
-    const resolve=async(event:React.FormEvent<HTMLFormElement>)=>{
-        event.preventDefault();
-        if(submitting||saving)return;
-        if(!canManage){setError("Full Inventory access is required to resolve missing equipment.");return;}
-        if(!resolution){setError("Choose whether the equipment was found or permanently lost.");return;}
-        if(notes.trim().length<10){setError("Please provide at least 10 characters of notes.");return;}
-        if(resolution==="writeoff"&&!confirmPermanentLoss){
-            setError("Confirm that the loss is verified and recorded stock must be permanently reduced.");return;
-        }
-        setError("");
-        setSubmitting(true);
-        try{
-            // Reuse the existing backend action, payload and Manager permission checks.
-            await onSave({action:"resolve_missing_equipment",reportId:report.id,resolution,notes:notes.trim()});
-            setReviewOpen(false);
-        }catch(cause){
-            setError(cause instanceof Error?cause.message:"Unable to resolve missing report.");
-        }finally{setSubmitting(false);}
-    };
-    return <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E9E1EE] p-3 text-xs" style={{backgroundColor:"#FFF0F3"}}>
-        <div className="min-w-0 flex-1">
-            <strong className="text-[#2B174C]">{report.equipmentName} · {report.quantity} missing {report.quantity===1?"unit":"units"}</strong>
-            <p className="mt-1 break-words text-[#86778F]">{report.reason}</p>
-            {report.bookingReference&&<p className="mt-1 break-all text-[10px] text-[#5330B6]">Booking: {report.bookingReference} · After resolving the missing equipment, review any customer charge or waiver in Bookings → Billing.</p>}
-        </div>
-        <div className="flex items-center gap-3">
-            <span className="rounded-full bg-[#FFF2DB] px-2.5 py-1 text-[10px] font-semibold text-[#996000]" style={{backgroundColor:"#FFDBE5",color:"#A52646"}}>Needs Review</span>
-            <button ref={reviewButtonRef} type="button" disabled={saving||!canManage} onClick={open}
-                    className="inline-flex items-center gap-2 rounded-lg bg-[#2B174C] px-3 py-2 font-semibold text-white transition hover:bg-[#432569] disabled:cursor-not-allowed disabled:opacity-40">
-                Review Missing Equipment <ArrowRight size={14} aria-hidden="true"/>
-            </button>
-        </div>
-        {reviewOpen&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/55 p-3 sm:p-6" role="presentation">
-            <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={`missing-review-title-${report.id}`}
-                 aria-describedby={`missing-review-description-${report.id}`}
-                 className="flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-2xl">
-                <div className="flex shrink-0 items-start justify-between gap-3 border-b border-[#E9E1EE] px-5 py-4">
-                    <div>
-                        <h3 id={`missing-review-title-${report.id}`} className="text-lg font-bold text-[#21132E]">Resolve Missing Equipment</h3>
-                        <p id={`missing-review-description-${report.id}`} className="mt-1 text-xs text-[#806A8C]">
-                            {report.equipmentName} · {report.quantity} missing {report.quantity===1?"unit":"units"}
-                        </p>
-                    </div>
-                    <button ref={closeButtonRef} type="button" onClick={close} disabled={saving||submitting} aria-label="Close missing equipment review"
-                            className="rounded-lg border border-[#E6DDF0] p-2 text-[#5F4E75] hover:bg-[#F7F1FF] disabled:opacity-40"><X size={17}/></button>
-                </div>
-                <form onSubmit={event=>void resolve(event)} className="min-h-0 overflow-y-auto px-5 py-4">
-                    {report.reason&&<p className="mb-4 rounded-lg border border-[#E9E1EE] bg-[#FFFCF8] p-3 text-xs text-[#695D75]">
-                        <span className="font-semibold text-[#2B174C]">Reported reason: </span>{report.reason}
-                    </p>}
-                    <fieldset className="space-y-2">
-                        <legend className="mb-2 text-sm font-bold text-[#21132E]">Choose how to resolve this report</legend>
-                        <label className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 ${resolution==="found"?"border-[#9F88CF] bg-[#F7F1FF]":"border-[#E6DDF0] bg-white"}`}>
-                            <input type="radio" name={`missing-resolution-${report.id}`} value="found" checked={resolution==="found"}
-                                   onChange={()=>{setResolution("found");setConfirmPermanentLoss(false);setError("");}} disabled={saving||submitting}
-                                   className="mt-0.5 accent-[#2B174C]"/>
-                            <span><strong className="block text-sm text-[#21132E]">Mark as Found</strong>
-                                <span className="mt-1 block text-xs leading-5 text-[#806A8C]">The missing equipment was located. Resolve the missing-unit report.</span></span>
-                        </label>
-                        <label className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 ${resolution==="writeoff"?"border-[#E4A3AE] bg-[#FFF8F8]":"border-[#E6DDF0] bg-white"}`}>
-                            <input type="radio" name={`missing-resolution-${report.id}`} value="writeoff" checked={resolution==="writeoff"}
-                                   onChange={()=>{setResolution("writeoff");setError("");}} disabled={saving||submitting}
-                                   className="mt-0.5 accent-[#B62C42]"/>
-                            <span><strong className="block text-sm text-[#21132E]">Confirm Permanent Loss</strong>
-                                <span className="mt-1 block text-xs leading-5 text-[#806A8C]">The equipment could not be recovered. Permanently deduct the lost units from recorded stock.</span></span>
-                        </label>
-                    </fieldset>
-                    <label className="mt-4 block text-xs font-semibold text-[#5A476A]" htmlFor={`missing-notes-${report.id}`}>Reason / Notes <span className="font-normal text-[#806A8C]">(at least 10 characters)</span></label>
-                    <textarea id={`missing-notes-${report.id}`} rows={3} maxLength={400} value={notes}
-                              onChange={event=>{setNotes(event.target.value);setError("");}} disabled={saving||submitting}
-                              placeholder="Describe how the equipment was found or why the loss is confirmed."
-                              className="mt-2 w-full rounded-xl border border-[#E3D8EA] bg-white p-3 text-sm text-[#21132E] outline-none focus:border-[#2B174C] focus:ring-1 focus:ring-[#2B174C] disabled:opacity-60"/>
-                    {resolution==="writeoff"&&<div className="mt-3 rounded-xl border border-[#F0B7C2] bg-[#FFF4F6] p-3">
-                        <div className="flex items-start gap-2 text-xs leading-5 text-[#9D2438]"><AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden="true"/>
-                            <span>Permanent loss will reduce the recorded equipment quantity. Confirm the investigation before proceeding.</span>
-                        </div>
-                        <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs font-semibold text-[#762339]">
-                            <input type="checkbox" checked={confirmPermanentLoss} onChange={event=>setConfirmPermanentLoss(event.target.checked)}
-                                   disabled={saving||submitting} className="mt-0.5 accent-[#B62C42]"/>
-                            <span>I verified the loss and authorize the permanent stock adjustment.</span>
-                        </label>
-                    </div>}
-                    {error&&<p role="alert" className="mt-3 text-xs font-semibold text-[#B62C42]">{error}</p>}
-                    <div className="mt-5 flex flex-wrap justify-end gap-2 border-t border-[#E9E1EE] pt-4">
-                        <button type="button" onClick={close} disabled={saving||submitting}
-                                className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-xs font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-40">Cancel</button>
-                        <button type="submit" disabled={!canManage||saving||submitting||!resolution||notes.trim().length<10||(resolution==="writeoff"&&!confirmPermanentLoss)}
-                                className={`rounded-xl px-4 py-2.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40 ${resolution==="writeoff"?"bg-[#B62C42] hover:bg-[#9C2137]":"bg-[#2B174C] hover:bg-[#432569]"}`}>
-                            {submitting||saving?"Saving...":resolution==="found"?"Confirm Found":resolution==="writeoff"?"Confirm Permanent Loss":"Choose a resolution"}
-                        </button>
-                    </div>
-                </form>
-            </div>
-        </div>}
-    </div>;
-}
-
 function RetireEquipmentDialog({item,saving,close,onSave}:{
     item:RentalEquipment;saving:boolean;close:()=>void;onSave:(mutation:RentalMutation)=>Promise<void>;
 }) {

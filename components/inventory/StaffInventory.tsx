@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import {
-    AlertTriangle, ArrowLeftRight, CalendarDays, ChevronDown, ClipboardList, Clock3, Eye,
+    AlertTriangle, ArrowLeftRight, CalendarDays, ChevronDown, ClipboardList,
     Package, PackagePlus, RefreshCw, Search, ShoppingCart, X, CheckCircle2, CalendarClock, Truck,
 } from "lucide-react";
 import { useInventoryController } from "@/hooks/useInventory";
@@ -692,44 +692,43 @@ export default function StaffInventory() {
                             </div>
                             <button type="button" className={`${outline} h-9 px-3 text-xs`} onClick={()=>{setActionError("");chooseReceipt(null);setShowReceivingInfo(true);}}>View Deliveries</button>
                         </section>}
-                        <div className="grid min-w-0 items-stretch gap-4 xl:grid-cols-2">
+                        <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-2">
                             {/* Manager-inspired table sizing, with Staff-only review actions. */}
-                            <section className={`${card} flex h-[470px] min-h-0 min-w-0 flex-col`}>
+                            <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`}>
                                 <SectionHead icon={<ClipboardList size={18}/>} title="Stock Alerts to Review" subtitle="Low and out-of-stock products to verify or report.">
                                     <select aria-label="Filter sales tasks" value={taskFilter} onChange={e=>setTaskFilter(e.target.value)}
-                                            className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none">
+                                            className="h-9 w-[104px] shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-2 text-[11px] font-semibold text-[#2B174C] outline-none">
                                         <option value="all">All Tasks</option><option value="Low Stock">Low Stock</option><option value="Out of Stock">Out of Stock</option>
                                     </select>
                                 </SectionHead>
-                                <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden">
+                                <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" tabIndex={0} aria-label="Stock alerts to review">
                                     <table className="w-full min-w-0 table-fixed text-[10px] xl:text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                                        <colgroup><col className="w-[36%]"/><col className="w-[11%]"/><col className="w-[12%]"/><col className="w-[23%]"/><col className="w-[18%]"/></colgroup>
+                                        <colgroup><col className="w-[38%]"/><col className="w-[11%]"/><col className="w-[13%]"/><col className="w-[21%]"/><col className="w-[17%]"/></colgroup>
                                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
-                                            <th className="break-words px-2 py-2.5 text-left text-[9px] font-semibold uppercase text-[#806A8C]">Product</th>
-                                            <th className="break-words px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Current Stock</th>
-                                            <th className="break-words px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Reorder Point</th>
-                                            <th className="px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Task</th>
-                                            <th className="px-1 py-2.5 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Action</th>
+                                            <th className="break-words px-2 py-2 text-left text-[9px] font-semibold uppercase text-[#806A8C]">Product</th>
+                                            <th className="break-words px-1 py-2 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Current Stock</th>
+                                            <th className="break-words px-1 py-2 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Reorder Point</th>
+                                            <th className="px-1 py-2 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Task</th>
+                                            <th className="px-1 py-2 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Action</th>
                                         </tr></thead>
-                                        <tbody>{tasks.slice(0,30).map(item=><tr key={item.key} className="border-b border-[#EFE8F2] text-[#2B174C] last:border-b-0">
-                                            <td className="break-words px-3 py-2.5 font-semibold">{item.name}</td>
-                                            <td className="px-1 py-2.5 text-center font-semibold">{item.stock}</td>
-                                            <td className="px-1 py-2.5 text-center text-[#5F4E75]">{item.reorder}</td>
-                                            <td className="px-1 py-2.5 text-center">
-                                                <span className={`inline-flex max-w-full items-center justify-center break-words rounded-full px-2 py-1 text-center text-[10px] font-semibold leading-4 ${stockBadge(item.status)}`}>
+                                        <tbody>{tasks.map(item=><tr key={item.key} className="border-b border-[#EFE8F2] text-[#2B174C] last:border-b-0">
+                                            <td className="break-words px-2 py-2 font-semibold align-middle">{item.name}</td>
+                                            <td className="px-1 py-2 text-center align-middle font-semibold">{item.stock}</td>
+                                            <td className="px-1 py-2 text-center align-middle text-[#5F4E75]">{item.reorder}</td>
+                                            <td className="px-1 py-2 text-center align-middle">
+                                                <span className={`inline-block max-w-full break-words text-[10px] font-semibold leading-4 ${reportsByKey.has(item.key) ? "text-[#A43D48]" : item.status === "Out of Stock" ? "text-[#BF2438]" : "text-[#B07408]"}`}>
                                                     {reportsByKey.has(item.key) ? "Reported" : item.status === "Out of Stock" ? "Report Shortage" : "Check / Report"}
                                                 </span>
                                             </td>
-                                            <td className="px-1.5 py-2.5 text-center">
-                                                <button type="button" onClick={()=>openProductReview(item)} className="inline-flex w-full max-w-[110px] items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-[10px] font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">Review</button>
+                                            <td className="px-1 py-2 text-center align-middle">
+                                                <button type="button" onClick={()=>openProductReview(item)} className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">Review</button>
                                             </td>
                                         </tr>)}</tbody>
                                     </table>
                                     {tasks.length===0 && <p className="px-5 py-8 text-center text-sm text-[#8A7D90]">No stock tasks match this filter.</p>}
-                                    {tasks.length>30 && <p className="border-t border-[#F0EAF4] px-4 py-2 text-xs text-[#806A8C]">Showing first 30 of {tasks.length} stock alerts. Use the branch inventory list to find more.</p>}
                                 </div>
                             </section>
-                            <section className={`${card} flex h-[470px] min-h-0 min-w-0 flex-col`}>
+                            <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`}>
                                 <SectionHead icon={<ClipboardList size={18}/>} title="Sales Operations Queue"
                                              subtitle="Booking inclusions to prepare and hand over · no rental equipment">
                                     <select aria-label="Filter sales booking tasks" value={salesQueueFilter}
@@ -743,35 +742,35 @@ export default function StaffInventory() {
                                 {salesQueueError&&<p role="alert" className="px-3 py-2 text-[11px] text-red-700">{salesQueueError}
                                     <button type="button" className="ml-2 underline" onClick={()=>setSalesQueueKey(key=>key+1)}>Retry</button></p>}
                                 {salesQueueLoading?<div className="space-y-3 p-4" aria-busy="true">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]"/>)}</div>:
-                                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+                                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Sales operations booking queue" tabIndex={0}>
                                         <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                                            <colgroup><col className="w-[35%]"/><col className="w-[22%]"/><col className="w-[26%]"/><col className="w-[17%]"/></colgroup>
+                                            <colgroup><col className="w-[34%]"/><col className="w-[19%]"/><col className="w-[28%]"/><col className="w-[19%]"/></colgroup>
                                             <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>
-                                                {["Client / Booking Ref","Schedule","Booking Type","Action"].map(label=><th key={label} className={headClass}>{label}</th>)}
+                                                {["Client / Booking Ref","Schedule","Booking Type","Action"].map(label=><th key={label} className={`${headClass} !px-2 !py-2`}>{label}</th>)}
                                             </tr></thead>
-                                            <tbody>{visibleSalesBookings.slice(0,50).map(booking=>{
+                                            <tbody>{visibleSalesBookings.map(booking=>{
                                                 const active=selectedSalesBookingRef===booking.reference;
                                                 const open=()=>{setSelectedSalesBookingRef(booking.reference);setSalesQueueError("");};
                                                 return <tr key={booking.bookingId} tabIndex={0} aria-selected={active}
                                                            onClick={open}
                                                            onKeyDown={e=>{if(e.target===e.currentTarget&&(e.key==="Enter"||e.key===" ")){e.preventDefault();open();}}}
-                                                           className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"bg-[#F1EBFF]":"hover:bg-[#FCF9FF]"}`}>
-                                                    <td className={`px-3 py-3 align-middle ${active?"border-l-4 border-[#6F3FD3] pl-2":""}`}>
+                                                           className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"":"hover:bg-[#FCF9FF]"}`}>
+                                                    <td className={`px-2 py-2 align-middle ${active?"border-l-4 border-[#6F3FD3] pl-2":""}`}>
                                                         <span className="block break-words font-semibold">{booking.clientName}</span>
                                                         <span className="mt-1 block break-all text-[10px] text-[#806A8C]">{booking.reference}</span>
                                                     </td>
-                                                    <td className="px-3 py-3 align-middle">
+                                                    <td className="px-2 py-2 align-middle">
                                                         <span className="block font-medium">{displaySalesBookingDate(booking.eventDate)}</span>
                                                         {booking.eventTime&&<span className="mt-1 block text-[10px] text-[#806A8C]">{booking.eventTime}</span>}
                                                     </td>
-                                                    <td className="px-3 py-3 align-middle">
+                                                    <td className="px-2 py-2 align-middle">
                                                         <span className="block break-words font-medium">{salesBookingType(booking.bookingType)}</span>
                                                         <span className="mt-1 block text-[10px] text-[#806A8C]">{booking.items.length} product {booking.items.length===1?"line":"lines"}</span>
                                                     </td>
-                                                    <td className="px-2 py-3 text-center align-middle">
+                                                    <td className="px-1 py-2 text-center align-middle">
                                                         <button type="button" aria-haspopup="dialog"
                                                                 onClick={e=>{e.stopPropagation();open();}}
-                                                                className={`inline-flex min-h-9 w-full min-w-0 max-w-full items-center justify-center gap-1 whitespace-normal break-words rounded-xl border border-[#E6DDF0] bg-white px-1.5 py-1 text-center text-[11px] font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50 ${active?"border-[#D9CDF0] bg-white text-[#5330B6]":""}`}>
+                                                                className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">
                                                             View Items
                                                         </button>
                                                     </td>
@@ -779,7 +778,6 @@ export default function StaffInventory() {
                                             })}</tbody>
                                         </table>
                                         {visibleSalesBookings.length===0&&<p className="p-5 text-center text-xs text-[#806A8C]">No Sales product preparation tasks match this filter.</p>}
-                                        {visibleSalesBookings.length>50&&<p className="px-3 py-2 text-[11px] text-[#806A8C]">Showing the first 50 bookings. Change the schedule filter to find others.</p>}
                                     </div>}
                                 <p className="border-t border-[#F0EAF4] px-3 py-2 text-[10px] text-[#806A8C]">Confirmed bookings only. Prepare each product, then release the complete Sales order after full payment. Rental equipment stays in the Rental queue.</p>
                             </section>
@@ -796,21 +794,19 @@ export default function StaffInventory() {
                                 </div>
                             </SectionHead>
                             <div className="border-b border-[#E9E1EE] px-4 py-3">
-                                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto_auto_auto] xl:items-center">
+                                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center">
                                     <label className="relative min-w-0"><span className="sr-only">Search sales inventory</span>
                                         <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
                                         <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products, variants, clients or booking references..." className="h-[44px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]"/>
                                     </label>
-                                    <button type="button" className={outline} onClick={()=>{setStatus("Low Stock");document.getElementById("staff-sales-list")?.scrollIntoView({behavior:"smooth"});}}><Eye size={16}/> View Low Stock</button>
-                                    <button type="button" className={`${outline} text-xs`} onClick={()=>{setActivityPage(1);setShowActivityHistory(true);}} disabled={activityLoading||!!activityError}><Clock3 size={16}/> View Stock Activity</button>
                                     {canReceive && <button type="button" className={primary} onClick={()=>{setActionError("");setShowReceivingInfo(true);}}><PackagePlus size={16}/> Record Stock In{receivingTasks.length ? ` (${receivingTasks.length})` : ""}</button>}
                                 </div>
                             </div>
                             <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Branch sales inventory list" tabIndex={0}>
                                 <table className="w-full min-w-0 table-fixed text-[10px] xl:text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                                    <colgroup><col className="w-[10%]"/><col className="w-[18%]"/><col className="w-[12%]"/><col className="w-[9%]"/><col className="w-[9%]"/><col className="w-[11%]"/><col className="w-[11%]"/><col className="w-[11%]"/><col className="w-[9%]"/></colgroup>
+                                    <colgroup><col className="w-[11%]"/><col className="w-[19%]"/><col className="w-[11%]"/><col className="w-[9%]"/><col className="w-[9%]"/><col className="w-[11%]"/><col className="w-[10%]"/><col className="w-[11%]"/><col className="w-[9%]"/></colgroup>
                                     <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
-                                        {['Product No.','Product','Category','Available Stock','Reorder Point','Last Stock In','Expiration','Status','Action'].map((label,index)=><th key={label} className={`break-words px-2 py-2.5 text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C] ${index===1||index===2?'text-left':'text-center'}`}>{label}</th>)}
+                                        {['Product No.','Product','Category','Available Stock','Reorder Point','Last Stock In','Expiration','Status','Action'].map((label,index)=><th key={label} className={`break-words px-2 py-2 text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C] ${index===1||index===2?'text-left':'text-center'}`}>{label}</th>)}
                                     </tr></thead>
                                     <tbody>{visibleProducts.map(product=>{
                                         const variants=product.hasVariants&&product.variants?.length?product.variants:[];
@@ -822,33 +818,33 @@ export default function StaffInventory() {
                                         const expiration=expirations.map(v=>v.slice(0,10)).sort()[0]||null;
                                         const productLine=lines.find(line=>line.product.id===product.id);
                                         return <React.Fragment key={product.id}>
-                                            <tr className={`h-14 border-b border-[#EFE8F2] text-[#2B174C] hover:bg-[#FFFCF8] ${expandable?'cursor-pointer':''}`}
+                                            <tr className={`h-12 border-b border-[#EFE8F2] text-[#2B174C] hover:bg-[#FFFCF8] ${expandable?'cursor-pointer':''}`}
                                                 onClick={expandable?()=>setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]})):undefined}>
-                                                <td className="break-all px-2 py-2.5 text-center font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">
+                                                <td className="break-all px-2 py-2 text-center font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">
                                                     <div className="flex items-center justify-center gap-1"><span className="inline-flex w-[13px] shrink-0 items-center justify-center">{expandable?<ChevronDown size={13} className={`transition ${expanded?'rotate-180':''}`}/>:null}</span><span>{product.productNumber||"—"}</span></div>
                                                 </td>
-                                                <td className="break-words px-3 py-2.5 font-semibold">{product.name}</td>
-                                                <td className="break-words px-2 py-2.5 text-[#5F4E75]">{product.category||"—"}</td>
-                                                <td className="px-2 py-2.5 text-center font-semibold">{stock.toLocaleString('en-PH')}</td>
-                                                <td className="px-2 py-2.5 text-center text-[#5F4E75]">{reorder.toLocaleString('en-PH')}</td>
-                                                <td className="px-2 py-2.5 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.productDates[product.id])}</td>
-                                                <td className="px-2 py-2.5 text-center text-[#5F4E75]">{inventoryExpirationLabel(expiration)}</td>
-                                                <td className="px-1 py-2.5 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(product))}</td>
-                                                <td className="px-1 py-2.5 text-center"><button type="button" className="inline-flex max-w-full items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-[10px] font-semibold text-[#5330B6] hover:bg-[#ECE3FF]"
-                                                                                                onClick={e=>{e.stopPropagation();if(expandable)setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]}));else if(productLine)openProductReview(productLine);}}>{expandable?(expanded?'Hide':'Variants'):'View'}</button></td>
+                                                <td className="break-words px-3 py-2 font-semibold">{product.name}</td>
+                                                <td className="break-words px-2 py-2 text-[#5F4E75]">{product.category||"—"}</td>
+                                                <td className="px-2 py-2 text-center font-semibold">{stock.toLocaleString('en-PH')}</td>
+                                                <td className="px-2 py-2 text-center text-[#5F4E75]">{reorder.toLocaleString('en-PH')}</td>
+                                                <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.productDates[product.id])}</td>
+                                                <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(expiration)}</td>
+                                                <td className="px-1 py-2 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(product))}</td>
+                                                <td className="px-1 py-2 text-center"><button type="button" className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                                                                                              onClick={e=>{e.stopPropagation();if(expandable)setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]}));else if(productLine)openProductReview(productLine);}}>{expandable?(expanded?'Hide':'Variants'):'View'}</button></td>
                                             </tr>
                                             {expandable&&expanded&&variants.map(variant=>{
                                                 const line=lines.find(row=>row.product.id===product.id&&row.variantId===variant.id);
-                                                return <tr key={variant.id} className="h-14 border-b border-[#EFE8F2] bg-[#FCF9FF] text-[#2B174C]">
-                                                    <td className="break-all px-2 py-2.5 text-center font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">{variant.variantNumber||"—"}</td>
-                                                    <td className="break-words px-3 py-2.5 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {staffVariantDisplayName(variant.variantValues)}</td>
-                                                    <td className="px-2 py-2.5 text-[#8A7D90]">Variant</td>
-                                                    <td className="px-2 py-2.5 text-center font-semibold">{Number(variant.stock||0).toLocaleString('en-PH')}</td>
-                                                    <td className="px-2 py-2.5 text-center text-[#5F4E75]">{Number(variant.alertLevel||0).toLocaleString('en-PH')}</td>
-                                                    <td className="px-2 py-2.5 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.variantDates[`${product.id}:${variant.id}`])}</td>
-                                                    <td className="px-2 py-2.5 text-center text-[#5F4E75]">{inventoryExpirationLabel(variant.expirationDate)}</td>
-                                                    <td className="px-1 py-2.5 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
-                                                    <td className="px-1 py-2.5 text-center"><button type="button" disabled={!line} onClick={()=>line&&openProductReview(line)} className="inline-flex max-w-full items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-[10px] font-semibold text-[#5330B6] hover:bg-[#ECE3FF] disabled:opacity-50">View</button></td>
+                                                return <tr key={variant.id} className="h-12 border-b border-[#EFE8F2] bg-[#FCF9FF] text-[#2B174C]">
+                                                    <td className="break-all px-2 py-2 text-center font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">{variant.variantNumber||"—"}</td>
+                                                    <td className="break-words px-3 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {staffVariantDisplayName(variant.variantValues)}</td>
+                                                    <td className="px-2 py-2 text-[#8A7D90]">Variant</td>
+                                                    <td className="px-2 py-2 text-center font-semibold">{Number(variant.stock||0).toLocaleString('en-PH')}</td>
+                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{Number(variant.alertLevel||0).toLocaleString('en-PH')}</td>
+                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.variantDates[`${product.id}:${variant.id}`])}</td>
+                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(variant.expirationDate)}</td>
+                                                    <td className="px-1 py-2 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
+                                                    <td className="px-1 py-2 text-center"><button type="button" disabled={!line} onClick={()=>line&&openProductReview(line)} className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">View</button></td>
                                                 </tr>;
                                             })}
                                         </React.Fragment>;

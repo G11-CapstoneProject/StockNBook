@@ -9,7 +9,7 @@ const JWT_SECRET = "stocknbook-secret-key";
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -442,7 +442,7 @@ async function requireRentalIncidentSettlement(db,{bookingId,storeId,branchId,al
         if(issue.status==='pending')throw rentalError('Manager must review missing rental equipment before booking completion.');
         if(issue.status==='writeoff'&&!issue.claimStatus)
             throw rentalError('Manager must approve or waive the verified missing-equipment charge.');
-        if(!allowOutstanding&&issue.claimStatus==='approved'&&Number(issue.paid)+Number(issue.applied)+0.005<Number(issue.amount))
+        if(!allowOutstanding&&issue.claimStatus!=='waived'&&Number(issue.paid)+Number(issue.applied)+0.005<Number(issue.amount))
             throw rentalError('Settle the approved missing-equipment charge or apply the held security deposit.');
     }
     const [damage]=await db.execute(`SELECT c.status AS claimStatus,c.approved_amount AS amount,
@@ -453,8 +453,19 @@ async function requireRentalIncidentSettlement(db,{bookingId,storeId,branchId,al
                                        AND m.start_reason LIKE 'Rental damage %'`,[bookingId,storeId,branchId,reference]);
     for(const issue of damage){
         if(!issue.claimStatus)throw rentalError('Manager must approve or waive the booking-linked damage charge.');
-        if(!allowOutstanding&&issue.claimStatus==='approved'&&Number(issue.paid)+Number(issue.applied)+0.005<Number(issue.amount))
+        if(!allowOutstanding&&issue.claimStatus!=='waived'&&Number(issue.paid)+Number(issue.applied)+0.005<Number(issue.amount))
             throw rentalError('Settle the approved equipment-damage charge or apply the held security deposit.');
+    }
+    if(!allowOutstanding){
+        // Never complete or refund an underpaid claim, even if its status label was
+        // prematurely marked "settled". Deposit application is not cash received.
+        const [unpaid]=await db.execute(`SELECT COUNT(*) AS outstanding FROM booking_customer_claims
+                                         WHERE booking_id=? AND store_id=? AND branch_id=?
+                                           AND status<>'waived'
+                                           AND COALESCE(approved_amount,0)>COALESCE(amount_paid,0)+COALESCE(deposit_applied,0)+0.005`,
+            [bookingId,storeId,branchId]);
+        if(Number(unpaid[0]?.outstanding||0)>0)
+            throw rentalError('Record and verify all additional customer payments before completing the booking or refunding the deposit.');
     }
 }
 
@@ -511,6 +522,55 @@ async function requirePhysicalAndIncidentDecision(db,{bookingId,storeId,branchId
     await requireRentalIncidentSettlement(db,{bookingId,storeId,branchId,allowOutstanding:true});
 }
 
+// Final booking completion is automatic, but only after physical return, inspection,
+// claims and the separate refundable deposit ledger have all been reconciled.
+async function automaticallyCompleteSettledBooking(db,bookingId,storeId,branchId) {
+    const [books]=await db.execute(`SELECT status,agreed_price,amount_paid,balance FROM bookings
+                                    WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,storeId,branchId]);
+    const booking=books[0];
+    if(String(booking?.status||'').toLowerCase()!=='pending settlement')return false;
+    if(!(Number(booking.agreed_price)>0) || Number(booking.amount_paid)+0.005<Number(booking.agreed_price)
+        || Number(booking.balance)>0.005)return false;
+    const [details]=await db.execute(`SELECT refundable_deposit_required,deposit_collected,deposit_applied,deposit_refunded
+                                      FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
+        [bookingId,storeId,branchId]);
+    if(!details.length)return false;
+    const f=details[0];
+    if(Number(f.deposit_collected)+0.005<Number(f.refundable_deposit_required) ||
+        Number(f.deposit_collected)-Number(f.deposit_applied)-Number(f.deposit_refunded)>0.005)return false;
+    const [sales]=await db.execute(`SELECT COUNT(*) AS pending FROM booking_items bi
+                                                                        LEFT JOIN booking_sales_fulfillment sf ON sf.booking_item_id=bi.id
+                AND sf.store_id=bi.store_id AND sf.branch_id=bi.branch_id
+                                    WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?
+                                      AND bi.product_id IS NOT NULL AND bi.booked_quantity>0
+                                      AND (sf.issued_at IS NULL OR COALESCE(bi.used_quantity,0)<bi.booked_quantity)`,
+        [bookingId,storeId,branchId]);
+    if(Number(sales[0]?.pending||0)>0)return false;
+    // These existing validation functions check all rental returns, inspection,
+    // pending physical incidents and paid/waived/applied loss/damage claims.
+    try {
+        await requireRentalReturnBeforeCompletion(db,{bookingId,storeId,branchId});
+        await requireRentalIncidentSettlement(db,{bookingId,storeId,branchId});
+    } catch(err) {
+        if(err?.rentalValidation)return false;
+        throw err;
+    }
+    const [pendingCleaning]=await db.execute(`SELECT COUNT(*) AS pending
+                                              FROM rental_booking_allocations a
+                                                       LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id
+                                                       JOIN booking_rental_items ri ON ri.booking_reference=a.booking_reference
+                                                  AND ri.equipment_id=a.equipment_id AND ri.store_id=a.store_id AND ri.branch_id=a.branch_id
+                                              WHERE ri.booking_id=? AND a.store_id=? AND a.branch_id=?
+                                                AND COALESCE(w.returned_received_units,a.quantity)>0
+                                                AND (w.inspected_at IS NULL OR w.inspection_status IN ('pending','cleaning'))`,
+        [bookingId,storeId,branchId]);
+    if(Number(pendingCleaning[0]?.pending||0)>0)return false;
+    const [result]=await db.execute(`UPDATE bookings SET status='Completed'
+                                     WHERE id=? AND store_id=? AND branch_id=? AND status='Pending Settlement'`,
+        [bookingId,storeId,branchId]);
+    return result.affectedRows===1;
+}
+
 // Booking billing: prices come from store policy; a deposit is a refundable LIABILITY.
 function financeCurrency(value,label='Amount') {
     const raw=Number(value);
@@ -527,11 +587,10 @@ async function getFeePolicy(db,storeId,branchId){
                                    WHERE p.store_id=? AND p.branch_id=? LIMIT 1`,[storeId,branchId]);
     const row=rows[0]||{};
     return {deliveryFee:Number(row.delivery_fee||0),setupFee:Number(row.setup_fee||0),
-        refundableDeposit:Number(row.refundable_deposit||0),
-        // New branches require an Owner-set minimum by default. The migration
-        // keeps existing zero-deposit branch policies optional until changed.
-        depositPolicy:['required','optional','none'].includes(row.rental_deposit_policy)
-            ?row.rental_deposit_policy:'required',
+        // Refundable rental security deposits are chosen per booking by the Manager.
+        // No branch/Owner minimum is imposed on new booking quotations.
+        refundableDeposit:0,
+        depositPolicy:'optional',
         deliveryIncludedPackage:!!row.delivery_included_package,
         setupIncludedPackage:!!row.setup_included_package};
 }
@@ -1759,6 +1818,9 @@ const CANONICAL_BOOKING_STATUSES = [
     "Awaiting Down Payment",
     "Confirmed",
     "Preparing",
+    "Released",
+    "Return Inspection",
+    "Pending Settlement",
     "Completed",
     "Cancelled",
 ];
@@ -2370,7 +2432,7 @@ exports.handler = async (event) => {
                 await connection.execute(`INSERT INTO booking_financial_details
                                           (booking_id,store_id,branch_id,package_base,rental_subtotal,delivery_fee,setup_fee,refundable_deposit_required)
                                           VALUES (?,?,?,?,?,?,?,?)`,[bookingId,targetStoreId,targetBranchId,packagePrice,rentalQuote.amount,
-                    delivery,setup,rentalQuote.count>0 && policy.depositPolicy==='required'?policy.refundableDeposit:0]);
+                    delivery,setup,0]);
                 // For catalog-only custom requests, save the quote directly from verified
                 // Products/Rental line prices. Free-form bespoke work must be reviewed by Manager.
                 const customSalesTotal=bookingItemsToSave.filter(i=>i.sourceType==='custom')
@@ -2395,7 +2457,7 @@ exports.handler = async (event) => {
                     success: true,
                     id: bookingId,
                     quoted_booking_charges:authoritativeTotal,
-                    refundable_deposit_required:rentalQuote.count>0 && policy.depositPolicy==='required'?policy.refundableDeposit:0,
+                    refundable_deposit_required:0,
                     service_fees:{delivery,setup},
                     package_price: packagePrice,
                     required_down_payment: requiredDownPayment,
@@ -2534,12 +2596,19 @@ exports.handler = async (event) => {
             salesInventoryAccess !== "none")) {
             return response(403, { error: "Bookings access is not permitted for this account." });
         }
+        if (tokenRole === 'staff' && new Set([
+            'assess_booking_confirmation','confirm_standard_booking',
+            'request_booking_approval','advance_staff_booking'
+        ]).has(action)) {
+            return response(403,{error:'Staff Bookings is view-only. Use Staff Inventory to prepare, release and inspect items.'});
+        }
         const bookingReadActions = new Set([
             "get_booking_page_bookings", "get_dashboard_bookings", "get_bookings", "get_booking_items", "get_booking_financial_statement", "get_booking_claim_sources", "get_customer_review_case", "get_booking_fee_policy", "get_staff_sales_booking_queue",
         ]);
         const standardStaffActions = new Set([
-            'assess_booking_confirmation','confirm_standard_booking','request_booking_approval',
-            'advance_staff_booking', 'prepare_staff_sales_booking_item', 'release_staff_sales_booking',
+            // Physical consumable fulfilment is authorized by Inventory access,
+            // never by the read-only Staff Booking module.
+            'prepare_staff_sales_booking_item', 'release_staff_sales_booking',
         ]);
         if (tokenRole === 'staff' && !bookingReadActions.has(action) &&
             !(standardStaffActions.has(action) && ['standard','full'].includes(bookingAccess)) &&
@@ -2586,7 +2655,7 @@ exports.handler = async (event) => {
                                                                          LEFT JOIN booking_sales_fulfillment f ON f.booking_item_id=bi.id
                                                              AND f.store_id=b.store_id AND f.branch_id=b.branch_id
                                                          WHERE b.store_id=? AND b.branch_id=?
-                                                           AND LOWER(b.status) IN ('confirmed','preparing')
+                                                           AND LOWER(b.status) IN ('confirmed','preparing','released','return inspection','pending settlement')
                                                            AND bi.inventory_status='reserved' AND bi.product_id IS NOT NULL
                                                            AND bi.booked_quantity>0 AND COALESCE(bi.used_quantity,0)=0
                                                            AND f.issued_at IS NULL
@@ -2620,7 +2689,7 @@ exports.handler = async (event) => {
                                                            WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,store_id,branchId]);
                 if(!bookings.length)throw rentalError('Booking is not in your assigned branch.');
                 const booking=bookings[0];
-                if(!['confirmed','preparing'].includes(String(booking.status||'').toLowerCase()))
+                if(!['confirmed','preparing','released','return inspection','pending settlement'].includes(String(booking.status||'').toLowerCase()))
                     throw rentalError('Only confirmed or preparing bookings can be fulfilled.');
                 const [lines]=await connection.execute(`SELECT id,booked_quantity,reserved_quantity,
                                                                used_quantity,inventory_status,unit_price,product_name
@@ -2647,6 +2716,9 @@ exports.handler = async (event) => {
                     await connection.execute(`INSERT INTO booking_sales_fulfillment
                                               (booking_item_id,booking_id,store_id,branch_id,prepared_at,prepared_by)
                                               VALUES (?,?,?,?,NOW(),?)`,[itemId,bookingId,store_id,branchId,employee.name]);
+                    await connection.execute(`UPDATE bookings SET status='Preparing'
+                                              WHERE id=? AND store_id=? AND branch_id=? AND status='Confirmed'`,
+                        [bookingId,store_id,branchId]);
                     await logEmployeeAction(connection,{storeId:store_id,branchId,employee,module:'Bookings',
                         referenceNumber:String(booking.booking_reference),referenceId:String(bookingId),
                         action:'Prepared Sales booking inclusion',details:`Prepared ${line.booked_quantity} × ${line.product_name}`});
@@ -2654,6 +2726,22 @@ exports.handler = async (event) => {
                     const total=Number(booking.agreed_price),paid=Number(booking.amount_paid),balance=Number(booking.balance);
                     if(!Number.isFinite(total)||total<=0||!Number.isFinite(paid)||!Number.isFinite(balance)||
                         paid+0.005<total||balance>0.005)throw rentalError('Full verified booking payment is required before Sales product handover.');
+                    const [rentalCount]=await connection.execute(`SELECT COUNT(*) AS count FROM booking_rental_items
+                                                                  WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                        [bookingId,store_id,branchId]);
+                    if(Number(rentalCount[0]?.count||0)>0){
+                        const [depositTerms]=await connection.execute(`SELECT refundable_deposit_required,deposit_collected
+                                                                       FROM booking_financial_details
+                                                                       WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                            [bookingId,store_id,branchId]);
+                        if(!depositTerms.length)throw rentalError('Booking security-deposit terms are unavailable. Ask the Manager to review Billing.');
+                        const required=Number(depositTerms[0].refundable_deposit_required);
+                        const collected=Number(depositTerms[0].deposit_collected);
+                        if(depositTerms[0].refundable_deposit_required==null ||
+                            !Number.isFinite(required)||required<0 || !Number.isFinite(collected)||collected<0 ||
+                            collected+0.005<required)
+                            throw rentalError('Collect the full agreed refundable security deposit before releasing booking items.');
+                    }
                     const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
                     const eventDay=String(booking.eventDay||'');
                     if(eventDay>today)throw rentalError('Sales products cannot be released before their scheduled event date.');
@@ -2669,6 +2757,32 @@ exports.handler = async (event) => {
                                                   WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
                             [quantity,Math.round(quantity*Number(line.unit_price||0)*100)/100,line.id,bookingId,store_id,branchId]);
                     }
+                    const [rentals]=await connection.execute(`SELECT COUNT(*) AS remaining
+                                                              FROM rental_booking_allocations
+                                                              WHERE store_id=? AND branch_id=? AND booking_reference=?
+                                                                AND status='reserved'`,
+                        [store_id,branchId,booking.booking_reference]);
+                    const [rentalExpected]=await connection.execute(`SELECT COUNT(*) AS expected
+                                                                     FROM booking_rental_items
+                                                                     WHERE store_id=? AND branch_id=? AND booking_id=?`,
+                        [store_id,branchId,bookingId]);
+                    const [rentalAllocated]=await connection.execute(`SELECT COUNT(*) AS actual
+                                                                      FROM rental_booking_allocations
+                                                                      WHERE store_id=? AND branch_id=? AND booking_reference=?`,
+                        [store_id,branchId,booking.booking_reference]);
+                    if(Number(rentals[0]?.remaining||0)===0 &&
+                        Number(rentalExpected[0]?.expected||0)===Number(rentalAllocated[0]?.actual||0)) {
+                        await connection.execute(`UPDATE bookings SET status='Released'
+                                                  WHERE id=? AND store_id=? AND branch_id=? AND status IN ('Confirmed','Preparing')`,
+                            [bookingId,store_id,branchId]);
+                    }
+                    if(Number(rentalExpected[0]?.expected||0)===0 &&
+                        Number(rentals[0]?.remaining||0)===0) {
+                        await connection.execute(`UPDATE bookings SET status='Pending Settlement'
+                                                  WHERE id=? AND store_id=? AND branch_id=? AND status='Released'`,
+                            [bookingId,store_id,branchId]);
+                    }
+                    await automaticallyCompleteSettledBooking(connection,bookingId,store_id,branchId);
                     await logEmployeeAction(connection,{storeId:store_id,branchId,employee,module:'Bookings',
                         referenceNumber:String(booking.booking_reference),referenceId:String(bookingId),
                         action:'Released complete Sales booking inclusions',
@@ -2698,13 +2812,10 @@ exports.handler = async (event) => {
             if(!br.length)return response(404,{error:'Store branch not found.'});
             const delivery=financeCurrency(body.deliveryFee,'Delivery fee');
             const setup=financeCurrency(body.setupFee,'Setup fee');
-            const depositMode=String(body.depositPolicy||'');
-            if(!['required','optional','none'].includes(depositMode))
-                return response(400,{error:'Select a valid rental security-deposit policy.'});
-            const requestedDeposit=financeCurrency(body.refundableDeposit,'Refundable deposit');
-            if(depositMode==='required' && requestedDeposit<=0)
-                return response(400,{error:'Enter a positive branch minimum for required rental deposits.'});
-            const deposit=depositMode==='none'?0:requestedDeposit;
+            // Branch service fees remain Owner-configurable. Rental security
+            // deposits are optional and set by the Manager per booking.
+            const depositMode='optional';
+            const deposit=0;
             await connection.execute(`INSERT INTO booking_fee_policies
                                       (store_id,branch_id,delivery_fee,setup_fee,refundable_deposit,rental_deposit_policy,delivery_included_package,setup_included_package)
                                       VALUES(?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE delivery_fee=VALUES(delivery_fee),setup_fee=VALUES(setup_fee),
@@ -2718,7 +2829,7 @@ exports.handler = async (event) => {
         // transfer money, issue refunds, notify the customer or adjudicate liability.
         if (new Set(['get_customer_review_case','record_customer_case_event',
             'set_customer_review','authorize_customer_booking_exception',
-            'waive_unpaid_customer_claim','close_booking_outstanding_claim']).has(action)) {
+            'waive_unpaid_customer_claim']).has(action)) {
             const bookingId=Number(body.bookingId||body.booking_id);
             if(!Number.isSafeInteger(bookingId)||bookingId<=0)
                 return response(400,{error:'Valid booking ID is required.'});
@@ -2834,38 +2945,20 @@ exports.handler = async (event) => {
                         [reason.slice(0,200),claimId]);
                     await insertEvent('claim_waived_after_dispute',
                         `Previously approved ₱${Number(claims[0].approved_amount).toFixed(2)} waived after documented Manager investigation. ${reason}`.slice(0,500));
+                    await automaticallyCompleteSettledBooking(connection,bookingId,store_id,branchId);
                     await connection.commit();
                 }catch(e){await connection.rollback();if(e.rentalValidation)return response(409,{error:e.message});throw e;}
                 return response(200,{success:true});
             }
-            if(action==='close_booking_outstanding_claim'){
-                if(String(book.status||'').trim().toLowerCase()!=='preparing')
-                    return response(409,{error:'Only a Preparing booking can be closed.'});
-                await connection.beginTransaction();
-                try{
-                    const [locked]=await connection.execute(`SELECT id,status FROM bookings
-                                                             WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,store_id,branchId]);
-                    if(String(locked[0]?.status||'').toLowerCase()!=='preparing')throw rentalError('Booking status changed; refresh.');
-                    await requirePhysicalAndIncidentDecision(connection,{bookingId,storeId:store_id,branchId});
-                    const [claims]=await connection.execute(`SELECT
-                                                                 COALESCE(SUM(GREATEST(approved_amount-amount_paid-deposit_applied,0)),0) AS due
-                                                             FROM booking_customer_claims WHERE booking_id=? AND store_id=? AND branch_id=? AND status='approved'`,
-                        [bookingId,store_id,branchId]);
-                    if(Number(claims[0]?.due||0)<=0.005)throw rentalError('There is no outstanding approved claim. Use normal booking completion.');
-                    await connection.execute(`UPDATE bookings SET status='Completed' WHERE id=? AND store_id=? AND branch_id=? AND status='Preparing'`,
-                        [bookingId,store_id,branchId]);
-                    await insertEvent('closed_outstanding');
-                    await logEmployeeAction(connection,{storeId:store_id,branchId,employee:person,module:'Bookings',
-                        referenceNumber:book.reference,referenceId:String(bookingId),action:'Closed operational booking with outstanding customer claim',
-                        details:`Approved equipment debt remains outstanding. ${reason}`});
-                    await connection.commit();
-                }catch(e){await connection.rollback();if(e.rentalValidation)return response(409,{error:e.message});throw e;}
-                return response(200,{success:true,status:'Completed',financialStatus:'Outstanding claim'});
-            }
+
         }
 
+        if(action==='close_booking_outstanding_claim')
+            return response(409,{error:'Booking cannot be completed with unpaid claims. Use Pending Settlement until everything is resolved.'});
+
         if(action==='get_booking_financial_statement'||action==='get_booking_claim_sources'||
-            action==='approve_booking_claim'||action==='waive_booking_claim'||action==='record_booking_financial_event') {
+            action==='approve_booking_claim'||action==='waive_booking_claim'||action==='record_booking_financial_event'||
+            action==='settle_booking_security_deposit') {
             const bookingId=Number(body.bookingId||body.booking_id);
             if(!Number.isSafeInteger(bookingId)||bookingId<=0)return response(400,{error:'Valid booking ID required.'});
             const [bs]=await connection.execute('SELECT id,store_id,branch_id,booking_reference FROM bookings WHERE id=? AND store_id=?',[bookingId,store_id]);
@@ -2901,6 +2994,192 @@ exports.handler = async (event) => {
                     [bookingId,store_id,book.branch_id,book.booking_reference]);
                 return response(200,{missing,damage});
             }
+            // Manager settlement from Booking Quick Actions. The whole decision,
+            // deposit application, optional customer claim payment, and refund are
+            // committed together. No customer charge without a documented Staff
+            // damage/loss incident; a refundable deposit is never rental revenue.
+            if(action==='settle_booking_security_deposit') {
+                if(tokenRole!=='manager'||bookingAccess!=='full'||Number(tokenBranchId)!==Number(book.branch_id))
+                    return response(403,{error:'Assigned-branch Manager permission is required to settle deposits.'});
+                const requestKey=String(body.requestKey||'').trim();
+                if(!/^[A-Za-z0-9_-]{12,85}$/.test(requestKey))
+                    return response(400,{error:'A unique settlement request key is required.'});
+                const mode=String(body.mode||'');
+                if(!['refund','damage'].includes(mode))
+                    return response(400,{error:'Choose Refund deposit or Damage/missing settlement.'});
+                const refundAmount=financeCurrency(body.refundAmount??0,'Refund amount');
+                const receivedAmount=financeCurrency(body.additionalPaymentReceived??0,'Additional payment received');
+                if(mode==='refund'&&receivedAmount>0)
+                    return response(400,{error:'Additional claim payment requires a documented damage/missing incident.'});
+                if(receivedAmount>0&&body.paymentVerified!==true)
+                    return response(400,{error:'Verify that the additional customer payment was actually received.'});
+                if(refundAmount>0&&body.refundVerified!==true)
+                    return response(400,{error:'Confirm that the refund has actually been given to the customer.'});
+                const sourceType=String(body.sourceType||'');
+                const sourceId=Number(body.sourceId);
+                if(mode==='damage'&&(!['damage','missing'].includes(sourceType)||
+                    !Number.isSafeInteger(sourceId)||sourceId<=0))
+                    return response(400,{error:'Select a Staff-recorded damage or confirmed missing-item incident.'});
+                const newCharge=mode==='damage' ? financeCurrency(body.chargeAmount??0,'Approved customer charge') : 0;
+                const reason=String(body.reason||'').trim().slice(0,500);
+                const branchId=Number(book.branch_id);
+                await connection.beginTransaction();
+                try {
+                    const keys=[`${requestKey}-ap`,`${requestKey}-cash`,`${requestKey}-rf`];
+                    const [prior]=await connection.execute(`SELECT id FROM booking_financial_events
+                                                            WHERE store_id=? AND request_key IN (?,?,?) LIMIT 1`,
+                        [store_id,...keys]);
+                    if(prior.length){
+                        await connection.rollback();
+                        return response(200,{success:true,alreadyRecorded:true});
+                    }
+                    const [locked]=await connection.execute(`SELECT status,agreed_price,amount_paid,balance
+                                                             FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                        [bookingId,store_id,branchId]);
+                    if(String(locked[0]?.status||'').toLowerCase()!=='pending settlement')
+                        throw rentalError('Security deposit settlement is available only after Staff finishes return inspection (Pending Settlement).');
+                    if(!(Number(locked[0].agreed_price)>0)||
+                        Number(locked[0].amount_paid)+0.005<Number(locked[0].agreed_price)||
+                        Number(locked[0].balance)>0.005)
+                        throw rentalError('Booking price must be fully paid before return settlement.');
+                    await requireRentalReturnBeforeCompletion(connection,{bookingId,storeId:store_id,branchId});
+                    const [unchecked]=await connection.execute(`SELECT COUNT(*) AS pending
+                                                                FROM rental_booking_allocations a
+                                                                         JOIN booking_rental_items ri ON ri.booking_reference=a.booking_reference
+                                                                    AND ri.equipment_id=a.equipment_id AND ri.store_id=a.store_id AND ri.branch_id=a.branch_id
+                                                                         LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id
+                                                                WHERE ri.booking_id=? AND a.store_id=? AND a.branch_id=?
+                                                                  AND COALESCE(w.returned_received_units,a.quantity)>0
+                                                                  AND (w.inspected_at IS NULL OR w.inspection_status IN ('pending','cleaning'))`,
+                        [bookingId,store_id,branchId]);
+                    if(Number(unchecked[0]?.pending||0)>0)
+                        throw rentalError('Staff must finish return inspection and cleaning before financial settlement.');
+                    const [details]=await connection.execute(`SELECT refundable_deposit_required,deposit_collected,deposit_applied,deposit_refunded
+                                                              FROM booking_financial_details
+                                                              WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                        [bookingId,store_id,branchId]);
+                    if(!details.length)throw rentalError('Booking financial details are missing.');
+                    const d=details[0];
+                    if(Number(d.deposit_collected)+0.005<Number(d.refundable_deposit_required))
+                        throw rentalError('The agreed security deposit has not been fully collected.');
+                    const heldCents=Math.round((Number(d.deposit_collected)-Number(d.deposit_applied)-Number(d.deposit_refunded))*100);
+                    if(heldCents<0)throw rentalError('Refundable deposit ledger needs reconciliation.');
+                    const refundCents=Math.round(refundAmount*100);
+                    const cashCents=Math.round(receivedAmount*100);
+                    let applyCents=0,claimId=null,createdClaim=false;
+                    const employee=await getActingEmployee(connection,decodedToken,tokenRole,store_id);
+                    const saveEvent=async(type,amount,claim,key)=>{
+                        if(amount<=0)return;
+                        await connection.execute(`INSERT INTO booking_financial_events
+                                                  (booking_id,store_id,branch_id,claim_id,event_type,amount,request_key,actor_role,actor_name)
+                                                  VALUES(?,?,?,?,?,?,?,?,?)`,
+                            [bookingId,store_id,branchId,claim,type,amount,key,'manager',String(employee.name||'Manager').slice(0,150)]);
+                    };
+                    if(mode==='damage'){
+                        const table=sourceType==='missing'?'rental_missing_unit_reports':'rental_maintenance_records';
+                        const [sources]=await connection.execute(`SELECT id,equipment_id,
+                                                                         ${sourceType==='missing'?'quantity':'quantity_started'} AS quantity,
+                                                                         ${sourceType==='missing'?'status':'start_reason'} AS issueState
+                                                                  FROM ${table} WHERE id=? AND store_id=? AND branch_id=? AND booking_reference=? FOR UPDATE`,
+                            [sourceId,store_id,branchId,book.booking_reference]);
+                        if(!sources.length)throw rentalError('The selected incident is not linked to this booking.');
+                        if(sourceType==='missing'&&sources[0].issueState==='pending'){
+                            // The Manager decides permanent loss in the Booking settlement itself.
+                            // Keep the stock deduction, report resolution, and customer claim in ONE transaction.
+                            if(body.confirmPermanentLoss!==true)
+                                throw rentalError('Confirm permanent loss for the Staff-recorded missing item before approving its charge or waiver.');
+                            if(reason.length<10)
+                                throw rentalError('Explain the verified missing-item decision (at least 10 characters).');
+                            const qty=Number(sources[0].quantity);
+                            const [equipment]=await connection.execute(`SELECT id,total_units,rented_out_units,maintenance_units,missing_units
+                                FROM rental_equipment WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                [sources[0].equipment_id,store_id,branchId]);
+                            if(!equipment.length||!Number.isSafeInteger(qty)||qty<1||
+                                qty>Number(equipment[0].missing_units)||
+                                qty>Number(equipment[0].total_units)-Number(equipment[0].rented_out_units)-Number(equipment[0].maintenance_units))
+                                throw rentalError('Missing-unit stock quantities need reconciliation before confirming the loss.');
+                            await connection.execute(`UPDATE rental_equipment
+                                SET missing_units=missing_units-?,total_units=total_units-? WHERE id=?`,
+                                [qty,qty,equipment[0].id]);
+                            await connection.execute(`UPDATE rental_missing_unit_reports
+                                SET status='writeoff',resolved_by=?,resolved_at=NOW(),resolution_notes=? WHERE id=?`,
+                                [String(employee.name||'Manager').slice(0,150),reason,sourceId]);
+                            await connection.execute(`INSERT INTO rental_stock_movements
+                                (store_id,branch_id,equipment_id,type,quantity,reference_number,description,actor_name)
+                                VALUES(?,?,?,'adjustment',?,?,?,?)`,
+                                [store_id,branchId,equipment[0].id,qty,`MISS-${String(sourceId).padStart(6,'0')}`,
+                                    `Booking-confirmed permanent loss: ${reason}`.slice(0,500),String(employee.name||'Manager').slice(0,150)]);
+                        } else if(sourceType==='missing'&&sources[0].issueState!=='writeoff'){
+                            throw rentalError('This missing item was found or already resolved. Refresh the booking incidents.');
+                        }
+                        if(sourceType==='damage'&&!String(sources[0].issueState||'').startsWith('Rental damage '))
+                            throw rentalError('The damage charge must relate to a documented Staff return-inspection incident.');
+                        const [claims]=await connection.execute(`SELECT * FROM booking_customer_claims
+                                                                 WHERE booking_id=? AND store_id=? AND branch_id=?
+                                                                   AND source_type=? AND source_record_id=? FOR UPDATE`,
+                            [bookingId,store_id,branchId,sourceType,sourceId]);
+                        let claim=claims[0];
+                        if(!claim){
+                            // Zero is an explicit Manager waiver, never an implicit payment.
+                            // All documented incidents still get an auditable decision.
+                            if(reason.length<10)throw rentalError('Document why the customer is responsible (at least 10 characters).');
+                            const [created]=await connection.execute(`INSERT INTO booking_customer_claims
+                                                                      (booking_id,store_id,branch_id,source_type,source_record_id,equipment_id,quantity,reason,approved_amount,status,approved_by)
+                                                                      VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+                                [bookingId,store_id,branchId,sourceType,sourceId,sources[0].equipment_id,
+                                    sources[0].quantity,reason,newCharge,newCharge>0?'approved':'waived',String(employee.name||'Manager').slice(0,150)]);
+                            claimId=Number(created.insertId);
+                            createdClaim=true;
+                            claim={id:claimId,approved_amount:newCharge,amount_paid:0,deposit_applied:0,status:newCharge>0?'approved':'waived'};
+                        }else {
+                            if(claim.status!=='approved')throw rentalError('This incident is already waived or settled. Choose an unpaid approved claim.');
+                            claimId=Number(claim.id);
+                        }
+                        const outstandingCents=Math.round((Number(claim.approved_amount)-Number(claim.amount_paid)-Number(claim.deposit_applied))*100);
+                        if(outstandingCents<=0&&!createdClaim)throw rentalError('The selected incident has no outstanding approved charge.');
+                        applyCents=Math.min(heldCents,Math.max(0,outstandingCents));
+                        if(cashCents>outstandingCents-applyCents)
+                            throw rentalError('Additional customer payment exceeds the unpaid damage/missing-item charge.');
+                        await saveEvent('deposit_applied',applyCents/100,claimId,keys[0]);
+                        await saveEvent('claim_paid',cashCents/100,claimId,keys[1]);
+                        if(applyCents>0)await connection.execute(`UPDATE booking_financial_details
+                                                                  SET deposit_applied=deposit_applied+? WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                            [applyCents/100,bookingId,store_id,branchId]);
+                        if(claim.status!=='waived')await connection.execute(`UPDATE booking_customer_claims
+                            SET status=IF(approved_amount<=amount_paid+deposit_applied+?+?+0.005,'settled','approved'),
+                                deposit_applied=deposit_applied+?,amount_paid=amount_paid+?
+                            WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
+                            [applyCents/100,cashCents/100,applyCents/100,cashCents/100,claimId,bookingId,store_id,branchId]);
+                    }
+                    if(refundCents>heldCents-applyCents)
+                        throw rentalError('Refund amount exceeds the security deposit still held after charges.');
+                    if(refundCents>0){
+                        // Never refund money while any incident remains undecided or
+                        // any approved claim has an unpaid balance.
+                        await requireRentalIncidentSettlement(connection,{bookingId,storeId:store_id,branchId});
+                        await saveEvent('deposit_refunded',refundCents/100,null,keys[2]);
+                        await connection.execute(`UPDATE booking_financial_details SET deposit_refunded=deposit_refunded+?
+                                                  WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                            [refundCents/100,bookingId,store_id,branchId]);
+                    }
+                    if(mode==='refund'&&refundCents<=0&&heldCents>0)
+                        throw rentalError('Enter a positive refund amount, or select damage settlement with a documented incident.');
+                    if(mode==='damage'&&!createdClaim&&applyCents===0&&cashCents===0&&refundCents===0)
+                        throw rentalError('No amount was settled. Record a verified additional payment or choose another outstanding claim.');
+                    // The existing completion validator rechecks all returns,
+                    // inspections, customer claims, and fully reconciled deposits.
+                    const completed=await automaticallyCompleteSettledBooking(connection,bookingId,store_id,branchId);
+                    await connection.commit();
+                    return response(200,{success:true,completed,
+                        appliedDeposit:applyCents/100,additionalPaymentRecorded:cashCents/100,
+                        amountRefunded:refundCents/100});
+                }catch(e){
+                    await connection.rollback();
+                    if(e.rentalValidation||e.code==='ER_DUP_ENTRY')
+                        return response(409,{error:e.rentalValidation?e.message:'This claim/settlement was already recorded. Refresh before retrying.'});
+                    throw e;
+                }
+            }
             if(action==='approve_booking_claim'||action==='waive_booking_claim') {
                 if(tokenRole!=='manager'||bookingAccess!=='full')
                     return response(403,{error:'Manager with Full Booking access must review equipment claims.'});
@@ -2934,6 +3213,7 @@ exports.handler = async (event) => {
                     if(e.code==='ER_DUP_ENTRY')return response(409,{error:'This physical incident already has a recorded charge or waiver.'});
                     throw e;
                 }
+                await automaticallyCompleteSettledBooking(connection,bookingId,store_id,Number(book.branch_id));
                 return response(200,{success:true,statement:await getBookingStatement(connection,bookingId,store_id,book.branch_id)});
             }
             // All financial movements are append-only and require a unique request key.
@@ -2972,8 +3252,8 @@ exports.handler = async (event) => {
                 if(type==='deposit_refunded'){
                     await requireRentalIncidentSettlement(connection,{bookingId,storeId:store_id,branchId:book.branch_id});
                     const [bookingStatus]=await connection.execute('SELECT status FROM bookings WHERE id=? AND store_id=? FOR UPDATE',[bookingId,store_id]);
-                    if(!['completed','cancelled'].includes(String(bookingStatus[0]?.status||'').toLowerCase()))
-                        throw rentalError('Refund the deposit only after the booking is completed or cancelled and physically reconciled.');
+                    if(!['pending settlement','completed','cancelled'].includes(String(bookingStatus[0]?.status||'').toLowerCase()))
+                        throw rentalError('Refund the deposit only after Staff has returned and inspected the booking, or after a reconciled cancellation.');
                     const [unsettled]=await connection.execute(`SELECT COUNT(*) AS pending FROM booking_customer_claims
                                                                 WHERE booking_id=? AND status='approved' AND approved_amount>amount_paid+deposit_applied`,[bookingId]);
                     if(Number(unsettled[0].pending)>0)throw rentalError('Resolve outstanding loss/damage claims before refunding the deposit.');
@@ -2994,6 +3274,7 @@ exports.handler = async (event) => {
                 if(claim!==null){await connection.execute(`UPDATE booking_customer_claims SET
                                                                                               ${type==='deposit_applied'?'deposit_applied':'amount_paid'}=${type==='deposit_applied'?'deposit_applied':'amount_paid'}+?,
                                                                                               status=IF(approved_amount<=amount_paid+deposit_applied,'settled','approved') WHERE id=?`,[amount,claimId]);}
+                await automaticallyCompleteSettledBooking(connection,bookingId,store_id,Number(book.branch_id));
                 await connection.commit();
             }catch(e){await connection.rollback();if(e.rentalValidation)return response(409,{error:e.message});throw e;}
             return response(200,{success:true,statement:await getBookingStatement(connection,bookingId,store_id,book.branch_id)});
@@ -3231,8 +3512,50 @@ exports.handler = async (event) => {
 
             const [rows] = await connection.execute(query, params);
 
+            // Preserve the established booking-list query. Deposit information is
+            // optional for rendering this list, but NEVER for the server-side
+            // release check. A financial lookup failure must not hide all bookings.
+            const depositByBooking = new Map();
+            if (rows.length) {
+                const bookingIds = rows.map(row => Number(row.id))
+                    .filter(value => Number.isSafeInteger(value) && value > 0);
+                try {
+                    // Bound each lookup to the authenticated store and relevant
+                    // booking IDs. Chunks also avoid excessive SQL placeholders.
+                    for (let i = 0; i < bookingIds.length; i += 250) {
+                        const slice = bookingIds.slice(i, i + 250);
+                        const placeholders = slice.map(() => '?').join(',');
+                        const [details] = await connection.execute(
+                            `SELECT booking_id AS bookingId,
+                                    refundable_deposit_required AS requiredDeposit,
+                                    deposit_collected AS collectedDeposit
+                             FROM booking_financial_details
+                             WHERE store_id=? AND booking_id IN (${placeholders})`,
+                            [store_id, ...slice]
+                        );
+                        for (const detail of details) {
+                            depositByBooking.set(Number(detail.bookingId), detail);
+                        }
+                    }
+                } catch (depositError) {
+                    // Do NOT treat missing/unavailable deposit data as paid.
+                    // The UI will show Deposit Unverified for affected bookings.
+                    // Existing rental/consumable release endpoints still enforce
+                    // both payments from the authoritative financial ledger.
+                    console.error('Booking list deposit lookup failed:', depositError);
+                }
+            }
+            const bookingsWithDeposits = rows.map(row => {
+                const financial = depositByBooking.get(Number(row.id));
+                return {
+                    ...row,
+                    securityDepositRequired: financial?.requiredDeposit ?? null,
+                    securityDepositCollected: financial?.collectedDeposit ?? null,
+                };
+            });
+
             return response(200, {
-                bookings: rows,
+                bookings: bookingsWithDeposits,
                 total: rows.length,
             });
         }
@@ -3712,7 +4035,7 @@ exports.handler = async (event) => {
 
             if (!booking_id || !status) return response(400, { error: "Missing booking_id or status" });
 
-            const allowedStatuses = ["Pending Review","Awaiting Down Payment","Confirmed","Preparing","Completed","Cancelled"];
+            const allowedStatuses = ["Pending Review","Awaiting Down Payment","Confirmed","Cancelled"];
             const normalizedTargetStatus = normalizeBookingStatus(status);
             if (!normalizedTargetStatus || !allowedStatuses.includes(normalizedTargetStatus)) {
                 return response(400, { error: "Invalid booking status" });
@@ -3738,8 +4061,11 @@ exports.handler = async (event) => {
             const allowedTransitions = {
                 "Pending Review": ["Awaiting Down Payment","Confirmed","Cancelled"],
                 "Awaiting Down Payment": ["Confirmed","Cancelled"],
-                "Confirmed": ["Preparing","Cancelled"],
-                "Preparing": ["Completed","Cancelled"],
+                "Confirmed": ["Cancelled"],
+                "Preparing": ["Cancelled"],
+                "Released": [],
+                "Return Inspection": [],
+                "Pending Settlement": [],
                 "Completed": [],
                 "Cancelled": [],
             };
@@ -3765,31 +4091,21 @@ exports.handler = async (event) => {
             await connection.beginTransaction();
             try {
                 if(status==='Awaiting Down Payment' || status==='Confirmed') {
-                    // For the initial approval, enforce the branch's rental-deposit
-                    // policy or a Manager's saved, auditable waiver. Later confirmation
-                    // uses the already-agreed booking-specific deposit, not a newly
-                    // changed branch default.
+                    // Check the saved, booking-specific deposit without an Owner policy.
+                    // The Manager may agree to ₱0 or any valid nonnegative amount.
                     if(currentStatus==='Pending Review'){
                         const branchId=Number(requestedBranchId||rows[0].branch_id);
                         const [rentalLines]=await connection.execute(`SELECT COUNT(*) AS units
                                                                       FROM booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
                             [Number(booking_id),store_id,branchId]);
                         if(Number(rentalLines[0]?.units||0)>0){
-                            const policy=await getFeePolicy(connection,store_id,branchId);
-                            const [terms]=await connection.execute(`SELECT refundable_deposit_required,deposit_waiver_reason
+                            const [terms]=await connection.execute(`SELECT refundable_deposit_required
                                                                     FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
                                 [Number(booking_id),store_id,branchId]);
                             if(!terms.length)throw rentalError('Booking deposit terms are missing. Review and save payment terms first.');
-                            const deposit=Number(terms[0].refundable_deposit_required||0),standard=Number(policy.refundableDeposit||0);
-                            if(policy.depositPolicy==='required'){
-                                if(standard<=0)throw rentalError('Owner must set a positive rental-deposit minimum for this branch.');
-                                const waived=deposit===0 && tokenRole==='manager' &&
-                                    String(terms[0].deposit_waiver_reason||'').trim().length>=10;
-                                if((deposit===0 && !waived)||(deposit>0 && deposit+0.005<standard))
-                                    throw rentalError('Save the branch-required rental deposit or a documented Manager waiver before approving.');
-                            }else if(policy.depositPolicy==='none' && deposit>0.005){
-                                throw rentalError('This branch policy does not collect rental security deposits. Review payment terms.');
-                            }
+                            const deposit=Number(terms[0].refundable_deposit_required);
+                            if(terms[0].refundable_deposit_required == null || !Number.isFinite(deposit) || deposit<0)
+                                throw rentalError('Save a valid optional refundable security deposit in Payment Terms first.');
                         }
                     }
                     const review=await inspectBookingForConfirmation(connection,{
@@ -3957,7 +4273,6 @@ exports.handler = async (event) => {
                 required_down_payment,
                 requiredDownPayment,
                 refundable_deposit,
-                depositWaiverReason,
                 branch_id,
                 branchId,
             } = body;
@@ -4016,7 +4331,6 @@ exports.handler = async (event) => {
             if(normalizeBookingStatus(previousBooking.status)!=='Pending Review')
                 return response(409,{error:'Booking payment terms are locked after Manager approval.'});
             const bookingBranchId=Number(previousBooking.branch_id);
-            const rentalPolicy=await getFeePolicy(connection,store_id,bookingBranchId);
             const depositSpecified=refundable_deposit!==undefined && refundable_deposit!==null;
             const depositAmount=depositSpecified?financeCurrency(refundable_deposit,'Refundable security deposit'):null;
             const rentalQuote=await rentalQuoteTotal(connection,Number(booking_id),store_id,
@@ -4027,18 +4341,6 @@ exports.handler = async (event) => {
             const requiredMinimum=financeLines.length ?
                 Number(financeLines[0].package_base)+Number(financeLines[0].rental_subtotal)+
                 Number(financeLines[0].delivery_fee)+Number(financeLines[0].setup_fee) : rentalQuote.total;
-            if(depositSpecified && rentalQuote.count>0){
-                const standard=Number(rentalPolicy.refundableDeposit||0);
-                if(rentalPolicy.depositPolicy==='required'){
-                    if(standard<=0)return response(409,{error:'Owner must configure a positive rental security-deposit minimum for this branch.'});
-                    if(depositAmount>0 && depositAmount+0.005<standard)
-                        return response(400,{error:'Required rental deposit is below the branch minimum. Increase the deposit or waive it entirely with a Manager reason.'});
-                    if(depositAmount===0 && (tokenRole!=='manager'||String(depositWaiverReason||'').trim().length<10))
-                        return response(400,{error:'Manager must document a security-deposit waiver (10+ characters).'});
-                }else if(rentalPolicy.depositPolicy==='none' && depositAmount>0){
-                    return response(400,{error:'The Owner policy does not collect rental deposits. Set the deposit to zero.'});
-                }
-            }
             if(depositSpecified && rentalQuote.count===0 && depositAmount>0)
                 return response(400,{error:'Rental security deposits apply only to bookings containing rental equipment.'});
             if(rentalQuote.count || requiredMinimum>0){
@@ -4095,14 +4397,12 @@ exports.handler = async (event) => {
                         [Number(booking_id),store_id,bookingBranchId]);
                     if(existingDeposit.length && depositAmount+0.005<Number(existingDeposit[0].deposit_collected||0))
                         throw rentalError('The agreed deposit cannot be lower than funds already collected; settle them first.');
-                    const waiverReason=rentalQuote.count>0 && depositAmount===0 && rentalPolicy.depositPolicy==='required'
-                        ?String(depositWaiverReason||'').trim().slice(0,500):null;
                     await connection.execute(`INSERT INTO booking_financial_details
                                               (booking_id,store_id,branch_id,refundable_deposit_required,deposit_waiver_reason)
                                               VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE
                                                   refundable_deposit_required=VALUES(refundable_deposit_required),
                                                   deposit_waiver_reason=VALUES(deposit_waiver_reason)`,
-                        [Number(booking_id),store_id,bookingBranchId,depositAmount,waiverReason]);
+                        [Number(booking_id),store_id,bookingBranchId,depositAmount,null]);
                 }
 
                 const priceBookingRef = buildBookingReference(previousBooking, booking_id);
@@ -4129,9 +4429,7 @@ exports.handler = async (event) => {
                         `${priceBookingRef} (${customerNameForPrice}): ` +
                         `price ₱${prevAgreed.toLocaleString()} → ₱${total.toLocaleString()}, ` +
                         `down payment ₱${prevDp.toLocaleString()} → ₱${requiredDp.toLocaleString()}` +
-                        (depositSpecified ? `, refundable deposit ₱${depositAmount.toLocaleString()}` +
-                            (rentalQuote.count>0 && depositAmount===0 && rentalPolicy.depositPolicy==='required'
-                                ? ` (Manager waiver: ${String(depositWaiverReason||'').trim().slice(0,200)})` : '') : ''),
+                        (depositSpecified ? `, refundable deposit ₱${depositAmount.toLocaleString()}` : ''),
                 });
 
                 await connection.commit();
@@ -4146,6 +4444,111 @@ exports.handler = async (event) => {
                 required_down_payment: requiredDp,
                 ...(depositSpecified?{refundable_deposit:depositAmount}:{}),
             });
+        }
+
+        // ── MANAGER: record verified booking payment and optional deposit together ──
+        // Atomic settlement: refundable deposit is a separate liability, never
+        // counted toward the agreed booking price or ordinary booking payments.
+        if (action === "record_booking_customer_payment_with_deposit") {
+            if (tokenRole !== "manager" || bookingAccess !== "full")
+                return response(403, {error: "Assigned-branch Manager with full Bookings access is required."});
+            const bookingId = Number(body.booking_id);
+            const branchId = Number(tokenBranchId);
+            if (!Number.isSafeInteger(bookingId) || bookingId <= 0)
+                return response(400, {error: "Valid booking ID is required."});
+            const bookingPayment = financeCurrency(body.bookingPayment ?? 0, "Booking payment received");
+            const depositPayment = financeCurrency(body.depositPayment ?? 0, "Refundable security deposit received");
+            const expectedBookingPaid = financeCurrency(body.expectedBookingPaid, "Previously recorded booking payment");
+            const expectedDepositCollected = financeCurrency(body.expectedDepositCollected, "Previously recorded security deposit");
+            if (bookingPayment + depositPayment <= 0)
+                return response(400, {error: "Record a positive booking payment, security deposit, or both."});
+            const requestKey = String(body.requestKey || "").trim();
+            if (!/^[a-zA-Z0-9_-]{12,100}$/.test(requestKey))
+                return response(400, {error: "A unique payment transaction key is required."});
+
+            await connection.beginTransaction();
+            try {
+                const [bookings] = await connection.execute(`SELECT id,booking_reference,name,status,
+                                                                    agreed_price,package_price,required_down_payment,amount_paid
+                                                             FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                    [bookingId,store_id,branchId]);
+                if (!bookings.length) throw rentalError("Booking not found in the Manager's assigned branch.");
+                const booking = bookings[0];
+                const [prior] = await connection.execute(`SELECT booking_id,event_type,amount FROM booking_financial_events
+                                                          WHERE store_id=? AND request_key=? LIMIT 1 FOR UPDATE`,
+                    [store_id,requestKey]);
+                if (prior.length) {
+                    if (Number(prior[0].booking_id) !== bookingId ||
+                        String(prior[0].event_type) !== "deposit_received" ||
+                        Math.abs(Number(prior[0].amount) - depositPayment) > 0.005)
+                        throw rentalError("This payment transaction key was already used for another entry.");
+                    await connection.rollback();
+                    return response(200, {success:true,alreadyRecorded:true,refreshRequired:true});
+                }
+                const agreed = Number(booking.agreed_price || booking.package_price || 0);
+                const currentPaid = Number(booking.amount_paid);
+                const down = Number(booking.required_down_payment || 0);
+                if (![agreed,currentPaid,down].every(Number.isFinite) || agreed <= 0 ||
+                    currentPaid < 0 || currentPaid > agreed + 0.005)
+                    throw rentalError("The agreed booking price or previous payment needs reconciliation.");
+                if (Math.abs(currentPaid - expectedBookingPaid) > 0.005)
+                    throw rentalError("Booking payments changed. Close and reopen the payment dialog before recording more money.");
+                const [terms] = await connection.execute(`SELECT refundable_deposit_required,deposit_collected
+                                                          FROM booking_financial_details
+                                                          WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1 FOR UPDATE`,
+                    [bookingId,store_id,branchId]);
+                if (!terms.length)
+                    throw rentalError("Booking financial details are unavailable. Ask the Manager to review Billing.");
+                const requiredDeposit = Number(terms[0].refundable_deposit_required);
+                const collectedDeposit = Number(terms[0].deposit_collected);
+                if (![requiredDeposit,collectedDeposit].every(Number.isFinite) || requiredDeposit < 0 || collectedDeposit < 0)
+                    throw rentalError("Security-deposit records need reconciliation before collecting payment.");
+                if (Math.abs(collectedDeposit - expectedDepositCollected) > 0.005)
+                    throw rentalError("Security deposit collections changed. Close and reopen the payment dialog.");
+                const bookingRemainingCents = Math.max(0,Math.round(agreed*100) - Math.round(currentPaid*100));
+                const depositRemainingCents = Math.max(0,Math.round(requiredDeposit*100) - Math.round(collectedDeposit*100));
+                if (Math.round(bookingPayment*100) > bookingRemainingCents)
+                    throw rentalError("Booking payment exceeds the outstanding booking balance.");
+                if (Math.round(depositPayment*100) > depositRemainingCents)
+                    throw rentalError("Security deposit payment exceeds the agreed unpaid refundable deposit.");
+                const newPaid = (Math.round(currentPaid*100) + Math.round(bookingPayment*100)) / 100;
+                const newDepositCollected = (Math.round(collectedDeposit*100) + Math.round(depositPayment*100)) / 100;
+                const newBalance = Math.max(0,(Math.round(agreed*100) - Math.round(newPaid*100)) / 100);
+                const paymentStatus = newBalance <= 0 ? "Fully Paid" :
+                    down > 0 && newPaid + 0.005 >= down ? "Down Payment Paid" :
+                        newPaid > 0 ? "Partial" : "Unpaid";
+
+                await connection.execute(`UPDATE bookings SET amount_paid=?,balance=?,payment_status=?
+                                          WHERE id=? AND store_id=? AND branch_id=?`,
+                    [newPaid,newBalance,paymentStatus,bookingId,store_id,branchId]);
+                if (depositPayment > 0) {
+                    const employee = await getActingEmployee(connection,decodedToken,tokenRole,store_id);
+                    await connection.execute(`INSERT INTO booking_financial_events
+                                              (booking_id,store_id,branch_id,claim_id,event_type,amount,request_key,actor_role,actor_name)
+                                              VALUES (?,?,?,NULL,'deposit_received',?,?,?,?)`,
+                        [bookingId,store_id,branchId,depositPayment,requestKey,tokenRole,employee.name]);
+                    await connection.execute(`UPDATE booking_financial_details SET deposit_collected=deposit_collected+?
+                                              WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                        [depositPayment,bookingId,store_id,branchId]);
+                }
+                const employee = await getActingEmployee(connection,decodedToken,tokenRole,store_id);
+                await logEmployeeAction(connection,{
+                    storeId:store_id,branchId,employee,module:"Bookings",
+                    referenceNumber:buildBookingReference(booking,bookingId),
+                    referenceId:String(bookingId),action:"Recorded verified customer payment",
+                    details:`Booking payment ₱${bookingPayment.toFixed(2)}; refundable security deposit ₱${depositPayment.toFixed(2)}. Deposit recorded separately from revenue.`,
+                });
+                await connection.commit();
+                return response(200,{success:true,amountPaid:newPaid,balance:newBalance,paymentStatus,
+                    depositCollected:newDepositCollected,
+                    depositRemaining:Math.max(0,(Math.round(requiredDeposit*100)-Math.round(newDepositCollected*100))/100),
+                    totalDueBeforeRelease:Math.max(0,newBalance)+
+                        Math.max(0,(Math.round(requiredDeposit*100)-Math.round(newDepositCollected*100))/100)});
+            } catch (err) {
+                await connection.rollback();
+                if (err.rentalValidation) return response(409,{error:err.message});
+                throw err;
+            }
         }
 
         // ── PROTECTED: update_payment ─────────────────────────────────────────

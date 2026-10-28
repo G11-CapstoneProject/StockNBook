@@ -331,7 +331,7 @@ export default function BookingFinancialPanel({bookingId,branchId,ownerView=fals
         try{
             await request('record_booking_financial_event',{eventType,amount:n,
                 claimId:['deposit_applied','claim_paid'].includes(eventType)?Number(claimId):undefined,
-                requestKey:crypto.randomUUID()});setAmount('');await refresh();
+                requestKey:crypto.randomUUID()});setAmount('');await refresh();window.dispatchEvent(new Event('stocknbook:booking-updated'));
         }catch(e){setError(e instanceof Error?e.message:'Unable to save financial movement.');}finally{setBusy(false);}
     }
     function selectedDecisionSourcePresent(){
@@ -348,7 +348,7 @@ export default function BookingFinancialPanel({bookingId,branchId,ownerView=fals
         setBusy(true);setError('');
         try{await request(waive?'waive_booking_claim':'approve_booking_claim',{
             sourceType,sourceId:Number(sourceId),...(waive?{}:{amount:Number(claimAmount)}),reason:reason.trim()});
-            setSourceId('');setClaimAmount('');setReason('');await refresh();
+            setSourceId('');setClaimAmount('');setReason('');await refresh();window.dispatchEvent(new Event('stocknbook:booking-updated'));
             setNotice(waive?'Customer charge waived. The equipment incident and maintenance record remain unchanged.':'Customer charge approved. Record payment or apply an eligible deposit separately.');}
         catch(e){setError(e instanceof Error?e.message:'Unable to record Manager decision.');}finally{setBusy(false);}
     }
@@ -401,7 +401,7 @@ export default function BookingFinancialPanel({bookingId,branchId,ownerView=fals
         setBusy(true);setError('');
         try{
             await request('waive_unpaid_customer_claim',{claimId:selected.id,notes:waiveExistingReason.trim(),channel:'none'});
-            setWaiveExistingId('');setWaiveExistingReason('');await refresh();
+            setWaiveExistingId('');setWaiveExistingReason('');await refresh();window.dispatchEvent(new Event('stocknbook:booking-updated'));
             setNotice('Approved charge waived after investigation. The original equipment incident remains recorded.');
         }catch(e){setError(e instanceof Error?e.message:'Unable to waive this claim.');}
         finally{setBusy(false);}
@@ -673,10 +673,7 @@ export default function BookingFinancialPanel({bookingId,branchId,ownerView=fals
             {customerCase.claimDue>0&&<div className="rounded-lg border border-[#E3D8EA] p-3">
                 <h6 className="font-bold">Outstanding approved claim</h6>
                 <p className="text-[#806A8C]">The customer still owes {money(customerCase.claimDue)}. Refundable deposits must be reconciled separately. Operational closure is not a debt waiver.</p>
-                {customerCase.bookingStatus.toLowerCase()==='preparing'&&<button type="button" disabled={busy} onClick={()=>{
-                    if(window.confirm('Close physical operations while keeping this customer debt open? Confirm all returns, inspections and incident decisions are finished.'))
-                        void manageCustomerCase('close_booking_outstanding_claim');
-                }} className="mt-2 rounded-lg border border-[#D8CBE7] px-3 py-2 font-semibold disabled:opacity-50">Close operations — keep claim outstanding</button>}
+                <p className="mt-2 text-[11px] text-[#806A8C]">Booking stays Pending Settlement until outstanding charges are paid, waived, or covered by an applied deposit and the remaining refundable deposit is reconciled.</p>
             </div>}
             {waiverCandidates.length>0&&<div className="space-y-2 rounded-lg border border-[#E3D8EA] bg-[#FCFAFF] p-3">
                 <h6 className="font-bold">Correct or waive an already approved unpaid charge</h6>

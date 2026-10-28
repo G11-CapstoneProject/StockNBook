@@ -25,6 +25,8 @@ type BookingQueueAllocation = StaffRentalAllocation & {
     packageName?: string | null;
     eventDate?: string | null;
     eventTime?: string | null;
+    depositRequired?: number | null;
+    depositCollected?: number | null;
 };
 type BookingQueueItem = { item: StaffRentalAllocation; type: TaskType | null };
 type BookingQueueGroup = {
@@ -167,6 +169,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         ...rental.allocations.filter(a=>taskType(a)==="clean").map(a=>({
             key:`booking-${a.allocationId}`,
             kind:"cleaning" as const,
+            equipmentId:a.equipmentId,
             equipmentName:a.equipmentName,
             units:a.cleaningUnits>0?a.cleaningUnits:a.quantity,
             reference:a.bookingReference,
@@ -175,6 +178,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         ...rental.maintenanceTasks.map(t=>({
             key:`maintenance-${t.id}`,
             kind:t.conditionStatus==="Routine"?"routine" as const:"repairs" as const,
+            equipmentId:t.equipmentId,
             equipmentName:t.equipmentName,
             units:t.units,
             reference:`MNT-${String(t.id).padStart(6,"0")}`,
@@ -251,11 +255,18 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         return text.includes(queueQuery)&&group.tasks.some(x=>taskFilter==="all"||taskFilter===x.type);
     });
     const selectedQueueBooking=visibleBookingGroups.find(group=>group.reference===selectedQueueReference)||null;
-    const selectedQueuePayment=selectedQueueBooking?.tasks[0]?.item;
+    const selectedQueuePayment=selectedQueueBooking?.tasks[0]?.item as BookingQueueAllocation | undefined;
     const selectedQueuePaid=!!selectedQueuePayment&&Number.isFinite(selectedQueuePayment.bookingTotal)
         &&Number.isFinite(selectedQueuePayment.amountPaid)&&Number.isFinite(selectedQueuePayment.bookingBalance)
         &&selectedQueuePayment.bookingTotal>0&&selectedQueuePayment.amountPaid+0.005>=selectedQueuePayment.bookingTotal
         &&selectedQueuePayment.bookingBalance<=0.005;
+    // Missing financial terms fail closed: do not enable handover using only booking payments.
+    const selectedQueueDepositSettled=!!selectedQueuePayment &&
+        selectedQueuePayment.depositRequired != null && selectedQueuePayment.depositCollected != null &&
+        Number.isFinite(Number(selectedQueuePayment.depositRequired)) &&
+        Number.isFinite(Number(selectedQueuePayment.depositCollected)) &&
+        Number(selectedQueuePayment.depositRequired)>=0 && Number(selectedQueuePayment.depositCollected)>=0 &&
+        Number(selectedQueuePayment.depositCollected)+0.005>=Number(selectedQueuePayment.depositRequired);
     React.useEffect(()=>{
         if(!selectedQueueReference)return;
         const onKeyDown=(event:KeyboardEvent)=>{
@@ -270,7 +281,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const queueAllOut=!!selectedQueueBooking&&selectedQueueBooking.tasks.length>0&&
         selectedQueueBooking.tasks.every(x=>x.type==="return");
     const queueReleaseDateValid=!!selectedQueueBooking&&selectedQueueBooking.tasks.every(x=>x.item.startDate<=today);
-    const queueReleaseReady=queueAllPrepared&&selectedQueuePaid&&queueReleaseDateValid&&canOperate&&!rental.saving;
+    const queueReleaseReady=queueAllPrepared&&selectedQueuePaid&&selectedQueueDepositSettled&&queueReleaseDateValid&&canOperate&&!rental.saving;
     const startBookingOperation=(kind:"release"|"return")=>{
         if(!selectedQueueBooking)return;
         setBookingOperation(kind);setBookingOperationError("");setBookingOperationNotes("");
@@ -283,7 +294,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         setBookingOperationError("");
         try {
             if(bookingOperation==="release") {
-                if(!queueReleaseReady)throw new Error("All items must be prepared, the booking fully paid, and the scheduled release date reached.");
+                if(!queueReleaseReady)throw new Error("All items must be prepared, the booking balance and security deposit settled, and the scheduled release date reached.");
                 await rental.actBooking({action:"release_rental_booking",bookingReference:selectedQueueBooking.reference});
                 setNotice(`All rental equipment released for ${selectedQueueBooking.reference}.`);
             } else {
@@ -413,73 +424,64 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
             {title:"Previous Returns To Finalize",num:inspection,caption:`${inspectionUnits} previously returned units on hold`,icon:<ClipboardCheck size={19}/>},
             {title:"Needs Cleaning",num:cleaning,caption:"Equipment held until cleaning is recorded",icon:<Sparkles size={19}/>},
         ].map(c=><div key={c.title} className="rounded-2xl border border-[#E6DDF0] bg-white p-3 shadow-sm"><div className="flex items-start justify-between gap-2"><p className="text-sm font-semibold text-[#21132E]">{c.title}</p><span className="rounded-full bg-[#F1EBFF] p-2 text-[#5A35A5]">{c.icon}</span></div><p className="mt-3 text-2xl font-bold text-[#2B174C]">{rental.connected?c.num:"—"}</p><p className="text-[11px] text-[#8A7D90]">{c.caption}</p></div>)}</div>
-        <div className="grid min-w-0 items-stretch gap-4 xl:grid-cols-2">
-            <section className={panel}>
+        <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-2">
+            <section className={`${panel} flex h-[272px] min-h-0 flex-col`}>
                 <Header icon={<PackageCheck size={18}/>} title="Supplier Equipment Receiving"
                         subtitle="Confirm actual delivered units from Manager-recorded purchases"/>
-                <div className="max-h-[270px] overflow-y-auto overflow-x-hidden">
-                    <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]"><thead className="bg-[#FFFDF8]"><tr>{["Purchase No.","Equipment","Pending","Action"].map(h=><th key={h} className={th}>{h}</th>)}</tr></thead>
+                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Pending supplier equipment receipts" tabIndex={0}>
+                    <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]"><colgroup><col className="w-[32%]"/><col className="w-[28%]"/><col className="w-[10%]"/><col className="w-[18%]"/></colgroup><thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>{["Purchase No.","Equipment","Pending","Action"].map(h=><th key={h} className={`${th} !px-2`}>{h}</th>)}</tr></thead>
                         <tbody>{rental.pendingReceipts.map(r=><tr key={r.id} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                            <td className="px-3 py-3">{r.purchaseNumber}</td><td className="px-3 py-3">{r.equipmentName}</td>
-                            <td className="px-3 py-3">{r.quantityExpected-r.quantityReceived}</td>
-                            <td className="px-2 py-3"><button type="button" className={`${action} h-auto min-h-9 max-w-full whitespace-normal break-words px-2 py-1.5 text-center`} disabled={!canOperate} onClick={()=>startStockTask({kind:"receive",id:r.id,label:r.equipmentName,max:r.quantityExpected-r.quantityReceived})}>Receive</button></td>
+                            <td className="px-2 py-2 align-top">{r.purchaseNumber}</td><td className="px-2 py-2 align-top">{r.equipmentName}</td>
+                            <td className="px-2 py-2 align-top text-[#6F3FD3]">{r.quantityExpected-r.quantityReceived}</td>
+                            <td className="px-2 py-2 align-top text-left"><button type="button" className="inline-flex min-h-[30px] w-[96px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate} onClick={()=>startStockTask({kind:"receive",id:r.id,label:r.equipmentName,max:r.quantityExpected-r.quantityReceived})}>Receive</button></td>
                         </tr>)}</tbody></table>
                     {rental.connected&&rental.pendingReceipts.length===0&&<Empty>No equipment deliveries awaiting confirmation.</Empty>}
                 </div>
             </section>
-            <section className={panel}>
+            <section className={`${panel} flex h-[272px] min-h-0 flex-col`}>
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
                     <div className="flex items-center gap-3">
                         <span className="rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]"><ClipboardCheck size={18}/></span>
                         <div><h3 className="text-[15px] font-bold text-[#21132E]">Equipment Care &amp; Maintenance</h3>
                             <p className="text-[11px] text-[#86778F]">Clean returned equipment, complete routine care, and monitor repairs.</p></div>
                     </div>
-                    <span className="rounded-full bg-[#FFF0EF] px-3 py-1 text-[11px] font-semibold text-[#B33B45]">
-                        {rental.connected?`${careTasks.length} open ${careTasks.length===1?"task":"tasks"}`:"Loading tasks..."}
-                    </span>
+                    <select aria-label="Filter equipment care tasks" value={careFilter}
+                            onChange={e=>setCareFilter(e.target.value as typeof careFilter)}
+                            className="h-9 w-[118px] shrink-0 cursor-pointer rounded-xl border border-[#E6DDF0] bg-white px-2 text-[11px] font-semibold text-[#2B174C] outline-none focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0 focus:border-[#E6DDF0]">
+                        <option value="all">All Tasks</option>
+                        <option value="cleaning">Cleaning</option>
+                        <option value="routine">Routine Care</option>
+                        <option value="repairs">Repairs</option>
+                    </select>
                 </div>
-                <div className="flex flex-wrap gap-2 border-b border-[#F0EAF4] px-4 py-3" aria-label="Equipment care task filters">
-                    {([
-                        {value:"all",label:"All",count:careTasks.length},
-                        {value:"cleaning",label:"Cleaning",count:careTasks.filter(t=>t.kind==="cleaning").length},
-                        {value:"routine",label:"Routine Care",count:careTasks.filter(t=>t.kind==="routine").length},
-                        {value:"repairs",label:"Repairs",count:careTasks.filter(t=>t.kind==="repairs").length},
-                    ] as const).map(f=><button key={f.value} type="button" aria-pressed={careFilter===f.value}
-                                               onClick={()=>setCareFilter(f.value)}
-                                               className={`rounded-full border px-3 py-1 text-[11px] font-semibold transition-colors ${careFilter===f.value
-                                                   ?"border-[#2B174C] bg-[#2B174C] text-white"
-                                                   :"border-[#E4D5FA] bg-white text-[#6F3FD3] hover:bg-[#F7F1FF]"}`}>
-                        {f.label} ({f.count})
-                    </button>)}
-                </div>
-                <div className="max-h-[270px] overflow-y-auto overflow-x-hidden">
+                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Equipment care and maintenance tasks" tabIndex={0}>
                     <table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[19%]"/><col className="w-[28%]"/><col className="w-[8%]"/><col className="w-[21%]"/><col className="w-[24%]"/></colgroup>
+                        <colgroup><col className="w-[22%]"/><col className="w-[29%]"/><col className="w-[8%]"/><col className="w-[17%]"/><col className="w-[18%]"/></colgroup>
                         <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>
-                            {["Equipment","Work Item / Reference","Units","Status","Action"].map(h=><th key={h} className={th}>{h}</th>)}
+                            {["Equipment","Work Item / Reference","Units","Status","Action"].map(h=><th key={h} className={`${th} !px-2 ${h === "Units" || h === "Qty" ? "whitespace-nowrap" : ""}`}>{h}</th>)}
                         </tr></thead>
                         <tbody>{visibleCareTasks.map(task=><tr key={task.key} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                            <td className="px-3 py-3 font-medium">{task.equipmentName}</td>
-                            <td className="px-3 py-3">
+                            <td className="px-2 py-2 align-top font-medium">{task.equipmentName}</td>
+                            <td className="px-2 py-2 align-top">
                                 <div className="font-medium">{task.kind==="cleaning"?"Clean returned equipment":
                                     task.kind==="routine"?"Routine cleaning / upkeep":"Repair / safety review"}</div>
                                 <div className="mt-1 max-w-[200px] break-all text-[10px] text-[#86778F]">{task.reference}</div>
                             </td>
-                            <td className="px-3 py-3 font-semibold tabular-nums">{task.units}</td>
-                            <td className="px-3 py-3">
-                                {task.kind==="cleaning"?<span className="inline-flex max-w-full break-words rounded-full bg-amber-50 px-1.5 py-1 text-[10px] font-semibold text-amber-800">Needs Cleaning</span>:
-                                    task.kind==="routine"?<span className="inline-flex max-w-full break-words rounded-full bg-[#F1EBFF] px-1.5 py-1 text-[10px] font-semibold text-[#5330B6]">Routine Care</span>:
-                                        <span className="inline-flex max-w-full break-words rounded-full bg-[#FFF0EF] px-1.5 py-1 text-[10px] font-semibold text-[#A43D48]">
+                            <td className="px-2 py-2 align-top font-semibold tabular-nums">{task.units}</td>
+                            <td className="px-2 py-2 align-top">
+                                {task.kind==="cleaning"?<span className="break-words text-[10px] font-semibold text-[#C27416]">Needs Cleaning</span>:
+                                    task.kind==="routine"?<span className="break-words text-[10px] font-semibold text-[#5330B6]">Routine Care</span>:
+                                        <span className="break-words text-[10px] font-semibold text-[#A43D48]">
                                         {!task.maintenance.repairApproved?"Manager Approval":task.maintenance.pendingUnits>0?"Under Review":"Repair Approved"}
                                     </span>}
                             </td>
-                            <td className="px-3 py-3">
-                                {task.kind==="cleaning"?<button type="button" className={`${action} h-auto min-h-9 w-full max-w-full whitespace-normal break-words px-1.5 py-1.5 text-center`} disabled={!canOperate||rental.saving}
+                            <td className="px-2 py-2 align-top text-left">
+                                {task.kind==="cleaning"?<button type="button" className="inline-flex min-h-[30px] w-[96px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving}
                                                                 onClick={()=>openRentalAction(task.allocation)}>Mark Cleaned</button>:
-                                    task.kind==="routine"?<button type="button" className={`${action} h-auto min-h-9 w-full max-w-full whitespace-normal break-words px-1.5 py-1.5 text-center`} disabled={!canOperate||rental.saving||task.units<1}
+                                    task.kind==="routine"?<button type="button" className="inline-flex min-h-[30px] w-[96px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving||task.units<1}
                                                                   onClick={()=>startStockTask({kind:"routine",id:task.maintenance.id,label:task.equipmentName,max:task.units})}>Mark Care Done</button>:
                                         task.maintenance.repairApproved&&task.maintenance.pendingUnits===0&&task.units>0?
-                                            <button type="button" className={`${action} h-auto min-h-9 w-full max-w-full whitespace-normal break-words px-1.5 py-1.5 text-center`} disabled={!canOperate||rental.saving}
+                                            <button type="button" className="inline-flex min-h-[30px] w-[96px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving}
                                                     onClick={()=>startStockTask({kind:"complete",id:task.maintenance.id,label:task.equipmentName,max:task.units})}>Report Complete</button>:
                                             <span className="text-[11px] text-[#86778F]">Awaiting Manager</span>}
                             </td>
@@ -488,14 +490,11 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                     {rental.connected&&visibleCareTasks.length===0&&<Empty>{careFilter==="all"?
                         "No equipment care or repair tasks are pending.":"No matching equipment care tasks."}</Empty>}
                 </div>
-                <p className="border-t border-[#F0EAF4] px-4 py-2 text-[11px] text-[#806A8C]">
-                    Staff may finish cleaning and routine upkeep. Damaged equipment stays on hold until approved through the Manager repair workflow.
-                </p>
             </section>
         </div>
         {rental.error&&<p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">Rental operations unavailable: {rental.error} <button type="button" className="underline" onClick={()=>void rental.refresh(true)}>Retry</button></p>}
-        <div className="grid min-w-0 items-stretch gap-4 xl:grid-cols-2">
-            <section className={panel}>
+        <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-2">
+            <section className={`${panel} flex h-[340px] min-h-0 flex-col`}>
                 <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
                     <div className="flex min-w-0 flex-1 items-center gap-3">
                         <span className="shrink-0 rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]"><ClipboardList size={18}/></span>
@@ -515,33 +514,33 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                     </select>
                 </div>
 
-                <div className="max-h-[470px] overflow-y-auto overflow-x-hidden">
+                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Rental operations bookings" tabIndex={0}>
                     <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[35%]"/><col className="w-[22%]"/><col className="w-[26%]"/><col className="w-[17%]"/></colgroup>
-                        <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>{["Client / Booking Ref","Schedule","Booking Type","Action"].map(h=><th className={th} key={h}>{h}</th>)}</tr></thead>
-                        <tbody>{visibleBookingGroups.slice(0,50).map(group=>{
+                        <colgroup><col className="w-[34%]"/><col className="w-[17%]"/><col className="w-[26%]"/><col className="w-[18%]"/></colgroup>
+                        <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>{["Client / Booking Ref","Schedule","Booking Type","Action"].map(h=><th className={`${th} !px-2`} key={h}>{h}</th>)}</tr></thead>
+                        <tbody>{visibleBookingGroups.map(group=>{
                             const active=selectedQueueReference===group.reference;
                             const open=()=>setSelectedQueueReference(group.reference);
                             return <tr key={group.reference} tabIndex={0} aria-selected={active}
                                        onClick={open} onKeyDown={e=>{if(e.target===e.currentTarget&&(e.key==="Enter"||e.key===" ")){e.preventDefault();open();}}}
-                                       className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"bg-[#F1EBFF]":"hover:bg-[#FCF9FF]"}`}>
-                                <td className={`px-3 py-3 align-middle ${active?"border-l-4 border-[#6F3FD3] pl-2":""}`}>
+                                       className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"":"hover:bg-[#FCF9FF]"}`}>
+                                <td className={`px-2 py-2 align-top ${active?"border-l-4 border-[#6F3FD3] pl-2":""}`}>
                                     <span className="block break-words font-semibold">{group.clientName}</span>
                                     <span className="mt-1 block break-all text-[10px] text-[#806A8C]">{group.reference}</span>
                                 </td>
-                                <td className="px-3 py-3 align-middle">
+                                <td className="px-2 py-2 align-top">
                                     <span className="block font-medium">{queueScheduleDate(group.scheduleDate)}</span>
                                     {group.eventTime&&<span className="mt-1 block text-[10px] text-[#806A8C]">{group.eventTime}</span>}
                                     {group.returnDate!==group.scheduleDate&&<span className="mt-1 block text-[10px] text-[#806A8C]">Return: {queueScheduleDate(group.returnDate)}</span>}
                                 </td>
-                                <td className="px-3 py-3 align-middle">
+                                <td className="px-2 py-2 align-top">
                                     <span className="block break-words font-medium">{group.bookingType}</span>
                                     <span className="mt-1 block text-[10px] text-[#806A8C]">{group.tasks.length} equipment {group.tasks.length===1?"line":"lines"}</span>
                                 </td>
-                                <td className="px-2 py-3 text-center align-middle">
+                                <td className="px-2 py-2 align-top text-left">
                                     <button type="button" aria-haspopup="dialog"
                                             onClick={e=>{e.stopPropagation();open();}}
-                                            className={`inline-flex min-h-9 max-w-full items-center justify-center whitespace-nowrap rounded-xl border border-[#E6DDF0] bg-white px-2 py-1 text-center text-[11px] font-semibold text-[#2B174C] hover:bg-[#F7F1FF] ${active?"border-[#D9CDF0] bg-white text-[#5330B6]":""}`}>
+                                            className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] cursor-pointer">
                                         View Items
                                     </button>
                                 </td>
@@ -549,14 +548,13 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                         })}</tbody>
                     </table>
                     {rental.connected&&visibleBookingGroups.length===0&&<Empty>No matching booking tasks. Select All Tasks, or confirm a booking with rental equipment.</Empty>}
-                    {visibleBookingGroups.length>50&&<p className="border-t border-[#F0EAF4] px-3 py-2 text-[11px] text-[#806A8C]">Showing the first 50 bookings. Use the search or filters to find another booking.</p>}
                 </div>
-                <p className="border-t border-[#F0EAF4] px-4 py-2 text-[11px] text-[#806A8C]">Select View Items to open the booking equipment checklist. Returned units needing cleaning move into Equipment Care &amp; Maintenance; damaged units require Manager review. To report a problem before handover, use Report Issue.</p>
+                <p className="border-t border-[#F0EAF4] px-4 py-2 text-[11px] text-[#806A8C]">Select View Items to open the booking equipment checklist. Staff records return conditions here; customer damage and missing-item charges are reviewed in Bookings. To report a problem before handover, use Report Issue.</p>
             </section>
-            <section className={panel}><Header icon={<Clock3 size={18}/>} title="Recent Rental Activity" subtitle="Latest branch equipment movements (read-only)"/>
-                <div className="max-h-[350px] overflow-y-auto overflow-x-hidden"><table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                    <colgroup><col className="w-[21%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[7%]"/><col className="w-[32%]"/></colgroup><thead className="sticky top-0 bg-[#FFFDF8]"><tr>{["Time","Equipment","Activity","Qty","Booking Ref."].map(h=><th className={th} key={h}>{h}</th>)}</tr></thead><tbody>
-                {rental.activity.slice(0,8).map(e=><tr key={e.id} className="border-t border-[#F0EAF4] text-[#2B174C]"><td className="px-3 py-3">{dateTime(e.occurredAt)}</td><td className="px-3 py-3">{e.equipmentName}</td><td className="px-3 py-3">{e.type.replaceAll("_"," ")}</td><td className="px-3 py-3">{e.quantity}</td><td className="px-3 py-3">{e.referenceNumber||"—"}</td></tr>)}
+            <section className={`${panel} flex h-[340px] min-h-0 flex-col`}><Header icon={<Clock3 size={18}/>} title="Recent Rental Activity" subtitle="Latest branch equipment movements (read-only)"/>
+                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Recent rental activity" tabIndex={0}><table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                    <colgroup><col className="w-[20%]"/><col className="w-[24%]"/><col className="w-[19%]"/><col className="w-[7%]"/><col className="w-[22%]"/></colgroup><thead className="sticky top-0 bg-[#FFFDF8]"><tr>{["Time","Equipment","Activity","Qty","Booking Ref."].map(h=><th className={`${th} !px-2 ${h === "Units" || h === "Qty" ? "whitespace-nowrap" : ""}`} key={h}>{h}</th>)}</tr></thead><tbody>
+                {rental.activity.map(e=><tr key={e.id} className="border-t border-[#F0EAF4] text-[#2B174C]"><td className="px-2 py-2 align-top">{dateTime(e.occurredAt)}</td><td className="px-2 py-2 align-top">{e.equipmentName}</td><td className={`px-2 py-2.5 ${/(damage|missing|lost)/i.test(e.type)?"text-[#D33548]":/(inspect|return|clean|receiv|release|prepar)/i.test(e.type)?"text-[#2563EB]":"text-[#2B174C]"}`}>{e.type.replaceAll("_"," ")}</td><td className="px-2 py-2 align-top">{e.quantity}</td><td className="px-2 py-2 align-top">{e.referenceNumber||"—"}</td></tr>)}
                 </tbody></table>{rental.connected&&rental.activity.length===0&&<Empty>No recorded equipment movements yet.</Empty>}</div>
             </section>
         </div>
@@ -642,8 +640,9 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                 <p className="mt-1 text-[11px] text-[#806A8C]">{selectedQueueBooking.tasks.length} equipment {selectedQueueBooking.tasks.length===1?"line":"lines"} · {selectedQueueBooking.tasks.reduce((sum,x)=>sum+x.item.quantity,0)} booked units</p>
                                 <p className="mt-1 text-[11px] text-[#806A8C]">{selectedQueueBooking.tasks.filter(x=>x.type!=="prepare").length} of {selectedQueueBooking.tasks.length} equipment lines prepared or further along</p>
                             </div>
-                            <span className={`rounded-full px-3 py-1 text-[10px] font-semibold ${selectedQueuePaid?"bg-[#E5F7ED] text-[#218246]":"bg-[#FFF3D8] text-[#986408]"}`}>
-                                {selectedQueuePaid?"Fully Paid":selectedQueuePayment&&Number.isFinite(selectedQueuePayment.bookingBalance)?"Balance Pending":"Payment Unavailable"}
+                            <span className={`rounded-full px-3 py-1 text-[10px] font-semibold ${selectedQueuePaid&&selectedQueueDepositSettled?"bg-[#E5F7ED] text-[#218246]":"bg-[#FFF3D8] text-[#986408]"}`}>
+                                {!selectedQueuePaid?(selectedQueuePayment&&Number.isFinite(selectedQueuePayment.bookingBalance)?"Booking Balance Pending":"Payment Unavailable")
+                                    :!selectedQueueDepositSettled?"Security Deposit Pending":"Fully Settled"}
                             </span>
                         </div>
                         <div className="min-w-0 overflow-x-hidden">
@@ -673,14 +672,15 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                             <div className="flex flex-wrap items-center justify-between gap-3">
                                 <div>
                                     <p className="text-xs font-semibold text-[#2B174C]">Release the complete booking</p>
-                                    <p className="mt-1 text-[11px] text-[#806A8C]">All equipment must be prepared, the entire bill paid, and the scheduled date reached.</p>
+                                    <p className="mt-1 text-[11px] text-[#806A8C]">All equipment must be prepared; the booking balance and any agreed security deposit must be fully paid, and the release date must be reached.</p>
                                 </div>
                                 <button type="button" className={`${primary} disabled:cursor-not-allowed disabled:opacity-40`}
                                         disabled={!queueReleaseReady} onClick={()=>startBookingOperation("release")}>Release Booking</button>
                             </div>
                             {!queueAllPrepared&&<p className="text-[11px] text-[#986408]">Prepare every equipment line before releasing the booking.</p>}
                             {queueAllPrepared&&!selectedQueuePaid&&<p className="text-[11px] text-[#986408]">Full payment has not been recorded; Release Booking remains disabled.</p>}
-                            {queueAllPrepared&&selectedQueuePaid&&!queueReleaseDateValid&&<p className="text-[11px] text-[#986408]">Release is available on or after the scheduled rental start date.</p>}
+                            {queueAllPrepared&&selectedQueuePaid&&!selectedQueueDepositSettled&&<p className="text-[11px] text-[#986408]">The agreed refundable security deposit is unpaid or cannot be verified; release remains disabled.</p>}
+                            {queueAllPrepared&&selectedQueuePaid&&selectedQueueDepositSettled&&!queueReleaseDateValid&&<p className="text-[11px] text-[#986408]">Release is available on or after the scheduled rental start date.</p>}
                         </div>}
                         {queueAllOut&&<div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#F0EAF4] px-4 py-3">
                             <p className="text-xs text-[#5A476A]">Receive all booked equipment in one return transaction, with missing quantities recorded separately.</p>
@@ -878,6 +878,23 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                             <p className="mt-2 text-[#86778F]">Known tasks from the current workspace. Previous returns may need a one-time confirmation; new returns have their condition check completed when received.</p>
                         </div>;
                     })()}
+                    {careTasks.filter(task=>task.equipmentId===selectedEquipment.id).length>0&&
+                        <div className="space-y-2 rounded-xl border border-[#E6DDF0] p-3 text-xs">
+                            <p className="font-semibold text-[#2B174C]">Outstanding stock care</p>
+                            {careTasks.filter(task=>task.equipmentId===selectedEquipment.id).map(task=><div key={task.key} className="flex flex-wrap items-center justify-between gap-2 border-t border-[#F0EAF4] pt-2">
+                                <span className="min-w-0 flex-1 text-[#5A476A]">{task.kind==="cleaning"?"Clean returned equipment":task.kind==="routine"?"Routine care":"Repair / safety review"} · {task.units} unit(s)</span>
+                                {task.kind==="cleaning"?
+                                    <button type="button" disabled={!canOperate||rental.saving} className={action}
+                                            onClick={()=>{setViewEquipment(null);openRentalAction(task.allocation);}}>Mark Cleaned</button>:
+                                    task.kind==="routine"?
+                                        <button type="button" disabled={!canOperate||rental.saving} className={action}
+                                                onClick={()=>{setViewEquipment(null);startStockTask({kind:"routine",id:task.maintenance.id,label:task.equipmentName,max:task.units});}}>Mark Care Done</button>:
+                                        task.maintenance.repairApproved&&task.maintenance.pendingUnits===0&&task.units>0?
+                                            <button type="button" disabled={!canOperate||rental.saving} className={action}
+                                                    onClick={()=>{setViewEquipment(null);startStockTask({kind:"complete",id:task.maintenance.id,label:task.equipmentName,max:task.units});}}>Report Complete</button>:
+                                            <span className="text-[#86778F]">Awaiting Manager</span>}
+                            </div>)}
+                        </div>}
                     <p>Missing: {selectedEquipment.missingUnits}</p>
                     <p className="font-semibold">Check: {selectedEquipment.totalUnits} owned = {Math.max(0,selectedEquipment.totalUnits-selectedEquipment.rentedOutUnits-selectedEquipment.maintenanceUnits-selectedEquipment.missingUnits)} available + {selectedEquipment.rentedOutUnits} out + {selectedEquipment.maintenanceUnits} held + {selectedEquipment.missingUnits} missing.</p><p className="rounded-lg bg-[#F7F3FC] p-3 text-xs">Product catalog and rental pricing are managed by the Manager.</p></div>}
             </section>

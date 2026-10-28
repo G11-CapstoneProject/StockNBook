@@ -446,6 +446,7 @@ export default function ManagerBookings() {
     const [paymentModal, setPaymentModal] = useState<Booking | null>(null);
     const [paymentSaving, setPaymentSaving] = useState(false);
     const [paymentError, setPaymentError] = useState("");
+    const [settlementModal, setSettlementModal] = useState<Booking | null>(null);
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
     const [cancelModal, setCancelModal] = useState<Booking | null>(null);
     const [cancelItems, setCancelItems] = useState<BookingInventoryItem[]>([]);
@@ -555,15 +556,27 @@ export default function ManagerBookings() {
                 cache: "no-store",
             });
 
-            const data = await res.json();
+            // A failed API can return an empty body or non-JSON response.
+            // Keep the actual status/error visible rather than logging only {}.
+            const rawResponse = await res.text();
+            let data: Record<string, unknown> = {};
+            try {
+                data = rawResponse ? JSON.parse(rawResponse) as Record<string, unknown> : {};
+            } catch {
+                data = {error: rawResponse.slice(0, 250) || 'Invalid response from Bookings API.'};
+            }
 
-            if (!res.ok || data.success === false) {
-                console.error("Bookings load failed:", data);
+            if (!res.ok || data.success === false || !Array.isArray(data.bookings)) {
+                const message = typeof data.error === 'string' && data.error.trim()
+                    ? data.error
+                    : `Bookings API returned HTTP ${res.status}${res.statusText ? ` (${res.statusText})` : ''}.`;
+                console.error('Bookings load failed:', {status: res.status, message, details: data});
+                setBookingActionError(message);
                 setBookings([]);
                 return [];
             }
 
-            const normalizedBookings = (data.bookings || []).map(
+            const normalizedBookings = data.bookings.map(
                 (booking: Record<string, unknown>) =>
                     normalizeBooking(booking, savedBranchName)
             );
@@ -582,6 +595,18 @@ export default function ManagerBookings() {
 
     useEffect(() => {
         void loadBookings();
+        const refreshVisible = () => {
+            if(document.visibilityState === 'visible')void loadBookings();
+        };
+        const refreshEvent = () => { void loadBookings(); };
+        const interval = window.setInterval(refreshVisible, 60_000);
+        window.addEventListener('focus',refreshVisible);
+        window.addEventListener('stocknbook:booking-updated',refreshEvent);
+        return () => {
+            window.clearInterval(interval);
+            window.removeEventListener('focus',refreshVisible);
+            window.removeEventListener('stocknbook:booking-updated',refreshEvent);
+        };
     }, []);
 
 
@@ -888,40 +913,38 @@ export default function ManagerBookings() {
         setPriceModal(null);
     }
 
-    // Persist the ACTUAL amount received rather than silently assigning the
-    // required deposit or full balance. update_payment expects the cumulative
-    // amount_paid (the same existing API contract as before).
-    async function saveRecordedPayment(receivedNow: number) {
+    // Save the verified booking payment and refundable deposit in one server-side
+    // transaction. They remain separate ledgers: a deposit is NOT booking revenue.
+    async function saveRecordedPayment(bookingReceivedNow: number, depositReceivedNow: number,
+                                       expectedDepositCollected: number) {
         if (!paymentModal || paymentSaving) return;
         const booking = bookings.find(item => item.id === paymentModal.id) ?? paymentModal;
         const total = getTotalPrice(booking);
         const currentPaid = getAmountPaid(booking);
-        const remainingCents = Math.round((total - currentPaid) * 100);
-        const receivedCents = Math.round(receivedNow * 100);
-        if (!Number.isFinite(receivedNow) || receivedCents <= 0 ||
-            receivedCents > remainingCents || Math.abs(receivedNow * 100 - receivedCents) > 0.001) {
-            setPaymentError("Enter a valid amount greater than ₱0.00 and no more than the remaining balance.");
+        const remainingCents = Math.max(0, Math.round((total - currentPaid) * 100));
+        const bookingCents = Math.round(bookingReceivedNow * 100);
+        const depositCents = Math.round(depositReceivedNow * 100);
+        if (![bookingReceivedNow, depositReceivedNow, expectedDepositCollected].every(Number.isFinite) ||
+            bookingCents < 0 || depositCents < 0 || bookingCents + depositCents <= 0 ||
+            bookingCents > remainingCents ||
+            Math.abs(bookingReceivedNow * 100 - bookingCents) > 0.001 ||
+            Math.abs(depositReceivedNow * 100 - depositCents) > 0.001) {
+            setPaymentError("Enter valid booking and deposit amounts, using at most two decimal places.");
             return;
         }
         const token = getToken();
         if (!token) { setPaymentError("Please sign in again before recording payment."); return; }
-        const newAmountPaid = Math.round(currentPaid * 100 + receivedCents) / 100;
-        const newBalance = Math.max(0, Math.round(total * 100 - Math.round(newAmountPaid * 100)) / 100);
-        const requiredDp = getRequiredDownPayment(booking);
-        const status = newBalance <= 0
-            ? "Fully Paid"
-            : requiredDp > 0 && newAmountPaid + 0.005 >= requiredDp
-                ? "Down Payment Paid"
-                : "Partial";
         setPaymentSaving(true);
         setPaymentError("");
         try {
             const body: Record<string, unknown> = {
-                action: "update_payment",
+                action: "record_booking_customer_payment_with_deposit",
                 booking_id: booking.id,
-                amount_paid: newAmountPaid,
-                balance: newBalance,
-                payment_status: status,
+                bookingPayment: bookingReceivedNow,
+                depositPayment: depositReceivedNow,
+                expectedBookingPaid: currentPaid,
+                expectedDepositCollected,
+                requestKey: `BOOKPAY-${booking.id}-${crypto.randomUUID()}`,
             };
             const branchId = getBranchId();
             if (branchId) body.branch_id = Number(branchId);
@@ -932,18 +955,23 @@ export default function ManagerBookings() {
             });
             const result = await response.json();
             if (!response.ok || result.success === false || result.error) {
-                throw new Error(result.error || result.message || "Failed to record payment.");
+                throw new Error(result.error || result.message || "Failed to record customer payment.");
             }
-            // Money received is not the same thing as Manager confirming inventory.
             updateLocalBooking(booking.id, {
-                amount_paid: newAmountPaid, amountPaid: newAmountPaid,
-                balance: newBalance, payment_status: status, paymentStatus: status,
+                amount_paid: result.amountPaid, amountPaid: result.amountPaid,
+                balance: result.balance, payment_status: result.paymentStatus,
+                paymentStatus: result.paymentStatus,
+                // Refresh the deposit balance immediately, even for deposit-only receipts.
+                securityDepositCollected: result.depositCollected,
             });
             setPaymentModal(null);
             setBookingActionError("");
-            await loadBookings();
+            // The server transaction is already committed. A refresh failure
+            // must not incorrectly tell the Manager that the payment failed.
+            try { await loadBookings(); }
+            catch (refreshError) { console.error("Payment saved, but booking list refresh failed:", refreshError); }
             showBookingToast("success", "Customer payment recorded successfully",
-                `${peso(receivedNow)} received for ${booking.bookingReference || booking.name}. Booking confirmation remains separate.`);
+                `${peso(bookingReceivedNow)} booking payment and ${peso(depositReceivedNow)} refundable deposit received. Booking confirmation remains separate.`);
         } catch (error) {
             setPaymentError(error instanceof Error ? error.message : "Unable to record payment.");
         } finally {
@@ -1157,6 +1185,7 @@ export default function ManagerBookings() {
                         onRecordDownPayment={canManage ? b => {setPaymentError("");setPaymentModal(b);} : undefined}
                         onMarkFullyPaid={canManage ? b => {setPaymentError("");setPaymentModal(b);} : undefined}
                         onCancelBooking={canManage ? openCancelModal : undefined}
+                        onSettleDeposit={canManage ? b => setSettlementModal(b) : undefined}
                     />}
             </section>
 
@@ -1184,6 +1213,17 @@ export default function ManagerBookings() {
                 busy={paymentSaving} error={paymentError}
                 onClose={() => {if(!paymentSaving){setPaymentModal(null);setPaymentError("");}}}
                 onSave={saveRecordedPayment}
+            />}
+
+            {settlementModal && canManage && <SecurityDepositSettlementModal
+                booking={bookings.find(b => b.id === settlementModal.id) ?? settlementModal}
+                onClose={() => setSettlementModal(null)}
+                onSaved={async (completed) => {
+                    await loadBookings();
+                    showBookingToast('success', completed ? 'Booking completed' : 'Settlement recorded',
+                        completed ? 'All returns, charges and the refundable deposit are reconciled.' :
+                            'Payment and deposit ledger updated. Any outstanding balance or unreviewed incident keeps the booking Pending Settlement.');
+                }}
             />}
 
             {priceModal && canManage && normalizeStatus((bookings.find(b => b.id === priceModal.id) ?? priceModal).status) === "Pending Review" && (
@@ -1252,6 +1292,308 @@ export default function ManagerBookings() {
     );
 }
 // Keep the existing manager approval confirmation, without any deadline requirement.
+type SettlementClaim = {
+    id: number; sourceType: 'damage' | 'missing'; sourceId: number;
+    equipmentName?: string; amount: number; amountPaid: number; depositApplied: number; status: string;
+};
+type SettlementIncident = {
+    id: number; type: 'damage' | 'missing'; equipmentName?: string;
+    reason?: string; status?: string; decisionStatus?: string | null; quantity?: number;
+};
+type SettlementStatement = {
+    booking: {status: string; reference: string; name: string; balance: number};
+    depositRequired: number; depositCollected: number; depositApplied: number;
+    depositRefunded: number; depositHeld: number; claimBalance: number;
+    claims: SettlementClaim[];
+};
+
+// This modal lives in ManagerBookings: no new project component or unrelated file.
+function SecurityDepositSettlementModal({booking,onClose,onSaved}: {
+    booking: Booking;
+    onClose: () => void;
+    onSaved: (completed: boolean) => Promise<void>;
+}) {
+    const [statement,setStatement]=useState<SettlementStatement|null>(null);
+    const [incidents,setIncidents]=useState<SettlementIncident[]>([]);
+    const [loading,setLoading]=useState(true);
+    const [busy,setBusy]=useState(false);
+    const [error,setError]=useState('');
+    const [selected,setSelected]=useState('');
+    const [charge,setCharge]=useState('');
+    const [reason,setReason]=useState('');
+    const [refund,setRefund]=useState('');
+    const [customerPaid,setCustomerPaid]=useState('');
+    const [verified,setVerified]=useState(false);
+    const [refundVerified,setRefundVerified]=useState(false);
+    const [lossConfirmed,setLossConfirmed]=useState(false);
+
+    const branchId=Number(booking.branchId??booking.branch_id??0);
+    async function request(action:string,extra:Record<string,unknown>={}) {
+        const token=sessionStorage.getItem('token');
+        if(!token)throw new Error('Your login session has expired.');
+        const res=await fetch('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},
+            body:JSON.stringify({action,bookingId:booking.id,branch_id:branchId,...extra}),cache:'no-store'});
+        const text=await res.text();
+        let data:Record<string,unknown>={};
+        try {data=text?JSON.parse(text) as Record<string,unknown>:{};}catch {throw new Error(`Bookings API returned an invalid response (HTTP ${res.status}).`);}
+        if(!res.ok||data.error)throw new Error(typeof data.error==='string'?data.error:`Bookings API error (HTTP ${res.status}).`);
+        return data;
+    }
+    async function refresh() {
+        const [info,records]=await Promise.all([
+            request('get_booking_financial_statement'),request('get_booking_claim_sources')
+        ]);
+        if(!info.statement)throw new Error('Financial statement is unavailable for this booking.');
+        setStatement(info.statement as SettlementStatement);
+        const lists=records as unknown as {damage?:Omit<SettlementIncident,'type'>[];missing?:Omit<SettlementIncident,'type'>[]};
+        setIncidents([
+            ...(lists.damage??[]).map(x=>({...x,type:'damage' as const})),
+            ...(lists.missing??[]).map(x=>({...x,type:'missing' as const}))
+        ]);
+    }
+    useEffect(()=>{
+        let active=true;
+        void refresh().catch(e=>{if(active)setError(e instanceof Error?e.message:'Could not load settlement details.');})
+            .finally(()=>{if(active)setLoading(false);});
+        return ()=>{active=false;};
+    },[booking.id,branchId]);
+
+    const held=Math.max(0,Number(statement?.depositHeld??0));
+    // Render ONE settlement workflow based on actual Staff inspection findings,
+    // not a Manager-selected Refund/Damage tab. Keep resolved incidents visible
+    // for audit, but never allow a settled or waived claim to be charged again.
+    const chargeableIncidents=incidents.filter(i=>
+        i.type==='damage'||(i.type==='missing'&&['pending','writeoff'].includes(String(i.status||'').toLowerCase())));
+    const outstandingFor=(i:SettlementIncident)=>{
+        const claim=statement?.claims.find(c=>c.sourceType===i.type&&c.sourceId===i.id);
+        return claim?.status==='approved'
+            ? Math.max(0,Number(claim.amount)-Number(claim.amountPaid)-Number(claim.depositApplied))
+            : 0;
+    };
+    const actionableIncidents=chargeableIncidents.filter(i=>{
+        const claim=statement?.claims.find(c=>c.sourceType===i.type&&c.sourceId===i.id);
+        return !claim || (claim.status==='approved'&&outstandingFor(i)>0.005);
+    });
+    const mode:'refund'|'damage'=actionableIncidents.length>0?'damage':'refund';
+    const selectedIncident=actionableIncidents.find(i=>`${i.type}:${i.id}`===selected)??actionableIncidents[0];
+    const savedClaim=statement?.claims.find(c=>c.sourceType===selectedIncident?.type&&c.sourceId===selectedIncident?.id);
+    const alreadyApproved=!!savedClaim&&savedClaim.status==='approved';
+    const approvedCharge=alreadyApproved?Number(savedClaim?.amount??0):Number(charge||0);
+    const owed=Math.max(0,alreadyApproved&&selectedIncident?outstandingFor(selectedIncident):approvedCharge);
+    const applied=Math.min(held,owed);
+    const additionalDue=Math.max(0,Math.round((owed-applied)*100)/100);
+    // Display the customer's remaining refundable deposit after the current charge.
+    // This is a preview, not a recorded refund; the existing verified-refund flow stays unchanged.
+    const finalRefund=Math.max(0,Math.round((held-applied)*100)/100);
+    const maxRefund=held;
+    const refundValue=mode==='refund'?Number(refund||0):0;
+    const receivedValue=Number(customerPaid||0);
+    const moneyValid=(raw:string,value:number)=>raw.trim()===''||(
+        Number.isFinite(value)&&value>=0&&Math.abs(value*100-Math.round(value*100))<0.001);
+    const pendingDecisions=chargeableIncidents.filter(i=>!i.decisionStatus||i.decisionStatus==='pending');
+    const pendingMissing=incidents.some(i=>i.type==='missing'&&i.status==='pending');
+    const confirmingSelectedLoss=selectedIncident?.type==='missing'&&selectedIncident.status==='pending';
+    const refundBlocked=pendingDecisions.length>0||pendingMissing||Number(statement?.claimBalance??0)>0.005;
+
+    async function save() {
+        if(!statement||busy)return;
+        if(String(statement.booking.status).toLowerCase()!=='pending settlement'){
+            setError('Booking is not awaiting settlement. Refresh the page.');return;
+        }
+        if(mode==='refund'&&(!moneyValid(refund,refundValue)||refundValue>maxRefund+0.005)){
+            setError(`Refund must be between ₱0.00 and ${peso(maxRefund)} (two decimal places).`);return;
+        }
+        if(mode==='refund'&&refundValue>0&&!refundVerified){
+            setError('Confirm that the customer actually received the stated refund.');return;
+        }
+        if(mode==='damage'){
+            if(!selectedIncident){setError('Select a documented damage or missing-item incident.');return;}
+            if(savedClaim&&!alreadyApproved){setError('This claim is already settled or waived. Select another unresolved incident.');return;}
+            if(!alreadyApproved&&(!charge.trim()||!moneyValid(charge,approvedCharge)||reason.trim().length<10)){
+                setError('Enter an approved charge (₱0 for a waived charge) and at least 10 characters explaining the decision.');return;
+            }
+            if(confirmingSelectedLoss&&!lossConfirmed){
+                setError('Confirm that the reported missing equipment is permanently lost before recording the charge or waiver.');return;
+            }
+            if(!moneyValid(customerPaid,receivedValue)||receivedValue>additionalDue+0.005){
+                setError(`Additional payment received must not exceed ${peso(additionalDue)}.`);return;
+            }
+            if(receivedValue>0&&!verified){setError('Verify actual receipt of additional customer payment.');return;}
+        }else if(refundBlocked){
+            setError('Resolve every recorded equipment incident and outstanding charge before refunding the deposit.');return;
+        }else if(refundValue<=0&&held>0){
+            setError('Enter the amount actually refunded to the customer.');return;
+        }
+        setBusy(true);setError('');
+        try {
+            const data=await request('settle_booking_security_deposit',{
+                requestKey:crypto.randomUUID().replace(/-/g,''),mode,refundAmount:refundValue,
+                refundVerified:mode==='refund'&&refundValue>0?refundVerified:false,
+                ...(mode==='damage'?{
+                    sourceType:selectedIncident?.type,sourceId:selectedIncident?.id,
+                    chargeAmount:alreadyApproved?0:approvedCharge,reason:reason.trim(),
+                    additionalPaymentReceived:receivedValue,paymentVerified:receivedValue>0?verified:false,
+                    confirmPermanentLoss:confirmingSelectedLoss?lossConfirmed:false
+                }:{}),
+            });
+            await onSaved(Boolean(data.completed));
+            if(data.completed){onClose();return;}
+            setRefund('');setCharge('');setReason('');setCustomerPaid('');setVerified(false);setRefundVerified(false);setLossConfirmed(false);setSelected('');
+            await refresh();
+        }catch(e){setError(e instanceof Error?e.message:'Unable to save settlement.');}
+        finally{setBusy(false);}
+    }
+
+    return <div className="fixed inset-0 z-[180] flex items-center justify-center bg-black/55 px-3 py-6">
+        <div role="dialog" aria-modal="true" aria-labelledby="deposit-settlement-title"
+             className="flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#EFE6F5] px-5 py-4">
+                <h2 id="deposit-settlement-title" className="text-lg font-bold text-[#25143F]">Settle Security Deposit &amp; Charges</h2>
+                <button type="button" disabled={busy} onClick={onClose} aria-label="Close settlement dialog" className="rounded-lg p-2 hover:bg-[#F7F1FF] disabled:opacity-50"><X size={18}/></button>
+            </div>
+            <div className="min-h-0 overflow-y-auto px-5 py-4">
+                <p className="text-xs text-[#806A8C]">{booking.name} · {booking.bookingReference||`#${booking.id}`}</p>
+                {loading?<p className="mt-5 text-sm text-[#806A8C]">Loading verified deposit and inspection records…</p>:
+                    statement&&<>
+                        <section className="mt-4 rounded-xl border border-[#E7DEEF] bg-[#FAF8FD] p-4">
+                            <div className="mb-3 flex items-center justify-between gap-3">
+                                <h3 className="text-sm font-bold text-[#2B174C]">Security deposit</h3>
+                                <span className="text-xs text-[#7A698A]">Refundable amount</span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-xs text-[#675775]">
+                                <div>Collected <strong className="mt-1 block text-sm text-[#21132F]">{peso(statement.depositCollected)}</strong></div>
+                                <div>Applied to claims <strong className="mt-1 block text-sm text-[#21132F]">{peso(statement.depositApplied)}</strong></div>
+                                <div>Previously refunded <strong className="mt-1 block text-sm text-[#21132F]">{peso(statement.depositRefunded)}</strong></div>
+                                <div>Still held <strong className="mt-1 block text-base text-[#4D2A96]">{peso(held)}</strong></div>
+                            </div>
+                        </section>
+
+                        <section className="mt-4 space-y-2">
+                            <h3 className="text-sm font-bold text-[#2B174C]">Affected equipment / incident</h3>
+                            {incidents.filter(i=>i.type==='damage'||i.status!=='found').length===0?
+                                <p className="rounded-xl border border-[#E6DDF0] px-3 py-3 text-sm text-[#675775]">No damaged or missing rental items recorded by Staff.</p>:
+                                <div className="divide-y divide-[#EFE7F4] overflow-hidden rounded-xl border border-[#E6DDF0]">
+                                    {incidents.filter(i=>i.type==='damage'||i.status!=='found').map(i=>{
+                                        const key=`${i.type}:${i.id}`;
+                                        const selectable=actionableIncidents.some(item=>item.type===i.type&&item.id===i.id);
+                                        const active=mode==='damage'&&selectedIncident?.type===i.type&&selectedIncident?.id===i.id;
+                                        const rowClass=`w-full px-3 py-3 text-left ${active?'bg-[#F6F0FF]':'bg-white'}`;
+                                        // Both incident sources return Staff's recorded reason. Remove only
+                                        // the system-generated booking prefix, retaining the actual notes.
+                                        const recordedReason=String(i.reason??'').trim();
+                                        const staffNote=(i.type==='damage'
+                                            ? recordedReason.replace(/^Rental damage [^:]+:\s*/i,'')
+                                            : recordedReason.replace(/^Booking [^:]+:\s*/i,'')).trim();
+                                        const details=<>
+                                    <span className="flex items-center justify-between gap-3">
+                                        <span className="min-w-0 text-sm font-semibold text-[#29183D]">{i.equipmentName||`Equipment #${i.id}`}</span>
+                                        <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold ${i.type==='damage'?'bg-[#FFF3DF] text-[#8F5700]':'bg-[#FDECEC] text-[#B42318]'}`}>
+                                            {i.type==='damage'?'Damaged':'Missing'}
+                                        </span>
+                                    </span>
+                                            <span className="mt-1.5 block whitespace-pre-wrap break-words text-xs leading-5 text-[#746482]">
+                                        <span className="font-semibold">Staff notes: </span>{staffNote||'No reason or inspection notes recorded.'}
+                                    </span>
+                                        </>;
+                                        return selectable?
+                                            <button key={key} type="button" aria-pressed={active}
+                                                    aria-label={`Set charge for ${i.equipmentName||`Equipment #${i.id}`} (${i.type})`}
+                                                    onClick={()=>{setSelected(key);setCharge('');setReason('');setCustomerPaid('');setVerified(false);setLossConfirmed(false);}}
+                                                    className={`${rowClass} cursor-pointer hover:bg-[#F8F4FC] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#7F5BB5]`}>
+                                                {details}
+                                            </button>:
+                                            <div key={key} className={rowClass}>{details}</div>;
+                                    })}
+                                </div>}
+                        </section>
+                        {pendingMissing&&<p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">A missing-item report needs a Manager decision. Select the item below and confirm permanent loss to record its charge or waiver here in Bookings.</p>}
+
+                        {mode==='damage'&&selectedIncident?<section className="mt-4 space-y-3 border-t border-[#ECE4F2] pt-4">
+                            <h3 className="text-sm font-bold text-[#2B174C]">Customer charge</h3>
+                            {confirmingSelectedLoss&&<label className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs leading-5 text-amber-950">
+                                <input type="checkbox" checked={lossConfirmed} onChange={e=>setLossConfirmed(e.target.checked)} className="mt-1"/>
+                                <span><strong>Confirm permanent loss of {selectedIncident.equipmentName||'this equipment'}.</strong> I verified Staff's missing-item report. Saving this decision will deduct the lost units from rental stock, even if the customer charge is ₱0. An item later recovered needs a separate stock reconciliation.</span>
+                            </label>}
+                            {alreadyApproved?<div className="rounded-lg bg-[#F8F4FC] p-3 text-xs text-[#37234A]">
+                                Approved amount: <strong>{peso(approvedCharge)}</strong> · Unpaid: <strong>{peso(owed)}</strong>
+                            </div>:!savedClaim&&<>
+                                <label className="block text-xs font-semibold text-[#29183D]">Approved repair / replacement charge (₱)
+                                    <input type="number" min="0" step="0.01" value={charge} onChange={e=>setCharge(e.target.value)} placeholder="0.00 — zero means no customer charge"
+                                           className="mt-1.5 w-full rounded-xl border border-[#D9CBE8] px-3 py-3 text-sm font-normal outline-none focus:border-[#7F5BB5]"/>
+                                </label>
+                                <label className="block text-xs font-semibold text-[#29183D]">Reason for charge
+                                    <textarea value={reason} onChange={e=>setReason(e.target.value)} rows={2}
+                                              placeholder="Explain the documented damage or missing item (10+ characters)"
+                                              className="mt-1.5 w-full rounded-xl border border-[#D9CBE8] px-3 py-3 text-sm font-normal outline-none focus:border-[#7F5BB5]"/>
+                                </label>
+                            </>}
+                            <div className="space-y-2 rounded-xl bg-[#F8F4FC] p-3 text-xs">
+                                <div className="flex justify-between gap-2"><span>Deposit applied</span><strong>{peso(applied)}</strong></div>
+                                <div className="flex justify-between gap-2 font-semibold"><span>Additional payment due</span><strong className="text-[#4D2A96]">{peso(additionalDue)}</strong></div>
+                            </div>
+                            {additionalDue>0.005&&<>
+                                <p className="text-xs leading-relaxed text-[#8F5700]">
+                                    The booking stays Pending Settlement until the additional charge is fully paid. Record only verified payments actually received.
+                                </p>
+                                <label className="block text-xs font-semibold text-[#29183D]">Additional payment received (₱) · Optional
+                                    <input type="number" min="0" step="0.01" max={additionalDue} value={customerPaid}
+                                           onChange={e=>setCustomerPaid(e.target.value)} placeholder="0.00 — leave blank if unpaid"
+                                           className="mt-1.5 w-full rounded-xl border border-[#D9CBE8] px-3 py-3 text-sm font-normal outline-none focus:border-[#7F5BB5]"/>
+                                </label>
+                                {receivedValue>0&&<label className="flex items-start gap-2 text-xs text-[#514463]">
+                                    <input type="checkbox" checked={verified} onChange={e=>setVerified(e.target.checked)} className="mt-0.5"/>
+                                    I verified that this payment was actually received.
+                                </label>}
+                            </>}
+                            <p className="text-xs text-[#806A8C]">Any unused deposit can be refunded after all equipment claims are resolved.</p>
+                        </section>:<section className="mt-4 space-y-3 border-t border-[#ECE4F2] pt-4">
+                            <h3 className="text-sm font-bold text-[#2B174C]">Deposit refund</h3>
+                            {incidents.length===0&&<p className="text-xs text-[#806A8C]">No damaged or missing equipment was recorded by Staff.</p>}
+                            {refundBlocked&&<p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                Resolve the outstanding equipment incident or charge before refunding the deposit.
+                            </p>}
+                            <label className="block text-xs font-semibold text-[#29183D]">Amount actually refunded to the customer (₱)
+                                <input type="number" min="0" max={maxRefund} step="0.01" value={refund} onChange={e=>setRefund(e.target.value)}
+                                       placeholder="0.00" disabled={refundBlocked||held<=0}
+                                       className="mt-1.5 w-full rounded-xl border border-[#D9CBE8] px-3 py-3 text-sm font-normal outline-none focus:border-[#7F5BB5] disabled:bg-[#F7F4F9]"/>
+                                <span className="mt-1 block font-normal text-[#806A8C]">Available for refund: {peso(maxRefund)}.</span>
+                            </label>
+                            {refundValue>0&&<label className="flex items-start gap-2 text-xs text-[#514463]">
+                                <input type="checkbox" checked={refundVerified} onChange={e=>setRefundVerified(e.target.checked)} className="mt-0.5"/>
+                                I confirm the refund was actually given to the customer.
+                            </label>}
+                        </section>}
+                        <section className="mt-4 rounded-xl border border-[#DACDEB] bg-[#F8F4FC] px-4 py-3" aria-label="Final customer refund calculation">
+                            <div className="flex items-center justify-between gap-3">
+                                <span className="text-sm font-bold text-[#2B174C]">Final refund to customer</span>
+                                <strong className="shrink-0 text-lg font-bold text-[#4D2A96]">{peso(finalRefund)}</strong>
+                            </div>
+                            <p className="mt-1 text-xs leading-relaxed text-[#806A8C]">
+                                {mode==='damage'
+                                    ? 'Calculated after applying the proposed charge to the held deposit. This amount may change if other incidents or charges remain unresolved; refund it only after all claims are settled.'
+                                    : refundBlocked
+                                        ? 'This amount remains on hold until all damage, missing-item and claim reviews are resolved.'
+                                        : 'This is the remaining refundable deposit. Record the amount actually given to the customer above before completing the booking.'}
+                            </p>
+                        </section>
+                        <p className="mt-4 text-xs leading-relaxed text-[#806A8C]">Only amounts actually received or refunded are recorded. The booking becomes Completed automatically after all item checks, claims, and deposit balances are settled.</p>
+                    </>}
+                {error&&<p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</p>}
+            </div>
+            <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-[#EFE6F5] bg-white px-5 py-4">
+                <button type="button" disabled={busy} onClick={onClose} className="rounded-lg border border-[#D8CBE7] px-4 py-2.5 text-sm font-semibold text-[#2B174C] disabled:opacity-50">Cancel</button>
+                <button type="button" disabled={busy||loading||!statement||
+                    (mode==='damage'&&!selectedIncident)||
+                    (mode==='refund'&&refundBlocked)}
+                        onClick={()=>void save()}
+                        className="rounded-lg bg-[#4D2A96] px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">
+                    {busy?'Saving settlement…':'Save Settlement'}
+                </button>
+            </div>
+        </div>
+    </div>;
+}
+
 function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
     booking: Booking;
     busy: boolean;
@@ -1264,9 +1606,6 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
     const [depositRequired, setDepositRequired] = useState<number | null>(null);
     const [depositError, setDepositError] = useState("");
     const [hasRental, setHasRental] = useState<boolean | null>(null);
-    const [policyDeposit, setPolicyDeposit] = useState<number | null>(null);
-    const [depositPolicy, setDepositPolicy] = useState<'required'|'optional'|'none'|null>(null);
-    const [waiverSaved, setWaiverSaved] = useState(false);
     const [noDpReason, setNoDpReason] = useState("");
     useEffect(() => {
         let cancelled = false;
@@ -1286,23 +1625,16 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
                     body: JSON.stringify({ action: "get_booking_items", booking_id: booking.id,
                         branch_id: Number(booking.branchId || booking.branch_id) || undefined }),
                 });
-                const policyResponse = await fetch("/api/bookings",{method:"POST",
-                    headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
-                    body:JSON.stringify({action:"get_booking_fee_policy",branchId:Number(booking.branchId||booking.branch_id)})});
-                const [data, itemsData, policyData] = await Promise.all([response.json(), itemsResponse.json(),policyResponse.json()]);
+                const [data, itemsData] = await Promise.all([response.json(), itemsResponse.json()]);
                 const deposit = Number(data.statement?.depositRequired);
                 if (!response.ok || data.error || data.statement?.depositRequired == null || !Number.isFinite(deposit) ||
-                    !itemsResponse.ok || itemsData.error || !policyResponse.ok || policyData.error ||
-                    !Number.isFinite(Number(policyData.policy?.refundableDeposit)) ||
-                    !['required','optional','none'].includes(policyData.policy?.depositPolicy) ||
+                    !itemsResponse.ok || itemsData.error ||
                     !Array.isArray(itemsData.rentalItems) || !Array.isArray(data.statement?.rentalItems))
                     throw new Error(data.error || itemsData.error || "Security deposit or rental items are unavailable.");
                 if (!cancelled) {
                     setDepositRequired(Math.max(0, deposit));
                     setHasRental(itemsData.rentalItems.length > 0 || data.statement.rentalItems.length > 0);
-                    setPolicyDeposit(Number(policyData.policy.refundableDeposit));
-                    setDepositPolicy(policyData.policy.depositPolicy as 'required'|'optional'|'none');
-                    setWaiverSaved(String(data.statement.depositWaiverReason||"").trim().length>=10);
+
                 }
             } catch (error) {
                 if (!cancelled) setDepositError(error instanceof Error ? error.message : "Unable to read deposit terms.");
@@ -1315,19 +1647,9 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
             setValidation("Load the refundable security deposit before approving the quotation.");
             return;
         }
-        if (hasRental === null || policyDeposit === null || depositPolicy === null) {
-            setValidation("Booking rental items and deposit policy must be verified first.");
+        if (hasRental === null) {
+            setValidation("Booking rental items must be verified first.");
             return;
-        }
-        if(hasRental && depositPolicy==='required'){
-            if(policyDeposit<=0){setValidation('Owner must set a positive rental-deposit minimum for this branch.');return;}
-            if(depositRequired >= 0 && depositRequired < policyDeposit &&
-                !(depositRequired===0 && waiverSaved)){
-                setValidation('Save a compliant rental security deposit or a documented Manager waiver in Payment Terms first.');return;
-            }
-        }
-        if(hasRental && depositPolicy==='none' && depositRequired > 0){
-            setValidation('The Owner policy does not collect rental deposits. Review Payment Terms.');return;
         }
         if (getRequiredDownPayment(booking)===0 && noDpReason.trim().length<10){
             setValidation("Explain the Manager-authorized no-down-payment confirmation (at least 10 characters)."); return;
@@ -1356,14 +1678,7 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
                 <div className="flex justify-between gap-3"><span>Final Agreed Price</span><strong>{peso(getTotalPrice(booking))}</strong></div>
                 <div className="flex justify-between gap-3"><span>Required Down Payment</span><strong>{peso(getRequiredDownPayment(booking))}</strong></div>
                 <div className="flex justify-between gap-3"><span>Refundable Security Deposit</span><strong>{depositRequired === null ? "Loading…" : peso(depositRequired)}</strong></div>
-                {hasRental && depositPolicy==='required' &&
-                    <p className="text-xs text-[#806A8C]">{(policyDeposit??0)<=0
-                        ? 'Owner must configure the required rental deposit before approval.'
-                        : depositRequired===0 && waiverSaved
-                            ? 'Documented Manager deposit waiver saved; customer liability terms still apply.'
-                            : `Owner-required rental deposit minimum: ${peso(policyDeposit!)}. Collected separately before equipment release.`}</p>}
-                {hasRental && depositPolicy==='optional' && <p className="text-xs text-[#806A8C]">Optional under branch policy; the Manager has agreed the amount shown above.</p>}
-                {hasRental && depositPolicy==='none' && <p className="text-xs text-[#806A8C]">No deposit required under this branch's policy.</p>}
+                {hasRental && <p className="text-xs text-[#806A8C]">Manager-selected optional deposit. Any positive amount must be collected before rental release.</p>}
                 {depositError && <p role="alert" className="text-xs text-red-600">{depositError}</p>}
             </div>
             {getRequiredDownPayment(booking)===0 && <label className="mt-4 block text-xs font-medium text-[#4F4162]">
@@ -1382,10 +1697,7 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
             {(validation || error) && <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{validation || error}</p>}
             <div className="mt-5 flex justify-end gap-2">
                 <button type="button" disabled={busy} onClick={onClose} className="rounded-xl border border-[#E2D6EF] px-4 py-2.5 text-sm font-semibold text-[#47246E]">Back</button>
-                <button type="button" disabled={busy || !agreed || depositRequired === null || hasRental === null || policyDeposit === null || depositPolicy === null ||
-                    (hasRental && depositPolicy==='required' &&
-                        (policyDeposit<=0 || (depositRequired<policyDeposit && !(depositRequired===0 && waiverSaved)))) ||
-                    (hasRental && depositPolicy==='none' && depositRequired>0) ||
+                <button type="button" disabled={busy || !agreed || depositRequired === null || hasRental === null ||
                     (getRequiredDownPayment(booking)===0 && noDpReason.trim().length<10)} onClick={submit} className="rounded-xl bg-[#432078] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Approving..." : getRequiredDownPayment(booking)===0 ? "Approve & Confirm" : "Approve Booking"}</button>
             </div>
         </div>
@@ -1397,47 +1709,119 @@ function RecordPaymentModal({booking, busy, error, onClose, onSave}: {
     busy: boolean;
     error: string;
     onClose: () => void;
-    onSave: (actualReceived: number) => void | Promise<void>;
+    onSave: (bookingReceived: number, depositReceived: number, expectedDepositCollected: number) => void | Promise<void>;
 }) {
     const balance = getBalance(booking);
     const paid = getAmountPaid(booking);
     const required = getRequiredDownPayment(booking);
-    const [amount, setAmount] = useState("");
+    const [bookingAmount, setBookingAmount] = useState("");
+    const [depositAmount, setDepositAmount] = useState("");
+    const [deposit, setDeposit] = useState<{required: number; collected: number} | null>(null);
+    const [depositLoading, setDepositLoading] = useState(true);
+    const [depositError, setDepositError] = useState("");
     const [verified, setVerified] = useState(false);
     const [validation, setValidation] = useState("");
+
+    // Read the actual financial ledger. The booking-list row does not contain
+    // reliably updated refundable-deposit collections.
+    useEffect(() => {
+        let cancelled = false;
+        setDeposit(null);
+        setDepositLoading(true);
+        setDepositError("");
+        void (async () => {
+            try {
+                const token = sessionStorage.getItem("token");
+                if (!token) throw new Error("Sign in again to view payment details.");
+                const response = await fetch("/api/bookings", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({action: "get_booking_financial_statement", booking_id: booking.id,
+                        branch_id: Number(booking.branchId || booking.branch_id) || undefined}),
+                });
+                const data = await response.json();
+                const statement = data.statement;
+                const requiredAmount = Number(statement?.depositRequired);
+                const collectedAmount = Number(statement?.depositCollected);
+                if (!response.ok || data.error || statement?.depositRequired == null ||
+                    statement?.depositCollected == null || !Number.isFinite(requiredAmount) ||
+                    !Number.isFinite(collectedAmount) || requiredAmount < 0 || collectedAmount < 0)
+                    throw new Error(data.error || "Security deposit amounts are unavailable.");
+                if (!cancelled) setDeposit({required: requiredAmount, collected: collectedAmount});
+            } catch (cause) {
+                if (!cancelled) setDepositError(cause instanceof Error ? cause.message : "Unable to load security deposit.");
+            } finally {
+                if (!cancelled) setDepositLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [booking.id, booking.branchId, booking.branch_id]);
+
+    const moneyCents = (n: number) => Math.round(n * 100);
+    const bookingDueCents = Math.max(0, moneyCents(balance));
+    const depositDueCents = deposit === null ? 0 : Math.max(0, moneyCents(deposit.required) - moneyCents(deposit.collected));
+    const bookingReceived = Number(bookingAmount || 0);
+    const depositReceived = Number(depositAmount || 0);
+    const validEntry = (raw: string, amount: number, dueCents: number) => raw.trim() === "" ||
+        (Number.isFinite(amount) && amount >= 0 && moneyCents(amount) <= dueCents &&
+            Math.abs(amount * 100 - moneyCents(amount)) <= 0.001);
+    const bookingReceivedCents = moneyCents(bookingReceived);
+    const depositReceivedCents = moneyCents(depositReceived);
+    const totalReceived = (bookingReceivedCents + depositReceivedCents) / 100;
+    const remainingAfter = Math.max(0, bookingDueCents - bookingReceivedCents) / 100;
+    const depositAfter = Math.max(0, depositDueCents - depositReceivedCents) / 100;
+    const totalDue = (bookingDueCents + depositDueCents) / 100;
+
     function save() {
-        const value = Number(amount);
-        if (amount.trim() === "" || !Number.isFinite(value) || value <= 0 || value > balance + 0.001 || Math.round(value*100)/100 !== value) {
-            setValidation("Enter the actual received amount in pesos, up to the remaining balance, using at most two decimal places.");
+        if (depositLoading || !deposit) { setValidation("Load the booking's security-deposit ledger before recording a payment."); return; }
+        if (!validEntry(bookingAmount, bookingReceived, bookingDueCents) ||
+            !validEntry(depositAmount, depositReceived, depositDueCents) ||
+            bookingReceivedCents + depositReceivedCents <= 0) {
+            setValidation("Enter the amount actually received for the booking, the security deposit, or both. Each must not exceed its unpaid balance and may have up to two decimal places.");
             return;
         }
-        if (!verified) {setValidation("Confirm that you checked the payment before saving.");return;}
+        if (!verified) {setValidation("Confirm that you checked the payment before saving."); return;}
         setValidation("");
-        void onSave(value);
+        void onSave(bookingReceived, depositReceived, deposit.collected);
     }
     return <div role="presentation" className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 px-4 py-6">
         <div role="dialog" aria-modal="true" aria-labelledby="payment-modal-title" className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-[#E7D9F2] bg-white p-5 shadow-2xl">
             <div className="flex items-center justify-between gap-2"><h2 id="payment-modal-title" className="text-lg font-bold text-[#26153F]">Record Customer Payment</h2><button type="button" aria-label="Close" disabled={busy} onClick={onClose} className="rounded-lg p-1.5 hover:bg-[#F5F0FC]"><X size={19}/></button></div>
             <p className="mt-1 text-sm text-[#78698D]">{booking.name} · {booking.bookingReference || `#${booking.id}`}</p>
             <div className="mt-4 space-y-2 rounded-xl border border-[#E9E0EF] bg-[#FCFAFF] p-3 text-sm">
-                <div className="flex justify-between gap-3"><span>Agreed Price</span><strong>{peso(getTotalPrice(booking))}</strong></div>
-                <div className="flex justify-between gap-3"><span>Amount Already Paid</span><strong>{peso(paid)}</strong></div>
+                <div className="flex justify-between gap-3"><span>Agreed Booking Price</span><strong>{peso(getTotalPrice(booking))}</strong></div>
+                <div className="flex justify-between gap-3"><span>Booking Amount Already Paid</span><strong>{peso(paid)}</strong></div>
                 <div className="flex justify-between gap-3"><span>Required Down Payment</span><strong>{peso(required)}</strong></div>
-                <div className="flex justify-between gap-3 border-t pt-2"><span>Remaining Balance</span><strong className="text-[#492193]">{peso(balance)}</strong></div>
+                <div className="flex justify-between gap-3 border-t border-[#E9E0EF] pt-2"><span>Remaining Booking Balance</span><strong>{peso(balance)}</strong></div>
+                <div className="flex justify-between gap-3"><span>Refundable Security Deposit</span><strong>{depositLoading ? "Loading…" : deposit ? peso(deposit.required) : "Unavailable"}</strong></div>
+                <div className="flex justify-between gap-3"><span>Security Deposit Collected</span><strong>{depositLoading ? "Loading…" : deposit ? peso(deposit.collected) : "Unavailable"}</strong></div>
+                <div className="flex justify-between gap-3"><span>Security Deposit Still Due</span><strong>{depositLoading ? "Loading…" : deposit ? peso(depositDueCents / 100) : "Unavailable"}</strong></div>
+                <div className="flex justify-between gap-3 border-t border-[#D8C6E8] pt-2 font-semibold"><span>Total to Collect Before Release</span><strong className="text-[#492193]">{depositLoading ? "Loading…" : deposit ? peso(totalDue) : "Unavailable"}</strong></div>
             </div>
-            <label htmlFor="actual-customer-payment" className="mt-4 block text-sm font-semibold text-[#24143C]">Amount Actually Received (₱) <span className="text-red-500">*</span></label>
-            <input id="actual-customer-payment" type="number" required min="0.01" max={balance} step="0.01" inputMode="decimal" placeholder="0.00" value={amount}
-                   onChange={e=>{setAmount(e.target.value);setValidation("");}} disabled={busy} autoFocus
+            {depositError && <p role="alert" className="mt-2 text-xs font-medium text-red-700">{depositError} Close and reopen this dialog to retry.</p>}
+            <p className="mt-3 text-xs leading-5 text-[#806A8C]">Record the two amounts separately. The security deposit is refundable and is not part of booking revenue.</p>
+            <label htmlFor="actual-customer-payment" className="mt-3 block text-sm font-semibold text-[#24143C]">Booking Payment Received (₱)</label>
+            <input id="actual-customer-payment" type="number" min="0" max={balance} step="0.01" inputMode="decimal" placeholder="0.00" value={bookingAmount}
+                   onChange={e=>{setBookingAmount(e.target.value);setValidation("");}} disabled={busy || depositLoading || !deposit || bookingDueCents <= 0} autoFocus
                    className="mt-1.5 h-11 w-full rounded-xl border border-[#D9C6E9] bg-white px-4 text-sm font-semibold outline-none focus:border-[#7140DC] focus:ring-2 focus:ring-[#7140DC]/15" />
-            {amount && Number(amount)>0 && Number(amount)<=balance && <p className="mt-2 text-xs text-[#6A5888]">Balance after recording: {peso(Math.max(0, balance - Number(amount)))}</p>}
+            <label htmlFor="actual-security-deposit" className="mt-3 block text-sm font-semibold text-[#24143C]">Refundable Security Deposit Received (₱)</label>
+            <input id="actual-security-deposit" type="number" min="0" max={depositDueCents / 100} step="0.01" inputMode="decimal" placeholder="0.00" value={depositAmount}
+                   onChange={e=>{setDepositAmount(e.target.value);setValidation("");}} disabled={busy || depositLoading || !deposit || depositDueCents <= 0}
+                   className="mt-1.5 h-11 w-full rounded-xl border border-[#D9C6E9] bg-white px-4 text-sm font-semibold outline-none focus:border-[#7140DC] focus:ring-2 focus:ring-[#7140DC]/15" />
+            <div className="mt-3 space-y-1 rounded-xl bg-[#F7F1FF] px-3 py-2.5 text-xs text-[#57436F]">
+                <div className="flex justify-between gap-2 font-semibold"><span>Total Actually Received Now</span><span>{peso(totalReceived)}</span></div>
+                <div className="flex justify-between gap-2"><span>Booking Balance After Payment</span><span>{peso(remainingAfter)}</span></div>
+                <div className="flex justify-between gap-2"><span>Deposit Still Due After Payment</span><span>{peso(depositAfter)}</span></div>
+                <div className="flex justify-between gap-2 border-t border-[#E2D6EF] pt-1 font-bold"><span>Still Due Before Release</span><span>{peso(remainingAfter + depositAfter)}</span></div>
+            </div>
             <label className="mt-4 flex cursor-pointer items-start gap-2.5 rounded-lg border border-[#E8DDF2] bg-[#FCFAFF] p-3 text-xs leading-5 text-[#49376A]">
-                <input type="checkbox" checked={verified} onChange={e=>setVerified(e.target.checked)} disabled={busy} className="mt-0.5 accent-[#6435BC]" />
-                <span>I checked the actual payment in the bank, GCash, Maya, or cash records and confirm this amount was received.</span>
+                <input type="checkbox" checked={verified} onChange={e=>setVerified(e.target.checked)} disabled={busy || depositLoading || !deposit} className="mt-0.5 accent-[#6435BC]" />
+                <span>I checked the actual payment in the bank, GCash, Maya, or cash records and confirm these amounts were received.</span>
             </label>
-            <p className="mt-3 text-xs leading-5 text-[#827393]">A partial amount stays partial until the required down payment is met. Saving payment does not confirm the booking; Manager confirmation remains a separate action.</p>
+            <p className="mt-3 text-xs leading-5 text-[#827393]">A partial booking payment stays partial until the required down payment is met. Recording payment does not confirm a booking. Release requires both the full booking balance and any agreed security deposit to be settled.</p>
             {(validation || error) && <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs font-medium text-red-700">{validation || error}</p>}
             <div className="mt-5 flex gap-2"><button type="button" disabled={busy} onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-[#D9C6E9] bg-white px-3 text-sm font-semibold text-[#352353] hover:bg-[#F7F1FF] disabled:opacity-50">Cancel</button>
-                <button type="button" disabled={busy || balance <= 0} onClick={save} className="min-h-11 flex-1 rounded-xl bg-[#432183] px-3 text-sm font-bold text-white hover:bg-[#30145F] disabled:opacity-50">{busy ? "Saving…" : "Save Payment"}</button></div>
+                <button type="button" disabled={busy || depositLoading || !deposit || totalDue <= 0} onClick={save} className="min-h-11 flex-1 rounded-xl bg-[#432183] px-3 text-sm font-bold text-white hover:bg-[#30145F] disabled:opacity-50">{busy ? "Saving…" : "Save Payment"}</button></div>
         </div>
     </div>;
 }

@@ -93,8 +93,9 @@ export default function StaffBookings() {
     const canView = access === "view" || access === "standard" || access === "full";
     // A Staff "full" legacy flag does not grant Manager price/cancellation controls.
     const canManage = false;
-    const canConfirmStandard = access === "standard" || access === "full";
-    const canOperateBookings = canConfirmStandard;
+    // All Staff Booking pages are read-only. Operational actions are in Staff Inventory.
+    const canConfirmStandard = false;
+    const canOperateBookings = false;
     const [approvalModal, setApprovalModal] = useState<Booking | null>(null);
     const [confirmModal, setConfirmModal] = useState<Booking | null>(null);
     const [reviewAcknowledged, setReviewAcknowledged] = useState(false);
@@ -204,6 +205,18 @@ export default function StaffBookings() {
 
     useEffect(() => {
         void loadBookings();
+        const refreshVisible = () => {
+            if(document.visibilityState === 'visible')void loadBookings();
+        };
+        const refreshEvent = () => { void loadBookings(); };
+        const interval = window.setInterval(refreshVisible, 60_000);
+        window.addEventListener('focus',refreshVisible);
+        window.addEventListener('stocknbook:booking-updated',refreshEvent);
+        return () => {
+            window.clearInterval(interval);
+            window.removeEventListener('focus',refreshVisible);
+            window.removeEventListener('stocknbook:booking-updated',refreshEvent);
+        };
     }, []);
 
 
@@ -715,12 +728,7 @@ export default function StaffBookings() {
                             {branchName}
                         </span>
 
-                        {canConfirmStandard && (
-                            <span className="rounded-lg border border-[#E6DDF0] bg-white px-3.5 py-1.5 text-xs font-semibold text-[#5F4E75]">
-                                Standard confirmation & operations
-                            </span>
-                        )}
-                        {access === "view" && (
+                        {canView && (
                             <span className="rounded-lg border border-[#E6DDF0] bg-white px-3.5 py-1.5 text-xs font-semibold text-[#5F4E75]">
                                 View only
                             </span>
@@ -894,12 +902,8 @@ export default function StaffBookings() {
                             </div>
                         ) : (
                             <BookingWorkspace bookings={filtered} canManage={canManage}
-                                              canConfirmStandard={canConfirmStandard}
-                                              canOperateBookings={canOperateBookings}
-                                              onOperateBooking={(id, status) => void advanceStaffBooking(id, status)}
-                                              operationsBusy={actionBusy}
-                                              onConfirmStandard={(b)=>{setConfirmModal(b);setReviewAcknowledged(false);setActionMessage("")}}
-                                              onRequestApproval={(b)=>{setApprovalModal(b);setApprovalReason("");setActionMessage("")}}
+                                              canConfirmStandard={false}
+                                              canOperateBookings={false}
                                               onUpdateStatus={canManage ? updateStatus : undefined}
                                               onSetPrice={canManage ? setPriceModal : undefined}
                                               onRecordDownPayment={

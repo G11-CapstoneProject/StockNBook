@@ -707,10 +707,10 @@ export function PriceModal({
                                onClose,
                            }: {
     booking: Booking;
-    onConfirm: (agreedPrice: number, requiredDownPayment: number, refundableDeposit: number) => void | Promise<void>;
+    onConfirm: (agreedPrice: number, requiredDownPayment: number, refundableDeposit: number, waiverReason: string) => void | Promise<void>;
     onClose: () => void;
 }) {
-    const [price, setPrice] = useState(String(booking.agreed_price ?? booking.agreedPrice ?? ""));
+    const [price, setPrice] = useState(String(getTotalPrice(booking) || ""));
     const [downPayment, setDownPayment] = useState(String(
         booking.required_down_payment ?? booking.requiredDownPayment ?? booking.down_payment_amount ?? booking.downPaymentAmount ?? ""
     ));
@@ -718,11 +718,13 @@ export function PriceModal({
         booking.refundable_deposit ?? booking.refundableDeposit ?? ""
     ));
     const [hasRental, setHasRental] = useState<boolean | null>(null);
+    const [branchDeposit, setBranchDeposit] = useState<number | null>(null);
+    const [depositPolicy, setDepositPolicy] = useState<'required'|'optional'|'none'|null>(null);
+    const [waiveDeposit, setWaiveDeposit] = useState(false);
+    const [waiverReason, setWaiverReason] = useState("");
     const [termsLoading, setTermsLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
-    const isCustom = isCustomBooking(booking);
-
     // Identify rental equipment from the actual booking rather than guessing from booking type.
     // The financial statement also holds the existing refundable-deposit amount.
     useEffect(() => {
@@ -735,11 +737,12 @@ export function PriceModal({
         void (async () => {
             try {
                 const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
-                const [itemsResponse, statementResponse] = await Promise.all([
+                const [itemsResponse, statementResponse, policyResponse] = await Promise.all([
                     fetch("/api/bookings", { method: "POST", headers, body: body("get_booking_items") }),
                     fetch("/api/bookings", { method: "POST", headers, body: body("get_booking_financial_statement") }),
+                    fetch("/api/bookings", { method: "POST", headers, body:JSON.stringify({action:"get_booking_fee_policy",branchId:Number(branchId)}) }),
                 ]);
-                const [itemsData, financeData] = await Promise.all([itemsResponse.json(), statementResponse.json()]);
+                const [itemsData, financeData, policyData] = await Promise.all([itemsResponse.json(), statementResponse.json(), policyResponse.json()]);
                 if (!itemsResponse.ok || itemsData.error || itemsData.success === false ||
                     !statementResponse.ok || financeData.error || financeData.success === false || !financeData.statement) {
                     throw new Error(itemsData.error || financeData.error || "Could not verify booking rental items and security deposit.");
@@ -747,6 +750,9 @@ export function PriceModal({
                 if (!Array.isArray(itemsData.rentalItems) || !Array.isArray(financeData.statement.rentalItems)) {
                     throw new Error("The booking API did not provide the rental-item information required to set the security deposit.");
                 }
+                if(!policyResponse.ok||policyData.error||!Number.isFinite(Number(policyData.policy?.refundableDeposit))||
+                    !['required','optional','none'].includes(policyData.policy?.depositPolicy))
+                    throw new Error(policyData.error||"Could not verify branch security-deposit policy.");
                 const rental = itemsData.rentalItems.length > 0 || financeData.statement.rentalItems.length > 0;
                 const saved = financeData.statement.depositRequired;
                 if (saved == null || !Number.isFinite(Number(saved)) || Number(saved) < 0) {
@@ -754,7 +760,15 @@ export function PriceModal({
                 }
                 if (!cancelled) {
                     setHasRental(rental);
-                    setRefundableDeposit(String(saved));
+                    const mode=policyData.policy.depositPolicy as 'required'|'optional'|'none';
+                    const minimum=Math.max(0,Number(policyData.policy.refundableDeposit));
+                    const hasSavedWaiver=String(financeData.statement.depositWaiverReason||'').trim().length>=10;
+                    setDepositPolicy(mode);
+                    setBranchDeposit(minimum);
+                    setRefundableDeposit(String(rental && mode==='required' && minimum>0 && Number(saved)===0 && !hasSavedWaiver
+                        ? minimum : mode==='none'||!rental ? 0 : Number(saved)));
+                    setWaiveDeposit(rental && mode==='required' && Number(saved)===0 && hasSavedWaiver);
+                    setWaiverReason(String(financeData.statement.depositWaiverReason||""));
                 }
             } catch (err) {
                 if (!cancelled) setError(err instanceof Error ? err.message : "Could not check rental items.");
@@ -772,7 +786,6 @@ export function PriceModal({
         const parsedDeposit = Number(refundableDeposit);
         const isMoney = (value: string, n: number) => value.trim() !== "" &&
             Number.isFinite(n) && Math.abs(n * 100 - Math.round(n * 100)) < 0.001;
-        if (!isCustom) { setError("Agreed price is only used for custom bookings."); return; }
         if (!isMoney(price, parsedPrice) || parsedPrice <= 0) { setError("Enter a valid agreed price."); return; }
         if (!isMoney(downPayment, parsedDownPayment) || parsedDownPayment < 0 || parsedDownPayment > parsedPrice) {
             setError("Down payment must be between ₱0.00 and the agreed booking price."); return;
@@ -780,11 +793,23 @@ export function PriceModal({
         if (!isMoney(refundableDeposit, parsedDeposit) || parsedDeposit < 0) {
             setError("Enter a valid refundable security deposit amount."); return;
         }
-        if (hasRental && parsedDeposit <= 0) {
-            setError("A security deposit greater than ₱0.00 is required because this booking includes rental equipment."); return;
+        if(hasRental && depositPolicy==='required'){
+            if(branchDeposit===null || branchDeposit<=0){
+                setError('Ask the Owner to configure a positive minimum rental security deposit for this branch.');return;
+            }
+            if(parsedDeposit<branchDeposit &&
+                (parsedDeposit!==0 || !waiveDeposit || waiverReason.trim().length<10)){
+                setError('Set at least the branch minimum, or waive the entire deposit with a Manager reason (10+ characters).');return;
+            }
+        }
+        if(hasRental && depositPolicy==='none' && parsedDeposit!==0){
+            setError('The Owner policy does not collect rental deposits. Set this amount to ₱0.');return;
+        }
+        if(!hasRental && parsedDeposit!==0){
+            setError('A booking without rental equipment does not require a rental security deposit.');return;
         }
         setSaving(true); setError("");
-        try { await onConfirm(parsedPrice, parsedDownPayment, parsedDeposit); }
+        try { await onConfirm(parsedPrice, parsedDownPayment, parsedDeposit,waiveDeposit?waiverReason.trim():""); }
         catch (err) { setError(err instanceof Error ? err.message : "Could not save payment terms."); }
         finally { setSaving(false); }
     }
@@ -792,8 +817,8 @@ export function PriceModal({
     const inputStyle = "h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 pl-10 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10";
     return (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
-            <div role="dialog" aria-modal="true" aria-label="Set Custom Payment Terms" className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-[18px] border border-[#E6DDF0] bg-white p-5 font-sans shadow-2xl">
-                <h3 className="text-[20px] font-bold text-[#1A1220]">Set Custom Payment Terms</h3>
+            <div role="dialog" aria-modal="true" aria-label="Review Booking Payment Terms" className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-[18px] border border-[#E6DDF0] bg-white p-5 font-sans shadow-2xl">
+                <h3 className="text-[20px] font-bold text-[#1A1220]">Review Booking Payment Terms</h3>
                 <p className="mt-1 text-sm leading-6 text-[#7A6A84]">Enter the agreed price, required down payment, and refundable security deposit for <strong className="text-[#1A1220]">{booking.name}</strong>.</p>
                 <div className="mt-4 space-y-3">
                     {([
@@ -805,17 +830,37 @@ export function PriceModal({
                         <div className="relative mt-2">
                             <PhilippinePeso size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
                             <input aria-label={field.label} type="number" min="0" step="0.01" required
-                                   disabled={termsLoading || saving} value={field.value}
+                                   disabled={termsLoading || saving || (field.label.includes("Security Deposit") && (waiveDeposit || depositPolicy==='none' || !hasRental))} value={field.value}
                                    onChange={e => { field.set(e.target.value); setError(""); }} placeholder="0.00" className={inputStyle} />
                         </div>
                     </label>)}
                     <p className="text-xs leading-5 text-[#806A8C]">
-                        {termsLoading ? "Checking rental equipment and existing deposit..." : hasRental === null
-                            ? "Rental equipment could not be verified. Saving is disabled."
-                            : hasRental ? "Required: this booking contains rental items. The Manager must enter a security deposit greater than ₱0.00."
-                                : "Optional: no rental items were found. Enter ₱0.00 if no security deposit is needed."}
-                        {" "}The security deposit is refundable and is not included in the agreed booking price.
+                        {termsLoading ? "Checking booking items and branch policy..." : hasRental === null
+                            ? "Booking rental items could not be verified. Saving is disabled."
+                            : hasRental && depositPolicy==='required'
+                                ? (branchDeposit??0)>0
+                                    ? `Rental deposit required (including package/additional equipment): minimum ${peso(branchDeposit!)}. Manager may increase it or record a full waiver with a reason.`
+                                    : 'Owner must first configure a positive minimum rental deposit for this branch.'
+                                : hasRental && depositPolicy==='optional'
+                                    ? 'Rental deposit optional under Owner policy. Manager may set a positive amount for higher-risk equipment, or ₱0.'
+                                    : hasRental && depositPolicy==='none'
+                                        ? 'No rental security deposit under the Owner policy.'
+                                        : 'No rental equipment — no refundable rental deposit required.'}
+                        {" "}Any collected security deposit is refundable and separate from the agreed booking price.
                     </p>
+                    {hasRental && depositPolicy==='required' && (branchDeposit??0)>0 && <div className="rounded-xl border border-[#E6DDF0] p-3 text-xs">
+                        <label className="flex items-start gap-2">
+                            <input type="checkbox" checked={waiveDeposit} disabled={saving||termsLoading}
+                                   onChange={e=>{setWaiveDeposit(e.target.checked);setRefundableDeposit(e.target.checked?"0":String(branchDeposit));setError("");}}/>
+                            <span>Manager waiver: do not collect the branch security deposit for this booking</span>
+                        </label>
+                        {waiveDeposit && <label className="mt-2 block">Waiver reason (required, 10+ characters)
+                            <textarea value={waiverReason} onChange={e=>setWaiverReason(e.target.value)} maxLength={500}
+                                      className="mt-1 w-full rounded-lg border border-[#E6DDF0] p-2" rows={2}
+                                      placeholder="Document why this customer may book without a refundable deposit" />
+                        </label>}
+                    </div>}
+                    <p className="text-xs text-[#806A8C]">If down payment is ₱0, the Manager must provide a separate no-DP confirmation reason before stock is reserved.</p>
                     {price !== "" && downPayment !== "" && refundableDeposit !== "" &&
                         Number.isFinite(Number(price)) && Number.isFinite(Number(downPayment)) && Number.isFinite(Number(refundableDeposit)) &&
                         <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FF] p-3 text-xs text-[#2B174C]">
@@ -826,7 +871,7 @@ export function PriceModal({
                 </div>
                 <div className="mt-5 flex gap-3">
                     <button type="button" disabled={saving} onClick={onClose} className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:opacity-50">Cancel</button>
-                    <button type="button" disabled={saving || termsLoading || hasRental === null} onClick={() => void handleConfirm()} className="flex-1 rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-50">{saving ? "Saving..." : "Save Terms"}</button>
+                    <button type="button" disabled={saving || termsLoading || hasRental === null || depositPolicy === null} onClick={() => void handleConfirm()} className="flex-1 rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-50">{saving ? "Saving..." : "Save Terms"}</button>
                 </div>
             </div>
         </div>
@@ -1218,7 +1263,7 @@ export function BookingRow({
                             <div className="rounded-lg border border-[#E8E1F1] bg-white p-3 text-xs text-[#847492]">You have view-only access to booking actions.</div>
                         ) : (
                             <div className="grid gap-2 sm:grid-cols-2">
-                                {isCustom && customNeedsTerms && canEditPaymentTerms ? (
+                                {customNeedsTerms && canEditPaymentTerms ? (
                                     <button type="button" className={`${action} bg-[#4D2A96] text-white hover:bg-[#371C72]`} onClick={() => onSetPrice?.(b)}>Set Price, DP &amp; Deposit</button>
                                 ) : displayStatus === "Pending Review" ? (
                                     <span className="flex items-center justify-center rounded-lg border border-[#E8DCF4] bg-white px-3 py-2 text-center text-xs font-semibold text-[#806D92]">Approve booking before recording payment</span>
@@ -1230,7 +1275,7 @@ export function BookingRow({
                                         {requiredDp > 0 && paid < requiredDp ? "Verify & Record Down Payment" : "Record Remaining Payment"}
                                     </button>
                                 ) : <span className="flex items-center justify-center rounded-lg border border-[#D6EDDC] bg-[#EFF9F1] px-3 py-2 text-xs font-semibold text-[#18854C]">{total <= 0 ? "Payment terms missing" : "Payment completed"}</span>}
-                                {isCustom && !customNeedsTerms && canEditPaymentTerms &&
+                                {!customNeedsTerms && canEditPaymentTerms &&
                                     <button type="button" className={`${action} border border-[#D6C4F8] bg-white text-[#4D2A96] hover:bg-[#F3EEFF]`} onClick={() => onSetPrice?.(b)}>Edit Price, DP &amp; Deposit</button>}
                                 {managerCanAdvance ? (
                                     <button type="button" disabled={statusActionDisabled || total <= 0} onClick={() => { if (!statusActionDisabled && total > 0) onUpdateStatus?.(b.id, actionNextStatus); }}
@@ -1243,7 +1288,7 @@ export function BookingRow({
                                             className={`${action} border border-red-200 bg-red-50 text-red-700 hover:bg-red-100`}>Cancel Booking</button>}
                             </div>
                         )}
-                        {!canEditPaymentTerms && isCustom && <p className="mt-3 rounded-lg border border-[#E7DDF5] bg-[#F8F4FF] p-3 text-xs text-[#674A8E]">Custom price, required down payment and refundable security deposit are locked after approval.</p>}
+                        {!canEditPaymentTerms && <p className="mt-3 rounded-lg border border-[#E7DDF5] bg-[#F8F4FF] p-3 text-xs text-[#674A8E]">Custom price, required down payment and refundable security deposit are locked after approval.</p>}
                         {b.approvalStatus === "pending" && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-900"><strong>Manager approval requested:</strong> {b.approvalReason || "Awaiting review."}</p>}
                         <p className="mt-3 text-xs leading-5 text-[#847492]">{statusHelper} Recording money does not automatically confirm a booking.</p>
                     </section>
@@ -1611,7 +1656,7 @@ export function BookingRow({
                                             <div className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-3 py-3 text-center text-xs font-semibold text-[#6E5B83]">Approve booking before recording payment.</div>
                                         ) : managerView && displayStatus === "Cancelled" ? (
                                             <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-3 text-center text-xs font-semibold text-red-700">Cancelled booking — payments disabled.</div>
-                                        ) : isCustom && customNeedsTerms && canEditPaymentTerms ? (
+                                        ) : customNeedsTerms && canEditPaymentTerms ? (
                                             <button
                                                 onClick={(e) => {
                                                     e.stopPropagation();
@@ -1620,7 +1665,7 @@ export function BookingRow({
                                                 type="button"
                                                 className="inline-flex h-[42px] w-full items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                                             >
-                                                Set Price, DP & Security Deposit
+                                                Review Price, DP & Security Deposit
                                             </button>
                                         ) : total <= 0 ? (
                                             <div
@@ -1663,7 +1708,7 @@ export function BookingRow({
                                             </button>
                                         )}
 
-                                        {isCustom && !customNeedsTerms && canManage && !ownerView && canEditPaymentTerms && (
+                                        {!customNeedsTerms && canManage && !ownerView && canEditPaymentTerms && (
                                             <button
                                                 onClick={(e) => {
                                                     e.stopPropagation();
@@ -1672,7 +1717,7 @@ export function BookingRow({
                                                 type="button"
                                                 className="mt-3 inline-flex h-[42px] w-full items-center justify-center rounded-xl border border-[#E6DDF0] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
                                             >
-                                                Edit Price, DP & Security Deposit
+                                                Review Price, DP & Security Deposit
                                             </button>
                                         )}
                                     </div>
@@ -1940,4 +1985,3 @@ function SummaryLine({
         </div>
     );
 }
-

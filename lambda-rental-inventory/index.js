@@ -806,6 +806,16 @@ async function staffRentalBookingMutation(db,scope,body) {
         if(!Number.isFinite(total)||total<=0||!Number.isFinite(paid)||!Number.isFinite(balance)
             ||paid+0.005<total||balance>0.005)
             fail(409,'The customer must pay the entire booking balance before equipment handover.');
+        // Financial security deposit is separate from rental revenue. A zero
+        // agreed deposit is valid (no policy, or documented Manager waiver).
+        // Never hand equipment over while an agreed positive deposit is unpaid.
+        const [depositTerms]=await db.execute(`SELECT refundable_deposit_required,deposit_collected
+                                               FROM booking_financial_details
+                                               WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1 FOR UPDATE`,
+            [booking.id,scope.storeId,scope.branchId]);
+        if(!depositTerms.length)fail(409,'Booking security-deposit terms are unavailable. Ask the Manager to review Billing.');
+        if(Number(depositTerms[0].deposit_collected||0)+0.005<Number(depositTerms[0].refundable_deposit_required||0))
+            fail(409,'Collect the agreed refundable security deposit before releasing rental equipment.');
         if(lines.some(line=>line.status!=='reserved'||!line.preparedAt))
             fail(409,'Every rental equipment line must be prepared before releasing the booking.');
         if(lines.some(line=>String(line.startDate)>todayPh()))

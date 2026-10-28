@@ -600,7 +600,8 @@ export default function ManagerBookings() {
         id: number,
         newStatus: string,
         price?: number,
-        usedItems?: CancelUsedItem[]
+        usedItems?: CancelUsedItem[],
+        noDpReason?: string
     ): Promise<boolean> {
 
         const token = getToken();
@@ -613,11 +614,13 @@ export default function ManagerBookings() {
         const oldStatus = normalizeStatus(booking.status);
         if (cleanStatus !== "Cancelled" &&
             !(oldStatus === "Pending Review" && cleanStatus === "Awaiting Down Payment") &&
+            !(oldStatus === "Pending Review" && cleanStatus === "Confirmed" &&
+                getRequiredDownPayment(booking)===0 && (noDpReason||"").trim().length>=10) &&
             !(oldStatus === "Awaiting Down Payment" && cleanStatus === "Confirmed")) {
             setBookingActionError("Only Staff may advance preparation, release and completion. Managers approve and confirm bookings.");
             return false;
         }
-        if (cleanStatus === "Confirmed") {
+        if (cleanStatus === "Confirmed" && !(oldStatus === "Pending Review" && getRequiredDownPayment(booking)===0 && (noDpReason||"").trim().length>=10)) {
             const needed = getRequiredDownPayment(booking) > 0 ? getRequiredDownPayment(booking) : getTotalPrice(booking);
             if (getTotalPrice(booking) <= 0 || getAmountPaid(booking) + 0.005 < needed) {
                 setBookingActionError("Verify the required down payment (or full price when no down payment is required) before confirming.");
@@ -640,7 +643,8 @@ export default function ManagerBookings() {
                 (getRequiredDownPayment(booking) > 0 ? getRequiredDownPayment(booking) : getTotalPrice(booking))
             );
 
-            if (cleanStatus !== nextStatus) {
+            if (cleanStatus !== nextStatus && !(oldStatus==="Pending Review" && cleanStatus==="Confirmed" &&
+                getRequiredDownPayment(booking)===0 && (noDpReason||"").trim().length>=10)) {
                 console.warn(`Cannot jump to ${cleanStatus}. Next valid status is ${nextStatus}`);
                 return false;
             }
@@ -659,6 +663,7 @@ export default function ManagerBookings() {
             if (branchId) body.branch_id = Number(branchId);
             if (price !== undefined) body.agreed_price = price;
             if (usedItems) body.used_items = usedItems;
+            if (noDpReason) body.noDpReason = noDpReason;
 
             const res = await fetch("/api/bookings", {
                 method: "POST",
@@ -781,11 +786,12 @@ export default function ManagerBookings() {
         booking: Booking,
         agreedPrice: number,
         requiredDownPayment: number,
-        refundableDeposit: number
+        refundableDeposit: number,
+        depositWaiverReason: string
     ) {
         const latest = bookings.find(b => b.id === booking.id) ?? booking;
         if (normalizeStatus(latest.status) !== "Pending Review" || latest.approvalStatus === "approved") {
-            throw new Error("Custom price and down payment are locked after booking approval.");
+            throw new Error("Booking price and payment terms are locked after approval.");
         }
         const token = getToken();
         const branchId = getBranchId();
@@ -799,6 +805,7 @@ export default function ManagerBookings() {
                 // Requires the backend update_price action to persist this value atomically
                 // for the selected booking; it must not overwrite the branch-wide policy.
                 refundable_deposit: refundableDeposit,
+                depositWaiverReason,
             };
 
             if (branchId) body.branch_id = Number(branchId);
@@ -843,11 +850,11 @@ export default function ManagerBookings() {
             const newPaymentStatus =
                 currentPaid >= agreedPrice
                     ? "Fully Paid"
-                    : currentPaid >= requiredDownPayment
+                    : requiredDownPayment > 0 && currentPaid >= requiredDownPayment
                         ? "Down Payment Paid"
                         : currentPaid > 0
                             ? "Partial"
-                            : "Down Payment Required";
+                            : requiredDownPayment === 0 ? "Unpaid" : "Down Payment Required";
 
             updateLocalBooking(booking.id, {
                 agreed_price: agreedPrice,
@@ -872,11 +879,12 @@ export default function ManagerBookings() {
     async function handlePriceConfirm(
         agreedPrice: number,
         requiredDownPayment: number,
-        refundableDeposit: number
+        refundableDeposit: number,
+        depositWaiverReason: string
     ) {
         if (!priceModal) return;
         // Let PriceModal show any API/persistence error without closing the editor.
-        await updateCustomPaymentTerms(priceModal, agreedPrice, requiredDownPayment, refundableDeposit);
+        await updateCustomPaymentTerms(priceModal, agreedPrice, requiredDownPayment, refundableDeposit, depositWaiverReason);
         setPriceModal(null);
     }
 
@@ -1157,11 +1165,14 @@ export default function ManagerBookings() {
                 busy={approvalSaving}
                 error={approvalError}
                 onClose={() => { if (!approvalSaving) { setApprovalModal(null); setApprovalError(""); } }}
-                onApprove={async () => {
+                onApprove={async (noDpReason) => {
                     setApprovalSaving(true);
                     setApprovalError("");
                     try {
-                        const ok = await updateStatus(approvalModal.id, "Awaiting Down Payment");
+                        const chosen=bookings.find(b=>b.id===approvalModal.id)??approvalModal;
+                        const noDp=getRequiredDownPayment(chosen)===0;
+                        const ok = await updateStatus(approvalModal.id, noDp?"Confirmed":"Awaiting Down Payment",
+                            undefined,undefined,noDp?noDpReason:undefined);
                         if (ok) setApprovalModal(null);
                         else setApprovalError("Approval was not completed. Check the notification and try again.");
                     } finally { setApprovalSaving(false); }
@@ -1246,13 +1257,17 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
     busy: boolean;
     error: string;
     onClose: () => void;
-    onApprove: () => Promise<void>;
+    onApprove: (noDpReason?:string) => Promise<void>;
 }) {
     const [agreed, setAgreed] = useState(false);
     const [validation, setValidation] = useState("");
     const [depositRequired, setDepositRequired] = useState<number | null>(null);
     const [depositError, setDepositError] = useState("");
     const [hasRental, setHasRental] = useState<boolean | null>(null);
+    const [policyDeposit, setPolicyDeposit] = useState<number | null>(null);
+    const [depositPolicy, setDepositPolicy] = useState<'required'|'optional'|'none'|null>(null);
+    const [waiverSaved, setWaiverSaved] = useState(false);
+    const [noDpReason, setNoDpReason] = useState("");
     useEffect(() => {
         let cancelled = false;
         void (async () => {
@@ -1271,15 +1286,23 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
                     body: JSON.stringify({ action: "get_booking_items", booking_id: booking.id,
                         branch_id: Number(booking.branchId || booking.branch_id) || undefined }),
                 });
-                const [data, itemsData] = await Promise.all([response.json(), itemsResponse.json()]);
+                const policyResponse = await fetch("/api/bookings",{method:"POST",
+                    headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
+                    body:JSON.stringify({action:"get_booking_fee_policy",branchId:Number(booking.branchId||booking.branch_id)})});
+                const [data, itemsData, policyData] = await Promise.all([response.json(), itemsResponse.json(),policyResponse.json()]);
                 const deposit = Number(data.statement?.depositRequired);
                 if (!response.ok || data.error || data.statement?.depositRequired == null || !Number.isFinite(deposit) ||
-                    !itemsResponse.ok || itemsData.error || !Array.isArray(itemsData.rentalItems) ||
-                    !Array.isArray(data.statement?.rentalItems))
+                    !itemsResponse.ok || itemsData.error || !policyResponse.ok || policyData.error ||
+                    !Number.isFinite(Number(policyData.policy?.refundableDeposit)) ||
+                    !['required','optional','none'].includes(policyData.policy?.depositPolicy) ||
+                    !Array.isArray(itemsData.rentalItems) || !Array.isArray(data.statement?.rentalItems))
                     throw new Error(data.error || itemsData.error || "Security deposit or rental items are unavailable.");
                 if (!cancelled) {
                     setDepositRequired(Math.max(0, deposit));
                     setHasRental(itemsData.rentalItems.length > 0 || data.statement.rentalItems.length > 0);
+                    setPolicyDeposit(Number(policyData.policy.refundableDeposit));
+                    setDepositPolicy(policyData.policy.depositPolicy as 'required'|'optional'|'none');
+                    setWaiverSaved(String(data.statement.depositWaiverReason||"").trim().length>=10);
                 }
             } catch (error) {
                 if (!cancelled) setDepositError(error instanceof Error ? error.message : "Unable to read deposit terms.");
@@ -1292,9 +1315,22 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
             setValidation("Load the refundable security deposit before approving the quotation.");
             return;
         }
-        if (hasRental === null || (hasRental && depositRequired <= 0)) {
-            setValidation("Rental bookings require a refundable security deposit greater than ₱0.00. Set it in Custom Payment Terms before approval.");
+        if (hasRental === null || policyDeposit === null || depositPolicy === null) {
+            setValidation("Booking rental items and deposit policy must be verified first.");
             return;
+        }
+        if(hasRental && depositPolicy==='required'){
+            if(policyDeposit<=0){setValidation('Owner must set a positive rental-deposit minimum for this branch.');return;}
+            if(depositRequired >= 0 && depositRequired < policyDeposit &&
+                !(depositRequired===0 && waiverSaved)){
+                setValidation('Save a compliant rental security deposit or a documented Manager waiver in Payment Terms first.');return;
+            }
+        }
+        if(hasRental && depositPolicy==='none' && depositRequired > 0){
+            setValidation('The Owner policy does not collect rental deposits. Review Payment Terms.');return;
+        }
+        if (getRequiredDownPayment(booking)===0 && noDpReason.trim().length<10){
+            setValidation("Explain the Manager-authorized no-down-payment confirmation (at least 10 characters)."); return;
         }
         if (!agreed) {
             setValidation("Confirm that the manager and customer agreed on the payment terms.");
@@ -1305,7 +1341,7 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
             return;
         }
         setValidation("");
-        void onApprove();
+        void onApprove(getRequiredDownPayment(booking)===0?noDpReason.trim():undefined);
     }
     return <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 px-4 py-5">
         <div role="dialog" aria-modal="true" aria-labelledby="approval-title" className="w-full max-w-md rounded-2xl border border-[#E5D8F1] bg-white p-5 shadow-2xl">
@@ -1320,18 +1356,37 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
                 <div className="flex justify-between gap-3"><span>Final Agreed Price</span><strong>{peso(getTotalPrice(booking))}</strong></div>
                 <div className="flex justify-between gap-3"><span>Required Down Payment</span><strong>{peso(getRequiredDownPayment(booking))}</strong></div>
                 <div className="flex justify-between gap-3"><span>Refundable Security Deposit</span><strong>{depositRequired === null ? "Loading…" : peso(depositRequired)}</strong></div>
-                {hasRental && depositRequired === 0 && <p role="alert" className="text-xs text-red-600">Rental items require a refundable security deposit greater than ₱0.00 before approval.</p>}
+                {hasRental && depositPolicy==='required' &&
+                    <p className="text-xs text-[#806A8C]">{(policyDeposit??0)<=0
+                        ? 'Owner must configure the required rental deposit before approval.'
+                        : depositRequired===0 && waiverSaved
+                            ? 'Documented Manager deposit waiver saved; customer liability terms still apply.'
+                            : `Owner-required rental deposit minimum: ${peso(policyDeposit!)}. Collected separately before equipment release.`}</p>}
+                {hasRental && depositPolicy==='optional' && <p className="text-xs text-[#806A8C]">Optional under branch policy; the Manager has agreed the amount shown above.</p>}
+                {hasRental && depositPolicy==='none' && <p className="text-xs text-[#806A8C]">No deposit required under this branch's policy.</p>}
                 {depositError && <p role="alert" className="text-xs text-red-600">{depositError}</p>}
             </div>
+            {getRequiredDownPayment(booking)===0 && <label className="mt-4 block text-xs font-medium text-[#4F4162]">
+                Manager no-down-payment authorization reason (10+ characters)
+                <textarea value={noDpReason} onChange={e=>setNoDpReason(e.target.value)} rows={2}
+                          className="mt-1 w-full rounded-lg border border-[#E2D6EF] p-2" maxLength={500}/>
+                <span className="mt-1 block font-normal text-[#806A8C]">Approval directly confirms/reserves a zero-DP booking; all remaining booking charges must still be paid before release.</span>
+            </label>}
             <label className="mt-4 flex items-start gap-2 text-xs leading-5 text-[#4F4162]">
                 <input type="checkbox" checked={agreed} onChange={e=>{setAgreed(e.target.checked);setValidation("");}} disabled={busy} className="mt-1 accent-[#673DC8]"/>
                 <span>I confirm that the customer agrees to the final booking price, required down payment, and separate refundable security deposit.</span>
             </label>
-            <p className="mt-3 text-xs leading-5 text-[#816E93]">Approved bookings are not yet inventory reservations. Price and down payment are locked after approval.</p>
+            <p className="mt-3 text-xs leading-5 text-[#816E93]">{getRequiredDownPayment(booking)===0
+                ? "With the documented no-DP exception, Manager approval also confirms and reserves this booking. Full booking payment is still required before release."
+                : "Approval records the agreed terms but does not reserve inventory until the required payment is verified and confirmation is completed."} Payment terms are locked after approval.</p>
             {(validation || error) && <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{validation || error}</p>}
             <div className="mt-5 flex justify-end gap-2">
                 <button type="button" disabled={busy} onClick={onClose} className="rounded-xl border border-[#E2D6EF] px-4 py-2.5 text-sm font-semibold text-[#47246E]">Back</button>
-                <button type="button" disabled={busy || !agreed || depositRequired === null || hasRental === null || (hasRental && depositRequired <= 0)} onClick={submit} className="rounded-xl bg-[#432078] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Approving..." : "Approve Booking"}</button>
+                <button type="button" disabled={busy || !agreed || depositRequired === null || hasRental === null || policyDeposit === null || depositPolicy === null ||
+                    (hasRental && depositPolicy==='required' &&
+                        (policyDeposit<=0 || (depositRequired<policyDeposit && !(depositRequired===0 && waiverSaved)))) ||
+                    (hasRental && depositPolicy==='none' && depositRequired>0) ||
+                    (getRequiredDownPayment(booking)===0 && noDpReason.trim().length<10)} onClick={submit} className="rounded-xl bg-[#432078] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Approving..." : getRequiredDownPayment(booking)===0 ? "Approve & Confirm" : "Approve Booking"}</button>
             </div>
         </div>
     </div>;

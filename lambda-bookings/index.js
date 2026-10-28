@@ -528,10 +528,14 @@ async function getFeePolicy(db,storeId,branchId){
     const row=rows[0]||{};
     return {deliveryFee:Number(row.delivery_fee||0),setupFee:Number(row.setup_fee||0),
         refundableDeposit:Number(row.refundable_deposit||0),
+        // New branches require an Owner-set minimum by default. The migration
+        // keeps existing zero-deposit branch policies optional until changed.
+        depositPolicy:['required','optional','none'].includes(row.rental_deposit_policy)
+            ?row.rental_deposit_policy:'required',
         deliveryIncludedPackage:!!row.delivery_included_package,
         setupIncludedPackage:!!row.setup_included_package};
 }
-async function getBookingStatement(db,bookingId,storeId,branchId){
+async function getBookingStatement(db,bookingId,storeId,branchId,includeWaiverReason=false){
     const [bs]=await db.execute(`SELECT id,booking_reference AS reference,name,phone,booking_type AS bookingType,
                                         package_name AS packageName,DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate,
                                         status,agreed_price AS agreedPrice,package_price AS packagePrice,
@@ -567,7 +571,8 @@ async function getBookingStatement(db,bookingId,storeId,branchId){
             bookingType:b.bookingType,packageName:b.packageName,agreedPrice:b.agreedPrice,
             downPayment:Number(b.downPayment||0),bookingPayments:Number(b.bookingPayments||0),balance:Number(b.balance||0),
             dpDeadline:b.dpDeadline||null},
-        ...numbers,salesSubtotal,agreedCharges,claimBalance,
+        ...numbers,depositWaiverReason:includeWaiverReason?(fin.deposit_waiver_reason||null):null,
+        salesSubtotal,agreedCharges,claimBalance,
         salesItems:salesItems.map(i=>({...i,quantity:Number(i.quantity),unitPrice:Number(i.unitPrice),amount:Number(i.amount)})),depositHeld:Math.max(0,numbers.depositCollected-numbers.depositApplied-numbers.depositRefunded),
         rentalItems:items.map(x=>({...x,quantity:Number(x.quantity),days:Number(x.days),dailyRate:Number(x.dailyRate),amount:Number(x.amount)})),
         claims:claims.map(x=>({...x,amount:Number(x.amount),amountPaid:Number(x.amountPaid),depositApplied:Number(x.depositApplied)}))};
@@ -2352,6 +2357,7 @@ exports.handler = async (event) => {
                 if(expectedPolicy && (rentalMoneyCents(expectedPolicy.deliveryFee)!==rentalMoneyCents(policy.deliveryFee)||
                     rentalMoneyCents(expectedPolicy.setupFee)!==rentalMoneyCents(policy.setupFee)||
                     rentalMoneyCents(expectedPolicy.refundableDeposit)!==rentalMoneyCents(policy.refundableDeposit)||
+                    (expectedPolicy.depositPolicy && expectedPolicy.depositPolicy!==policy.depositPolicy)||
                     Boolean(expectedPolicy.deliveryIncludedPackage)!==policy.deliveryIncludedPackage||
                     Boolean(expectedPolicy.setupIncludedPackage)!==policy.setupIncludedPackage))
                     throw rentalError('Service fees or deposit policy changed. Refresh the booking quotation.');
@@ -2364,7 +2370,7 @@ exports.handler = async (event) => {
                 await connection.execute(`INSERT INTO booking_financial_details
                                           (booking_id,store_id,branch_id,package_base,rental_subtotal,delivery_fee,setup_fee,refundable_deposit_required)
                                           VALUES (?,?,?,?,?,?,?,?)`,[bookingId,targetStoreId,targetBranchId,packagePrice,rentalQuote.amount,
-                    delivery,setup,policy.refundableDeposit]);
+                    delivery,setup,rentalQuote.count>0 && policy.depositPolicy==='required'?policy.refundableDeposit:0]);
                 // For catalog-only custom requests, save the quote directly from verified
                 // Products/Rental line prices. Free-form bespoke work must be reviewed by Manager.
                 const customSalesTotal=bookingItemsToSave.filter(i=>i.sourceType==='custom')
@@ -2389,7 +2395,7 @@ exports.handler = async (event) => {
                     success: true,
                     id: bookingId,
                     quoted_booking_charges:authoritativeTotal,
-                    refundable_deposit_required:policy.refundableDeposit,
+                    refundable_deposit_required:rentalQuote.count>0 && policy.depositPolicy==='required'?policy.refundableDeposit:0,
                     service_fees:{delivery,setup},
                     package_price: packagePrice,
                     required_down_payment: requiredDownPayment,
@@ -2692,13 +2698,20 @@ exports.handler = async (event) => {
             if(!br.length)return response(404,{error:'Store branch not found.'});
             const delivery=financeCurrency(body.deliveryFee,'Delivery fee');
             const setup=financeCurrency(body.setupFee,'Setup fee');
-            const deposit=financeCurrency(body.refundableDeposit,'Refundable deposit');
+            const depositMode=String(body.depositPolicy||'');
+            if(!['required','optional','none'].includes(depositMode))
+                return response(400,{error:'Select a valid rental security-deposit policy.'});
+            const requestedDeposit=financeCurrency(body.refundableDeposit,'Refundable deposit');
+            if(depositMode==='required' && requestedDeposit<=0)
+                return response(400,{error:'Enter a positive branch minimum for required rental deposits.'});
+            const deposit=depositMode==='none'?0:requestedDeposit;
             await connection.execute(`INSERT INTO booking_fee_policies
-                                      (store_id,branch_id,delivery_fee,setup_fee,refundable_deposit,delivery_included_package,setup_included_package)
-                                      VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE delivery_fee=VALUES(delivery_fee),setup_fee=VALUES(setup_fee),
-                                          refundable_deposit=VALUES(refundable_deposit),delivery_included_package=VALUES(delivery_included_package),
+                                      (store_id,branch_id,delivery_fee,setup_fee,refundable_deposit,rental_deposit_policy,delivery_included_package,setup_included_package)
+                                      VALUES(?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE delivery_fee=VALUES(delivery_fee),setup_fee=VALUES(setup_fee),
+                                          refundable_deposit=VALUES(refundable_deposit),rental_deposit_policy=VALUES(rental_deposit_policy),
+                                          delivery_included_package=VALUES(delivery_included_package),
                                           setup_included_package=VALUES(setup_included_package)`,
-                [store_id,branchId,delivery,setup,deposit,body.deliveryIncludedPackage?1:0,body.setupIncludedPackage?1:0]);
+                [store_id,branchId,delivery,setup,deposit,depositMode,body.deliveryIncludedPackage?1:0,body.setupIncludedPackage?1:0]);
             return response(200,{success:true,policy:await getFeePolicy(connection,store_id,branchId)});
         }
         // Manager customer follow-up and future-booking review. These actions NEVER
@@ -2860,7 +2873,8 @@ exports.handler = async (event) => {
             const book=bs[0];
             if(tokenRole!=='owner'&&Number(book.branch_id)!==Number(tokenBranchId))return response(403,{error:'Different branch.'});
             if(action==='get_booking_financial_statement')
-                return response(200,{statement:await getBookingStatement(connection,bookingId,store_id,book.branch_id),
+                return response(200,{statement:await getBookingStatement(connection,bookingId,store_id,book.branch_id,
+                        tokenRole==='manager'||tokenRole==='owner'),
                     viewerRole:tokenRole,canWrite:bookingAccess==='full'});
             if(action==='get_booking_claim_sources'){
                 // These are the documented booking incidents, not arbitrary Manager-entered fees.
@@ -3751,6 +3765,33 @@ exports.handler = async (event) => {
             await connection.beginTransaction();
             try {
                 if(status==='Awaiting Down Payment' || status==='Confirmed') {
+                    // For the initial approval, enforce the branch's rental-deposit
+                    // policy or a Manager's saved, auditable waiver. Later confirmation
+                    // uses the already-agreed booking-specific deposit, not a newly
+                    // changed branch default.
+                    if(currentStatus==='Pending Review'){
+                        const branchId=Number(requestedBranchId||rows[0].branch_id);
+                        const [rentalLines]=await connection.execute(`SELECT COUNT(*) AS units
+                                                                      FROM booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                            [Number(booking_id),store_id,branchId]);
+                        if(Number(rentalLines[0]?.units||0)>0){
+                            const policy=await getFeePolicy(connection,store_id,branchId);
+                            const [terms]=await connection.execute(`SELECT refundable_deposit_required,deposit_waiver_reason
+                                                                    FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                [Number(booking_id),store_id,branchId]);
+                            if(!terms.length)throw rentalError('Booking deposit terms are missing. Review and save payment terms first.');
+                            const deposit=Number(terms[0].refundable_deposit_required||0),standard=Number(policy.refundableDeposit||0);
+                            if(policy.depositPolicy==='required'){
+                                if(standard<=0)throw rentalError('Owner must set a positive rental-deposit minimum for this branch.');
+                                const waived=deposit===0 && tokenRole==='manager' &&
+                                    String(terms[0].deposit_waiver_reason||'').trim().length>=10;
+                                if((deposit===0 && !waived)||(deposit>0 && deposit+0.005<standard))
+                                    throw rentalError('Save the branch-required rental deposit or a documented Manager waiver before approving.');
+                            }else if(policy.depositPolicy==='none' && deposit>0.005){
+                                throw rentalError('This branch policy does not collect rental security deposits. Review payment terms.');
+                            }
+                        }
+                    }
                     const review=await inspectBookingForConfirmation(connection,{
                         bookingId:Number(booking_id),storeId:store_id,
                         branchId:Number(requestedBranchId||rows[0].branch_id),lock:true
@@ -3908,13 +3949,15 @@ exports.handler = async (event) => {
             });
         }
 
-        // ── PROTECTED: update_price for custom bookings ───────────────────────
+        // ── PROTECTED: update_price for pre-approval booking payment terms ───────
         if (action === "update_price") {
             const {
                 booking_id,
                 agreed_price,
                 required_down_payment,
                 requiredDownPayment,
+                refundable_deposit,
+                depositWaiverReason,
                 branch_id,
                 branchId,
             } = body;
@@ -3951,7 +3994,7 @@ exports.handler = async (event) => {
             }
 
             let priceSelectQuery = `
-                SELECT id, branch_id, booking_reference, name, agreed_price, required_down_payment
+                SELECT id, branch_id, booking_reference, name, status, agreed_price, required_down_payment
                 FROM bookings
                 WHERE id = ?
                   AND store_id = ?
@@ -3969,6 +4012,13 @@ exports.handler = async (event) => {
             }
 
             const previousBooking = priceRows[0];
+            // Payment terms, including deposit waivers, are locked after approval.
+            if(normalizeBookingStatus(previousBooking.status)!=='Pending Review')
+                return response(409,{error:'Booking payment terms are locked after Manager approval.'});
+            const bookingBranchId=Number(previousBooking.branch_id);
+            const rentalPolicy=await getFeePolicy(connection,store_id,bookingBranchId);
+            const depositSpecified=refundable_deposit!==undefined && refundable_deposit!==null;
+            const depositAmount=depositSpecified?financeCurrency(refundable_deposit,'Refundable security deposit'):null;
             const rentalQuote=await rentalQuoteTotal(connection,Number(booking_id),store_id,
                 requestedBranchId||previousBooking.branch_id);
             const [financeLines]=await connection.execute(`SELECT package_base,rental_subtotal,delivery_fee,setup_fee
@@ -3977,6 +4027,20 @@ exports.handler = async (event) => {
             const requiredMinimum=financeLines.length ?
                 Number(financeLines[0].package_base)+Number(financeLines[0].rental_subtotal)+
                 Number(financeLines[0].delivery_fee)+Number(financeLines[0].setup_fee) : rentalQuote.total;
+            if(depositSpecified && rentalQuote.count>0){
+                const standard=Number(rentalPolicy.refundableDeposit||0);
+                if(rentalPolicy.depositPolicy==='required'){
+                    if(standard<=0)return response(409,{error:'Owner must configure a positive rental security-deposit minimum for this branch.'});
+                    if(depositAmount>0 && depositAmount+0.005<standard)
+                        return response(400,{error:'Required rental deposit is below the branch minimum. Increase the deposit or waive it entirely with a Manager reason.'});
+                    if(depositAmount===0 && (tokenRole!=='manager'||String(depositWaiverReason||'').trim().length<10))
+                        return response(400,{error:'Manager must document a security-deposit waiver (10+ characters).'});
+                }else if(rentalPolicy.depositPolicy==='none' && depositAmount>0){
+                    return response(400,{error:'The Owner policy does not collect rental deposits. Set the deposit to zero.'});
+                }
+            }
+            if(depositSpecified && rentalQuote.count===0 && depositAmount>0)
+                return response(400,{error:'Rental security deposits apply only to bookings containing rental equipment.'});
             if(rentalQuote.count || requiredMinimum>0){
                 const [state]=await connection.execute("SELECT status FROM bookings WHERE id=? AND store_id=?",
                     [Number(booking_id),store_id]);
@@ -3997,6 +4061,7 @@ exports.handler = async (event) => {
                                          WHEN COALESCE(amount_paid, 0) >= ? THEN 'Fully Paid'
                                          WHEN COALESCE(amount_paid, 0) >= ? AND ? > 0 THEN 'Down Payment Paid'
                                          WHEN COALESCE(amount_paid, 0) > 0 THEN 'Partial'
+                                         WHEN ? = 0 THEN 'Unpaid'
                                          ELSE 'Down Payment Required'
                         END
                 WHERE id = ?
@@ -4008,6 +4073,7 @@ exports.handler = async (event) => {
                 requiredDp,
                 total,
                 total,
+                requiredDp,
                 requiredDp,
                 requiredDp,
                 Number(booking_id),
@@ -4023,6 +4089,21 @@ exports.handler = async (event) => {
 
             try {
                 await connection.execute(query, params);
+                if(depositSpecified){
+                    const [existingDeposit]=await connection.execute(`SELECT deposit_collected,deposit_applied,deposit_refunded
+                                                                      FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                        [Number(booking_id),store_id,bookingBranchId]);
+                    if(existingDeposit.length && depositAmount+0.005<Number(existingDeposit[0].deposit_collected||0))
+                        throw rentalError('The agreed deposit cannot be lower than funds already collected; settle them first.');
+                    const waiverReason=rentalQuote.count>0 && depositAmount===0 && rentalPolicy.depositPolicy==='required'
+                        ?String(depositWaiverReason||'').trim().slice(0,500):null;
+                    await connection.execute(`INSERT INTO booking_financial_details
+                                              (booking_id,store_id,branch_id,refundable_deposit_required,deposit_waiver_reason)
+                                              VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE
+                                                  refundable_deposit_required=VALUES(refundable_deposit_required),
+                                                  deposit_waiver_reason=VALUES(deposit_waiver_reason)`,
+                        [Number(booking_id),store_id,bookingBranchId,depositAmount,waiverReason]);
+                }
 
                 const priceBookingRef = buildBookingReference(previousBooking, booking_id);
                 const customerNameForPrice = previousBooking.name || "customer";
@@ -4042,12 +4123,15 @@ exports.handler = async (event) => {
                     employee: actingEmployeeForPrice,
                     module: "Bookings",
                     referenceNumber: priceBookingRef,
-                    action: "Updated custom price",
+                    action: "Updated booking payment terms",
                     referenceId: String(booking_id),
                     details:
                         `${priceBookingRef} (${customerNameForPrice}): ` +
                         `price ₱${prevAgreed.toLocaleString()} → ₱${total.toLocaleString()}, ` +
-                        `down payment ₱${prevDp.toLocaleString()} → ₱${requiredDp.toLocaleString()}`,
+                        `down payment ₱${prevDp.toLocaleString()} → ₱${requiredDp.toLocaleString()}` +
+                        (depositSpecified ? `, refundable deposit ₱${depositAmount.toLocaleString()}` +
+                            (rentalQuote.count>0 && depositAmount===0 && rentalPolicy.depositPolicy==='required'
+                                ? ` (Manager waiver: ${String(depositWaiverReason||'').trim().slice(0,200)})` : '') : ''),
                 });
 
                 await connection.commit();
@@ -4060,6 +4144,7 @@ exports.handler = async (event) => {
                 success: true,
                 agreed_price: total,
                 required_down_payment: requiredDp,
+                ...(depositSpecified?{refundable_deposit:depositAmount}:{}),
             });
         }
 

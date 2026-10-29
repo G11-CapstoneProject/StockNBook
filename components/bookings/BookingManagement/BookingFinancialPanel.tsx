@@ -1,11 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Download, Copy, Phone, Mail } from "lucide-react";
 
-type ClaimSource = {id:number;equipmentId:number;equipmentName?:string;quantity:number;reason:string;status?:string;decisionStatus?:string|null};
 type Statement = {
-    booking:{reference:string;name:string;bookingType:string;packageName:string;status:string;agreedPrice:number|null;downPayment:number;bookingPayments:number;balance:number};
+    booking:{reference:string;name:string;bookingType:string;packageName:string;status:string;eventDate?:string;agreedPrice:number|null;downPayment:number;bookingPayments:number;balance:number};
     packageBase:number;salesSubtotal?:number;rentalSubtotal:number;deliveryFee:number;setupFee:number;
     depositRequired:number;depositCollected:number;depositApplied:number;depositRefunded:number;depositHeld:number;
     claimBalance:number;agreedCharges:number;
@@ -13,14 +11,25 @@ type Statement = {
     salesItems?:{name:string;variantName?:string;quantity:number;unitPrice:number;amount:number}[];
     claims:{id:number;sourceType:string;sourceId:number;equipmentName?:string;quantity:number;reason:string;amount:number;amountPaid:number;depositApplied:number;status:string}[];
 };
-type CustomerReviewCase = {
-    profile?:{reviewRequired:number|boolean;identityVerified:number|boolean;reason:string;updatedBy:string;updatedAt:string}|null;
-    events:{id:number;eventType:string;notes:string;channel:string;followUpOn:string|null;actorName:string;createdAt:string}[];
-    earlierOutstanding:{reference:string;due:number}[];
-    contact?:{phone:string;email:string;facebookName:string};
-    claimDue:number;latestScheduledFollowUp?:string|null;followUpOverdue?:boolean;bookingStatus:string;identityLookupAvailable:boolean;
-};
 const money=(n:number)=>`₱${Number(n||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+
+// A combined customer charge is saved on ONE claim record to prevent double
+// billing. The other affected items have zero-value companion records for audit.
+// Those companion records are NOT individually waived: they are covered by the
+// same booking-wide amount. This also corrects receipts for existing records
+// that the legacy Lambda labelled 'waived'.
+type ReceiptClaim = Statement['claims'][number];
+const isCombinedChargeLeader = (claim:ReceiptClaim) =>
+    /^combined booking-wide charge\b/i.test(String(claim.reason||'').trim()) && Number(claim.amount)>0;
+const isCombinedChargeCompanion = (claim:ReceiptClaim) =>
+    /^covered by the same combined booking-wide charge\b/i.test(String(claim.reason||'').trim());
+const combinedReceiptTotal = (claims:ReceiptClaim[]) =>
+    claims.filter(isCombinedChargeLeader).reduce((sum,claim)=>sum+Math.max(0,Number(claim.amount)||0),0);
+// Do not imply that a single affected item was charged the full combined price.
+// The grouped amount is displayed ONCE below the affected-item list.
+const isIncludedInCombinedCharge = (claim:ReceiptClaim,claims:ReceiptClaim[]) =>
+    combinedReceiptTotal(claims)>0 && (isCombinedChargeLeader(claim)||isCombinedChargeCompanion(claim));
+
 
 // The receipt must identify the real store and the booking's own branch,
 // not the StockNBook platform or another branch in an Owner session.
@@ -137,14 +146,14 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
         text(name.slice(0,87),left+7,780,nameSize,true,'1 1 1');
         rect(34,739,527,26,'0.91 0.85 0.99');
         text(`BRANCH: ${clean(branchName).slice(0,88)}`,left+7,748,10,true,'0.25 0.13 0.43');
-        text('BOOKING RECEIPT',left,713,16,true,'0.17 0.09 0.30');
-        text('Itemized sales and rental receipt - Not a tax invoice',left,697,8.5,false,'0.45 0.38 0.52');
+        text('BOOKING PAYMENT RECEIPT',left,713,16,true,'0.17 0.09 0.30');
+        text('Booking payments, refundable deposit and charge settlement - Not a tax invoice',left,697,8,false,'0.45 0.38 0.52');
     };
     const tableHeading=()=>{
         rect(left,y-9,right-left,25,'0.96 0.94 0.99');
         text('ITEM / SERVICE',left+7,y,8,true);
         text('QTY',325,y,8,true);
-        text('UNIT RATE',372,y,8,true);
+        text('UNIT PRICE',372,y,8,true);
         text('AMOUNT',500,y,8,true);
         y-=36;
     };
@@ -208,11 +217,19 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
     if(!(v.packageBase>0||(v.salesItems||[]).length||v.rentalItems.length||v.deliveryFee>0||v.setupFee>0)){
         ensure(25);text('No itemized charges available.',left+7,y,9);y-=23;
     }
-    ensure(18);rule();y-=21;
+    // Count only physical booked units. Package-base, delivery and setup are services,
+    // not additional physical items, so they do not inflate the total.
+    const totalBookedUnits=(v.salesItems||[]).reduce((sum,item)=>sum+Math.max(0,Number(item.quantity)||0),0)
+        +v.rentalItems.reduce((sum,item)=>sum+Math.max(0,Number(item.quantity)||0),0);
+    const itemizedSubtotal=Number(v.packageBase||0)+Number(v.deliveryFee||0)+Number(v.setupFee||0)
+        +(v.salesItems||[]).reduce((sum,item)=>sum+(Number(item.amount)||0),0)
+        +v.rentalItems.reduce((sum,item)=>sum+(Number(item.amount)||0),0);
+    ensure(23);rule();y-=19;
+    summary('TOTAL UNITS NEEDED',String(totalBookedUnits),true);
     inItems=false;
     const isAgreed=v.booking.agreedPrice!==null&&Number.isFinite(Number(v.booking.agreedPrice));
     const depositDue=Math.max(0,Number(v.depositRequired)-Number(v.depositCollected));
-    summary('Itemized subtotal',pesoPdf(v.agreedCharges));
+    summary('Itemized subtotal',pesoPdf(itemizedSubtotal));
     summary('Final agreed booking price',isAgreed?pesoPdf(Number(v.booking.agreedPrice)):'Awaiting agreement',true);
     summary('Payments received',`- ${pesoPdf(v.booking.bookingPayments)}`);
     summary('Remaining booking balance',isAgreed?pesoPdf(v.booking.balance):'Awaiting agreement',true);
@@ -224,16 +241,44 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
     if(Number(v.depositApplied)>0)summary('Applied to approved damage/loss',pesoPdf(v.depositApplied));
     if(Number(v.depositRefunded)>0)summary('Deposit refunded',pesoPdf(v.depositRefunded));
     summary('Deposit currently held',pesoPdf(v.depositHeld));
-    // Approved charges belong on the receipt only as monetary settlement lines.
-    if(Number(v.claimBalance)>0){
-        ensure(45);y-=8;rule();y-=16;
-        summary('Outstanding approved damage/loss charges',pesoPdf(v.claimBalance),true);
+    // Payment totals are separate from the agreed itemized booking price.
+    // The deposit is a refundable liability, not additional booking revenue.
+    const approvedClaims=v.claims.filter(c=>c.status!=='waived');
+    const approvedTotal=approvedClaims.reduce((total,c)=>total+Math.max(0,Number(c.amount)||0),0);
+    const claimPayments=approvedClaims.reduce((total,c)=>total+Math.max(0,Number(c.amountPaid)||0),0);
+    if(v.claims.length){
+        ensure(50);y-=8;rule();y-=18;
+        text('DAMAGE / MISSING ITEM CHARGES',left+8,y,9,true,'0.34 0.19 0.59');y-=24;
+        for(const claim of v.claims){
+            const covered=isIncludedInCombinedCharge(claim,v.claims);
+            itemRow(`${claim.equipmentName||'Rental equipment'} - ${claim.sourceType==='missing'?'Missing':'Damaged'}${claim.status==='waived'&&!covered?' (Waived)':''}`,
+                String(claim.quantity),'-',covered?'Included':pesoPdf(claim.status==='waived'?0:claim.amount));
+        }
+        // A combined charge covers all listed affected equipment, not only
+        // the first claim that holds the amount in the accounting ledger.
+        if(combinedReceiptTotal(v.claims)>0)
+            summary('Combined charge for affected equipment',pesoPdf(combinedReceiptTotal(v.claims)),true);
     }
-    ensure(69);
-    y-=10;
+    ensure(125);y-=7;rule();y-=20;
+    text('PAYMENTS / SETTLEMENT',left+8,y,9,true,'0.34 0.19 0.59');y-=24;
+    summary('Booking payments received',pesoPdf(v.booking.bookingPayments));
+    summary('Security deposit collected',pesoPdf(v.depositCollected));
+    summary('Additional claim payments received',pesoPdf(claimPayments));
+    const collected=Number(v.booking.bookingPayments)+Number(v.depositCollected)+claimPayments;
+    summary('Total cash collected',pesoPdf(collected),true);
+    summary('Deposit refunded to customer',`- ${pesoPdf(v.depositRefunded)}`);
+    summary('Net cash received',pesoPdf(collected-Number(v.depositRefunded)),true);
+    ensure(105);y-=8;rule();y-=18;
+    text('CLAIMS RECONCILIATION',left+8,y,9,true,'0.34 0.19 0.59');y-=24;
+    summary('Approved damage/missing charges',pesoPdf(approvedTotal));
+    summary('Paid directly against charges',pesoPdf(claimPayments));
+    summary('Deposit used for charges',pesoPdf(v.depositApplied));
+    summary('Unpaid charges',pesoPdf(v.claimBalance),true);
+    summary('Deposit still held',pesoPdf(v.depositHeld));
+    ensure(70);y-=10;
     rect(left,y-49,right-left,62,'0.18 0.10 0.30');
-    text('TOTAL TO COLLECT BEFORE RELEASE',left+13,y-6,9,true,'0.87 0.80 0.98');
-    const due=isAgreed?pesoPdf(Math.max(0,Number(v.booking.balance))+depositDue):'Awaiting agreement';
+    text('TOTAL OUTSTANDING FROM CUSTOMER',left+13,y-6,9,true,'0.87 0.80 0.98');
+    const due=isAgreed?pesoPdf(Math.max(0,Number(v.booking.balance))+depositDue+Math.max(0,Number(v.claimBalance))):'Awaiting agreement';
     text(due,left+13,y-33,17,true,'1 1 1');
     y-=72;
     // Keep receipt notes in the reserved bottom margin rather than creating a near-empty extra page.
@@ -269,436 +314,232 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
     window.setTimeout(()=>URL.revokeObjectURL(url),60000);
 }
 
-export default function BookingFinancialPanel({bookingId,branchId,ownerView=false,editable=true}:{bookingId:number;branchId:number;ownerView?:boolean;editable?:boolean}){
+/** Download the exact portrait Billing receipt from the booking header's export action. */
+export async function downloadBookingReceipt(bookingId:number,branchId:number):Promise<void>{
+    const token=sessionStorage.getItem('token');
+    if(!token)throw new Error('Login required to download the booking receipt.');
+    const res=await fetch('/api/bookings',{
+        method:'POST',
+        headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},
+        body:JSON.stringify({action:'get_booking_financial_statement',bookingId,branch_id:branchId||undefined}),
+    });
+    const data=await res.json();
+    if(!res.ok||data.error||data.success===false||!data.statement)
+        throw new Error(data.error||data.message||'Booking receipt is unavailable.');
+    const statement=data.statement as Statement;
+    const names=await resolveReceiptIdentity(statement,branchId);
+    if(!names.storeName||!names.branchName)
+        throw new Error('Store or branch name is unavailable. Verify the business details before exporting.');
+    downloadBookingReceiptPdf(statement,bookingId,names);
+}
+
+// Item, quantity, per-unit price and line total have their own columns.
+// Rental prices are daily rates; the existing rental duration stays visible below the name.
+function ReceiptItemLine({name,quantity,unitPrice,amount,detail,ratePerDay=false}:{name:string;quantity:number;unitPrice:number;amount:number;detail?:string;ratePerDay?:boolean}){
+    return <div className="grid grid-cols-[minmax(0,1fr)_32px_72px_76px] items-start gap-1.5 border-t border-[#F1EDF6] px-2 py-2 text-[10px] sm:grid-cols-[minmax(0,1fr)_44px_92px_92px] sm:gap-2 sm:px-3 sm:text-[11px]">
+        <div className="min-w-0 break-words font-medium text-[#25153D]">
+            {name}
+            {detail&&<p className="mt-0.5 text-[10px] font-normal text-[#806A8C]">{detail}</p>}
+        </div>
+        <span className="text-center font-semibold tabular-nums text-[#25153D]">{quantity}</span>
+        <span className="text-right font-medium tabular-nums text-[#25153D]">{money(unitPrice)}{ratePerDay&&<span className="block text-[9px] font-normal text-[#806A8C]">per day</span>}</span>
+        <span className="text-right font-semibold tabular-nums text-[#25153D]">{money(amount)}</span>
+    </div>;
+}
+
+type BillingReceiptProps={
+    bookingId:number;
+    branchId:number;
+    // Kept for callers in Manager/Owner/Staff views; the Billing tab is always read-only.
+    ownerView?:boolean;
+    editable?:boolean;
+};
+
+export default function BookingFinancialPanel({bookingId,branchId}:BillingReceiptProps){
     const [statement,setStatement]=useState<Statement|null>(null);
     const [receiptIdentity,setReceiptIdentity]=useState<ReceiptIdentity>({storeName:'',branchName:''});
-    const [exporting,setExporting]=useState(false);
-    const [viewerRole,setViewerRole]=useState('staff');const [canWrite,setCanWrite]=useState(false);
-    const [sources,setSources]=useState<{missing:ClaimSource[];damage:ClaimSource[]}>({missing:[],damage:[]});
-    const [error,setError]=useState('');const [notice,setNotice]=useState('');const [busy,setBusy]=useState(false);
-    const [eventType,setEventType]=useState('deposit_received');
-    const [amount,setAmount]=useState('');const [claimId,setClaimId]=useState('');
-    const [sourceType,setSourceType]=useState('damage');const [sourceId,setSourceId]=useState('');
-    const [claimAmount,setClaimAmount]=useState('');const [reason,setReason]=useState('');
-    const [customerCase,setCustomerCase]=useState<CustomerReviewCase|null>(null);
-    const [caseType,setCaseType]=useState('contact_attempt');const [caseChannel,setCaseChannel]=useState('phone');
-    const [caseNotes,setCaseNotes]=useState('');const [caseFollowUp,setCaseFollowUp]=useState('');
-    const [identityVerified,setIdentityVerified]=useState(false);
-    const [waiveExistingId,setWaiveExistingId]=useState('');
-    const [waiveExistingReason,setWaiveExistingReason]=useState('');
-    // Backend checks current account role and branch on EVERY action.
-    const request=useCallback(async (action:string,additional:Record<string,unknown>={})=>{
-        const token=sessionStorage.getItem('token');if(!token)throw new Error('Login required.');
-        const res=await fetch('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},
-            body:JSON.stringify({action,bookingId,branch_id:branchId||undefined,...additional})});
-        const json=await res.json();if(!res.ok||json.error)throw new Error(json.error||'Request failed.');
-        return json;
+    const [error,setError]=useState('');
+    const request=useCallback(async()=>{
+        const token=sessionStorage.getItem('token');
+        if(!token)throw new Error('Login required to view the booking receipt.');
+        const res=await fetch('/api/bookings',{
+            method:'POST',
+            headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},
+            body:JSON.stringify({action:'get_booking_financial_statement',bookingId,branch_id:branchId||undefined}),
+        });
+        const data=await res.json();
+        if(!res.ok||data.error||data.success===false||!data.statement)
+            throw new Error(data.error||data.message||'Booking receipt is unavailable.');
+        return data.statement as Statement;
     },[bookingId,branchId]);
-    const refresh=useCallback(async()=>{
-        try{
-            const data=await request('get_booking_financial_statement');setStatement(data.statement);setViewerRole(data.viewerRole||'staff');setCanWrite(!!data.canWrite);
-            if(data.statement){
-                const names=await resolveReceiptIdentity(data.statement as Statement,branchId);
-                setReceiptIdentity(names);
-            }else setReceiptIdentity({storeName:'',branchName:''});
-            if(!ownerView){const tasks=await request('get_booking_claim_sources');setSources({missing:tasks.missing||[],damage:tasks.damage||[]});}
-            if(!ownerView&&data.viewerRole==='manager'){const review=await request('get_customer_review_case');setCustomerCase(review.case||null);}else setCustomerCase(null);
-            setError('');
-        }catch(e){setError(e instanceof Error?e.message:'Could not load booking statement.');}
-    },[request,ownerView,branchId]);
-    useEffect(()=>{void refresh();},[refresh]);
-    useEffect(()=>{setNotice('');setSourceId('');setClaimAmount('');setReason('');setWaiveExistingId('');setWaiveExistingReason('');},[bookingId]);
-    async function exportReceipt(){
-        if(exporting)return;
-        setExporting(true);setError('');
-        try{
-            // Download a fresh statement so the PDF reflects the latest recorded payments.
-            const data=await request('get_booking_financial_statement');
-            if(!data.statement)throw new Error('The booking receipt is unavailable.');
-            setStatement(data.statement);
-            const names=await resolveReceiptIdentity(data.statement as Statement,branchId);
-            setReceiptIdentity(names);
-            if(!names.storeName || !names.branchName){
-                throw new Error('Store or branch name is unavailable. Verify your store/branch settings before exporting the receipt.');
+    useEffect(()=>{
+        let cancelled=false;
+        setStatement(null);
+        setReceiptIdentity({storeName:'',branchName:''});
+        setError('');
+        void (async()=>{
+            try{
+                const latest=await request();
+                const names=await resolveReceiptIdentity(latest,branchId);
+                if(!cancelled){setStatement(latest);setReceiptIdentity(names);}
+            }catch(e){
+                if(!cancelled)setError(e instanceof Error?e.message:'Could not load booking receipt.');
             }
-            downloadBookingReceiptPdf(data.statement as Statement,bookingId,names);
-        }catch(e){setError(e instanceof Error?e.message:'Could not download booking receipt.');}
-        finally{setExporting(false);}
-    }
-    async function record(){
-        const n=Number(amount);if(!Number.isFinite(n)||n<=0){setError('Enter an amount greater than zero.');return;}
-        setBusy(true);setError('');
-        try{
-            await request('record_booking_financial_event',{eventType,amount:n,
-                claimId:['deposit_applied','claim_paid'].includes(eventType)?Number(claimId):undefined,
-                requestKey:crypto.randomUUID()});setAmount('');await refresh();window.dispatchEvent(new Event('stocknbook:booking-updated'));
-        }catch(e){setError(e instanceof Error?e.message:'Unable to save financial movement.');}finally{setBusy(false);}
-    }
-    function selectedDecisionSourcePresent(){
-        return (sourceType==='damage'?sources.damage:sources.missing).some(item=>
-            String(item.id)===sourceId && !item.decisionStatus &&
-            (sourceType==='damage'||item.status==='writeoff'));
-    }
-    async function decideClaim(waive:boolean){
-        if(reason.trim().length<10){setError('Document the charge or waiver reason (at least 10 characters).');return;}
-        if(!selectedDecisionSourcePresent()){setError('Select one documented equipment incident.');return;}
-        if(!waive&&(!Number.isFinite(Number(claimAmount))||Number(claimAmount)<=0)){
-            setError('Enter an approved repair/replacement charge greater than zero.');return;
-        }
-        setBusy(true);setError('');
-        try{await request(waive?'waive_booking_claim':'approve_booking_claim',{
-            sourceType,sourceId:Number(sourceId),...(waive?{}:{amount:Number(claimAmount)}),reason:reason.trim()});
-            setSourceId('');setClaimAmount('');setReason('');await refresh();window.dispatchEvent(new Event('stocknbook:booking-updated'));
-            setNotice(waive?'Customer charge waived. The equipment incident and maintenance record remain unchanged.':'Customer charge approved. Record payment or apply an eligible deposit separately.');}
-        catch(e){setError(e instanceof Error?e.message:'Unable to record Manager decision.');}finally{setBusy(false);}
-    }
-    async function manageCustomerCase(action:string,extra:Record<string,unknown>={}) {
-        if(caseNotes.trim().length<10){setError('Enter a documented reason or customer contact note (10+ characters).');return;}
-        setBusy(true);setError('');
-        try {
-            await request(action,{notes:caseNotes.trim(),channel:caseChannel,
-                followUpOn:caseFollowUp||undefined,...extra});
-            setCaseNotes('');setCaseFollowUp('');setIdentityVerified(false);setWaiveExistingId('');
-            await refresh();
-        } catch(e) {setError(e instanceof Error?e.message:'Unable to save customer case update.');}
-        finally {setBusy(false);}
-    }
-    async function copyCustomerNotice(kind:'issue'|'payment'){
-        if(!statement)return;
-        const client=statement.booking.name||'Customer';
-        const business=receiptIdentity.storeName||'our event rental store';
-        const reference=statement.booking.reference;
-        let message='';
-        if(kind==='issue'){
-            const reports=[
-                ...sources.damage.filter(c=>!c.decisionStatus).map(c=>`${c.equipmentName||`Equipment #${c.equipmentId}`} — ${c.quantity} damaged`),
-                ...sources.missing.filter(c=>!c.decisionStatus).map(c=>`${c.equipmentName||`Equipment #${c.equipmentId}`} — ${c.quantity} missing (${c.status==='writeoff'?'confirmed loss':'under investigation'})`),
-            ];
-            if(!reports.length){setError('No incident awaiting review for this booking.');return;}
-            message=`Hello ${client}, this is ${business} regarding booking ${reference}. During our equipment return check we documented the following: ${reports.join('; ')}. We would like to discuss the return record and give you an opportunity to clarify these findings. No additional charge is being requested by this message. Please contact our store regarding this booking. Thank you.`;
-        }else{
-            const claims=statement.claims.filter(c=>c.status==='approved'&&c.amount-c.amountPaid-c.depositApplied>0.005);
-            if(!claims.length){setError('No outstanding approved equipment claims for this booking.');return;}
-            const lines=claims.map(c=>`${c.equipmentName||`Equipment #${c.sourceId}`} (${c.sourceType==='missing'?'missing':'damage'}, ${c.quantity} unit(s)): ${money(Math.max(0,c.amount-c.amountPaid-c.depositApplied))} due`);
-            const due=claims.reduce((sum,c)=>sum+Math.max(0,c.amount-c.amountPaid-c.depositApplied),0);
-            message=`Hello ${client}, this is ${business} about booking ${reference}. Following our documented equipment return assessment, these approved charges remain outstanding:\n${lines.join('\n')}\nTotal amount due: ${money(due)}. Please contact our store for an itemized explanation, to discuss any concern, or to arrange settlement. Any eligible security deposit already applied is reflected in the balances above. Thank you.`;
-        }
-        try{
-            if(!navigator.clipboard?.writeText)throw new Error('Clipboard unavailable in this browser.');
-            await navigator.clipboard.writeText(message);
-            setError('');setNotice('Message copied. Send it through your chosen channel, then separately record the real contact attempt or notice.');
-        }catch(e){setError(e instanceof Error?e.message:'Unable to copy the customer message.');}
-    }
-    async function waiveApprovedUnpaidClaim(){
-        const selected=statement?.claims.find(claim=>String(claim.id)===waiveExistingId);
-        if(!selected||selected.status!=='approved'||selected.amountPaid>0||selected.depositApplied>0){
-            setError('Choose an approved claim without any payment or deposit applied.');return;
-        }
-        if(waiveExistingReason.trim().length<10){
-            setError('Explain why the customer charge is being waived (at least 10 characters).');return;
-        }
-        if(!window.confirm(`Waive the customer charge for ${selected.equipmentName||'this equipment'}? This records a financial decision; it does not remove the equipment incident.`))return;
-        setBusy(true);setError('');
-        try{
-            await request('waive_unpaid_customer_claim',{claimId:selected.id,notes:waiveExistingReason.trim(),channel:'none'});
-            setWaiveExistingId('');setWaiveExistingReason('');await refresh();window.dispatchEvent(new Event('stocknbook:booking-updated'));
-            setNotice('Approved charge waived after investigation. The original equipment incident remains recorded.');
-        }catch(e){setError(e instanceof Error?e.message:'Unable to waive this claim.');}
-        finally{setBusy(false);}
-    }
-    if(!statement)return <div className="rounded-xl border border-[#E6DDF0] p-3 text-xs text-[#806A8C]">{error||'Loading itemized booking statement…'}</div>;
+        })();
+        return()=>{cancelled=true;};
+    },[request,branchId]);
+    if(!statement)return <div role={error?'alert':'status'} className="rounded-xl border border-[#E6DDF0] bg-white p-4 text-xs text-[#806A8C]">{error||'Loading booking payment receipt…'}</div>;
+
     const v=statement;
-    const undecidedMissing=sources.missing.filter(c=>!c.decisionStatus&&c.status==='writeoff');
-    const undecidedDamage=sources.damage.filter(c=>!c.decisionStatus);
-    const reviewNeeded=sources.missing.some(c=>c.status==='pending');
-    // Missing-item contact starts during investigation, not only after a write-off.
-    const issueReports=[...sources.damage.filter(c=>!c.decisionStatus),...sources.missing.filter(c=>!c.decisionStatus)];
-    // One combined booking-scoped incident list: never ask the Manager to choose an
-    // incident type before they can even see the affected equipment.
-    const pendingIncidents = [
-        ...undecidedDamage.map(item=>({...item,type:'damage' as const})),
-        ...undecidedMissing.map(item=>({...item,type:'missing' as const})),
-    ];
-    const selectedSource=pendingIncidents.find(item=>item.type===sourceType&&String(item.id)===sourceId)||null;
-    const waiverCandidates=v.claims.filter(c=>c.status==='approved'&&c.amountPaid<=0&&c.depositApplied<=0);
+    const agreedPrice=v.booking.agreedPrice==null?null:Number(v.booking.agreedPrice);
     const depositDue=Math.max(0,Number(v.depositRequired)-Number(v.depositCollected));
-    const releaseDue=Math.max(0,Number(v.booking.balance))+depositDue;
-    const refundableAfterClaims=Math.max(0,Number(v.depositHeld)-Number(v.claimBalance));
-    const quoteAgreed=v.booking.agreedPrice!==null && Number.isFinite(Number(v.booking.agreedPrice));
-    const hasChargeLines=v.packageBase>0 || (v.salesItems||[]).length>0 || v.rentalItems.length>0 || v.deliveryFee>0 || v.setupFee>0;
-    return <section className="mt-4 rounded-xl border border-[#E6DDF0] bg-white p-3 text-xs text-[#2B174C] sm:p-4" onClick={e=>e.stopPropagation()}>
-        <div className="flex flex-wrap items-center justify-between gap-2">
+    const bookingDue=Math.max(0,Number(v.booking.balance));
+    const claimDue=Math.max(0,Number(v.claimBalance));
+    const charges=v.claims.filter(c=>c.status!=='waived');
+    const approvedTotal=charges.reduce((sum,c)=>sum+Math.max(0,Number(c.amount)||0),0);
+    const claimPayments=charges.reduce((sum,c)=>sum+Math.max(0,Number(c.amountPaid)||0),0);
+    const cashCollected=Number(v.booking.bookingPayments)+Number(v.depositCollected)+claimPayments;
+    const netReceived=cashCollected-Number(v.depositRefunded);
+    const totalDue=bookingDue+depositDue+claimDue;
+    const fullyReconciled=agreedPrice!==null&&totalDue<0.005&&Number(v.depositHeld)<0.005;
+    const format=(value:number)=>money(Math.max(0,value));
+    const hasItems=v.packageBase>0||(v.salesItems||[]).length>0||v.rentalItems.length>0||v.deliveryFee>0||v.setupFee>0;
+    // Booking units = consumable quantity + rental quantity, not package/service line items.
+    const totalBookedUnits=(v.salesItems||[]).reduce((sum,item)=>sum+Math.max(0,Number(item.quantity)||0),0)
+        +v.rentalItems.reduce((sum,item)=>sum+Math.max(0,Number(item.quantity)||0),0);
+    const itemizedSubtotal=Number(v.packageBase||0)+Number(v.deliveryFee||0)+Number(v.setupFee||0)
+        +(v.salesItems||[]).reduce((sum,item)=>sum+(Number(item.amount)||0),0)
+        +v.rentalItems.reduce((sum,item)=>sum+(Number(item.amount)||0),0);
+    const receiptLine=(label:string,value:number,emphasis=false)=>
+        <div key={label} className={`flex items-start justify-between gap-3 ${emphasis?'font-bold text-[#2B174C]':'text-[#6A587A]'}`}>
+            <span>{label}</span><span className="shrink-0 tabular-nums text-right text-[#25153D]">{format(value)}</span>
+        </div>;
+    return <section className="mt-4 rounded-xl border border-[#E6DDF0] bg-white p-3 font-sans text-xs text-[#2B174C] sm:p-4" onClick={e=>e.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-                <h4 className="text-sm font-bold">Booking billing &amp; settlement</h4>
-                <p className="mt-1 text-[11px] text-[#806A8C]">Itemized booking receipt and settlement summary</p>
+                <h4 className="text-sm font-bold">Booking Payment Receipt</h4>
+                <p className="mt-1 text-[11px] text-[#806A8C]">Read-only record of booking payments, deposits and customer charges</p>
             </div>
-            <button type="button" onClick={()=>void exportReceipt()} disabled={exporting} title="Download booking receipt as PDF" aria-label="Download booking receipt as PDF" className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#D8CBE7] bg-white text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-wait disabled:opacity-50"><Download size={17} aria-hidden="true" /></button>
         </div>
-        <p className="my-2 text-[#806A8C]">Agreed booking amounts remain separate from refundable deposits and loss/damage claims.</p>
-        {notice&&<p role="status" className="mt-2 rounded-lg border border-[#D8E8D8] bg-[#F3FAF3] px-3 py-2 text-[#226B36]">{notice}</p>}
-        {error&&<p role="alert" className="mt-2 rounded-lg border border-[#F1D2D2] bg-[#FFF4F4] px-3 py-2 text-[#A32828]">{error}</p>}
-        {!ownerView&&editable&&canWrite&&viewerRole==='manager'&&<div className="mt-3 space-y-3 rounded-xl border border-[#E3D8EA] bg-[#FCFAFF] p-3" aria-label="Equipment damage or missing charge decision">
-            <div>
-                <h5 className="text-sm font-bold text-[#21132E]">Equipment Damage / Missing — Customer Charge Decision</h5>
-                <p className="mt-1 text-[#806A8C]">After the equipment is checked, decide whether the customer owes a justified repair/replacement charge or the business will waive it. Repair approval alone does not charge the customer.</p>
-            </div>
-            {reviewNeeded&&<p className="rounded-lg border border-[#F2DDB4] bg-[#FFF8E9] px-3 py-2 text-[#8A5A00]">Missing items are still being investigated. Confirm the loss in Manager Rental Inventory before deciding on a replacement charge.</p>}
-            {(undecidedMissing.length+undecidedDamage.length)===0 ? <div className="rounded-lg border border-[#E8E0EE] bg-white px-3 py-3 text-[#806A8C]">
-                {sources.missing.length+sources.damage.length===0?'No booking-linked missing or confirmed damage incidents have been recorded for this booking.':'No equipment incidents are awaiting a charge or waiver decision. See recorded decisions below.'}
-            </div> : <>
-                <div className="space-y-2" role="group" aria-label="Booking equipment incidents awaiting a charge decision">
-                    <p className="font-semibold text-[#21132E]">Select the affected equipment ({pendingIncidents.length} awaiting decision)</p>
-                    {pendingIncidents.map(item=>{
-                        const isSelected=sourceId===String(item.id)&&sourceType===item.type;
-                        return <button type="button" key={`${item.type}-${item.id}`} aria-pressed={isSelected}
-                                       onClick={()=>{setSourceType(item.type);setSourceId(String(item.id));setClaimAmount('');setReason('');}}
-                                       className={`w-full rounded-xl border px-3 py-3 text-left transition ${isSelected?'border-[#6D46B5] bg-[#F2ECFF]':'border-[#E3D8EA] bg-white hover:bg-[#FAF7FF]'}`}>
-                            <span className="flex flex-wrap items-center justify-between gap-2">
-                                <strong className="text-[#21132E]">{item.equipmentName||`Equipment #${item.equipmentId}`}</strong>
-                                <span className="rounded-full bg-[#F5F0FF] px-2.5 py-1 text-[11px] font-semibold text-[#4E2C66]">
-                                    {item.type==='damage'?'Confirmed damage':'Confirmed loss'} · {item.quantity} {item.quantity===1?'unit':'units'}
-                                </span>
-                            </span>
-                            <span className="mt-1 block break-words text-[#806A8C]">{item.reason||'No additional incident notes'} · Report #{item.id}</span>
-                            <span className="mt-1 block text-[11px] font-semibold text-[#5330B6]">{isSelected?'Selected for Manager decision':'Select to assess charge or waiver'}</span>
-                        </button>;
-                    })}
-                </div>
-                <label className="block font-semibold">Proposed customer charge (₱) — required only when approving
-                    <input type="number" min="0.01" step="0.01" value={claimAmount} onChange={e=>setClaimAmount(e.target.value)} placeholder="Actual documented repair/replacement cost" className="mt-1 w-full rounded-lg border border-[#E3D8EA] bg-white p-2 font-normal"/>
-                </label>
-                <label className="block font-semibold">Reason / evidence for charging or waiving
-                    <textarea value={reason} onChange={e=>setReason(e.target.value)} placeholder="Describe the condition, liability assessment, agreement and why the charge applies or is waived (at least 10 characters)" className="mt-1 w-full rounded-lg border border-[#E3D8EA] bg-white p-2 font-normal" rows={3}/>
-                </label>
-                <div className="flex flex-wrap gap-2">
-                    <button type="button" disabled={busy||!selectedSource||reason.trim().length<10||!(Number(claimAmount)>0)} onClick={()=>void decideClaim(false)} className="rounded-lg bg-[#2B174C] px-3 py-2 font-semibold text-white disabled:opacity-50">Approve customer charge</button>
-                    <button type="button" disabled={busy||!selectedSource||reason.trim().length<10} onClick={()=>void decideClaim(true)} className="rounded-lg border border-[#D8CBE7] bg-white px-3 py-2 font-semibold text-[#2B174C] disabled:opacity-50">Waive — no customer charge</button>
-                </div>
-                <p className="text-[11px] text-[#806A8C]">A waiver records ₱0 due for this incident. It does not cancel the repair task, replace a missing item, or automatically send a message to the customer.</p>
-            </>}
-        </div>}
-        <div id={`booking-receipt-${bookingId}`} className="mx-auto mt-3 w-full max-w-[740px] overflow-hidden rounded-2xl border border-[#DED3E9] bg-white shadow-sm">
+        {error&&<p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 p-2 text-red-700">{error}</p>}
+        <div id={`booking-receipt-${bookingId}`} className="mx-auto w-full max-w-[740px] overflow-hidden rounded-2xl border border-[#DED3E9] bg-white shadow-sm">
             <header className="border-b border-dashed border-[#D7CBE3] bg-[#FAF7FF] px-4 py-5 text-center sm:px-6">
                 <p className="break-words text-[17px] font-extrabold text-[#2B174C]">{receiptIdentity.storeName||'Store name unavailable'}</p>
                 <p className="mt-1 rounded-lg bg-[#EDE3FF] px-3 py-1.5 text-[11px] font-bold text-[#48227E]">Branch: {receiptIdentity.branchName||'Branch name unavailable'}</p>
-                <h5 className="mt-1 text-[20px] font-extrabold tracking-tight text-[#241537]">BOOKING RECEIPT</h5>
-                <p className="mt-1 text-[11px] text-[#806A8C]">Itemized statement · Not a tax invoice</p>
+                <h5 className="mt-3 text-[19px] font-extrabold tracking-tight text-[#241537]">BOOKING PAYMENT RECEIPT</h5>
+                <p className="mt-1 text-[10px] text-[#806A8C]">Recorded transactions · Not a tax invoice</p>
             </header>
-
             <div className="grid gap-x-4 gap-y-3 border-b border-dashed border-[#D7CBE3] px-4 py-4 sm:grid-cols-2 sm:px-6">
                 <div className="min-w-0"><p className="text-[10px] font-bold uppercase tracking-wide text-[#8B7C95]">Booking reference</p><p className="mt-1 break-all text-[12px] font-semibold text-[#241537]">{v.booking.reference||`#${bookingId}`}</p></div>
                 <div className="min-w-0"><p className="text-[10px] font-bold uppercase tracking-wide text-[#8B7C95]">Customer</p><p className="mt-1 break-words text-[12px] font-semibold text-[#241537]">{v.booking.name||'—'}</p></div>
-                <div className="min-w-0"><p className="text-[10px] font-bold uppercase tracking-wide text-[#8B7C95]">Booking type</p><p className="mt-1 font-medium text-[#241537]">{v.booking.bookingType||'—'}</p></div>
+                <div className="min-w-0"><p className="text-[10px] font-bold uppercase tracking-wide text-[#8B7C95]">Event date</p><p className="mt-1 font-semibold text-[#241537]">{v.booking.eventDate||'—'}</p></div>
                 <div className="min-w-0"><p className="text-[10px] font-bold uppercase tracking-wide text-[#8B7C95]">Booking status</p><p className="mt-1 font-semibold text-[#241537]">{v.booking.status||'—'}</p></div>
             </div>
-
-            <div className="px-3 py-4 sm:px-6 sm:py-5">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                    <h6 className="text-[12px] font-bold uppercase tracking-wide text-[#241537]">Order details</h6>
-                    <span className="text-[10px] font-medium text-[#887B99]">PHP (₱)</span>
-                </div>
-                <div className="grid grid-cols-[minmax(0,1fr)_38px_76px_83px] gap-1.5 border-y border-dashed border-[#DED3E9] bg-[#FCFAFF] px-2 py-2 text-[10px] font-bold uppercase tracking-wide text-[#806A8C] sm:grid-cols-[minmax(0,1fr)_48px_100px_110px] sm:gap-2">
-                    <span>Item / service</span><span className="text-center">Qty</span><span className="text-right">Unit rate</span><span className="text-right">Amount</span>
-                </div>
-                <div className="space-y-0.5 py-1">
-                    {v.packageBase>0&&<div className="grid grid-cols-[minmax(0,1fr)_38px_76px_83px] items-start gap-1.5 px-2 py-2 text-[11px] sm:grid-cols-[minmax(0,1fr)_48px_100px_110px] sm:gap-2">
-                        <span className="min-w-0 break-words font-medium">Package base{v.booking.packageName?` · ${v.booking.packageName}`:''}</span><span className="text-center tabular-nums">1</span><span className="text-right tabular-nums">{money(v.packageBase)}</span><strong className="text-right tabular-nums">{money(v.packageBase)}</strong>
-                    </div>}
-                    {(v.salesItems||[]).length>0&&<p className="px-2 pt-3 pb-1 text-[10px] font-bold uppercase tracking-[0.08em] text-[#5A35A5]">Consumable items</p>}
-                    {(v.salesItems||[]).map((item,index)=><div key={`sales-${index}`} className="grid grid-cols-[minmax(0,1fr)_38px_76px_83px] items-start gap-1.5 px-2 py-2 text-[11px] sm:grid-cols-[minmax(0,1fr)_48px_100px_110px] sm:gap-2">
-                        <span className="min-w-0 break-words font-medium text-[#241537]">{item.name}{item.variantName?` (${item.variantName})`:''}</span>
-                        <span className="text-center tabular-nums">{item.quantity}</span>
-                        <span className="text-right tabular-nums text-[#5F4E75]">{money(item.unitPrice)}</span>
-                        <strong className="text-right tabular-nums text-[#241537]">{money(item.amount)}</strong>
-                    </div>)}
-                    {v.rentalItems.length>0&&<p className="px-2 pt-3 pb-1 text-[10px] font-bold uppercase tracking-[0.08em] text-[#5A35A5]">Rental items</p>}
-                    {v.rentalItems.map((item,index)=><div key={`rental-${index}`} className="grid grid-cols-[minmax(0,1fr)_38px_76px_83px] items-start gap-1.5 px-2 py-2 text-[11px] sm:grid-cols-[minmax(0,1fr)_48px_100px_110px] sm:gap-2">
-                        <span className="min-w-0 break-words font-medium text-[#241537]">{item.name}<span className="mt-0.5 block text-[10px] font-normal text-[#806A8C]">{item.days} {Number(item.days)===1?'day':'days'} rental</span></span>
-                        <span className="text-center tabular-nums">{item.quantity}</span>
-                        <span className="text-right tabular-nums text-[#5F4E75]">{money(item.dailyRate)}<span className="block text-[9px]">/day</span></span>
-                        <strong className="text-right tabular-nums text-[#241537]">{money(item.amount)}</strong>
-                    </div>)}
-                    {(v.deliveryFee>0||v.setupFee>0)&&<p className="px-2 pt-3 pb-1 text-[10px] font-bold uppercase tracking-[0.08em] text-[#5A35A5]">Other charges</p>}
-                    {v.deliveryFee>0&&<div className="grid grid-cols-[minmax(0,1fr)_38px_76px_83px] gap-1.5 px-2 py-2 text-[11px] sm:grid-cols-[minmax(0,1fr)_48px_100px_110px] sm:gap-2"><span>Delivery / pickup</span><span className="text-center">1</span><span className="text-right tabular-nums">{money(v.deliveryFee)}</span><strong className="text-right tabular-nums">{money(v.deliveryFee)}</strong></div>}
-                    {v.setupFee>0&&<div className="grid grid-cols-[minmax(0,1fr)_38px_76px_83px] gap-1.5 px-2 py-2 text-[11px] sm:grid-cols-[minmax(0,1fr)_48px_100px_110px] sm:gap-2"><span>Setup</span><span className="text-center">1</span><span className="text-right tabular-nums">{money(v.setupFee)}</span><strong className="text-right tabular-nums">{money(v.setupFee)}</strong></div>}
-                    {!hasChargeLines&&<p className="py-4 text-center text-[11px] text-[#806A8C]">No itemized charges available.</p>}
-                </div>
-                <div className="space-y-2 border-t border-dashed border-[#DED3E9] px-2 py-3">
-                    <div className="flex items-center justify-between gap-3 text-[11px]"><span className="text-[#806A8C]">Itemized charge subtotal</span><strong className="tabular-nums">{money(v.agreedCharges)}</strong></div>
-                    <div className="flex items-center justify-between gap-3 text-[12px] font-bold"><span>Final agreed booking price</span><span className="text-right tabular-nums">{quoteAgreed?money(Number(v.booking.agreedPrice)):'Awaiting agreement'}</span></div>
-                    <div className="flex items-center justify-between gap-3 text-[11px]"><span className="text-[#806A8C]">Booking payments received</span><strong className="tabular-nums">− {money(v.booking.bookingPayments)}</strong></div>
-                    <div className="flex items-center justify-between gap-3 border-t border-[#EFE7F4] pt-2 text-[12px] font-bold"><span>Remaining booking balance</span><span className="text-right tabular-nums">{quoteAgreed?money(v.booking.balance):'Awaiting agreement'}</span></div>
-                    <p className="text-[10px] leading-4 text-[#806A8C]">The agreed price is separate from the original itemized estimate.</p>
-                </div>
-
-                <div className="mt-3 rounded-xl border border-[#E6DDF0] bg-[#FBF9FE] px-3 py-3 sm:px-4">
-                    <h6 className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#4E2C85]">Refundable security deposit</h6>
-                    <div className="space-y-2 text-[11px]">
-                        <div className="flex justify-between gap-3"><span>Required deposit</span><strong className="tabular-nums">{money(v.depositRequired)}</strong></div>
-                        <div className="flex justify-between gap-3"><span>Deposit collected</span><strong className="tabular-nums">{money(v.depositCollected)}</strong></div>
-                        <div className="flex justify-between gap-3 font-semibold"><span>Deposit still due</span><strong className="tabular-nums">{money(depositDue)}</strong></div>
-                        <div className="border-t border-dashed border-[#D8CBE7] pt-2">
-                            <div className="flex justify-between gap-3"><span>Applied to approved claims</span><strong className="tabular-nums">{money(v.depositApplied)}</strong></div>
-                            <div className="mt-2 flex justify-between gap-3"><span>Deposit refunded</span><strong className="tabular-nums">{money(v.depositRefunded)}</strong></div>
-                            <div className="mt-2 flex justify-between gap-3 font-semibold"><span>Deposit currently held</span><strong className="tabular-nums">{money(v.depositHeld)}</strong></div>
-                            <div className="mt-2 flex justify-between gap-3"><span>Potential refundable amount after unsettled claims</span><strong className="tabular-nums">{money(refundableAfterClaims)}</strong></div>
+            <div className="space-y-5 px-4 py-5 sm:px-6">
+                <section aria-label="Booking charges" className="space-y-2">
+                    <h6 className="border-b border-dashed border-[#DDD3E6] pb-2 text-[11px] font-bold uppercase tracking-wider text-[#4E2C85]">Booking charges</h6>
+                    {hasItems&&<div className="overflow-hidden rounded-xl border border-[#E8DEF3] bg-white text-[11px]">
+                        <div className="grid grid-cols-[minmax(0,1fr)_32px_72px_76px] gap-1.5 bg-[#F7F2FC] px-2 py-2 text-[10px] font-bold uppercase tracking-wide text-[#6A5582] sm:grid-cols-[minmax(0,1fr)_44px_92px_92px] sm:gap-2 sm:px-3">
+                            <span>Item / service</span>
+                            <span className="text-center">Qty</span>
+                            <span className="text-right">Unit price</span>
+                            <span className="text-right">Total</span>
                         </div>
-                    </div>
-                </div>
-
-                <div className="mt-4 rounded-xl bg-[#2B174C] px-4 py-4 text-white">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#D9CDED]">Total to collect before release</p>
-                    <p className="mt-1 text-[24px] font-extrabold tracking-tight tabular-nums sm:text-[28px]">{quoteAgreed?money(releaseDue):'Awaiting agreement'}</p>
-                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-[#E6DCF1]">
-                        <span>Remaining booking balance + outstanding refundable deposit</span>
-                    </div>
-                </div>
-                <p className="mt-2 text-[10px] leading-4 text-[#806A8C]">The refundable deposit is not a booking sale. It is held separately and settled after rental return and inspection.</p>
-
-                <div className="mt-5 border-t border-dashed border-[#D7CBE3] pt-4">
-                    <h6 className="text-[11px] font-bold uppercase tracking-wide text-[#241537]">Damage / loss settlement</h6>
-                    {v.claims.length===0?<p className="mt-2 text-[11px] text-[#806A8C]">No approved equipment claims.</p>:<div className="mt-2 space-y-3">
-                        {v.claims.map(claim=><div key={claim.id} className="rounded-lg border border-[#EFE7F4] p-2 text-[11px]">
-                            <p className="font-semibold">{claim.equipmentName||`Equipment #${claim.sourceId}`} · {claim.sourceType==='missing'?'Missing':'Damage'} · {claim.quantity} {claim.quantity===1?'unit':'units'}</p>
-                            <p className="mt-1 break-words text-[#806A8C]">{claim.reason}</p>
-                            <div className="mt-1 flex justify-between gap-2"><span>Approved: {money(claim.amount)} · {claim.status}</span><strong className="tabular-nums">Due {money(Math.max(0,claim.amount-claim.amountPaid-claim.depositApplied))}</strong></div>
-                        </div>)}
+                        {v.packageBase>0&&<ReceiptItemLine name={v.booking.packageName?`Package · ${v.booking.packageName}`:'Package'} quantity={1} unitPrice={v.packageBase} amount={v.packageBase}/>}
+                        {(v.salesItems||[]).length>0&&<div className="border-t border-[#EFE7F4] bg-[#FCFAFF] px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-[#806A8C]">Consumable items</div>}
+                        {(v.salesItems||[]).map((item,i)=><ReceiptItemLine key={`sale-${i}`} name={`${item.name}${item.variantName?` (${item.variantName})`:''}`} quantity={item.quantity} unitPrice={item.unitPrice} amount={item.amount}/>)}
+                        {v.rentalItems.length>0&&<div className="border-t border-[#EFE7F4] bg-[#FCFAFF] px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-[#806A8C]">Rental items</div>}
+                        {v.rentalItems.map((item,i)=><ReceiptItemLine key={`rental-${i}`} name={item.name} detail={`${item.days} ${Number(item.days)===1?'day':'days'} rental`} quantity={item.quantity} unitPrice={item.dailyRate} amount={item.amount} ratePerDay/>)}
+                        {(v.deliveryFee>0||v.setupFee>0)&&<div className="border-t border-[#EFE7F4] bg-[#FCFAFF] px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-[#806A8C]">Other charges</div>}
+                        {v.deliveryFee>0&&<ReceiptItemLine name="Delivery / pickup" quantity={1} unitPrice={v.deliveryFee} amount={v.deliveryFee}/>}
+                        {v.setupFee>0&&<ReceiptItemLine name="Setup" quantity={1} unitPrice={v.setupFee} amount={v.setupFee}/>}
+                        <div className="grid grid-cols-[minmax(0,1fr)_32px_72px_76px] items-center gap-1.5 border-t-2 border-[#E6DDF0] bg-[#FBF8FF] px-2 py-2.5 text-[10px] font-bold text-[#2B174C] sm:grid-cols-[minmax(0,1fr)_44px_92px_92px] sm:gap-2 sm:px-3 sm:text-[11px]">
+                            <span>Total units needed</span>
+                            <span className="text-center tabular-nums">{totalBookedUnits}</span>
+                            <span aria-hidden="true" />
+                            <span aria-hidden="true" />
+                        </div>
+                        <div className="flex items-center justify-between gap-2 border-t border-[#E6DDF0] bg-[#FBF8FF] px-3 py-2 text-[11px] font-bold text-[#2B174C]">
+                            <span>Itemized subtotal</span>
+                            <span className="tabular-nums">{money(itemizedSubtotal)}</span>
+                        </div>
                     </div>}
-                    <div className="mt-3 flex justify-between gap-2 border-t border-dashed border-[#DED3E9] pt-2 text-[11px] font-bold"><span>Outstanding customer claims</span><strong className="tabular-nums">{money(v.claimBalance)}</strong></div>
-                </div>
-                <p className="mt-5 border-t border-dashed border-[#D7CBE3] pt-4 text-center text-[10px] leading-4 text-[#8B7C95]">{receiptIdentity.storeName||'Store name unavailable'} · {receiptIdentity.branchName||'Branch name unavailable'}<br/>For reference only · Not a tax invoice</p>
-            </div>
-        </div>
-        <div className="mt-3 space-y-2 border-t border-[#E9E1EE] pt-3">
-            <h5 className="font-bold">Equipment damage / loss charge decisions</h5>
-            {v.claims.length===0?<p className="text-[#806A8C]">No equipment-charge or waiver decisions recorded for this booking.</p>:
-                v.claims.map(c=>{const due=Math.max(0,c.amount-c.amountPaid-c.depositApplied);return <div key={c.id} className="rounded-lg border border-[#E9E1EE] bg-white p-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                        <strong className="text-[#21132E]">{c.equipmentName||`Equipment #${c.sourceId}`} · {c.quantity} {c.quantity===1?'unit':'units'}</strong>
-                        <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${c.status==='waived'?'bg-[#F1ECF9] text-[#5A3C78]':due>0.005?'bg-[#FFF2D9] text-[#956000]':'bg-[#E6F6EA] text-[#226B36]'}`}>{c.status==='waived'?'Charge waived':due>0.005?'Payment outstanding':'Settled'}</span>
+                    {receiptLine('Final agreed booking price',agreedPrice??0,true)}
+                    {agreedPrice===null&&<p className="text-[10px] text-amber-700">Final price has not yet been agreed.</p>}
+                    {receiptLine('Booking payments received',Number(v.booking.bookingPayments))}
+                    <div className="border-t border-dashed border-[#DDD3E6] pt-2">{receiptLine('Remaining booking balance',bookingDue,true)}</div>
+                </section>
+                <section aria-label="Security deposit" className="space-y-2 rounded-xl border border-[#E8DEF3] bg-[#FBF8FF] p-3">
+                    <h6 className="text-[11px] font-bold uppercase tracking-wider text-[#4E2C85]">Refundable security deposit</h6>
+                    {receiptLine('Deposit required',Number(v.depositRequired))}
+                    {receiptLine('Deposit collected',Number(v.depositCollected))}
+                    {receiptLine('Deposit used for damage / missing charges',Number(v.depositApplied))}
+                    {receiptLine('Deposit already refunded to customer',Number(v.depositRefunded))}
+                    <div className="border-t border-dashed border-[#D8CBE7] pt-2">{receiptLine('Deposit still held',Number(v.depositHeld),true)}</div>
+                    {depositDue>0.005&&receiptLine('Deposit still to collect',depositDue)}
+                    <p className="pt-1 text-[10px] leading-4 text-[#806A8C]">Security deposits are refundable amounts held separately from booking revenue.</p>
+                </section>
+                <section aria-label="Damage and missing item charges" className="space-y-2">
+                    <h6 className="border-b border-dashed border-[#DDD3E6] pb-2 text-[11px] font-bold uppercase tracking-wider text-[#4E2C85]">Damage / missing charges</h6>
+                    {v.claims.length===0?<p className="text-[11px] text-[#806A8C]">No damage or missing-item charges recorded.</p>:
+                        <div className="overflow-hidden rounded-xl border border-[#E8DEF3] bg-white text-[11px]">
+                            <div className="grid grid-cols-[minmax(0,1fr)_50px_85px] gap-2 bg-[#F7F2FC] px-3 py-2 font-bold uppercase tracking-wide text-[#6A5582] sm:grid-cols-[minmax(0,1fr)_64px_100px]">
+                                <span>Affected item</span><span className="text-center">Qty</span><span className="text-right">Charge</span>
+                            </div>
+                            {v.claims.map(claim=>{
+                                const covered=isIncludedInCombinedCharge(claim,v.claims);
+                                return <div key={claim.id} className="border-t border-[#F1EDF6]">
+                                    <div className="grid grid-cols-[minmax(0,1fr)_50px_85px] items-start gap-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_64px_100px]">
+                                        <div className="min-w-0 break-words font-semibold text-[#25153D]">
+                                            {claim.equipmentName||`Equipment #${claim.sourceId}`}
+                                            <p className="mt-0.5 text-[10px] font-normal text-[#806A8C]">
+                                                {claim.sourceType==='missing'?'Missing':'Damaged'}
+                                                {claim.status==='waived'&&!covered?' · Waived':''}
+                                            </p>
+                                        </div>
+                                        <span className="text-center font-semibold tabular-nums text-[#25153D]">{claim.quantity}</span>
+                                        <span className="text-right font-semibold tabular-nums text-[#25153D]">
+                                            {covered?'Included':money(claim.status==='waived'?0:claim.amount)}
+                                        </span>
+                                    </div>
+                                    {!covered&&claim.status!=='waived'&&<div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[#F6F1F9] px-3 py-2 text-[10px] text-[#806A8C]">
+                                        <span>Paid: {money(claim.amountPaid)}</span><span>Deposit used: {money(claim.depositApplied)}</span>
+                                        <span>Due: {money(Math.max(0,claim.amount-claim.amountPaid-claim.depositApplied))}</span>
+                                    </div>}
+                                </div>;
+                            })}
+                            {combinedReceiptTotal(v.claims)>0&&<div className="flex items-center justify-between gap-3 border-t-2 border-[#D8CBE7] bg-[#FBF8FF] px-3 py-3 font-bold text-[#2B174C]">
+                                <span>Combined charge for all affected equipment</span>
+                                <span className="shrink-0 tabular-nums">{money(combinedReceiptTotal(v.claims))}</span>
+                            </div>}
+                        </div>}
+                    {receiptLine('Total approved charges',approvedTotal)}
+                    {receiptLine('Additional charge payments received',claimPayments)}
+                    {receiptLine('Deposit applied to charges',Number(v.depositApplied))}
+                    <div className="border-t border-dashed border-[#DDD3E6] pt-2">{receiptLine('Outstanding charges',claimDue,true)}</div>
+                </section>
+                <section aria-label="Payment totals" className="space-y-2 rounded-xl bg-[#F5F0FF] p-3">
+                    <h6 className="text-[11px] font-bold uppercase tracking-wider text-[#4E2C85]">Payment summary</h6>
+                    {receiptLine('Booking payments received',Number(v.booking.bookingPayments))}
+                    {receiptLine('Security deposit collected',Number(v.depositCollected))}
+                    {receiptLine('Additional charge payments received',claimPayments)}
+                    <div className="border-t border-[#DFD1F3] pt-2">{receiptLine('Total money collected',cashCollected,true)}</div>
+                    {receiptLine('Less: deposit refunded',Number(v.depositRefunded))}
+                    <div className="border-t border-[#DFD1F3] pt-2">{receiptLine('Net cash received',netReceived,true)}</div>
+                </section>
+                <div className="rounded-xl bg-[#2B174C] px-4 py-4 text-white">
+                    <div className="flex items-start justify-between gap-2">
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-[#E5D9FF]">Total outstanding from customer</span>
+                        <span className="text-[19px] font-extrabold tabular-nums">{agreedPrice===null?'Not set':format(totalDue)}</span>
                     </div>
-                    <p className="mt-1 text-[#806A8C]">{c.sourceType==='missing'?'Missing equipment':'Damaged equipment'} · Claim #{c.id}</p>
-                    <p className="mt-1 break-words text-[#5F4E75]">Decision: {c.reason}</p>
-                    {c.status==='waived'?<p className="mt-1 font-semibold">Customer charge: ₱0.00 (waived)</p>:
-                        <p className="mt-1">Approved: {money(c.amount)} · Paid: {money(c.amountPaid)} · Deposit applied: {money(c.depositApplied)} · <strong>Due: {money(due)}</strong></p>}
-                </div>})}
-            <p className="mt-1 font-bold">Outstanding customer claims: {money(v.claimBalance)}</p>
+                    <p className="mt-1 text-[10px] leading-4 text-[#E5D9FF]">Remaining booking balance + unpaid security deposit + unpaid approved charges.</p>
+                </div>
+                <p className="text-center text-[10px] leading-4 text-[#806A8C]">
+                    {fullyReconciled?'Recorded booking payments and deposit are fully reconciled.':
+                        'A deposit still held may require refund or application before final settlement.'}
+                    <span className="mt-1 block">This is a financial record, not a tax invoice. No payments can be entered from the Billing tab.</span>
+                </p>
+            </div>
         </div>
-        {!ownerView&&editable&&canWrite&&viewerRole==='manager'&&<div className="mt-3 space-y-2 border-t pt-3">
-            <h5 className="font-bold">Record deposit or claim payment</h5>
-            <select className="w-full rounded-lg border p-2" value={eventType} onChange={e=>setEventType(e.target.value)}>
-                <option value="deposit_received">Deposit collected</option>{viewerRole==='manager'&&<option value="deposit_refunded">Deposit refunded (Manager authorization)</option>}
-                {viewerRole==='manager'&&<option value="deposit_applied">Apply deposit to approved claim (Manager)</option>}
-                <option value="claim_paid">Customer paid approved claim</option>
-            </select>
-            {['claim_paid','deposit_applied'].includes(eventType)&&<select value={claimId} onChange={e=>setClaimId(e.target.value)} className="w-full rounded-lg border p-2">
-                <option value="">Select approved claim</option>{v.claims.filter(c=>c.status==='approved').map(c=><option key={c.id} value={c.id}>{c.equipmentName||`Equipment #${c.sourceId}`} · {c.sourceType==='missing'?'Missing':'Damage'} · {money(c.amount-c.amountPaid-c.depositApplied)} due</option>)}
-            </select>}
-            <input aria-label="Transaction amount" type="number" min="0.01" step="0.01" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="Amount (₱)" className="w-full rounded-lg border p-2"/>
-            <button type="button" disabled={busy} onClick={()=>void record()} className="rounded-lg bg-[#2B174C] px-3 py-2 font-bold text-white disabled:opacity-50">Save transaction</button>
-        </div>}
-
-        {!ownerView&&viewerRole==='manager'&&canWrite&&customerCase&&<div className="mt-4 space-y-3 border-t border-[#E9E1EE] pt-4">
-            <div>
-                <h5 className="font-bold">Customer incident follow-up &amp; future booking review</h5>
-                <p className="mt-1 text-[#806A8C]">Managers record contact attempts and decisions here. Saving an activity does not actually send a message or collect money. Flags apply only to this store and must be based on independently verified customer identity.</p>
-            </div>
-            <div className="rounded-xl border border-[#E3D8EA] bg-[#FCFAFF] p-3" aria-label="Customer contact for equipment incident">
-                <h6 className="font-bold text-[#21132E]">Contact customer about damaged or missing equipment</h6>
-                <p className="mt-1 text-[#806A8C]">Explain the documented issue first. Charge only after a separate Manager decision; send the message yourself and then record what actually happened below.</p>
-                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-                    {customerCase.contact?.phone?<a href={`tel:${customerCase.contact.phone.replace(/[^\d+]/g,'')}`} className="inline-flex items-center gap-1 font-semibold text-[#5330B6] hover:underline"><Phone size={13}/>{customerCase.contact.phone}</a>:<span className="text-[#806A8C]">Phone unavailable — see Overview</span>}
-                    {customerCase.contact?.email&&<a href={`mailto:${customerCase.contact.email}`} className="inline-flex items-center gap-1 break-all text-[#5330B6] hover:underline"><Mail size={13}/>{customerCase.contact.email}</a>}
-                    {customerCase.contact?.facebookName&&<span className="text-[#5F4E75]">Facebook: {customerCase.contact.facebookName}</span>}
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                    {issueReports.length>0&&<button type="button" onClick={()=>void copyCustomerNotice('issue')} className="inline-flex items-center gap-2 rounded-lg border border-[#D8CBE7] bg-white px-3 py-2 font-semibold text-[#2B174C] hover:bg-[#F7F1FF]"><Copy size={14}/> Copy issue notice</button>}
-                    {v.claims.some(c=>c.status==='approved'&&c.amount-c.amountPaid-c.depositApplied>0.005)&&<button type="button" onClick={()=>void copyCustomerNotice('payment')} className="inline-flex items-center gap-2 rounded-lg border border-[#D8CBE7] bg-white px-3 py-2 font-semibold text-[#2B174C] hover:bg-[#F7F1FF]"><Copy size={14}/> Copy itemized payment request</button>}
-                </div>
-                {issueReports.length===0&&!v.claims.some(c=>c.status==='approved'&&c.amount-c.amountPaid-c.depositApplied>0.005)&&<p className="mt-2 text-[#806A8C]">No pending equipment decision or unpaid equipment claim on this booking.</p>}
-                <p className="mt-2 text-[11px] text-[#806A8C]">Copying is not sending. Use phone, SMS, Messenger or email manually. Choose “Notice actually sent” only after the message was sent, or “Contact attempt” if the customer did not respond.</p>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#F7F1FF] p-3">
-                <div><strong>{customerCase.profile?.reviewRequired?'Manager review required':'No active future-booking restriction'}</strong>
-                    <p className="text-[#806A8C]">Outstanding charge on this booking: {money(customerCase.claimDue)}</p>
-                    {customerCase.followUpOverdue&&<p className="mt-1 font-bold text-[#A85B16]">Follow-up overdue since {customerCase.latestScheduledFollowUp}; Manager action needed.</p>}
-                    {customerCase.profile?.reason&&<p className="mt-1 text-[#806A8C]">Most recent review reason: {customerCase.profile.reason}</p>}</div>
-            </div>
-            {customerCase.earlierOutstanding.length>0&&<div className="rounded-lg border border-[#E9E1EE] p-2">
-                <strong>Earlier unpaid claims — same verified customer, this branch</strong>
-                {customerCase.earlierOutstanding.map(c=><p key={c.reference} className="mt-1">{c.reference} · {money(c.due)} outstanding</p>)}
-            </div>}
-            <label className="block font-semibold">Customer contact / decision note
-                <textarea rows={2} value={caseNotes} onChange={e=>setCaseNotes(e.target.value)}
-                          placeholder="Document customer communication, evidence, decision or reason (minimum 10 characters)"
-                          className="mt-1 w-full rounded-lg border border-[#E3D8EA] p-2 font-normal"/>
-            </label>
-            <div className="grid gap-2 sm:grid-cols-3">
-                <label className="block">Activity
-                    <select value={caseType} onChange={e=>setCaseType(e.target.value)} className="mt-1 w-full rounded-lg border p-2">
-                        <option value="contact_attempt">Contact attempt</option>
-                        <option value="notice_recorded">Notice actually sent</option>
-                        <option value="customer_response">Customer response</option>
-                        <option value="dispute_recorded">Charge disputed</option>
-                        <option value="payment_promise">Promise to pay/return</option>
-                        <option value="collection_escalation">Collection escalation</option>
-                    </select>
-                </label>
-                <label className="block">Channel
-                    <select value={caseChannel} onChange={e=>setCaseChannel(e.target.value)} className="mt-1 w-full rounded-lg border p-2">
-                        <option value="phone">Phone</option><option value="sms">SMS</option>
-                        <option value="messenger">Messenger</option><option value="email">Email</option>
-                        <option value="in_person">In person</option><option value="none">Internal note</option>
-                    </select>
-                </label>
-                <label className="block">Next follow-up date (optional)
-                    <input type="date" value={caseFollowUp} onChange={e=>setCaseFollowUp(e.target.value)} className="mt-1 w-full rounded-lg border p-2"/>
-                </label>
-            </div>
-            <button type="button" disabled={busy} onClick={()=>void manageCustomerCase('record_customer_case_event',{eventType:caseType})}
-                    className="rounded-lg border border-[#D8CBE7] px-3 py-2 font-semibold disabled:opacity-50">Save customer follow-up</button>
-            <div className="space-y-2 rounded-lg border border-[#E3D8EA] p-3">
-                <h6 className="font-bold">Future-booking review</h6>
-                <p className="text-[#806A8C]">Customers can submit requests, but a verified active flag prevents confirmation until the Manager documents a booking-specific exception. Clear a flag when the concern is resolved or was incorrect.</p>
-                <label className="flex items-start gap-2"><input type="checkbox" checked={identityVerified} onChange={e=>setIdentityVerified(e.target.checked)}/>
-                    <span>I independently verified the customer controls the contact details, not just matched a name or submitted phone.</span></label>
-                <div className="flex flex-wrap gap-2">
-                    {!customerCase.profile?.reviewRequired&&<button type="button" disabled={busy||!identityVerified||!customerCase.identityLookupAvailable} onClick={()=>void manageCustomerCase('set_customer_review',{reviewRequired:true,identityVerified:true})} className="rounded-lg border border-[#CBA8E8] px-3 py-2 font-semibold disabled:opacity-50">Require Manager review for future bookings</button>}
-                    {Boolean(customerCase.profile?.reviewRequired)&&<>
-                        <button type="button" disabled={busy} onClick={()=>void manageCustomerCase('set_customer_review',{reviewRequired:false})} className="rounded-lg border px-3 py-2 font-semibold disabled:opacity-50">Clear customer review restriction</button>
-                        {['pending review','awaiting down payment'].includes(customerCase.bookingStatus.toLowerCase())&&<button type="button" disabled={busy} onClick={()=>void manageCustomerCase('authorize_customer_booking_exception')} className="rounded-lg bg-[#2B174C] px-3 py-2 font-semibold text-white disabled:opacity-50">Authorize this booking only</button>}
-                    </>}
-                </div>
-            </div>
-            {customerCase.claimDue>0&&<div className="rounded-lg border border-[#E3D8EA] p-3">
-                <h6 className="font-bold">Outstanding approved claim</h6>
-                <p className="text-[#806A8C]">The customer still owes {money(customerCase.claimDue)}. Refundable deposits must be reconciled separately. Operational closure is not a debt waiver.</p>
-                <p className="mt-2 text-[11px] text-[#806A8C]">Booking stays Pending Settlement until outstanding charges are paid, waived, or covered by an applied deposit and the remaining refundable deposit is reconciled.</p>
-            </div>}
-            {waiverCandidates.length>0&&<div className="space-y-2 rounded-lg border border-[#E3D8EA] bg-[#FCFAFF] p-3">
-                <h6 className="font-bold">Correct or waive an already approved unpaid charge</h6>
-                <p className="text-[#806A8C]">Use only after a new Manager investigation shows the customer should not be charged. Claims with any recorded payment or applied deposit cannot be waived here; those require an audited refund/correction.</p>
-                <label className="block font-semibold">Select equipment and approved charge
-                    <select value={waiveExistingId} onChange={e=>setWaiveExistingId(e.target.value)} className="mt-1 w-full rounded-lg border border-[#E3D8EA] bg-white p-2 font-normal">
-                        <option value="">Choose an unpaid equipment claim</option>
-                        {waiverCandidates.map(c=><option key={c.id} value={c.id}>{c.equipmentName||`Equipment #${c.sourceId}`} · {c.sourceType==='missing'?'Missing':'Damage'} · Claim #{c.id} · {money(c.amount)}</option>)}
-                    </select>
-                </label>
-                <label className="block font-semibold">Reason for reversing the approved charge
-                    <textarea value={waiveExistingReason} onChange={e=>setWaiveExistingReason(e.target.value)} rows={2} placeholder="Explain the corrected assessment or why the charge is being waived (minimum 10 characters)" className="mt-1 w-full rounded-lg border border-[#E3D8EA] bg-white p-2 font-normal"/>
-                </label>
-                <button type="button" disabled={busy||!waiveExistingId||waiveExistingReason.trim().length<10} onClick={()=>void waiveApprovedUnpaidClaim()} className="rounded-lg border border-[#D8CBE7] bg-white px-3 py-2 font-semibold text-[#2B174C] disabled:opacity-50">Waive approved customer charge</button>
-            </div>}
-            <div className="max-h-48 space-y-2 overflow-y-auto" aria-label="Customer case history">
-                <h6 className="font-bold">Recorded case history</h6>
-                {customerCase.events.length===0?<p className="text-[#806A8C]">No contact or review history recorded yet.</p>:
-                    customerCase.events.map(e=><div key={e.id} className="rounded-lg border border-[#E9E1EE] p-2">
-                        <strong>{e.eventType.replaceAll('_',' ')}</strong> · {e.createdAt} · {e.actorName}
-                        <p className="text-[#806A8C]">{e.channel}{e.followUpOn?` · Follow-up: ${e.followUpOn}`:''}</p>
-                        <p className="mt-1">{e.notes}</p>
-                    </div>)}
-            </div>
-        </div>}
-
     </section>;
 }

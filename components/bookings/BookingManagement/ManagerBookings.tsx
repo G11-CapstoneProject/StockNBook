@@ -1,6 +1,6 @@
 "use client";
 
-import { getNextStatusConfig } from './_shared';
+import { getNextStatusConfig, getCustomerCustomRequest, formatBookingListTime } from './_shared';
 import { useEffect, useMemo, useState } from "react";
 import {
     BadgeCheck,
@@ -8,13 +8,14 @@ import {
     CheckCircle2,
     ClipboardCheck,
     Download,
-    PackageCheck,
+    HandCoins,
     RefreshCw,
     Search,
     Wallet,
     X,
 } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
+import { downloadBookingReceipt } from "./BookingFinancialPanel";
 import {
     Booking,
     FilterType,
@@ -395,6 +396,357 @@ function formatCurrentDateTime(value: Date) {
 }
 
 
+// Export the selected detail tab, not a generic booking-list report.
+// Billing PDF deliberately reuses the exact portrait receipt used by the Billing tab.
+type SelectedTab = "Overview" | "Billing" | "Items" | "Notes";
+type SelectedExportLine = { label: string; value: string; section?: boolean };
+type SelectedFinancialStatement = {
+    booking?: { agreedPrice?: number | null; bookingPayments?: number; balance?: number; downPayment?: number };
+    depositRequired?: number;
+    depositCollected?: number;
+    depositApplied?: number;
+    depositRefunded?: number;
+    depositHeld?: number;
+    claimBalance?: number;
+    packageBase?: number; deliveryFee?: number; setupFee?: number;
+    salesItems?: Array<{name: string;variantName?: string;quantity: number;unitPrice: number;amount: number}>;
+    rentalItems?: Array<{name: string;quantity: number;days: number;dailyRate: number;amount: number}>;
+    claims?: Array<{
+        equipmentName?: string; sourceType?: string; quantity?: number; reason?: string;
+        status?: string; amount?: number; amountPaid?: number; depositApplied?: number;
+    }>;
+};
+type SelectedBookingItems = {
+    items: Array<{
+        product_name: string; variant_name?: string | null; source_type?: string;
+        booked_quantity: number | string; used_quantity?: number | string;
+        available_for_booking?: number | null; inventory_status?: string;
+    }>;
+    rentalItems: Array<{
+        equipment_name: string; quantity: number | string;
+        start_date?: string; end_date?: string; allocation_status?: string;
+        available_for_event?: number | null;
+    }>;
+};
+
+async function getSelectedExportData(action: string, booking: Booking): Promise<Record<string, unknown>> {
+    const token = sessionStorage.getItem("token");
+    if (!token) throw new Error("Please log in before downloading booking details.");
+    const response = await fetch("/api/bookings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action, booking_id: booking.id,
+            ...(booking.branchId || booking.branch_id ? { branch_id: Number(booking.branchId || booking.branch_id) } : {}) }),
+    });
+    const data = await response.json();
+    if (!response.ok || data.error || data.success === false) {
+        throw new Error(data.error || data.message || `Unable to load ${action} for the export.`);
+    }
+    return data as Record<string, unknown>;
+}
+
+function selectedBookingExportLines(
+    booking: Booking,
+    tab: SelectedTab,
+    context: ManagerBookingExportContext,
+    statement: SelectedFinancialStatement | null,
+    data: SelectedBookingItems | null,
+): SelectedExportLine[] {
+    const lines: SelectedExportLine[] = [];
+    const section = (label: string) => lines.push({ label, value: "", section: true });
+    const add = (label: string, value: unknown) => lines.push({
+        label, value: value === null || value === undefined || String(value).trim() === "" ? "Not provided" : String(value),
+    });
+    const currency = (value: number | undefined | null) =>
+        value === null || value === undefined || !Number.isFinite(Number(value)) ? "Not available" : money(Number(value));
+
+    section("Booking identification");
+    add("Booking reference", booking.bookingReference || booking.booking_reference || `#${booking.id}`);
+    add("Customer", booking.name);
+    add("Store", context.storeName);
+    add("Branch", getBranchGroupName(booking) === "Unassigned Branch" ? context.branchName : getBranchGroupName(booking));
+    add("Booking status", getManagerBookingStatusLabel(booking.status));
+
+    if (tab === "Overview") {
+        section("Customer information");
+        add("Contact number", booking.phone);
+        add("Email address", booking.email);
+        add("Facebook / Messenger", booking.facebookName || booking.facebook_name);
+        section("Event details");
+        add("Booking type", getManagerBookingTypeLabel(booking));
+        add("Package", booking.packageName || booking.package_name || booking.package);
+        add("Event start date", formatDate(booking.date));
+        add("Event end date", booking.eventEndDate ? formatDate(booking.eventEndDate) : "Not specified");
+        add("Event time", formatBookingListTime(booking.eventTime || booking.event_time));
+        add("Event type", booking.eventType || booking.event_type);
+        add("Theme / motif", booking.theme);
+        add("Venue", booking.venue);
+        add("Payment status", getManagerPaymentLabel(booking));
+        section("Booking payment summary");
+        add("Agreed booking price", currency(statement?.booking?.agreedPrice ?? getTotalPrice(booking)));
+        add("Required down payment", currency(statement?.booking?.downPayment ?? getRequiredDownPayment(booking)));
+        add("Booking payments received", currency(statement?.booking?.bookingPayments ?? getAmountPaid(booking)));
+        add("Remaining booking balance", currency(statement?.booking?.balance ?? getBalance(booking)));
+        if (statement) {
+            section("Security deposit and equipment charges");
+            add("Security deposit required", currency(statement.depositRequired));
+            add("Security deposit collected", currency(statement.depositCollected));
+            add("Deposit applied to charges", currency(statement.depositApplied));
+            add("Deposit refunded", currency(statement.depositRefunded));
+            add("Deposit still held", currency(statement.depositHeld));
+            const claims = statement.claims || [];
+            add("Total approved damage / missing charges", currency(claims.filter(c => c.status !== "waived")
+                .reduce((sum, c) => sum + Number(c.amount || 0), 0)));
+            add("Outstanding equipment charges", currency(statement.claimBalance));
+        }
+        if (data) {
+            section("Consumable items in this booking");
+            if (!data.items.length) add("Items", "None");
+            data.items.forEach((item, index) => add(`${index + 1}. ${item.product_name}${item.variant_name ? ` - ${item.variant_name}` : ""}`,
+                `${item.booked_quantity} required`));
+            section("Rental items in this booking");
+            if (!data.rentalItems.length) add("Items", "None");
+            data.rentalItems.forEach((item, index) => add(`${index + 1}. ${item.equipment_name}`, `${item.quantity} required`));
+        }
+    } else if (tab === "Billing") {
+        if (!statement) throw new Error("Booking financial statement is unavailable for export.");
+        section("Itemized booking charges");
+        if (Number(statement.packageBase || 0)>0) add("Package price", currency(statement.packageBase));
+        for (const item of statement.salesItems || []) {
+            add(`${item.name}${item.variantName ? ` - ${item.variantName}` : ""} (qty ${item.quantity}, unit ${currency(item.unitPrice)})`, currency(item.amount));
+        }
+        for (const item of statement.rentalItems || []) {
+            add(`${item.name} (qty ${item.quantity}, ${item.days} day(s), daily rate ${currency(item.dailyRate)})`, currency(item.amount));
+        }
+        if (Number(statement.deliveryFee || 0)>0) add("Delivery fee", currency(statement.deliveryFee));
+        if (Number(statement.setupFee || 0)>0) add("Setup fee", currency(statement.setupFee));
+        section("Booking payments");
+        add("Final agreed booking price", currency(statement.booking?.agreedPrice));
+        add("Required down payment", currency(statement.booking?.downPayment));
+        add("Booking payments received", currency(statement.booking?.bookingPayments));
+        add("Remaining booking balance", currency(statement.booking?.balance));
+        section("Refundable security deposit");
+        add("Deposit required", currency(statement.depositRequired));
+        add("Deposit collected", currency(statement.depositCollected));
+        add("Deposit applied to charges", currency(statement.depositApplied));
+        add("Deposit refunded to customer", currency(statement.depositRefunded));
+        add("Deposit still held", currency(statement.depositHeld));
+        section("Damage / missing claims");
+        const claims = statement.claims || [];
+        if (!claims.length) add("Claims", "No recorded damage or missing claims");
+        claims.forEach((claim, index) => {
+            const grouped = /^covered by the same combined booking-wide charge\b/i.test(String(claim.reason || ""));
+            add(`Incident ${index + 1}`, `${claim.equipmentName || "Equipment"} - ${claim.sourceType || "Incident"}, quantity ${claim.quantity ?? "?"}, status ${grouped ? "Included in combined charge" : claim.status || "Not set"}`);
+            add("Approved amount", currency(claim.amount));
+            add("Payment received", currency(claim.amountPaid));
+            add("Deposit applied", currency(claim.depositApplied));
+        });
+        add("Outstanding damage / missing charges", currency(statement.claimBalance));
+    } else if (tab === "Items") {
+        if (!data) throw new Error("Booking item records are unavailable for export.");
+        section("Consumable items");
+        if (!data.items.length) add("Consumable items", "No consumable items included");
+        let consumableUnits = 0;
+        data.items.forEach((item, index) => {
+            const required = Math.max(0, Number(item.booked_quantity) || 0);
+            const issued = Math.max(0, Number(item.used_quantity) || 0);
+            const available = item.available_for_booking == null ? null : Number(item.available_for_booking);
+            const remaining = Math.max(0, required - issued);
+            const shortage = available == null || !Number.isFinite(available) ? "Not verified" : Math.max(0, remaining - available);
+            consumableUnits += required;
+            add(`${index + 1}. ${item.product_name}${item.variant_name ? ` - ${item.variant_name}` : ""}`,
+                `Required: ${required} | Available: ${available == null ? "Not verified" : available} | Shortage: ${shortage} | Already issued: ${issued}`);
+        });
+        add("Total consumable units", consumableUnits);
+        section("Rental items (availability for event dates)");
+        if (!data.rentalItems.length) add("Rental items", "No rental items included");
+        let rentalUnits = 0;
+        data.rentalItems.forEach((item, index) => {
+            const required = Math.max(0, Number(item.quantity) || 0);
+            const available = item.available_for_event == null ? null : Number(item.available_for_event);
+            const shortage = available == null || !Number.isFinite(available) ? "Not verified" : Math.max(0, required - available);
+            rentalUnits += required;
+            add(`${index + 1}. ${item.equipment_name}`,
+                `Required: ${required} | Available: ${available == null ? "Not verified" : available} | Shortage: ${shortage} | ${item.start_date || "?"} to ${item.end_date || "?"}`);
+        });
+        add("Total rental units", rentalUnits);
+        add("Total units included in booking", consumableUnits + rentalUnits);
+    }
+    if (tab === "Overview" || tab === "Notes") {
+        section("Customer notes and requests");
+        add("Additional custom request", getCustomerCustomRequest(booking) || "None provided");
+        add("Theme / motif request", booking.theme_motif_request || booking.themeMotifRequest || booking.theme || "None provided");
+        add("Additional notes", booking.additional_notes || booking.additionalNotes || booking.notes || "None provided");
+    }
+    return lines;
+}
+
+function selectedBookingTabPdf(lines: SelectedExportLine[], booking: Booking, tab: SelectedTab, context: ManagerBookingExportContext) {
+    const W = PDF_W, H = PDF_H, margin = 40;
+    const pages: string[][] = [];
+    let commands: string[] = [], y = 0;
+    const wrap = (value: string, width: number) => {
+        const words = value.replace(/\r/g, "").split(/(\s+)/);
+        const chunks: string[] = [];
+        let current = "";
+        for (const word of words) {
+            const candidate = current + word;
+            if (candidate.length > width && current.trim()) { chunks.push(current.trim()); current = word.trimStart(); }
+            else current = candidate;
+            while (current.length > width) { chunks.push(current.slice(0, width)); current = current.slice(width); }
+        }
+        if (current.trim() || !chunks.length) chunks.push(current.trim() || "-");
+        return chunks;
+    };
+    const startPage = () => {
+        commands = []; pages.push(commands);
+        commands.push("0.17 0.10 0.29 rg\n");
+        commands.push(pdfText(`${tab.toUpperCase()} - BOOKING DETAILS`, margin, H - 45, 16, true));
+        commands.push(pdfText(`${context.storeName}  |  ${context.branchName}`, margin, H - 67, 10));
+        commands.push(pdfText(`Booking: ${booking.bookingReference || `#${booking.id}`}  |  Exported ${context.exportedAt.toLocaleDateString("en-PH")}`, margin, H - 85, 9));
+        commands.push(pageLine(margin, H - 97, W - margin, H - 97));
+        y = H - 118;
+    };
+    startPage();
+    for (const line of lines) {
+        if (line.section) {
+            if (y < 78) startPage();
+            y -= 6;
+            commands.push("0.34 0.21 0.52 rg\n");
+            commands.push(pdfText(line.label.toUpperCase(), margin, y, 10, true));
+            y -= 9; commands.push(pageLine(margin, y, W - margin, y));
+            commands.push("0.17 0.10 0.29 rg\n");
+            y -= 19;
+        } else {
+            const labelLines = wrap(line.label, 34), valueLines = wrap(line.value, 92);
+            const length = Math.max(labelLines.length, valueLines.length);
+            if (y - length * 14 < 48) startPage();
+            for (let i = 0; i < length; i++) {
+                if (labelLines[i]) commands.push(pdfText(labelLines[i], margin + 3, y - 14 * i, 8.5, true));
+                if (valueLines[i]) commands.push(pdfText(valueLines[i], 259, y - 14 * i, 8.5));
+            }
+            y -= length * 14 + 9;
+        }
+    }
+    pages.forEach((page, i) => page.push(pdfText(`Page ${i + 1} of ${pages.length}`, W - 108, 25, 8)));
+    return pdfBlob(pages.map(p => p.join("")));
+}
+
+function selectedBookingTabExcel(lines: SelectedExportLine[], tab: SelectedTab, booking: Booking, context: ManagerBookingExportContext) {
+    const rows: Array<Array<string | number>> = [
+        [`${tab.toUpperCase()} - BOOKING DETAILS`],
+        [`Store: ${context.storeName}`], [`Branch: ${context.branchName}`],
+        [`Booking reference: ${booking.bookingReference || `#${booking.id}`}`],
+        [`Exported: ${context.exportedAt.toLocaleString("en-PH")}`],
+        ["Field", "Details"],
+        ...lines.map(line => line.section ? [line.label.toUpperCase(), ""] : [line.label, line.value]),
+    ];
+    const lastRow = rows.length;
+    const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
+        `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`+
+        `<dimension ref="A1:B${lastRow}"/><sheetViews><sheetView workbookViewId="0"/></sheetViews>`+
+        `<sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="1" width="40" customWidth="1"/>`+
+        `<col min="2" max="2" width="95" customWidth="1"/></cols>`+
+        `<sheetData>${xlsxRows(rows)}</sheetData><autoFilter ref="A6:B${lastRow}"/></worksheet>`;
+    const files: Array<[string, string]> = [
+        ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`],
+        ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
+        ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${tab}" sheetId="1" r:id="rId1"/></sheets></workbook>`],
+        ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`],
+        ["xl/worksheets/sheet1.xml", worksheet],
+    ];
+    return zipStored(files);
+}
+
+// Items exports use actual item rows and quantities, rather than the generic
+// booking-report columns. No prices or unrelated financial details are included.
+function selectedBookingItemsExcel(items: SelectedBookingItems, booking: Booking, context: ManagerBookingExportContext): Blob {
+    const rows: Array<Array<string | number>> = [
+        ["BOOKING ITEMS - PRODUCT LIST"],
+        [`Store: ${context.storeName}`],
+        [`Branch: ${context.branchName}`],
+        [`Booking reference: ${booking.bookingReference || `#${booking.id}`}`],
+        [`Exported: ${context.exportedAt.toLocaleString("en-PH")}`],
+        ["Type", "Item / Product", "Required", "Available", "Shortage", "Already Issued", "Event Start", "Event End"],
+    ];
+    let totalUnits = 0;
+    for (const item of items.items) {
+        const required = Math.max(0, Number(item.booked_quantity) || 0);
+        const issued = Math.max(0, Number(item.used_quantity) || 0);
+        const available = item.available_for_booking == null ? null : Number(item.available_for_booking);
+        const validAvailable = available !== null && Number.isFinite(available);
+        totalUnits += required;
+        rows.push([
+            "Consumable",
+            `${item.product_name}${item.variant_name ? ` - ${item.variant_name}` : ""}`,
+            required,
+            validAvailable ? available : "Not verified",
+            validAvailable ? Math.max(0, required - issued - available) : "Not verified",
+            issued,
+            "", "",
+        ]);
+    }
+    for (const item of items.rentalItems) {
+        const required = Math.max(0, Number(item.quantity) || 0);
+        const available = item.available_for_event == null ? null : Number(item.available_for_event);
+        const validAvailable = available !== null && Number.isFinite(available);
+        totalUnits += required;
+        rows.push([
+            "Rental", item.equipment_name, required,
+            validAvailable ? available : "Not verified",
+            validAvailable ? Math.max(0, required - available) : "Not verified",
+            "", item.start_date || "", item.end_date || "",
+        ]);
+    }
+    rows.push(["TOTAL UNITS REQUIRED", "", totalUnits, "", "", "", "", ""]);
+    const lastRow = rows.length;
+    const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
+        `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`+
+        `<dimension ref="A1:H${lastRow}"/><sheetViews><sheetView workbookViewId="0"/></sheetViews>`+
+        `<sheetFormatPr defaultRowHeight="15"/>`+
+        `<cols><col min="1" max="1" width="19" customWidth="1"/><col min="2" max="2" width="65" customWidth="1"/>`+
+        `<col min="3" max="6" width="18" customWidth="1"/><col min="7" max="8" width="20" customWidth="1"/></cols>`+
+        `<sheetData>${xlsxRows(rows)}</sheetData></worksheet>`;
+    return zipStored([
+        ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`],
+        ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
+        ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Items" sheetId="1" r:id="rId1"/></sheets></workbook>`],
+        ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`],
+        ["xl/worksheets/sheet1.xml", sheet],
+    ]);
+}
+
+async function downloadSelectedBookingTab(
+    booking: Booking, tab: SelectedTab, type: "pdf" | "excel", context: ManagerBookingExportContext,
+): Promise<void> {
+    const branchId = Number(booking.branchId || booking.branch_id || context.branchId || 0);
+    if (tab === "Billing" && type === "pdf") {
+        await downloadBookingReceipt(booking.id, branchId);
+        return;
+    }
+    const [financial, items] = await Promise.all([
+        tab === "Overview" || tab === "Billing" ? getSelectedExportData("get_booking_financial_statement", booking) : Promise.resolve(null),
+        tab === "Overview" || tab === "Items" ? getSelectedExportData("get_booking_items", booking) : Promise.resolve(null),
+    ]);
+    const statement = financial?.statement as SelectedFinancialStatement | undefined;
+    if (financial && !statement) throw new Error("Booking financial statement is unavailable for this export.");
+    const itemData: SelectedBookingItems | null = items ? {
+        items: Array.isArray(items.items) ? items.items as SelectedBookingItems["items"] : [],
+        rentalItems: Array.isArray(items.rentalItems) ? items.rentalItems as SelectedBookingItems["rentalItems"] : [],
+    } : null;
+    const lines = selectedBookingExportLines(booking, tab, context, statement || null, itemData);
+    const suffix = tab === "Billing" ? "Billing_Receipt" : tab === "Items" ? "Booking_Items"
+        : tab === "Notes" ? "Booking_Notes" : "Booking_Overview";
+    const fileBase = `${safeFilename(booking.bookingReference || booking.id)}_${suffix}`;
+    if (type === "pdf") {
+        downloadBlob(selectedBookingTabPdf(lines, booking, tab, context), `${fileBase}.pdf`);
+    } else if (tab === "Items" && itemData) {
+        downloadBlob(selectedBookingItemsExcel(itemData, booking, context), `${fileBase}.xlsx`);
+    } else {
+        downloadBlob(selectedBookingTabExcel(lines, tab, booking, context), `${fileBase}.xlsx`);
+    }
+}
+
 export default function ManagerBookings() {
     const canManage = getSavedBookingAccess("manager") === "full";
     const [bookings, setBookings] = useState<Booking[]>([]);
@@ -446,7 +798,6 @@ export default function ManagerBookings() {
     const [paymentModal, setPaymentModal] = useState<Booking | null>(null);
     const [paymentSaving, setPaymentSaving] = useState(false);
     const [paymentError, setPaymentError] = useState("");
-    const [settlementModal, setSettlementModal] = useState<Booking | null>(null);
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
     const [cancelModal, setCancelModal] = useState<Booking | null>(null);
     const [cancelItems, setCancelItems] = useState<BookingInventoryItem[]>([]);
@@ -595,18 +946,6 @@ export default function ManagerBookings() {
 
     useEffect(() => {
         void loadBookings();
-        const refreshVisible = () => {
-            if(document.visibilityState === 'visible')void loadBookings();
-        };
-        const refreshEvent = () => { void loadBookings(); };
-        const interval = window.setInterval(refreshVisible, 60_000);
-        window.addEventListener('focus',refreshVisible);
-        window.addEventListener('stocknbook:booking-updated',refreshEvent);
-        return () => {
-            window.clearInterval(interval);
-            window.removeEventListener('focus',refreshVisible);
-            window.removeEventListener('stocknbook:booking-updated',refreshEvent);
-        };
     }, []);
 
 
@@ -1099,9 +1438,9 @@ export default function ManagerBookings() {
                 <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     {([
                         { status: "Pending Review" as FilterType, title: "Pending Review", sub: "Requests to review", icon: <ClipboardCheck size={24} />, iconStyle: "bg-[#FFF0E5] text-[#E66B20]" },
-                        { status: "Awaiting Down Payment" as FilterType, title: "Approved", sub: "Approved, awaiting down payment", icon: <Wallet size={24} />, iconStyle: "bg-[#F1EBFF] text-[#6D35D4]" },
-                        { status: "Confirmed" as FilterType, title: "Confirmed", sub: "Secured bookings", icon: <BadgeCheck size={24} />, iconStyle: "bg-[#E6F7EE] text-[#159455]" },
-                        { status: "Preparing" as FilterType, title: "Preparing", sub: "Items being prepared", icon: <PackageCheck size={24} />, iconStyle: "bg-[#EAF1FF] text-[#2563EB]" },
+                        { status: "Awaiting Down Payment" as FilterType, title: "Awaiting Payment", sub: "Approved, awaiting down payment", icon: <Wallet size={24} />, iconStyle: "bg-[#F1EBFF] text-[#6D35D4]" },
+                        { status: "Confirmed" as FilterType, title: "Upcoming Booking", sub: "Confirmed bookings", icon: <BadgeCheck size={24} />, iconStyle: "bg-[#E6F7EE] text-[#159455]" },
+                        { status: "Pending Settlement" as FilterType, title: "Settle Deposit", sub: "Bookings pending settlement", icon: <HandCoins size={24} />, iconStyle: "bg-[#FFF6E7] text-[#B86A15]" },
                     ]).map((metric) => (
                         <button
                             type="button"
@@ -1165,7 +1504,20 @@ export default function ManagerBookings() {
                             </div>
                             {(search || filter !== "All" || approvalOnly || bookingType !== "All" || dateFrom || dateTo) && <div className="flex justify-end"><button type="button" onClick={clearFilters} className="text-xs font-semibold text-[#6335BC] hover:underline">Clear filters</button></div>}
                         </div>}
-                        onExportSelected={(b,type)=>exportBookings([b],type,true)}
+                        onExportSelected={(b,type,tab)=>{
+                            const context: ManagerBookingExportContext = {
+                                storeName: [sessionStorage.getItem("store_name"), sessionStorage.getItem("stocknbook_store_name"), sessionStorage.getItem("business_name"), sessionStorage.getItem("storeName")]
+                                    .find(value => Boolean(value?.trim())) || `Store ${getStoreId() || "Not available"}`,
+                                storeId: getStoreId() || "Not available",
+                                branchName,
+                                branchId: getBranchId() || "Not available",
+                                exportedAt: new Date(),
+                                selected: true,
+                            };
+                            void downloadSelectedBookingTab(b,tab,type,context)
+                                .then(()=>showBookingToast("success", `${tab} downloaded`, `${tab} exported as ${type === "pdf" ? "PDF" : "Excel"}.`))
+                                .catch(err=>setBookingActionError(err instanceof Error ? err.message : "Unable to export selected booking details."));
+                        }}
                         onUpdateStatus={canManage ? (id, status, price) => {
                             const booking = bookings.find(item => item.id === id);
                             if (status === "Awaiting Down Payment" && booking && normalizeStatus(booking.status) === "Pending Review") {
@@ -1185,7 +1537,6 @@ export default function ManagerBookings() {
                         onRecordDownPayment={canManage ? b => {setPaymentError("");setPaymentModal(b);} : undefined}
                         onMarkFullyPaid={canManage ? b => {setPaymentError("");setPaymentModal(b);} : undefined}
                         onCancelBooking={canManage ? openCancelModal : undefined}
-                        onSettleDeposit={canManage ? b => setSettlementModal(b) : undefined}
                     />}
             </section>
 
@@ -1213,17 +1564,6 @@ export default function ManagerBookings() {
                 busy={paymentSaving} error={paymentError}
                 onClose={() => {if(!paymentSaving){setPaymentModal(null);setPaymentError("");}}}
                 onSave={saveRecordedPayment}
-            />}
-
-            {settlementModal && canManage && <SecurityDepositSettlementModal
-                booking={bookings.find(b => b.id === settlementModal.id) ?? settlementModal}
-                onClose={() => setSettlementModal(null)}
-                onSaved={async (completed) => {
-                    await loadBookings();
-                    showBookingToast('success', completed ? 'Booking completed' : 'Settlement recorded',
-                        completed ? 'All returns, charges and the refundable deposit are reconciled.' :
-                            'Payment and deposit ledger updated. Any outstanding balance or unreviewed incident keeps the booking Pending Settlement.');
-                }}
             />}
 
             {priceModal && canManage && normalizeStatus((bookings.find(b => b.id === priceModal.id) ?? priceModal).status) === "Pending Review" && (
@@ -1292,308 +1632,6 @@ export default function ManagerBookings() {
     );
 }
 // Keep the existing manager approval confirmation, without any deadline requirement.
-type SettlementClaim = {
-    id: number; sourceType: 'damage' | 'missing'; sourceId: number;
-    equipmentName?: string; amount: number; amountPaid: number; depositApplied: number; status: string;
-};
-type SettlementIncident = {
-    id: number; type: 'damage' | 'missing'; equipmentName?: string;
-    reason?: string; status?: string; decisionStatus?: string | null; quantity?: number;
-};
-type SettlementStatement = {
-    booking: {status: string; reference: string; name: string; balance: number};
-    depositRequired: number; depositCollected: number; depositApplied: number;
-    depositRefunded: number; depositHeld: number; claimBalance: number;
-    claims: SettlementClaim[];
-};
-
-// This modal lives in ManagerBookings: no new project component or unrelated file.
-function SecurityDepositSettlementModal({booking,onClose,onSaved}: {
-    booking: Booking;
-    onClose: () => void;
-    onSaved: (completed: boolean) => Promise<void>;
-}) {
-    const [statement,setStatement]=useState<SettlementStatement|null>(null);
-    const [incidents,setIncidents]=useState<SettlementIncident[]>([]);
-    const [loading,setLoading]=useState(true);
-    const [busy,setBusy]=useState(false);
-    const [error,setError]=useState('');
-    const [selected,setSelected]=useState('');
-    const [charge,setCharge]=useState('');
-    const [reason,setReason]=useState('');
-    const [refund,setRefund]=useState('');
-    const [customerPaid,setCustomerPaid]=useState('');
-    const [verified,setVerified]=useState(false);
-    const [refundVerified,setRefundVerified]=useState(false);
-    const [lossConfirmed,setLossConfirmed]=useState(false);
-
-    const branchId=Number(booking.branchId??booking.branch_id??0);
-    async function request(action:string,extra:Record<string,unknown>={}) {
-        const token=sessionStorage.getItem('token');
-        if(!token)throw new Error('Your login session has expired.');
-        const res=await fetch('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},
-            body:JSON.stringify({action,bookingId:booking.id,branch_id:branchId,...extra}),cache:'no-store'});
-        const text=await res.text();
-        let data:Record<string,unknown>={};
-        try {data=text?JSON.parse(text) as Record<string,unknown>:{};}catch {throw new Error(`Bookings API returned an invalid response (HTTP ${res.status}).`);}
-        if(!res.ok||data.error)throw new Error(typeof data.error==='string'?data.error:`Bookings API error (HTTP ${res.status}).`);
-        return data;
-    }
-    async function refresh() {
-        const [info,records]=await Promise.all([
-            request('get_booking_financial_statement'),request('get_booking_claim_sources')
-        ]);
-        if(!info.statement)throw new Error('Financial statement is unavailable for this booking.');
-        setStatement(info.statement as SettlementStatement);
-        const lists=records as unknown as {damage?:Omit<SettlementIncident,'type'>[];missing?:Omit<SettlementIncident,'type'>[]};
-        setIncidents([
-            ...(lists.damage??[]).map(x=>({...x,type:'damage' as const})),
-            ...(lists.missing??[]).map(x=>({...x,type:'missing' as const}))
-        ]);
-    }
-    useEffect(()=>{
-        let active=true;
-        void refresh().catch(e=>{if(active)setError(e instanceof Error?e.message:'Could not load settlement details.');})
-            .finally(()=>{if(active)setLoading(false);});
-        return ()=>{active=false;};
-    },[booking.id,branchId]);
-
-    const held=Math.max(0,Number(statement?.depositHeld??0));
-    // Render ONE settlement workflow based on actual Staff inspection findings,
-    // not a Manager-selected Refund/Damage tab. Keep resolved incidents visible
-    // for audit, but never allow a settled or waived claim to be charged again.
-    const chargeableIncidents=incidents.filter(i=>
-        i.type==='damage'||(i.type==='missing'&&['pending','writeoff'].includes(String(i.status||'').toLowerCase())));
-    const outstandingFor=(i:SettlementIncident)=>{
-        const claim=statement?.claims.find(c=>c.sourceType===i.type&&c.sourceId===i.id);
-        return claim?.status==='approved'
-            ? Math.max(0,Number(claim.amount)-Number(claim.amountPaid)-Number(claim.depositApplied))
-            : 0;
-    };
-    const actionableIncidents=chargeableIncidents.filter(i=>{
-        const claim=statement?.claims.find(c=>c.sourceType===i.type&&c.sourceId===i.id);
-        return !claim || (claim.status==='approved'&&outstandingFor(i)>0.005);
-    });
-    const mode:'refund'|'damage'=actionableIncidents.length>0?'damage':'refund';
-    const selectedIncident=actionableIncidents.find(i=>`${i.type}:${i.id}`===selected)??actionableIncidents[0];
-    const savedClaim=statement?.claims.find(c=>c.sourceType===selectedIncident?.type&&c.sourceId===selectedIncident?.id);
-    const alreadyApproved=!!savedClaim&&savedClaim.status==='approved';
-    const approvedCharge=alreadyApproved?Number(savedClaim?.amount??0):Number(charge||0);
-    const owed=Math.max(0,alreadyApproved&&selectedIncident?outstandingFor(selectedIncident):approvedCharge);
-    const applied=Math.min(held,owed);
-    const additionalDue=Math.max(0,Math.round((owed-applied)*100)/100);
-    // Display the customer's remaining refundable deposit after the current charge.
-    // This is a preview, not a recorded refund; the existing verified-refund flow stays unchanged.
-    const finalRefund=Math.max(0,Math.round((held-applied)*100)/100);
-    const maxRefund=held;
-    const refundValue=mode==='refund'?Number(refund||0):0;
-    const receivedValue=Number(customerPaid||0);
-    const moneyValid=(raw:string,value:number)=>raw.trim()===''||(
-        Number.isFinite(value)&&value>=0&&Math.abs(value*100-Math.round(value*100))<0.001);
-    const pendingDecisions=chargeableIncidents.filter(i=>!i.decisionStatus||i.decisionStatus==='pending');
-    const pendingMissing=incidents.some(i=>i.type==='missing'&&i.status==='pending');
-    const confirmingSelectedLoss=selectedIncident?.type==='missing'&&selectedIncident.status==='pending';
-    const refundBlocked=pendingDecisions.length>0||pendingMissing||Number(statement?.claimBalance??0)>0.005;
-
-    async function save() {
-        if(!statement||busy)return;
-        if(String(statement.booking.status).toLowerCase()!=='pending settlement'){
-            setError('Booking is not awaiting settlement. Refresh the page.');return;
-        }
-        if(mode==='refund'&&(!moneyValid(refund,refundValue)||refundValue>maxRefund+0.005)){
-            setError(`Refund must be between ₱0.00 and ${peso(maxRefund)} (two decimal places).`);return;
-        }
-        if(mode==='refund'&&refundValue>0&&!refundVerified){
-            setError('Confirm that the customer actually received the stated refund.');return;
-        }
-        if(mode==='damage'){
-            if(!selectedIncident){setError('Select a documented damage or missing-item incident.');return;}
-            if(savedClaim&&!alreadyApproved){setError('This claim is already settled or waived. Select another unresolved incident.');return;}
-            if(!alreadyApproved&&(!charge.trim()||!moneyValid(charge,approvedCharge)||reason.trim().length<10)){
-                setError('Enter an approved charge (₱0 for a waived charge) and at least 10 characters explaining the decision.');return;
-            }
-            if(confirmingSelectedLoss&&!lossConfirmed){
-                setError('Confirm that the reported missing equipment is permanently lost before recording the charge or waiver.');return;
-            }
-            if(!moneyValid(customerPaid,receivedValue)||receivedValue>additionalDue+0.005){
-                setError(`Additional payment received must not exceed ${peso(additionalDue)}.`);return;
-            }
-            if(receivedValue>0&&!verified){setError('Verify actual receipt of additional customer payment.');return;}
-        }else if(refundBlocked){
-            setError('Resolve every recorded equipment incident and outstanding charge before refunding the deposit.');return;
-        }else if(refundValue<=0&&held>0){
-            setError('Enter the amount actually refunded to the customer.');return;
-        }
-        setBusy(true);setError('');
-        try {
-            const data=await request('settle_booking_security_deposit',{
-                requestKey:crypto.randomUUID().replace(/-/g,''),mode,refundAmount:refundValue,
-                refundVerified:mode==='refund'&&refundValue>0?refundVerified:false,
-                ...(mode==='damage'?{
-                    sourceType:selectedIncident?.type,sourceId:selectedIncident?.id,
-                    chargeAmount:alreadyApproved?0:approvedCharge,reason:reason.trim(),
-                    additionalPaymentReceived:receivedValue,paymentVerified:receivedValue>0?verified:false,
-                    confirmPermanentLoss:confirmingSelectedLoss?lossConfirmed:false
-                }:{}),
-            });
-            await onSaved(Boolean(data.completed));
-            if(data.completed){onClose();return;}
-            setRefund('');setCharge('');setReason('');setCustomerPaid('');setVerified(false);setRefundVerified(false);setLossConfirmed(false);setSelected('');
-            await refresh();
-        }catch(e){setError(e instanceof Error?e.message:'Unable to save settlement.');}
-        finally{setBusy(false);}
-    }
-
-    return <div className="fixed inset-0 z-[180] flex items-center justify-center bg-black/55 px-3 py-6">
-        <div role="dialog" aria-modal="true" aria-labelledby="deposit-settlement-title"
-             className="flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl">
-            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#EFE6F5] px-5 py-4">
-                <h2 id="deposit-settlement-title" className="text-lg font-bold text-[#25143F]">Settle Security Deposit &amp; Charges</h2>
-                <button type="button" disabled={busy} onClick={onClose} aria-label="Close settlement dialog" className="rounded-lg p-2 hover:bg-[#F7F1FF] disabled:opacity-50"><X size={18}/></button>
-            </div>
-            <div className="min-h-0 overflow-y-auto px-5 py-4">
-                <p className="text-xs text-[#806A8C]">{booking.name} · {booking.bookingReference||`#${booking.id}`}</p>
-                {loading?<p className="mt-5 text-sm text-[#806A8C]">Loading verified deposit and inspection records…</p>:
-                    statement&&<>
-                        <section className="mt-4 rounded-xl border border-[#E7DEEF] bg-[#FAF8FD] p-4">
-                            <div className="mb-3 flex items-center justify-between gap-3">
-                                <h3 className="text-sm font-bold text-[#2B174C]">Security deposit</h3>
-                                <span className="text-xs text-[#7A698A]">Refundable amount</span>
-                            </div>
-                            <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-xs text-[#675775]">
-                                <div>Collected <strong className="mt-1 block text-sm text-[#21132F]">{peso(statement.depositCollected)}</strong></div>
-                                <div>Applied to claims <strong className="mt-1 block text-sm text-[#21132F]">{peso(statement.depositApplied)}</strong></div>
-                                <div>Previously refunded <strong className="mt-1 block text-sm text-[#21132F]">{peso(statement.depositRefunded)}</strong></div>
-                                <div>Still held <strong className="mt-1 block text-base text-[#4D2A96]">{peso(held)}</strong></div>
-                            </div>
-                        </section>
-
-                        <section className="mt-4 space-y-2">
-                            <h3 className="text-sm font-bold text-[#2B174C]">Affected equipment / incident</h3>
-                            {incidents.filter(i=>i.type==='damage'||i.status!=='found').length===0?
-                                <p className="rounded-xl border border-[#E6DDF0] px-3 py-3 text-sm text-[#675775]">No damaged or missing rental items recorded by Staff.</p>:
-                                <div className="divide-y divide-[#EFE7F4] overflow-hidden rounded-xl border border-[#E6DDF0]">
-                                    {incidents.filter(i=>i.type==='damage'||i.status!=='found').map(i=>{
-                                        const key=`${i.type}:${i.id}`;
-                                        const selectable=actionableIncidents.some(item=>item.type===i.type&&item.id===i.id);
-                                        const active=mode==='damage'&&selectedIncident?.type===i.type&&selectedIncident?.id===i.id;
-                                        const rowClass=`w-full px-3 py-3 text-left ${active?'bg-[#F6F0FF]':'bg-white'}`;
-                                        // Both incident sources return Staff's recorded reason. Remove only
-                                        // the system-generated booking prefix, retaining the actual notes.
-                                        const recordedReason=String(i.reason??'').trim();
-                                        const staffNote=(i.type==='damage'
-                                            ? recordedReason.replace(/^Rental damage [^:]+:\s*/i,'')
-                                            : recordedReason.replace(/^Booking [^:]+:\s*/i,'')).trim();
-                                        const details=<>
-                                    <span className="flex items-center justify-between gap-3">
-                                        <span className="min-w-0 text-sm font-semibold text-[#29183D]">{i.equipmentName||`Equipment #${i.id}`}</span>
-                                        <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold ${i.type==='damage'?'bg-[#FFF3DF] text-[#8F5700]':'bg-[#FDECEC] text-[#B42318]'}`}>
-                                            {i.type==='damage'?'Damaged':'Missing'}
-                                        </span>
-                                    </span>
-                                            <span className="mt-1.5 block whitespace-pre-wrap break-words text-xs leading-5 text-[#746482]">
-                                        <span className="font-semibold">Staff notes: </span>{staffNote||'No reason or inspection notes recorded.'}
-                                    </span>
-                                        </>;
-                                        return selectable?
-                                            <button key={key} type="button" aria-pressed={active}
-                                                    aria-label={`Set charge for ${i.equipmentName||`Equipment #${i.id}`} (${i.type})`}
-                                                    onClick={()=>{setSelected(key);setCharge('');setReason('');setCustomerPaid('');setVerified(false);setLossConfirmed(false);}}
-                                                    className={`${rowClass} cursor-pointer hover:bg-[#F8F4FC] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#7F5BB5]`}>
-                                                {details}
-                                            </button>:
-                                            <div key={key} className={rowClass}>{details}</div>;
-                                    })}
-                                </div>}
-                        </section>
-                        {pendingMissing&&<p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">A missing-item report needs a Manager decision. Select the item below and confirm permanent loss to record its charge or waiver here in Bookings.</p>}
-
-                        {mode==='damage'&&selectedIncident?<section className="mt-4 space-y-3 border-t border-[#ECE4F2] pt-4">
-                            <h3 className="text-sm font-bold text-[#2B174C]">Customer charge</h3>
-                            {confirmingSelectedLoss&&<label className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs leading-5 text-amber-950">
-                                <input type="checkbox" checked={lossConfirmed} onChange={e=>setLossConfirmed(e.target.checked)} className="mt-1"/>
-                                <span><strong>Confirm permanent loss of {selectedIncident.equipmentName||'this equipment'}.</strong> I verified Staff's missing-item report. Saving this decision will deduct the lost units from rental stock, even if the customer charge is ₱0. An item later recovered needs a separate stock reconciliation.</span>
-                            </label>}
-                            {alreadyApproved?<div className="rounded-lg bg-[#F8F4FC] p-3 text-xs text-[#37234A]">
-                                Approved amount: <strong>{peso(approvedCharge)}</strong> · Unpaid: <strong>{peso(owed)}</strong>
-                            </div>:!savedClaim&&<>
-                                <label className="block text-xs font-semibold text-[#29183D]">Approved repair / replacement charge (₱)
-                                    <input type="number" min="0" step="0.01" value={charge} onChange={e=>setCharge(e.target.value)} placeholder="0.00 — zero means no customer charge"
-                                           className="mt-1.5 w-full rounded-xl border border-[#D9CBE8] px-3 py-3 text-sm font-normal outline-none focus:border-[#7F5BB5]"/>
-                                </label>
-                                <label className="block text-xs font-semibold text-[#29183D]">Reason for charge
-                                    <textarea value={reason} onChange={e=>setReason(e.target.value)} rows={2}
-                                              placeholder="Explain the documented damage or missing item (10+ characters)"
-                                              className="mt-1.5 w-full rounded-xl border border-[#D9CBE8] px-3 py-3 text-sm font-normal outline-none focus:border-[#7F5BB5]"/>
-                                </label>
-                            </>}
-                            <div className="space-y-2 rounded-xl bg-[#F8F4FC] p-3 text-xs">
-                                <div className="flex justify-between gap-2"><span>Deposit applied</span><strong>{peso(applied)}</strong></div>
-                                <div className="flex justify-between gap-2 font-semibold"><span>Additional payment due</span><strong className="text-[#4D2A96]">{peso(additionalDue)}</strong></div>
-                            </div>
-                            {additionalDue>0.005&&<>
-                                <p className="text-xs leading-relaxed text-[#8F5700]">
-                                    The booking stays Pending Settlement until the additional charge is fully paid. Record only verified payments actually received.
-                                </p>
-                                <label className="block text-xs font-semibold text-[#29183D]">Additional payment received (₱) · Optional
-                                    <input type="number" min="0" step="0.01" max={additionalDue} value={customerPaid}
-                                           onChange={e=>setCustomerPaid(e.target.value)} placeholder="0.00 — leave blank if unpaid"
-                                           className="mt-1.5 w-full rounded-xl border border-[#D9CBE8] px-3 py-3 text-sm font-normal outline-none focus:border-[#7F5BB5]"/>
-                                </label>
-                                {receivedValue>0&&<label className="flex items-start gap-2 text-xs text-[#514463]">
-                                    <input type="checkbox" checked={verified} onChange={e=>setVerified(e.target.checked)} className="mt-0.5"/>
-                                    I verified that this payment was actually received.
-                                </label>}
-                            </>}
-                            <p className="text-xs text-[#806A8C]">Any unused deposit can be refunded after all equipment claims are resolved.</p>
-                        </section>:<section className="mt-4 space-y-3 border-t border-[#ECE4F2] pt-4">
-                            <h3 className="text-sm font-bold text-[#2B174C]">Deposit refund</h3>
-                            {incidents.length===0&&<p className="text-xs text-[#806A8C]">No damaged or missing equipment was recorded by Staff.</p>}
-                            {refundBlocked&&<p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                Resolve the outstanding equipment incident or charge before refunding the deposit.
-                            </p>}
-                            <label className="block text-xs font-semibold text-[#29183D]">Amount actually refunded to the customer (₱)
-                                <input type="number" min="0" max={maxRefund} step="0.01" value={refund} onChange={e=>setRefund(e.target.value)}
-                                       placeholder="0.00" disabled={refundBlocked||held<=0}
-                                       className="mt-1.5 w-full rounded-xl border border-[#D9CBE8] px-3 py-3 text-sm font-normal outline-none focus:border-[#7F5BB5] disabled:bg-[#F7F4F9]"/>
-                                <span className="mt-1 block font-normal text-[#806A8C]">Available for refund: {peso(maxRefund)}.</span>
-                            </label>
-                            {refundValue>0&&<label className="flex items-start gap-2 text-xs text-[#514463]">
-                                <input type="checkbox" checked={refundVerified} onChange={e=>setRefundVerified(e.target.checked)} className="mt-0.5"/>
-                                I confirm the refund was actually given to the customer.
-                            </label>}
-                        </section>}
-                        <section className="mt-4 rounded-xl border border-[#DACDEB] bg-[#F8F4FC] px-4 py-3" aria-label="Final customer refund calculation">
-                            <div className="flex items-center justify-between gap-3">
-                                <span className="text-sm font-bold text-[#2B174C]">Final refund to customer</span>
-                                <strong className="shrink-0 text-lg font-bold text-[#4D2A96]">{peso(finalRefund)}</strong>
-                            </div>
-                            <p className="mt-1 text-xs leading-relaxed text-[#806A8C]">
-                                {mode==='damage'
-                                    ? 'Calculated after applying the proposed charge to the held deposit. This amount may change if other incidents or charges remain unresolved; refund it only after all claims are settled.'
-                                    : refundBlocked
-                                        ? 'This amount remains on hold until all damage, missing-item and claim reviews are resolved.'
-                                        : 'This is the remaining refundable deposit. Record the amount actually given to the customer above before completing the booking.'}
-                            </p>
-                        </section>
-                        <p className="mt-4 text-xs leading-relaxed text-[#806A8C]">Only amounts actually received or refunded are recorded. The booking becomes Completed automatically after all item checks, claims, and deposit balances are settled.</p>
-                    </>}
-                {error&&<p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</p>}
-            </div>
-            <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-[#EFE6F5] bg-white px-5 py-4">
-                <button type="button" disabled={busy} onClick={onClose} className="rounded-lg border border-[#D8CBE7] px-4 py-2.5 text-sm font-semibold text-[#2B174C] disabled:opacity-50">Cancel</button>
-                <button type="button" disabled={busy||loading||!statement||
-                    (mode==='damage'&&!selectedIncident)||
-                    (mode==='refund'&&refundBlocked)}
-                        onClick={()=>void save()}
-                        className="rounded-lg bg-[#4D2A96] px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">
-                    {busy?'Saving settlement…':'Save Settlement'}
-                </button>
-            </div>
-        </div>
-    </div>;
-}
-
 function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
     booking: Booking;
     busy: boolean;

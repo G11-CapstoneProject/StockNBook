@@ -11,7 +11,7 @@ import {
 import {
     useRentalInventory, availableNow, hasRentalStockDiscrepancy,
     type RentalEquipment, type RentalActivity, type RentalMaintenanceRecord,
-    type RentalPendingDamageObservation,
+    type RentalMaintenanceHistory, type RentalPendingInspection, type RentalMissingReport,
     type RentalMutation, type RentalSummary, type RentalImportRow, type RentalPurchaseDetails,
     type RentalBulkPurchase, type RentalPricingMethod,
     calculateCostBasedRentalRate,
@@ -36,6 +36,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const [retireItem,setRetireItem] = React.useState<RentalEquipment|null>(null);
     const [notice, setNotice] = React.useState("");
     const [importOpen, setImportOpen] = React.useState(false);
+    const [conditionTab,setConditionTab] = React.useState<"active"|"history">("active");
+    const [conditionDetail,setConditionDetail] = React.useState<ManagerConditionIssue|RentalMaintenanceHistory|null>(null);
     const [categoriesOpen, setCategoriesOpen] = React.useState(false);
     const [supplierPaymentsOpen, setSupplierPaymentsOpen] = React.useState(false);
     const [exportOpen, setExportOpen] = React.useState(false);
@@ -67,6 +69,10 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         return found && (category === "All Categories" || item.category === category) &&
             (status === "All Status" || equipmentStatuses(item, Boolean(appliedDates), availability).includes(status));
     }), [rental.equipment, search, category, status, datesAvailability, appliedDates]);
+
+    const managerConditionIssues=React.useMemo(()=>buildManagerConditionIssues(
+            rental.maintenanceRecords,rental.missingReports,rental.pendingInspections),
+        [rental.maintenanceRecords,rental.missingReports,rental.pendingInspections]);
 
     const resetDates = () => {
         setAppliedDates(null); setDatesAvailability(null);
@@ -112,7 +118,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
 
     return (
         <div className="space-y-4" aria-label="Rental inventory">
-            {!canManage&&<p role="status" className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3 text-xs text-[#5330B6]">View-only Inventory access: product details and maintenance reports remain visible, but catalog changes, repair approvals and purchases require Full access.</p>}
+            {!canManage&&<p role="status" className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3 text-xs text-[#5330B6]">View-only Inventory access: product details and maintenance reports remain visible, but catalog changes and purchases require Full access.</p>}
             {rental.error && (
                 <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E8CAD2] bg-[#FFF5F7] px-4 py-3 text-sm text-[#A92741]">
                     <span>{rental.error}{rental.connected ? " Showing the last loaded data." : ""}</span>
@@ -148,36 +154,38 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             </section>}
 
             <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
-                {/* Every open maintenance case is visible here. Actions stay in the
-                    Manager's table instead of being hidden in a separate dialog. */}
-                <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm" aria-label="Maintenance and condition approvals">
-                    <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
-                        <div className="flex min-w-0 items-start gap-3">
-                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><Wrench size={19}/></span>
-                            <div>
-                                <h2 className="text-[15px] font-bold text-[#21132E]">Maintenance &amp; Condition</h2>
-                                <p className="mt-0.5 text-[11px] text-[#86778F]">Approve reported repairs or completed stock releases using the Action column.</p>
+                {/* Read-only oversight: Staff owns routine repairs/recoveries. */}
+                <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm" aria-label="Equipment condition and monitoring">
+                    <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
+                        <div className="flex min-w-0 flex-1 items-center gap-3">
+                            <span className="shrink-0 rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]"><Wrench size={18}/></span>
+                            <div className="min-w-0">
+                                <h3 className="text-[15px] font-bold text-[#21132E]">Equipment Condition &amp; Monitoring</h3>
+                                <p className="text-[11px] leading-4 text-[#86778F]">Monitor unresolved equipment issues and verified Staff work.</p>
                             </div>
                         </div>
-                        {!rental.loading && rental.maintenanceDataReady && <span className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold ${rental.maintenanceRecords.some(needsManagerMaintenanceDecision) ? "bg-[#FFF1E4] text-[#A85B16]" : "bg-[#F5F1F8] text-[#695D75]"}`}>
-                            {rental.maintenanceRecords.filter(needsManagerMaintenanceDecision).length} for Manager approval
-                        </span>}
+                        <div className="ml-auto flex shrink-0 items-center gap-2" role="tablist" aria-label="Equipment condition views">
+                            <button type="button" role="tab" aria-selected={conditionTab==='active'} onClick={()=>setConditionTab('active')}
+                                    className={`inline-flex h-9 items-center justify-center whitespace-nowrap rounded-xl border px-3 text-[11px] font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] ${conditionTab==='active'?'border-[#D8CBE7] bg-[#F4EFFD] text-[#5B32C5]':'border-[#E6DDF0] bg-white text-[#2B174C] hover:bg-[#F7F1FF]'}`}>
+                                Active Issues
+                            </button>
+                            <button type="button" role="tab" aria-selected={conditionTab==='history'} onClick={()=>setConditionTab('history')}
+                                    className={`inline-flex h-9 items-center justify-center whitespace-nowrap rounded-xl border px-3 text-[11px] font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] ${conditionTab==='history'?'border-[#D8CBE7] bg-[#F4EFFD] text-[#5B32C5]':'border-[#E6DDF0] bg-white text-[#2B174C] hover:bg-[#F7F1FF]'}`}>
+                                Maintenance History
+                            </button>
+                        </div>
                     </div>
-                    {/* Preliminary Staff damage observations and confirmed maintenance cases
-                        share the same standard table. Observations remain view-only; only
-                        confirmed repairs can receive Manager approval. */}
                     {rental.loading ? <PanelSkeleton/> : !rental.connected ?
-                        <EmptyPanel label="Connect rental inventory to see maintenance records."/> :
-                        !rental.maintenanceDataReady ?
-                            <EmptyPanel label="The rental backend needs the maintenance records response. Apply the accompanying Lambda and SQL update."/> :
-                            rental.maintenanceRecords.length===0 && rental.pendingDamageObservations.length===0 ?
-                                <EmptyPanel label="No open repair or damage cases. Routine return inspections and cleaning are managed by Staff."/> :
-                                <MaintenanceRecordsTable records={rental.maintenanceRecords}
-                                                         pendingObservations={rental.pendingDamageObservations}
-                                                         saving={rental.saving} canManage={canManage} onSave={onSaved}/>}
-                    {rental.connected && rental.maintenanceDataReady && rental.maintenanceRecords.length>0 && <div className="shrink-0 border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-[11px] text-[#786887]">
-                        Repair approval authorizes the work, but units stay on hold. Staff reports completion before the Manager approves stock release.
-                    </div>}
+                        <EmptyPanel label="Connect rental inventory to view equipment condition."/> :
+                        !rental.monitoringDataReady ?
+                            <EmptyPanel label="Update the rental inventory Lambda and hook to display maintenance monitoring history."/> :
+                            conditionTab==='active' ? (
+                                managerConditionIssues.length===0 ? <EmptyPanel label="No active equipment issues. Staff repairs and recoveries appear in Maintenance History."/> :
+                                    <ManagerConditionIssueTable issues={managerConditionIssues} onView={setConditionDetail}/>
+                            ) : (
+                                rental.maintenanceHistory.length===0 ? <EmptyPanel label="No completed repair or recovery activity recorded yet."/> :
+                                    <ManagerConditionHistoryTable records={rental.maintenanceHistory} onView={setConditionDetail}/>
+                            )}
                 </section>
 
                 <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
@@ -205,6 +213,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             </div>
 
 
+
+            {conditionDetail&&<ManagerConditionDetails entry={conditionDetail} onClose={()=>setConditionDetail(null)}/>}
 
             {/* Rental supplier payments are separate from equipment stock actions. */}
             <section aria-label="Rental supplier payments" className="rounded-2xl border border-[#E7DFEC] bg-white px-4 py-3.5 shadow-sm">
@@ -435,122 +445,118 @@ function IssueBadge({issue}:{issue:string}) {
     return <span title={explanation[issue]} className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-semibold ${style}`}>{issue}</span>;
 }
 
-/* The maintenance panel reads open transactions from rental_maintenance_records.
-   A repair's estimated completion is optional: never invent one for historical data. */
-function MaintenanceDate({value}:{value:string|null}) {
-    if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return <>—</>;
-    const parsed = new Date(`${value}T12:00:00Z`);
-    return <>{parsed.toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric",year:"numeric"})}</>;
+// Read-only Manager oversight. Staff retains full responsibility for confirming
+// actual repairs/recoveries; customer liability is settled in Bookings.
+type ManagerConditionIssue = {
+    kind:"maintenance"|"missing"|"inspection"; key:string; equipmentName:string;
+    units:number; title:string; status:string; notes:string; reportedAt:string;
+    reference:string; bookingReference:string|null;
+};
+function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:RentalMissingReport[],
+                                     inspections:RentalPendingInspection[]):ManagerConditionIssue[] {
+    const active:ManagerConditionIssue[]=[];
+    for(const record of records){
+        active.push({kind:"maintenance",key:`maintenance-${record.id}`,equipmentName:record.equipmentName,
+            units:record.units,title:record.status==='Routine'?'Routine care':record.status==='For Inspection'?'Safety inspection':'Repair / safety check',
+            status:record.status==='Routine'?'Needs Care':record.status==='For Inspection'?'On Hold / Inspection':'On Hold / Repair',
+            notes:record.reason,reportedAt:record.dateReported,reference:`MNT-${String(record.id).padStart(6,'0')}`,
+            bookingReference:record.bookingReference||null});
+    }
+    for(const report of missing){
+        const units=Number(report.remainingUnits??report.quantity);
+        if(!Number.isSafeInteger(units)||units<=0)continue;
+        active.push({kind:"missing",key:`missing-${report.id}`,equipmentName:report.equipmentName,
+            units,title:"Missing equipment",status:"Missing / Unrecovered",notes:report.reason,
+            reportedAt:report.reportedAt,reference:`MISS-${String(report.id).padStart(6,'0')}`,
+            bookingReference:report.bookingReference||null});
+    }
+    for(const inspection of inspections){
+        active.push({kind:"inspection",key:`inspection-${inspection.allocationId}`,
+            equipmentName:inspection.equipmentName,units:inspection.units,
+            title:inspection.observedDamageUnits>0?`Return inspection (${inspection.observedDamageUnits} suspected damaged)`:'Previous return inspection',
+            status:"Pending Staff Inspection",notes:inspection.notes||'Awaiting Staff condition verification.',
+            reportedAt:inspection.reportedAt,reference:`Allocation #${inspection.allocationId}`,
+            bookingReference:inspection.bookingReference||null});
+    }
+    const priority={missing:0,maintenance:1,inspection:2};
+    return active.sort((a,b)=>priority[a.kind]-priority[b.kind]||b.reportedAt.localeCompare(a.reportedAt));
 }
-// Two existing backend approvals, surfaced directly in the Manager table.
-// Staff work in progress must never be confused with stock already released.
-function managerMaintenanceStage(record:RentalMaintenanceRecord):"release"|"approve"|"staff" {
-    if(!record.repairApproved) return "approve";
-    return record.pendingCompletionId ? "release" : "staff";
+function ManagerConditionDate({value}:{value:string|null|undefined}) {
+    if(!value)return <>—</>;
+    const parsed=/^\d{4}-\d{2}-\d{2}$/.test(value)?new Date(`${value}T12:00:00+08:00`):new Date(value);
+    return <>{Number.isNaN(parsed.getTime())?'—':parsed.toLocaleDateString('en-PH',{timeZone:'Asia/Manila',month:'short',day:'numeric',year:'numeric'})}</>;
 }
-function needsManagerMaintenanceDecision(record:RentalMaintenanceRecord):boolean {
-    return managerMaintenanceStage(record)!=="staff";
-}
-function MaintenanceStageBadge({record}:{record:RentalMaintenanceRecord}) {
-    const stage=managerMaintenanceStage(record);
-    return <span className={`inline-flex rounded-md px-2 py-1 text-[10px] font-semibold ${
-        stage==="release" ? "bg-[#EAF0FF] text-[#2855A5]" :
-            stage==="approve" ? "bg-[#FFF2D7] text-[#995F00]" :
-                "bg-[#F1EBFF] text-[#5330B6]"
-    }`}>{stage==="release"?"Awaiting Stock Release":stage==="approve"?"Awaiting Repair Approval":"Repair Authorized"}</span>;
-}
-function MaintenanceRecordsTable({records,pendingObservations,saving,canManage,onSave}:{
-    records:RentalMaintenanceRecord[];
-    pendingObservations:RentalPendingDamageObservation[];
-    saving:boolean;canManage:boolean;
-    onSave:(mutation:RentalMutation)=>Promise<void>;
-}) {
-    const [approvalError,setApprovalError]=React.useState("");
-    const [approvalSuccess,setApprovalSuccess]=React.useState("");
-    const [pendingId,setPendingId]=React.useState<number|null>(null);
-    const prioritized=React.useMemo(()=>[...records].sort((a,b)=>
-        Number(needsManagerMaintenanceDecision(b))-Number(needsManagerMaintenanceDecision(a)) ||
-        Number(managerMaintenanceStage(b)==="release")-Number(managerMaintenanceStage(a)==="release") ||
-        a.dateReported.localeCompare(b.dateReported)),[records]);
-    const approve=async(record:RentalMaintenanceRecord)=>{
-        if(!canManage){setApprovalError("Full Inventory access is required for Manager approvals.");return;}
-        const isRelease=managerMaintenanceStage(record)==="release";
-        if(!isRelease && managerMaintenanceStage(record)!=="approve") return;
-        const message=isRelease
-            ? `Approve release of ${record.pendingCompletionUnits ?? 0} repaired ${record.equipmentName} unit(s) back into available stock?`
-            : `Authorize repair for ${record.equipmentName}? The equipment remains on hold until Staff finishes and the Manager approves its release.`;
-        if(!window.confirm(message))return;
-        setApprovalError("");setApprovalSuccess("");setPendingId(record.id);
-        try {
-            await onSave(isRelease
-                ? {action:"approve_repair_completion",requestId:record.pendingCompletionId!}
-                : {action:"approve_maintenance_repair",maintenanceId:record.id});
-            setApprovalSuccess(isRelease
-                ? `Stock release approved for ${record.equipmentName}.`
-                : `Repair authorized for ${record.equipmentName}. Staff can complete the work.`);
-        } catch(error) {
-            setApprovalError(error instanceof Error?error.message:"Unable to approve the maintenance request.");
-        } finally {setPendingId(null);}
-    };
-    return <div className="min-h-0 flex-1 overflow-auto overscroll-contain" role="region" aria-label="Open maintenance records and approval actions" tabIndex={0}>
-        {approvalError&&<p role="alert" className="mx-3 mt-3 rounded-lg border border-red-200 bg-red-50 p-2.5 text-xs text-red-700">{approvalError}</p>}
-        {approvalSuccess&&<p role="status" className="mx-3 mt-3 rounded-lg border border-[#D3EAD9] bg-[#F2FBF4] p-2.5 text-xs text-[#237442]">{approvalSuccess}</p>}
-        <table className="w-full min-w-[570px] text-left text-[11px]">
-            <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]">
-            <tr className="border-b border-[#E9E1EE]">
-                <th className="px-3 py-3 font-semibold">Equipment / Units</th>
-                <th className="px-3 py-3 font-semibold">Issue / Schedule</th>
-                <th className="px-2 py-3 font-semibold">Approval Status</th>
-                <th className="px-3 py-3 text-center font-semibold">Action</th>
+function ManagerConditionIssueTable({issues,onView}:{issues:ManagerConditionIssue[];onView:(value:ManagerConditionIssue)=>void}){
+    return <div className="min-h-0 flex-1 overflow-auto overscroll-contain" role="region" aria-label="Active equipment issues" tabIndex={0}>
+        <table className="w-full min-w-[550px] text-left text-[11px]">
+            <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr className="border-b border-[#E9E1EE]">
+                <th className="px-3 py-3 font-semibold">Equipment</th><th className="px-3 py-3 font-semibold">Issue / Ref.</th>
+                <th className="px-2 py-3 font-semibold">Status</th><th className="px-3 py-3 text-center font-semibold">Action</th>
             </tr></thead>
-            <tbody>
-            {pendingObservations.map(observation=><tr key={`observed-${observation.allocationId}`}
-                                                      className="border-b border-[#EFE8F2] align-top last:border-0">
-                <td className="px-3 py-3">
-                    <p className="font-semibold text-[#2B174C]">{observation.equipmentName}</p>
-                    <p className="mt-1 text-[#776887]">{observation.observedDamagedUnits} possibly damaged {observation.observedDamagedUnits===1?"unit":"units"}</p>
-                    <p className="mt-1 break-all text-[10px] text-[#5330B6]">Booking: {observation.bookingReference}</p>
-                </td>
-                <td className="px-3 py-3 text-[#5F4E75]">
-                    <p className="break-words">Damage observed at return (not yet confirmed)</p>
-                    {observation.notes&&<p className="mt-1 break-words text-[10px] text-[#86778F]" title={observation.notes}>{observation.notes}</p>}
-                    <p className="mt-1 text-[10px] text-[#86778F]">Reported: <MaintenanceDate value={observation.reportedAt}/></p>
-                </td>
-                <td className="px-2 py-3">
-                    <span className="inline-flex rounded-md bg-[#FFF2D7] px-2 py-1 text-[10px] font-semibold text-[#995F00]">Pending Staff Inspection</span>
-                </td>
-                <td className="px-3 py-3 text-center">
-                    <span className="text-[11px] text-[#86778F]">Waiting for Staff inspection</span>
-                </td>
-            </tr>)}
-            {prioritized.map(record=>{
-                const stage=managerMaintenanceStage(record);
-                return <tr key={record.id} className="border-b border-[#EFE8F2] align-top last:border-0">
-                    <td className="px-3 py-3">
-                        <p className="font-semibold text-[#2B174C]">{record.equipmentName}</p>
-                        <p className="mt-1 text-[#776887]">{record.units} unit(s) on hold</p>
-                        <p className="mt-0.5 text-[#9B8AAA]">Record #{record.id}</p>
-                        {record.bookingReference&&<p className="mt-1 break-all text-[10px] text-[#5330B6]" title="Customer charge decisions are made from the booking's Billing tab">Booking: {record.bookingReference}</p>}
-                    </td>
-                    <td className="px-3 py-3 text-[#5F4E75]">
-                        <p className="max-w-[210px] break-words" title={record.reason}>{record.reason||"No reason provided"}</p>
-                        <p className="mt-1 text-[10px] text-[#86778F]">Reported: <MaintenanceDate value={record.dateReported}/></p>
-                        {record.estimatedCompletion&&<p className="mt-0.5 text-[10px] text-[#86778F]">Estimated: <MaintenanceDate value={record.estimatedCompletion}/></p>}
-                        {stage==="release"&&<p className="mt-1 text-[10px] text-[#5330B6]">{record.pendingCompletionUnits} unit(s) completed by Staff</p>}
-                    </td>
-                    <td className="px-2 py-3"><MaintenanceStageBadge record={record}/></td>
-                    <td className="px-3 py-3 text-center">
-                        {stage==="staff" ? <span className="text-[11px] text-[#86778F]">Waiting for Staff completion</span> :
-                            <button type="button" disabled={saving||pendingId!==null||!canManage}
-                                    onClick={()=>void approve(record)}
-                                    title={!canManage?"Full Inventory access is required":undefined}
-                                    className="inline-flex min-h-[35px] items-center justify-center rounded-lg bg-[#2B174C] px-3 py-2 text-[11px] font-semibold text-white transition hover:bg-[#432569] disabled:cursor-not-allowed disabled:opacity-40">
-                                {pendingId===record.id?"Saving…":stage==="release"?"Approve Stock Release":"Approve Repair"}
-                            </button>}
-                    </td>
-                </tr>;
-            })}</tbody>
+            <tbody>{issues.map(issue=><tr key={issue.key} className="border-b border-[#EFE8F2] align-top last:border-0">
+                <td className="px-3 py-3"><p className="font-semibold text-[#2B174C]">{issue.equipmentName}</p>
+                    <p className="mt-1 text-[#86778F]">{issue.units} {issue.units===1?'unit':'units'}</p></td>
+                <td className="px-3 py-3"><p className="font-medium text-[#49345A]">{issue.title}</p>
+                    <p className="mt-1 break-all text-[10px] text-[#86778F]">{issue.reference}</p></td>
+                <td className="px-2 py-3"><span className={`inline-flex rounded-md px-2 py-1 text-[10px] font-semibold ${issue.kind==='missing'?'bg-[#FFF0F0] text-[#B02733]':'bg-[#FFF2D7] text-[#956000]'}`}>{issue.status}</span></td>
+                <td className="px-3 py-3 text-center"><button type="button" onClick={()=>onView(issue)}
+                                                              className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3]">View Details</button></td>
+            </tr>)}</tbody>
         </table>
+    </div>;
+}
+function ManagerConditionHistoryTable({records,onView}:{records:RentalMaintenanceHistory[];onView:(value:RentalMaintenanceHistory)=>void}){
+    return <div className="min-h-0 flex-1 overflow-auto overscroll-contain" role="region" aria-label="Completed repair and recovery history" tabIndex={0}>
+        <table className="w-full min-w-[550px] text-left text-[11px]">
+            <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr className="border-b border-[#E9E1EE]">
+                <th className="px-3 py-3 font-semibold">Equipment</th><th className="px-3 py-3 font-semibold">Completed Activity</th>
+                <th className="px-2 py-3 font-semibold">Recorded By</th><th className="px-3 py-3 text-center font-semibold">Action</th>
+            </tr></thead>
+            <tbody>{records.map(record=><tr key={`history-${record.id}`} className="border-b border-[#EFE8F2] align-top last:border-0">
+                <td className="px-3 py-3"><p className="font-semibold text-[#2B174C]">{record.equipmentName}</p>
+                    <p className="mt-1 text-[#86778F]">{record.quantity} {record.quantity===1?'unit':'units'}</p></td>
+                <td className="px-3 py-3"><p className="font-medium text-[#49345A]">{record.type==='maintenance_completed'?'Repair Completed':'Recovery Recorded'}</p>
+                    <p className="mt-1 text-[10px] text-[#86778F]"><ManagerConditionDate value={record.occurredAt}/></p></td>
+                <td className="px-2 py-3 text-[#5F4E75]">{record.actorName||'Not recorded'}</td>
+                <td className="px-3 py-3 text-center"><button type="button" onClick={()=>onView(record)}
+                                                              className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3]">View Details</button></td>
+            </tr>)}</tbody>
+        </table>
+    </div>;
+}
+function ManagerConditionDetails({entry,onClose}:{entry:ManagerConditionIssue|RentalMaintenanceHistory;onClose:()=>void}) {
+    const issue='kind' in entry;
+    const bookingReference=entry.bookingReference;
+    const reference=issue?entry.reference:entry.referenceNumber;
+    const date=issue?entry.reportedAt:entry.occurredAt;
+    const notes=entry.notes;
+    return <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#160C26]/65 p-4" onClick={onClose} role="presentation">
+        <section role="dialog" aria-modal="true" aria-label="Equipment condition details"
+                 onClick={event=>event.stopPropagation()} className="w-full max-w-lg rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
+            <div className="flex items-start justify-between gap-3"><div>
+                <h3 className="text-base font-bold text-[#21132E]">{entry.equipmentName}</h3>
+                <p className="mt-1 text-xs text-[#806A8C]">{issue?entry.status:entry.type==='maintenance_completed'?'Repair completed':'Recovery recorded'}</p>
+            </div><button type="button" onClick={onClose} aria-label="Close details" className="rounded-lg border border-[#E6DDF0] p-2 text-[#2B174C] hover:bg-[#F7F1FF]"><X size={17}/></button></div>
+            <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
+                <div><dt className="text-[#86778F]">Recorded quantity</dt><dd className="mt-1 font-semibold text-[#21132E]">{issue?entry.units:entry.quantity} unit(s)</dd></div>
+                <div><dt className="text-[#86778F]">Recorded date</dt><dd className="mt-1 font-semibold text-[#21132E]"><ManagerConditionDate value={date}/></dd></div>
+                <div><dt className="text-[#86778F]">Reference</dt><dd className="mt-1 break-all font-semibold text-[#21132E]">{reference||'—'}</dd></div>
+                <div><dt className="text-[#86778F]">{issue?'Issue type':'Recorded by'}</dt><dd className="mt-1 font-semibold text-[#21132E]">{issue?entry.title:entry.actorName||'Not recorded'}</dd></div>
+            </dl>
+            <div className="mt-4 rounded-xl border border-[#E9E1EE] bg-[#FCFAFF] p-3">
+                <p className="text-xs font-semibold text-[#21132E]">{issue?'Incident / condition notes':'Staff activity notes'}</p>
+                <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-[#5F4E75]">{notes||'No notes recorded.'}</p>
+            </div>
+            {bookingReference&&<div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#E9E1EE] p-3">
+                <div><p className="text-[10px] text-[#86778F]">RELATED BOOKING</p><p className="mt-1 break-all text-xs font-semibold text-[#2B174C]">{bookingReference}</p></div>
+                <div className="flex flex-wrap items-center gap-2">
+                    <button type="button" onClick={()=>void navigator.clipboard?.writeText(bookingReference)} className="rounded-lg border border-[#D8CBE7] px-2.5 py-1.5 text-[11px] font-semibold text-[#2B174C]">Copy Ref.</button>
+                    <a href="/bookings" className="rounded-lg bg-[#2B174C] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#1B0D31]">Open Bookings</a>
+                </div>
+                <p className="w-full text-[10px] text-[#86778F]">Search the booking reference in Bookings to review customer settlement.</p>
+            </div>}
+            <p className="mt-4 text-[11px] text-[#86778F]">Read-only monitoring. Staff verifies physical equipment; billing decisions stay in Manager Bookings.</p>
+        </section>
     </div>;
 }
 function RetireEquipmentDialog({item,saving,close,onSave}:{

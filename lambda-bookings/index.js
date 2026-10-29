@@ -2974,7 +2974,11 @@ exports.handler = async (event) => {
                 // An issue with an approved/waived decision is no longer selectable.
                 const [missing]=await connection.execute(`SELECT m.id,m.equipment_id AS equipmentId,
                                                                  COALESCE(e.name,CONCAT('Equipment #',m.equipment_id)) AS equipmentName,
-                                                                 m.quantity,m.reason,m.status,c.status AS decisionStatus
+                                                                 GREATEST(0,m.quantity-COALESCE((SELECT SUM(mv.quantity) FROM rental_stock_movements mv
+                                                                                                 WHERE mv.store_id=m.store_id AND mv.branch_id=m.branch_id
+                                                                                                   AND mv.equipment_id=m.equipment_id AND mv.type='missing_resolved'
+                                                                                                   AND mv.reference_number=CONCAT('MISS-',LPAD(m.id,6,'0'))),0)) AS quantity,
+                                                                 m.reason,m.status,c.status AS decisionStatus
                                                           FROM rental_missing_unit_reports m LEFT JOIN booking_customer_claims c
                                                                                                        ON c.source_type='missing' AND c.source_record_id=m.id AND c.booking_id=?
                                                                                              LEFT JOIN rental_equipment e
@@ -2992,7 +2996,11 @@ exports.handler = async (event) => {
                                                          WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?
                                                            AND m.start_reason LIKE 'Rental damage %'`,
                     [bookingId,store_id,book.branch_id,book.booking_reference]);
-                return response(200,{missing,damage});
+                const [recoveredInspections]=await connection.execute(`SELECT COUNT(*) AS pending
+                                                                       FROM rental_maintenance_records WHERE store_id=? AND branch_id=? AND booking_reference=?
+                                                                                                         AND start_reason LIKE 'Recovered missing equipment (report #%'
+                                                                                                         AND quantity_remaining>0`,[store_id,book.branch_id,book.booking_reference]);
+                return response(200,{missing,damage,recoveryInspectionPending:Number(recoveredInspections[0]?.pending||0)>0});
             }
             // Manager settlement from Booking Quick Actions. The whole decision,
             // deposit application, optional customer claim payment, and refund are
@@ -3005,8 +3013,8 @@ exports.handler = async (event) => {
                 if(!/^[A-Za-z0-9_-]{12,85}$/.test(requestKey))
                     return response(400,{error:'A unique settlement request key is required.'});
                 const mode=String(body.mode||'');
-                if(!['refund','damage'].includes(mode))
-                    return response(400,{error:'Choose Refund deposit or Damage/missing settlement.'});
+                if(!['refund','damage','combined'].includes(mode))
+                    return response(400,{error:'Choose a valid security deposit settlement mode.'});
                 const refundAmount=financeCurrency(body.refundAmount??0,'Refund amount');
                 const receivedAmount=financeCurrency(body.additionalPaymentReceived??0,'Additional payment received');
                 if(mode==='refund'&&receivedAmount>0)
@@ -3020,15 +3028,16 @@ exports.handler = async (event) => {
                 if(mode==='damage'&&(!['damage','missing'].includes(sourceType)||
                     !Number.isSafeInteger(sourceId)||sourceId<=0))
                     return response(400,{error:'Select a Staff-recorded damage or confirmed missing-item incident.'});
-                const newCharge=mode==='damage' ? financeCurrency(body.chargeAmount??0,'Approved customer charge') : 0;
+                const newCharge=mode==='damage'||mode==='combined' ? financeCurrency(body.chargeAmount??0,'Approved customer charge') : 0;
                 const reason=String(body.reason||'').trim().slice(0,500);
+                if(mode==='combined'&&refundAmount>0)return response(400,{error:'Finish the combined charge first; refund remaining deposits in a separate verified action.'});
                 const branchId=Number(book.branch_id);
                 await connection.beginTransaction();
                 try {
                     const keys=[`${requestKey}-ap`,`${requestKey}-cash`,`${requestKey}-rf`];
                     const [prior]=await connection.execute(`SELECT id FROM booking_financial_events
-                                                            WHERE store_id=? AND request_key IN (?,?,?) LIMIT 1`,
-                        [store_id,...keys]);
+                                                            WHERE store_id=? AND (request_key IN (?,?,?) OR request_key LIKE ?) LIMIT 1`,
+                        [store_id,...keys,`${requestKey}-%`]);
                     if(prior.length){
                         await connection.rollback();
                         return response(200,{success:true,alreadyRecorded:true});
@@ -3066,7 +3075,7 @@ exports.handler = async (event) => {
                     if(heldCents<0)throw rentalError('Refundable deposit ledger needs reconciliation.');
                     const refundCents=Math.round(refundAmount*100);
                     const cashCents=Math.round(receivedAmount*100);
-                    let applyCents=0,claimId=null,createdClaim=false;
+                    let applyCents=0,claimId=null,createdClaim=false,pendingLossesResolved=0;
                     const employee=await getActingEmployee(connection,decodedToken,tokenRole,store_id);
                     const saveEvent=async(type,amount,claim,key)=>{
                         if(amount<=0)return;
@@ -3083,6 +3092,16 @@ exports.handler = async (event) => {
                                                                   FROM ${table} WHERE id=? AND store_id=? AND branch_id=? AND booking_reference=? FOR UPDATE`,
                             [sourceId,store_id,branchId,book.booking_reference]);
                         if(!sources.length)throw rentalError('The selected incident is not linked to this booking.');
+                        if(sourceType==='missing'){
+                            const [recoveries]=await connection.execute(`SELECT COALESCE(SUM(quantity),0) AS recovered
+                                                                         FROM rental_stock_movements WHERE store_id=? AND branch_id=? AND equipment_id=?
+                                                                                                       AND type='missing_resolved' AND reference_number=?`,
+                                [store_id,branchId,sources[0].equipment_id,`MISS-${String(sourceId).padStart(6,'0')}`]);
+                            const remaining=Number(sources[0].quantity)-Number(recoveries[0].recovered);
+                            if(!Number.isSafeInteger(remaining)||remaining<1)
+                                throw rentalError('All missing units have already been recovered. Refresh this incident.');
+                            sources[0].quantity=remaining;
+                        }
                         if(sourceType==='missing'&&sources[0].issueState==='pending'){
                             // The Manager decides permanent loss in the Booking settlement itself.
                             // Keep the stock deduction, report resolution, and customer claim in ONE transaction.
@@ -3092,21 +3111,21 @@ exports.handler = async (event) => {
                                 throw rentalError('Explain the verified missing-item decision (at least 10 characters).');
                             const qty=Number(sources[0].quantity);
                             const [equipment]=await connection.execute(`SELECT id,total_units,rented_out_units,maintenance_units,missing_units
-                                FROM rental_equipment WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                                        FROM rental_equipment WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
                                 [sources[0].equipment_id,store_id,branchId]);
                             if(!equipment.length||!Number.isSafeInteger(qty)||qty<1||
                                 qty>Number(equipment[0].missing_units)||
                                 qty>Number(equipment[0].total_units)-Number(equipment[0].rented_out_units)-Number(equipment[0].maintenance_units))
                                 throw rentalError('Missing-unit stock quantities need reconciliation before confirming the loss.');
                             await connection.execute(`UPDATE rental_equipment
-                                SET missing_units=missing_units-?,total_units=total_units-? WHERE id=?`,
+                                                      SET missing_units=missing_units-?,total_units=total_units-? WHERE id=?`,
                                 [qty,qty,equipment[0].id]);
                             await connection.execute(`UPDATE rental_missing_unit_reports
-                                SET status='writeoff',resolved_by=?,resolved_at=NOW(),resolution_notes=? WHERE id=?`,
+                                                      SET status='writeoff',resolved_by=?,resolved_at=NOW(),resolution_notes=? WHERE id=?`,
                                 [String(employee.name||'Manager').slice(0,150),reason,sourceId]);
                             await connection.execute(`INSERT INTO rental_stock_movements
-                                (store_id,branch_id,equipment_id,type,quantity,reference_number,description,actor_name)
-                                VALUES(?,?,?,'adjustment',?,?,?,?)`,
+                                                      (store_id,branch_id,equipment_id,type,quantity,reference_number,description,actor_name)
+                                                      VALUES(?,?,?,'adjustment',?,?,?,?)`,
                                 [store_id,branchId,equipment[0].id,qty,`MISS-${String(sourceId).padStart(6,'0')}`,
                                     `Booking-confirmed permanent loss: ${reason}`.slice(0,500),String(employee.name||'Manager').slice(0,150)]);
                         } else if(sourceType==='missing'&&sources[0].issueState!=='writeoff'){
@@ -3146,10 +3165,137 @@ exports.handler = async (event) => {
                                                                   SET deposit_applied=deposit_applied+? WHERE booking_id=? AND store_id=? AND branch_id=?`,
                             [applyCents/100,bookingId,store_id,branchId]);
                         if(claim.status!=='waived')await connection.execute(`UPDATE booking_customer_claims
-                            SET status=IF(approved_amount<=amount_paid+deposit_applied+?+?+0.005,'settled','approved'),
-                                deposit_applied=deposit_applied+?,amount_paid=amount_paid+?
-                            WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
+                                                                             SET status=IF(approved_amount<=amount_paid+deposit_applied+?+?+0.005,'settled','approved'),
+                                                                                 deposit_applied=deposit_applied+?,amount_paid=amount_paid+?
+                                                                             WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
                             [applyCents/100,cashCents/100,applyCents/100,cashCents/100,claimId,bookingId,store_id,branchId]);
+                    }
+                    if(mode==='combined'){
+                        // The Manager enters ONE total charge for the entire Staff-recorded
+                        // return, not an arbitrary per-item price. Keep incident-specific
+                        // claim rows for audit, but attach this combined amount only once.
+                        // Additional affected items covered by a positive combined charge
+                        // receive a settled companion record (not a waiver). No duplicate
+                        // customer charge is generated.
+                        const [missingSources]=await connection.execute(`SELECT m.id,m.equipment_id AS equipmentId,
+                                                                                GREATEST(0,m.quantity-COALESCE((SELECT SUM(mv.quantity) FROM rental_stock_movements mv
+                                                                                                                WHERE mv.store_id=m.store_id AND mv.branch_id=m.branch_id
+                                                                                                                  AND mv.equipment_id=m.equipment_id AND mv.type='missing_resolved'
+                                                                                                                  AND mv.reference_number=CONCAT('MISS-',LPAD(m.id,6,'0'))),0)) AS quantity,
+                                                                                m.status AS issueState,COALESCE(e.name,CONCAT('Equipment #',m.equipment_id)) AS equipmentName
+                                                                         FROM rental_missing_unit_reports m
+                                                                                  LEFT JOIN rental_equipment e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
+                                                                         WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?
+                                                                         ORDER BY m.id FOR UPDATE`,[store_id,branchId,book.booking_reference]);
+                        const [damageSources]=await connection.execute(`SELECT m.id,m.equipment_id AS equipmentId,
+                                                                               m.quantity_started AS quantity,m.start_reason AS issueState,
+                                                                               COALESCE(e.name,CONCAT('Equipment #',m.equipment_id)) AS equipmentName
+                                                                        FROM rental_maintenance_records m
+                                                                                 LEFT JOIN rental_equipment e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
+                                                                        WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?
+                                                                          AND m.start_reason LIKE 'Rental damage %'
+                                                                        ORDER BY m.id FOR UPDATE`,[store_id,branchId,book.booking_reference]);
+                        const sources=[...damageSources.map(r=>({...r,sourceType:'damage'})),
+                            ...missingSources.filter(r=>['pending','writeoff'].includes(String(r.issueState).toLowerCase())
+                                && Number(r.quantity)>0).map(r=>({...r,sourceType:'missing'}))];
+                        if(!sources.length)throw rentalError('No Staff-recorded damaged or missing equipment is available for a combined charge.');
+                        const [existingClaims]=await connection.execute(`SELECT * FROM booking_customer_claims
+                                                                         WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,store_id,branchId]);
+                        const existingBySource=new Map(existingClaims.map(c=>[`${c.source_type}:${c.source_record_id}`,c]));
+                        const pendingLosses=sources.filter(r=>r.sourceType==='missing'&&r.issueState==='pending');
+                        // Staff-reported missing rental units are permanent losses in this workflow.
+                        // Managers set ONE combined customer charge; they do not select a
+                        // separate Found/Permanently Lost resolution. Ignore no contrary
+                        // client choice: old clients attempting Found must refresh.
+                        if(Array.isArray(body.missingResolutions)&&body.missingResolutions.some(
+                            r=>String(r?.resolution||'')!=='writeoff'))
+                            throw rentalError('Missing items are treated as permanent loss. Refresh the booking page.');
+                        // Reuse the combined-charge reason; already-reviewed claims may
+                        // have no new charge field, so retain a clear audit fallback.
+                        const decisionNotes=(reason?reason:
+                            'Permanent loss based on Staff-recorded missing equipment at return').slice(0,500);
+                        const billableSources=sources;
+                        const undecided=billableSources.filter(r=>!existingBySource.has(`${r.sourceType}:${r.id}`));
+                        if(!undecided.length&&newCharge>0)
+                            throw rentalError('No unreviewed affected equipment remains. Do not charge previously decided claims again.');
+                        if(undecided.length&&!reason)
+                            throw rentalError('Explain the combined customer charge or waiver.');
+                        // Each missing-item decision and customer ledger movement is
+                        // part of the SAME transaction; a failure rolls back everything.
+                        pendingLossesResolved=pendingLosses.length;
+                        for(const r of pendingLosses){
+                            const qty=Number(r.quantity);
+                            const [eq]=await connection.execute(`SELECT id,total_units,rented_out_units,maintenance_units,missing_units
+                                                                 FROM rental_equipment WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                [r.equipmentId,store_id,branchId]);
+                            if(!eq.length||!Number.isSafeInteger(qty)||qty<1||qty>Number(eq[0].missing_units)||
+                                qty>Number(eq[0].total_units)-Number(eq[0].rented_out_units)-Number(eq[0].maintenance_units))
+                                throw rentalError('Missing equipment stock quantities need reconciliation before permanent loss is recorded.');
+                            // The report is locked and only pending reports are processed,
+                            // preventing the stock deduction from being applied twice.
+                            await connection.execute(`UPDATE rental_equipment SET missing_units=missing_units-?,
+                                                                                  total_units=total_units-? WHERE id=?`,[qty,qty,eq[0].id]);
+                            await connection.execute(`UPDATE rental_missing_unit_reports
+                                                      SET status='writeoff',resolved_by=?,resolved_at=NOW(),resolution_notes=?
+                                                      WHERE id=? AND status='pending'`,
+                                [String(employee.name||'Manager').slice(0,150),
+                                    `Automatically recorded as permanent loss in booking settlement: ${decisionNotes}`.slice(0,500),r.id]);
+                            await connection.execute(`INSERT INTO rental_stock_movements
+                                                      (store_id,branch_id,equipment_id,type,quantity,reference_number,description,actor_name)
+                                                      VALUES(?,?,?,?,?,?,?,?)`,
+                                [store_id,branchId,eq[0].id,'adjustment',qty,
+                                    `MISS-${String(r.id).padStart(6,'0')}`,
+                                    `Booking permanent loss: ${decisionNotes}`.slice(0,500),
+                                    String(employee.name||'Manager').slice(0,150)]);
+                        }
+                        const affectedNames=undecided.map(r=>r.equipmentName).join(', ').slice(0,180);
+                        const activeClaims=[];
+                        // Pre-existing approved balances are honored, never overwritten.
+                        for(const c of existingClaims){
+                            if(c.status==='waived')continue;
+                            // A prematurely labelled 'settled' claim with a real unpaid
+                            // balance must still be collected before booking completion.
+                            const outstanding=Math.round((Number(c.approved_amount)-Number(c.amount_paid)-Number(c.deposit_applied))*100);
+                            if(outstanding>0)activeClaims.push({id:Number(c.id),due:outstanding});
+                        }
+                        for(let i=0;i<undecided.length;i++){
+                            const r=undecided[i];
+                            const amount=i===0?newCharge:0;
+                            const combinedReason=(i===0
+                                ? `Combined booking-wide ${amount>0?'charge':'waiver'} for ${undecided.length} newly reviewed item(s) (${affectedNames}): ${reason}`
+                                : `Covered by the same combined booking-wide charge; no separate charge for ${r.equipmentName}. ${reason}`).slice(0,500);
+                            const [created]=await connection.execute(`INSERT INTO booking_customer_claims
+                                                                      (booking_id,store_id,branch_id,source_type,source_record_id,equipment_id,quantity,reason,approved_amount,status,approved_by)
+                                                                      VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+                                [bookingId,store_id,branchId,r.sourceType,r.id,r.equipmentId,r.quantity,
+                                    combinedReason,amount,amount>0?'approved':newCharge>0?'settled':'waived',String(employee.name||'Manager').slice(0,150)]);
+                            createdClaim=true;
+                            if(amount>0)activeClaims.push({id:Number(created.insertId),due:Math.round(amount*100)});
+                        }
+                        const totalDueCents=activeClaims.reduce((n,c)=>n+c.due,0);
+                        if(cashCents>Math.max(0,totalDueCents-Math.min(heldCents,totalDueCents)))
+                            throw rentalError('Additional customer payment exceeds the combined unpaid damage/missing charge.');
+                        let availableDeposit=Math.min(heldCents,totalDueCents);
+                        let availableCash=cashCents;
+                        for(let i=0;i<activeClaims.length;i++){
+                            const c=activeClaims[i];
+                            const fromDeposit=Math.min(c.due,availableDeposit);
+                            availableDeposit-=fromDeposit;
+                            const fromCash=Math.min(c.due-fromDeposit,availableCash);
+                            availableCash-=fromCash;
+                            const claimKey=`${requestKey}-${i}`;
+                            await saveEvent('deposit_applied',fromDeposit/100,c.id,`${claimKey}-ap`);
+                            await saveEvent('claim_paid',fromCash/100,c.id,`${claimKey}-cash`);
+                            if(fromDeposit||fromCash)await connection.execute(`UPDATE booking_customer_claims
+                                                                               SET status=IF(approved_amount<=amount_paid+deposit_applied+?+?+0.005,'settled','approved'),
+                                                                                   deposit_applied=deposit_applied+?,amount_paid=amount_paid+?
+                                                                               WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
+                                [fromDeposit/100,fromCash/100,fromDeposit/100,fromCash/100,c.id,bookingId,store_id,branchId]);
+                        }
+                        applyCents=Math.min(heldCents,totalDueCents);
+                        if(applyCents>0)await connection.execute(`UPDATE booking_financial_details
+                                                                  SET deposit_applied=deposit_applied+? WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                            [applyCents/100,bookingId,store_id,branchId]);
                     }
                     if(refundCents>heldCents-applyCents)
                         throw rentalError('Refund amount exceeds the security deposit still held after charges.');
@@ -3164,7 +3310,8 @@ exports.handler = async (event) => {
                     }
                     if(mode==='refund'&&refundCents<=0&&heldCents>0)
                         throw rentalError('Enter a positive refund amount, or select damage settlement with a documented incident.');
-                    if(mode==='damage'&&!createdClaim&&applyCents===0&&cashCents===0&&refundCents===0)
+                    if((mode==='damage'||mode==='combined')&&!createdClaim&&applyCents===0&&cashCents===0&&refundCents===0&&
+                        !(mode==='combined'&&pendingLossesResolved>0))
                         throw rentalError('No amount was settled. Record a verified additional payment or choose another outstanding claim.');
                     // The existing completion validator rechecks all returns,
                     // inspections, customer claims, and fully reconciled deposits.
@@ -3198,6 +3345,15 @@ exports.handler = async (event) => {
                                                           FROM ${table} WHERE id=? AND store_id=? AND branch_id=? AND booking_reference=?`,
                     [sourceId,store_id,book.branch_id,book.booking_reference]);
                 if(!sources.length)return response(409,{error:'This booking has no matching documented equipment incident.'});
+                if(source==='missing'){
+                    const [recoveries]=await connection.execute(`SELECT COALESCE(SUM(quantity),0) AS recovered
+                                                                 FROM rental_stock_movements WHERE store_id=? AND branch_id=? AND equipment_id=?
+                                                                                               AND type='missing_resolved' AND reference_number=?`,
+                        [store_id,book.branch_id,sources[0].equipment_id,`MISS-${String(sourceId).padStart(6,'0')}`]);
+                    sources[0].quantity=Number(sources[0].quantity)-Number(recoveries[0].recovered);
+                    if(!Number.isSafeInteger(sources[0].quantity)||sources[0].quantity<1)
+                        return response(409,{error:'There are no unrecovered units to charge for this report.'});
+                }
                 if(source==='missing'&&sources[0].issueState!=='writeoff')
                     return response(409,{error:'Resolve and confirm the equipment loss in Manager Rental Inventory first. Found equipment cannot be billed or waived as a loss.'});
                 if(source==='damage'&&!String(sources[0].issueState||'').startsWith('Rental damage '))
@@ -3744,7 +3900,8 @@ exports.handler = async (event) => {
             }
 
             let bookingQuery = `
-                SELECT id, status, store_id, branch_id, booking_reference
+                SELECT id, status, store_id, branch_id, booking_reference,
+                       DATE_FORMAT(event_date,'%Y-%m-%d') AS event_date
                 FROM bookings
                 WHERE id = ?
                   AND store_id = ?
@@ -3813,12 +3970,105 @@ exports.handler = async (event) => {
                 [bookingRows[0].booking_reference,store_id,recordedBranchId]) : [[]];
             const allocationStates=new Map(allocations.map(a=>[Number(a.equipment_id),String(a.status)]));
 
+            // Read-only availability display. Physical stock is checked NOW;
+            // rental reservations are checked over the saved event date range.
+            // Do not subtract this booking's own reserved units as competing demand.
+            const eventDate=String(bookingRows[0].event_date||'').slice(0,10);
+            const bookingReference=String(bookingRows[0].booking_reference||'');
+            const enrichedSales=[];
+            for(const item of items){
+                let available=null,reason=null;
+                try {
+                    const productId=Number(item.product_id);
+                    const variantId=Number(item.variant_id)>0 ? Number(item.variant_id) : null;
+                    if(!Number.isSafeInteger(productId)||productId<=0||!eventDate){
+                        reason='Product or event date is unavailable.';
+                    }else{
+                        const [matches]=await connection.execute(
+                            `SELECT p.deleted_at AS productDeleted,
+                                    DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS productExpiry,
+                                    v.id AS matchingVariant,v.deleted_at AS variantDeleted,
+                                    DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS variantExpiry,
+                                    bi.id AS inventoryId,bi.quantity_on_hand AS onHand
+                             FROM products p
+                                      LEFT JOIN product_variants v ON v.product_id=p.id AND v.id <=> ?
+                             LEFT JOIN branch_inventory bi ON bi.product_id=p.id AND bi.variant_id <=> ?
+                                 AND bi.store_id=p.store_id AND bi.branch_id=p.branch_id AND bi.status='active'
+                             WHERE p.id=? AND p.store_id=? AND p.branch_id=? LIMIT 1`,
+                            [variantId,variantId,productId,store_id,recordedBranchId]);
+                        const record=matches[0];
+                        if(!record || !record.inventoryId || (variantId!=null && !record.matchingVariant)){
+                            reason='Active inventory record not found.';
+                        }else if(record.productDeleted || record.variantDeleted ||
+                            (record.productExpiry && record.productExpiry<eventDate) ||
+                            (record.variantExpiry && record.variantExpiry<eventDate)){
+                            available=0;
+                            reason='Product is inactive or expires before the event date.';
+                        }else{
+                            const [batches]=await connection.execute(
+                                `SELECT COALESCE(SUM(remaining_quantity),0) AS eligible
+                                 FROM inventory_batches WHERE branch_inventory_id=?
+                                                          AND remaining_quantity>0 AND status='active'
+                                                          AND (expiration_date IS NULL OR expiration_date>=?)`,
+                                [record.inventoryId,eventDate]);
+                            const sellable=Math.min(Math.max(0,Number(record.onHand||0)),
+                                Math.max(0,Number(batches[0]?.eligible||0)));
+                            // Reserving consumables already reduces branch inventory.
+                            // Include this booking's unissued reservation so its own
+                            // quantity does not falsely appear as a shortage.
+                            const ownUnissued=String(item.inventory_status)==='reserved'
+                                ? Math.max(0,Number(item.reserved_quantity||0)-Number(item.used_quantity||0)-Number(item.restored_quantity||0)) : 0;
+                            available=Math.max(0,Math.floor(sellable+ownUnissued));
+                        }
+                    }
+                }catch(error){
+                    // Fail as 'not verified', never falsely display zero stock.
+                    console.warn('Booking consumable availability not verified',item.id,error?.message||error);
+                    available=null;reason='Current consumable stock could not be verified.';
+                }
+                enrichedSales.push({...item,available_for_booking:available,availability_note:reason});
+            }
+            const enrichedRentals=[];
+            for(const item of rentalItems){
+                let available=null,reason=null;
+                try{
+                    const from=String(item.start_date||''),to=String(item.end_date||'');
+                    if(!/^\d{4}-\d{2}-\d{2}$/.test(from)||!/^\d{4}-\d{2}-\d{2}$/.test(to)||from>to){
+                        reason='Rental dates are unavailable.';
+                    }else{
+                        const [equipment]=await connection.execute(
+                            `SELECT total_units,maintenance_units,missing_units FROM rental_equipment
+                             WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL LIMIT 1`,
+                            [item.equipment_id,store_id,recordedBranchId]);
+                        if(!equipment.length){reason='Rental equipment is unavailable in this branch.';}
+                        else{
+                            const [otherAllocations]=await connection.execute(
+                                `SELECT quantity,status,DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
+                                        DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
+                                 FROM rental_booking_allocations
+                                 WHERE store_id=? AND branch_id=? AND equipment_id=?
+                                   AND booking_reference <> ?
+                                   AND status IN ('reserved','checked_out')
+                                   AND start_date<=? AND (end_date>=? OR status='checked_out')`,
+                                [store_id,recordedBranchId,item.equipment_id,bookingReference,to,from]);
+                            const peak=rentalPeakReserved(otherAllocations,from,to,rentalTodayManila());
+                            const capacity=Math.max(0,Number(equipment[0].total_units||0)-
+                                Number(equipment[0].maintenance_units||0)-Number(equipment[0].missing_units||0));
+                            available=Math.max(0,Math.floor(capacity-peak));
+                        }
+                    }
+                }catch(error){
+                    console.warn('Booking rental date availability not verified',item.id,error?.message||error);
+                    available=null;reason='Availability for the event dates could not be verified.';
+                }
+                enrichedRentals.push({...item,available_for_event:available,availability_note:reason,
+                    allocation_status:allocationStates.get(Number(item.equipment_id))||'pending_review'});
+            }
             return response(200, {
                 success: true,
                 booking: bookingRows[0],
-                items,
-                rentalItems:rentalItems.map(r=>({...r,
-                    allocation_status:allocationStates.get(Number(r.equipment_id))||'pending_review'})),
+                items:enrichedSales,
+                rentalItems:enrichedRentals,
             });
         }
 

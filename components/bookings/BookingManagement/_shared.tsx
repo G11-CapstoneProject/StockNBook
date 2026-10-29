@@ -13,7 +13,6 @@ import {
     StickyNote,
     UserRound,
     CalendarDays,
-    Clock3,
     ShieldCheck,
     Download,
 } from "lucide-react";
@@ -67,6 +66,8 @@ export type Booking = {
     email?: string;
 
     date: string;
+    eventEndDate?: string | null;
+    event_end_date?: string | null;
     eventTime?: string;
     event_time?: string;
     eventType?: string;
@@ -134,6 +135,8 @@ type BookingRentalItem = {
     end_date: string;
     billable_days: number | string;
     allocation_status: string;
+    available_for_event?: number | null;
+    availability_note?: string | null;
     daily_rate?: number | string | null;
     rental_rate?: number | string | null;
     amount?: number | string | null;
@@ -152,15 +155,20 @@ type BookingInventoryItem = {
     used_quantity?: number | string;
     restored_quantity?: number | string;
     inventory_status?: string;
+    available_for_booking?: number | null;
+    availability_note?: string | null;
     unit_price?: number | string | null;
     total_price?: number | string | null;
 };
 
-type BookingItemizedStatement = {
-    salesItems: { name: string; variantName?: string; quantity: number; unitPrice: number; amount: number }[];
-    rentalItems: { name: string; quantity: number; days: number; dailyRate: number; amount: number }[];
-    salesSubtotal?: number;
-    rentalSubtotal?: number;
+// Read-only settlement values from the existing financial statement API.
+// Deposits are liabilities, not booking revenue; never treat a proposed charge as paid.
+type BookingSettlementSummary = {
+    depositHeld: number;
+    depositApplied: number;
+    depositRefunded: number;
+    approvedCharges: number;
+    outstandingCharges: number;
 };
 
 type CalendarDropdownProps = {
@@ -250,6 +258,20 @@ export function formatDate(value?: string | null) {
         day: "numeric",
         year: "numeric",
     });
+}
+
+// Format Booking List event times for display only. Keep the saved 24-hour value intact.
+export function formatBookingListTime(value?: string | null): string {
+    const raw = String(value ?? "").trim();
+    if (!raw) return "";
+
+    // API time values may include seconds (HH:mm:ss) or fractional seconds.
+    const match = raw.match(/^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d+)?)?$/);
+    if (!match) return raw; // Existing 12-hour strings or unknown formats are unchanged.
+
+    const hour = Number(match[1]);
+    const hour12 = hour % 12 || 12;
+    return `${hour12}:${match[2]} ${hour < 12 ? "AM" : "PM"}`;
 }
 
 export function formatMonth(date: Date) {
@@ -462,6 +484,7 @@ export function normalizeBooking(
             rawString(raw, "bookingReference") || rawString(raw, "booking_reference"),
         bookingType: rawString(raw, "bookingType") || rawString(raw, "booking_type"),
         facebookName: rawString(raw, "facebookName") || rawString(raw, "facebook_name"),
+        eventEndDate: rawString(raw, "eventEndDate") || rawString(raw, "event_end_date") || null,
         eventTime: rawString(raw, "eventTime") || rawString(raw, "event_time"),
         eventType: rawString(raw, "eventType") || rawString(raw, "event_type"),
         package:
@@ -835,7 +858,6 @@ export function PriceModal({
                                 : "No rental equipment — no refundable rental deposit required."}
                         {" "}Any collected security deposit is refundable, separate from the agreed booking price, and must be fully collected before rental release.
                     </p>
-                    <p className="text-xs text-[#806A8C]">If down payment is ₱0, the Manager must provide a separate no-DP confirmation reason before stock is reserved.</p>
                     {price !== "" && downPayment !== "" && refundableDeposit !== "" &&
                         Number.isFinite(Number(price)) && Number.isFinite(Number(downPayment)) && Number.isFinite(Number(refundableDeposit)) &&
                         <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FF] p-3 text-xs text-[#2B174C]">
@@ -930,7 +952,7 @@ export function getNextStatusConfig(displayStatus: string, downPaymentPaid: bool
 
 // Customer-only details; the public portal currently may append its free-text request
 // after generated inventory lines inside customOrder. Never display those product lines as notes.
-function getCustomerCustomRequest(booking: Booking): string {
+export function getCustomerCustomRequest(booking: Booking): string {
     const explicit = String(booking.additional_custom_request || booking.additionalCustomRequest || "").trim();
     if (explicit) return explicit;
     const saved = String(booking.customOrder || booking.custom_order || "").trim();
@@ -947,8 +969,6 @@ function getCustomerCustomRequest(booking: Booking): string {
     if (/\b(?:\d+\s*[x×]\s*\d+|₱\s*[\d,.]+|rental equipment)\b/i.test(after)) return "";
     return after;
 }
-
-function itemNameKey(name: string) { return String(name || "").trim().replace(/\s+/g, " ").toLowerCase(); }
 
 export type BookingDetailTab = "Overview" | "Billing" | "Items" | "Notes";
 
@@ -998,13 +1018,13 @@ export function BookingRow({
                            }: BookingRowProps) {
     const [bookingItems, setBookingItems] = useState<BookingInventoryItem[]>([]);
     const [bookingRentalItems, setBookingRentalItems] = useState<BookingRentalItem[]>([]);
-    const [itemizedPrices, setItemizedPrices] = useState<BookingItemizedStatement | null>(null);
     const [itemsLoading, setItemsLoading] = useState(false);
     const [itemsLoaded, setItemsLoaded] = useState(false);
     const [itemsError, setItemsError] = useState("");
     const [estimatedBookingPrice, setEstimatedBookingPrice] = useState<number | null>(null);
     // Existing financial-statement API supplies the booking-specific, refundable deposit.
     const [securityDeposit, setSecurityDeposit] = useState<{ required: number; collected: number } | null>(null);
+    const [settlementSummary, setSettlementSummary] = useState<BookingSettlementSummary | null>(null);
     const [estimateLoading, setEstimateLoading] = useState(false);
     const [estimateError, setEstimateError] = useState(false);
     const [open, setOpen] = useState(expandedByDefault);
@@ -1024,6 +1044,7 @@ export function BookingRow({
         let cancelled = false;
         setEstimatedBookingPrice(null);
         setSecurityDeposit(null);
+        setSettlementSummary(null);
         setEstimateError(false);
         setEstimateLoading(true);
         const branchId = b.branchId || b.branch_id;
@@ -1041,6 +1062,35 @@ export function BookingRow({
                     const collected = Number(result.statement.depositCollected);
                     if (Number.isFinite(required) && Number.isFinite(collected)) {
                         setSecurityDeposit({ required: Math.max(0, required), collected: Math.max(0, collected) });
+                    }
+                    // Reuse the already-fetched statement for the replacement Overview card.
+                    // An absent or incomplete ledger must display Unavailable, not invented zeros.
+                    const statement = result.statement;
+                    const settlementKeys = ["depositHeld", "depositApplied", "depositRefunded", "claimBalance"] as const;
+                    const hasSettlementValues = settlementKeys.every(key =>
+                        statement[key] !== null && statement[key] !== undefined &&
+                        Number.isFinite(Number(statement[key])) && Number(statement[key]) >= 0
+                    );
+                    if (hasSettlementValues && Array.isArray(statement.claims)) {
+                        const charges = statement.claims.filter((claim: { status?: string }) =>
+                            !["waived", "cancelled", "canceled", "rejected"].includes(
+                                String(claim.status || "").toLowerCase()
+                            )
+                        );
+                        if (charges.every((claim: { amount?: unknown }) =>
+                            claim.amount !== null && claim.amount !== undefined &&
+                            Number.isFinite(Number(claim.amount)) && Number(claim.amount) >= 0
+                        )) {
+                            setSettlementSummary({
+                                depositHeld: Number(statement.depositHeld),
+                                depositApplied: Number(statement.depositApplied),
+                                depositRefunded: Number(statement.depositRefunded),
+                                approvedCharges: charges.reduce(
+                                    (sum: number, claim: { amount: number | string }) => sum + Number(claim.amount), 0
+                                ),
+                                outstandingCharges: Number(statement.claimBalance),
+                            });
+                        }
                     }
                 }
                 const estimate = Number(result.statement?.agreedCharges);
@@ -1117,7 +1167,6 @@ export function BookingRow({
         async function loadBookingItems() {
             setItemsLoading(true);
             setItemsError("");
-            setItemizedPrices(null);
 
             try {
                 const body: Record<string, unknown> = {
@@ -1142,28 +1191,6 @@ export function BookingRow({
                     throw new Error(data.message || data.error || "Failed to load booking items.");
                 }
 
-                // Itemized prices come from the same financial statement used by Billing.
-                // Do not invent unit prices when a product is missing from the statement.
-                try {
-                    const financialResponse = await fetch("/api/bookings", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_booking_financial_statement", booking_id: b.id,
-                            ...(branchId ? { branch_id: Number(branchId) } : {}) }),
-                    });
-                    const financialData = await financialResponse.json();
-                    const statement = financialData.statement;
-                    if (financialResponse.ok && !financialData.error && statement && !cancelled) {
-                        setItemizedPrices({
-                            salesItems: Array.isArray(statement.salesItems) ? statement.salesItems : [],
-                            rentalItems: Array.isArray(statement.rentalItems) ? statement.rentalItems : [],
-                            salesSubtotal: Number.isFinite(Number(statement.salesSubtotal)) && statement.salesSubtotal != null ? Number(statement.salesSubtotal) : undefined,
-                            rentalSubtotal: Number.isFinite(Number(statement.rentalSubtotal)) && statement.rentalSubtotal != null ? Number(statement.rentalSubtotal) : undefined,
-                        });
-                    }
-                } catch {
-                    // The inventory remains visible; prices are marked unavailable instead of guessed.
-                }
                 if (!cancelled) {
                     setBookingItems(
                         Array.isArray(data.items)
@@ -1252,13 +1279,19 @@ export function BookingRow({
                             </div>
                         </section>
                         <section className={card}>
-                            <h3 className="mb-4 flex items-center gap-2 text-sm font-bold"><Clock3 size={17} className="text-[#6536D4]"/>Status &amp; Schedule</h3>
-                            <div className="space-y-3">
-                                <div className="flex items-center justify-between gap-3"><span className={infoLabel}>Current Status</span><span className={`rounded-full border px-2 py-1 text-[11px] font-semibold ${statusClass}`}>{managerView ? getManagerBookingStatusLabel(displayStatus) : displayStatus}</span></div>
-                                <div className="flex justify-between gap-3"><span className={infoLabel}>Next Step</span><span className={infoValue}>{managerCanAdvance ? (statusActionDisabled ? "Verify booking payment first" : actionLabel) : nextStatusLabel}</span></div>
-                                <div className="flex justify-between gap-3"><span className={infoLabel}>Payment Status</span><span className={infoValue}>{getManagerPaymentLabel(b)}</span></div>
-                                <div className="flex justify-between gap-3"><span className={infoLabel}>Event Schedule</span><span className={infoValue}>{formatDate(b.date)}</span></div>
-                            </div>
+                            <h3 className="mb-4 flex items-center gap-2 text-sm font-bold"><PhilippinePeso size={17} className="text-[#6536D4]"/>Security Deposit &amp; Charges</h3>
+                            {settlementSummary ? (
+                                <div className="space-y-3">
+                                    <div className="flex justify-between gap-3"><span className={infoLabel}>Security Deposit Held</span><span className={infoValue}>{peso(settlementSummary.depositHeld)}</span></div>
+                                    <div className="flex justify-between gap-3"><span className={infoLabel}>Total Damage / Missing Charges</span><span className={infoValue}>{peso(settlementSummary.approvedCharges)}</span></div>
+                                    <div className="flex justify-between gap-3"><span className={infoLabel}>Deposit Applied to Charges</span><span className={infoValue}>{peso(settlementSummary.depositApplied)}</span></div>
+                                    <div className="flex justify-between gap-3"><span className={infoLabel}>Additional Payment Due</span><span className={`${infoValue} ${settlementSummary.outstandingCharges > 0 ? "text-[#A56607]" : ""}`}>{peso(settlementSummary.outstandingCharges)}</span></div>
+                                    <div className="flex justify-between gap-3 border-t border-[#EAE4F0] pt-3"><span className="text-xs font-bold">Total Refunded to Customer</span><strong className="text-sm text-[#351263]">{peso(settlementSummary.depositRefunded)}</strong></div>
+                                    <p className="text-[11px] leading-4 text-[#887B99]">Shows recorded charges and transactions. Any new charge or refund appears after settlement is saved.</p>
+                                </div>
+                            ) : (
+                                <p className="text-xs text-[#887B99]">{estimateLoading ? "Loading deposit and charge records..." : "Deposit and charge details unavailable."}</p>
+                            )}
                         </section>
                     </div>
                     <section className={`${card} !bg-[#FCFAFF]`}>
@@ -1300,7 +1333,7 @@ export function BookingRow({
                                             className={`${action} border border-[#D6C4F8] bg-[#F3EEFF] text-[#4D2A96] hover:bg-[#ECE2FF]`}>
                                         {actionLabel}
                                     </button>
-                                ) : <span className="flex items-center justify-center rounded-lg border border-[#E8DCF4] bg-white px-3 py-2 text-center text-xs font-semibold text-[#806D92]">Staff handles preparation, release and return checks in Inventory; completion follows financial settlement automatically.</span>}
+                                ) : <span className="flex items-center justify-center rounded-lg border border-[#E8DCF4] bg-white px-3 py-2 text-center text-xs font-semibold text-[#806D92]">Staff handles preparation, release and return checks in Inventory.</span>}
                                 {!(["Released", "Completed", "Cancelled"].includes(displayStatus)) && onUpdateStatus &&
                                     <button type="button" onClick={() => onCancelBooking ? onCancelBooking(b) : onUpdateStatus?.(b.id, "Cancelled")}
                                             className={`${action} border border-red-200 bg-red-50 text-red-700 hover:bg-red-100`}>Cancel Booking</button>}
@@ -1308,7 +1341,6 @@ export function BookingRow({
                         )}
                         {!canEditPaymentTerms && <p className="mt-3 rounded-lg border border-[#E7DDF5] bg-[#F8F4FF] p-3 text-xs text-[#674A8E]">Custom price, required down payment and refundable security deposit are locked after approval.</p>}
                         {b.approvalStatus === "pending" && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-900"><strong>Manager approval requested:</strong> {b.approvalReason || "Awaiting review."}</p>}
-                        <p className="mt-3 text-xs leading-5 text-[#847492]">{statusHelper} Recording money does not automatically confirm a booking.</p>
                     </section>
                     {customNeedsTerms && <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900">Agree on custom pricing and the down payment before collecting payment.</p>}
                 </div>
@@ -1528,45 +1560,33 @@ export function BookingRow({
                                                         </div>
                                                     ) : (
                                                         <div className="max-h-[245px] space-y-2 overflow-y-auto overscroll-contain pr-1">
-                                                            {bookingItems.map((item) => {
+                                                            {bookingItems.map(item => {
                                                                 const itemLabel = item.variant_name
-                                                                    ? `${item.product_name} — ${item.variant_name}`
-                                                                    : item.product_name;
-                                                                const quantity = Number(item.booked_quantity || item.reserved_quantity || 0);
-                                                                const priced = itemizedPrices?.salesItems.find(line =>
-                                                                    itemNameKey(line.name) === itemNameKey(item.product_name) &&
-                                                                    itemNameKey(line.variantName || "") === itemNameKey(item.variant_name || "") &&
-                                                                    Number(line.quantity) === quantity);
-                                                                const fallbackUnit = item.unit_price == null ? null : Number(item.unit_price);
-                                                                const unitPrice = priced && Number.isFinite(Number(priced.unitPrice)) ? Number(priced.unitPrice)
-                                                                    : fallbackUnit !== null && Number.isFinite(fallbackUnit) ? fallbackUnit : null;
-                                                                const lineTotal = priced && Number.isFinite(Number(priced.amount)) ? Number(priced.amount)
-                                                                    : item.total_price != null && Number.isFinite(Number(item.total_price)) ? Number(item.total_price)
-                                                                        : unitPrice == null ? null : unitPrice * quantity;
-                                                                return (
-                                                                    <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
-                                                                        <div className="min-w-0">
-                                                                            <p className="truncate text-sm font-semibold text-[#1A1220]" title={itemLabel}>
-                                                                                {itemLabel}
-                                                                            </p>
-                                                                            <p className="mt-0.5 text-[11px] text-[#806A8C]">
-                                                                                {item.source_type === "package" ? "Package inclusion · Sales inventory" : "Sales inventory"}
-                                                                                {item.inventory_status ? ` · ${item.inventory_status}` : ""}
-                                                                            </p>
-                                                                        </div>
-                                                                        <div className="flex shrink-0 flex-wrap items-center gap-3 text-right text-xs text-[#4E2C66]">
-                                                                            <div><p className="text-[10px] text-[#806A8C]">Quantity</p><strong>{quantity}</strong></div>
-                                                                            <div><p className="text-[10px] text-[#806A8C]">Unit Price</p><strong>{unitPrice !== null ? peso(unitPrice) : "Unavailable"}</strong></div>
-                                                                            <div><p className="text-[10px] text-[#806A8C]">Total Price</p><strong>{lineTotal !== null ? peso(lineTotal) : "Unavailable"}</strong></div>
-                                                                        </div>
+                                                                    ? `${item.product_name} — ${item.variant_name}` : item.product_name;
+                                                                const required = Math.max(0, Number(item.booked_quantity || 0));
+                                                                const available = item.available_for_booking == null ? null : Number(item.available_for_booking);
+                                                                const verified = available !== null && Number.isFinite(available) && available >= 0;
+                                                                const delivered = Math.max(0, Number(item.used_quantity || 0));
+                                                                const stillNeeded = Math.max(0, required - delivered);
+                                                                const shortage = verified ? Math.max(0, stillNeeded - available!) : null;
+                                                                return <div key={item.id} className="rounded-xl border border-[#EFE7F4] bg-white px-3 py-3">
+                                                                    <p className="break-words text-sm font-semibold text-[#1A1220]" title={itemLabel}>{itemLabel}</p>
+                                                                    <p className="mt-0.5 text-[11px] text-[#806A8C]">
+                                                                        {item.source_type === "package" ? "Package inclusion · Sales inventory" : "Sales inventory"}
+                                                                        {delivered > 0 ? ` · ${delivered} already issued` : item.inventory_status ? ` · ${item.inventory_status}` : ""}
+                                                                    </p>
+                                                                    <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg bg-[#FAF8FD] p-2 text-center text-xs">
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Required</p><strong>{required}</strong></div>
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Available</p><strong>{verified ? available : "—"}</strong></div>
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Shortage</p>
+                                                                            <strong className={shortage !== null && shortage > 0 ? "text-[#C32F2F]" : "text-[#23834A]"}>
+                                                                                {shortage === null ? "—" : shortage > 0 ? shortage : "0"}
+                                                                            </strong></div>
                                                                     </div>
-                                                                );
+                                                                    {shortage !== null && shortage > 0 && <p className="mt-2 text-[11px] font-semibold text-[#C32F2F]">Additional items needed for this booking: {shortage}.</p>}
+                                                                    {!verified && <p className="mt-2 text-[11px] text-[#975A04]">{item.availability_note || "Stock availability could not be verified."}</p>}
+                                                                </div>;
                                                             })}
-                                                        </div>
-                                                    )}
-                                                    {itemizedPrices?.salesSubtotal != null && (
-                                                        <div className="mt-3 flex justify-between border-t border-[#E6DDF0] pt-2 text-xs font-bold text-[#2B174C]">
-                                                            <span>Consumable Items Subtotal</span><strong>{peso(itemizedPrices.salesSubtotal)}</strong>
                                                         </div>
                                                     )}
                                                 </section>
@@ -1586,40 +1606,27 @@ export function BookingRow({
                                                         </div>
                                                     ) : (
                                                         <div className="max-h-[245px] space-y-2 overflow-y-auto overscroll-contain pr-1">
-                                                            {bookingRentalItems.map((item) => {
-                                                                const quantity = Number(item.quantity || 0);
-                                                                const priced = itemizedPrices?.rentalItems.find(line =>
-                                                                    itemNameKey(line.name) === itemNameKey(item.equipment_name) &&
-                                                                    Number(line.quantity) === quantity);
-                                                                const days = priced ? Number(priced.days) : Number(item.billable_days || 1);
-                                                                const rawRate = priced?.dailyRate ?? item.daily_rate ?? item.rental_rate;
-                                                                const rate = rawRate == null || !Number.isFinite(Number(rawRate)) ? null : Number(rawRate);
-                                                                const totalPrice = priced && Number.isFinite(Number(priced.amount)) ? Number(priced.amount)
-                                                                    : item.amount != null && Number.isFinite(Number(item.amount)) ? Number(item.amount)
-                                                                        : rate == null ? null : rate * quantity * days;
-                                                                return <div key={`rental-${item.id}`} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#EFE7F4] bg-white px-3 py-2">
-                                                                    <div className="min-w-0">
-                                                                        <p className="truncate text-sm font-semibold text-[#1A1220]" title={item.equipment_name}>
-                                                                            {item.equipment_name}
-                                                                        </p>
-                                                                        <p className="mt-0.5 text-[11px] text-[#806A8C]">
-                                                                            Rental equipment · {item.allocation_status.replace(/_/g, " ")}
-                                                                            {" · "}{item.start_date === item.end_date ? item.start_date : `${item.start_date} – ${item.end_date}`}
-                                                                        </p>
+                                                            {bookingRentalItems.map(item => {
+                                                                const required = Math.max(0, Number(item.quantity || 0));
+                                                                const available = item.available_for_event == null ? null : Number(item.available_for_event);
+                                                                const verified = available !== null && Number.isFinite(available) && available >= 0;
+                                                                const shortage = verified ? Math.max(0, required - available!) : null;
+                                                                const period = item.start_date === item.end_date ? item.start_date : `${item.start_date} – ${item.end_date}`;
+                                                                return <div key={`rental-${item.id}`} className="rounded-xl border border-[#EFE7F4] bg-white px-3 py-3">
+                                                                    <p className="break-words text-sm font-semibold text-[#1A1220]" title={item.equipment_name}>{item.equipment_name}</p>
+                                                                    <p className="mt-0.5 text-[11px] text-[#806A8C]">Rental equipment · For event dates: {period}</p>
+                                                                    <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg bg-[#FAF8FD] p-2 text-center text-xs">
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Required</p><strong>{required}</strong></div>
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Available</p><strong>{verified ? available : "—"}</strong></div>
+                                                                        <div><p className="text-[10px] text-[#806A8C]">Shortage</p>
+                                                                            <strong className={shortage !== null && shortage > 0 ? "text-[#C32F2F]" : "text-[#23834A]"}>
+                                                                                {shortage === null ? "—" : shortage > 0 ? shortage : "0"}
+                                                                            </strong></div>
                                                                     </div>
-                                                                    <div className="flex shrink-0 flex-wrap items-center gap-3 text-right text-xs text-[#4E2C66]">
-                                                                        <div><p className="text-[10px] text-[#806A8C]">Quantity</p><strong>{quantity}</strong></div>
-                                                                        <div><p className="text-[10px] text-[#806A8C]">Days</p><strong>{Number.isFinite(days) ? days : "Unavailable"}</strong></div>
-                                                                        <div><p className="text-[10px] text-[#806A8C]">Rate/Day</p><strong>{rate !== null ? peso(rate) : "Unavailable"}</strong></div>
-                                                                        <div><p className="text-[10px] text-[#806A8C]">Total Price</p><strong>{totalPrice !== null ? peso(totalPrice) : "Unavailable"}</strong></div>
-                                                                    </div>
+                                                                    {shortage !== null && shortage > 0 && <p className="mt-2 text-[11px] font-semibold text-[#C32F2F]">Additional rental items needed for the scheduled event: {shortage}.</p>}
+                                                                    {!verified && <p className="mt-2 text-[11px] text-[#975A04]">{item.availability_note || "Availability for the event dates could not be verified."}</p>}
                                                                 </div>;
                                                             })}
-                                                        </div>
-                                                    )}
-                                                    {itemizedPrices?.rentalSubtotal != null && (
-                                                        <div className="mt-3 flex justify-between border-t border-[#E6DDF0] pt-2 text-xs font-bold text-[#2B174C]">
-                                                            <span>Rental Items Subtotal</span><strong>{peso(itemizedPrices.rentalSubtotal)}</strong>
                                                         </div>
                                                     )}
                                                 </section>
@@ -1864,13 +1871,17 @@ export function BookingWorkspace({
     bookings: Booking[];
     managerView?: boolean;
     listToolbar?: ReactNode;
-    onExportSelected?: (booking: Booking, format: "pdf" | "excel") => void;
+    onExportSelected?: (booking: Booking, format: "pdf" | "excel", tab: BookingDetailTab) => void;
 }) {
     const [selectedId, setSelectedId] = useState<number | null>(null);
     const [detailTab, setDetailTab] = useState<BookingDetailTab>("Overview");
     const [exportOpen, setExportOpen] = useState(false);
     const selectedBooking = bookings.find(booking => booking.id === selectedId) ?? bookings[0];
     const tabs: BookingDetailTab[] = ["Overview", "Billing", "Items", "Notes"];
+    // The header export action always describes and exports the currently selected tab.
+    const exportLabel = detailTab === "Billing" ? "Billing Receipt"
+        : detailTab === "Items" ? "Booking Items"
+            : detailTab === "Notes" ? "Booking Notes" : "Booking Overview";
 
     return (
         <div className={`grid min-w-0 gap-3 ${managerView ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" : "2xl:grid-cols-[minmax(0,1.12fr)_minmax(0,0.88fr)]"}`}>
@@ -1892,8 +1903,6 @@ export function BookingWorkspace({
                         <tbody>
                         {bookings.map(booking => {
                             const selected = booking.id === selectedBooking?.id;
-                            const total = getTotalPrice(booking);
-                            const paid = getAmountPaid(booking);
                             const payment = managerView ? getManagerPaymentLabel(booking) : getPaymentStatus(booking);
                             const bookingTypeLabel = managerView ? getManagerBookingTypeLabel(booking) : getBookingItemLabel(booking);
                             const status = normalizeBookingStatus(booking.status);
@@ -1914,16 +1923,13 @@ export function BookingWorkspace({
                                     </td>
                                     <td className="whitespace-nowrap px-3 py-3 align-top text-xs text-[#1A1220]">
                                         <p className="font-semibold">{formatDate(booking.date)}</p>
-                                        {booking.eventTime && <p className="mt-1 text-[#806A8C]">{booking.eventTime}</p>}
+                                        {booking.eventTime && <p className="mt-1 text-[#806A8C]">{formatBookingListTime(booking.eventTime)}</p>}
                                     </td>
                                     <td className="max-w-[110px] px-3 py-3 align-top">
                                         <p className="line-clamp-2 text-[11px] font-semibold text-[#1A1220]" title={bookingTypeLabel}>{bookingTypeLabel}</p>
                                     </td>
                                     <td className="whitespace-nowrap px-3 py-3 align-top">
                                         <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${PAYMENT_STYLE[payment] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{payment}</span>
-                                        <p className="mt-1 text-[11px] text-[#806A8C]">{peso(paid)} / {total > 0 ? peso(total) : "Not set"}</p>
-                                        {managerView && payment === "Deposit Pending" &&
-                                            <p className="mt-1 text-[11px] font-medium text-[#A56607]">{peso(Math.max(0, Number(booking.securityDepositRequired) - Number(booking.securityDepositCollected)))} deposit due</p>}
                                     </td>
                                     <td className="px-3 py-3 align-top"><span className={`inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-[11px] font-semibold ${STATUS_STYLE[status] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{managerView ? getManagerBookingStatusLabel(status) : status}</span></td>
                                 </tr>
@@ -1946,10 +1952,11 @@ export function BookingWorkspace({
                             <div className="flex items-center gap-2">
                                 <span className={`inline-flex shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${STATUS_STYLE[normalizeBookingStatus(selectedBooking.status)] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{managerView ? getManagerBookingStatusLabel(selectedBooking.status) : normalizeBookingStatus(selectedBooking.status)}</span>
                                 {managerView && onExportSelected && <div className="relative">
-                                    <button type="button" aria-label="Export selected booking" title="Export selected booking" onClick={() => setExportOpen(v => !v)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D9C9EB] text-[#43217A] hover:bg-[#F3EEFF]"><Download size={16}/></button>
-                                    {exportOpen && <div className="absolute right-0 top-10 z-30 w-40 rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-xl">
-                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "pdf");setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download PDF</button>
-                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "excel");setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download Excel (.xlsx)</button>
+                                    <button type="button" aria-label={`Download ${exportLabel}`} title={`Download ${exportLabel}`} aria-expanded={exportOpen} onClick={() => setExportOpen(v => !v)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D9C9EB] text-[#43217A] hover:bg-[#F3EEFF]"><Download size={16}/></button>
+                                    {exportOpen && <div className="absolute right-0 top-10 z-30 w-48 rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-xl">
+                                        <p className="px-3 py-1 text-[11px] font-semibold text-[#806A8C]">Export {exportLabel}</p>
+                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "pdf", detailTab);setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download {exportLabel} PDF</button>
+                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "excel", detailTab);setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download {exportLabel} Excel (.xlsx)</button>
                                     </div>}
                                 </div>}
                             </div>
@@ -1960,7 +1967,7 @@ export function BookingWorkspace({
                             <span className="max-w-full truncate" title={getBookingItemLabel(selectedBooking)}>{getBookingItemLabel(selectedBooking)}</span>
                         </div>}
                         <div className="mt-3 grid grid-cols-4 gap-1 rounded-xl bg-[#F7F1FF] p-1" role="tablist" aria-label="Booking detail sections">
-                            {tabs.map(tab => <button key={tab} type="button" role="tab" aria-selected={tab === detailTab} onClick={() => setDetailTab(tab)} className={`min-w-0 rounded-lg px-1.5 py-2 text-[11px] font-semibold transition ${tab === detailTab ? "bg-white text-[#2B174C] shadow-sm" : "text-[#806A8C] hover:bg-white/60"}`}>{tab}</button>)}
+                            {tabs.map(tab => <button key={tab} type="button" role="tab" aria-selected={tab === detailTab} onClick={() => {setDetailTab(tab);setExportOpen(false);}} className={`min-w-0 rounded-lg px-1.5 py-2 text-[11px] font-semibold transition ${tab === detailTab ? "bg-white text-[#2B174C] shadow-sm" : "text-[#806A8C] hover:bg-white/60"}`}>{tab}</button>)}
                         </div>
                     </div>
                     <div role="tabpanel" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">

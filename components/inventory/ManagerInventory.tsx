@@ -34,13 +34,17 @@ import {
 /* -------------------------------------------------------------------------- */
 
 type ProductVariant = {
+    sellableStock?: number;
+    expiredBatchUnits?: number;
+    branchStock?: number;
+    batchStock?: number;
+    ledgerMismatch?: boolean;
     id: number;
     productId: number;
     barcode?: string | number | null;
     variantNumber?: string | null;
     variantValues: Record<string, string>;
     stock: number;
-    sellableStock?: number; // Branch/batch eligible stock, read-only for availability display.
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
@@ -63,6 +67,11 @@ type ProductVariantSave = {
 };
 
 type Product = {
+    sellableStock?: number;
+    expiredBatchUnits?: number;
+    branchStock?: number;
+    batchStock?: number;
+    ledgerMismatch?: boolean;
     id: number;
     barcode?: string | number | null;
     productNumber?: string | null;
@@ -75,7 +84,6 @@ type Product = {
     name: string;
     category: string;
     stock: number;
-    sellableStock?: number; // Branch/batch eligible stock, read-only for availability display.
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
@@ -1644,7 +1652,7 @@ function getActionCenterRows(
                 salesVelocity: velocity.label,
                 salesVelocityValue: velocity.value,
                 issue: expired ? "Expired" : "Expiring",
-                action: expired ? "Review / Remove" : "Prioritize Sale",
+                action: expired ? "Dispose Expired" : "Prioritize Sale",
             });
         }
     });
@@ -2129,6 +2137,7 @@ export default function ManagerInventory() {
     const [lastStockInRecords, setLastStockInRecords] = React.useState<LastStockInRecord[]>([]);
     const [initialStockByProduct, setInitialStockByProduct] = React.useState<Record<number, number>>({});
     const [receivingProduct, setReceivingProduct] = React.useState<Product | null>(null);
+    const [disposalSelection, setDisposalSelection] = React.useState<{product: Product; variantId: number | null} | null>(null);
     const [restockToast, setRestockToast] = React.useState<SuccessToastMessage | null>(null);
     const closeRestockToast = React.useCallback(() => setRestockToast(null), []);
     const [showSupplierPayables, setShowSupplierPayables] = React.useState(false);
@@ -2831,6 +2840,7 @@ export default function ManagerInventory() {
                                 rows={actionRows}
                                 onEdit={inv.handleEditProduct}
                                 onReceive={(product) => setReceivingProduct(product)}
+                                onDispose={(product, variantId) => setDisposalSelection({product, variantId})}
                                 onDelete={inv.requestDeleteProduct}
                                 onVariantRemoved={async (name, mode) => {
                                     await inv.refreshAll();
@@ -2889,6 +2899,7 @@ export default function ManagerInventory() {
                             onStatusFilterChange={setStatusFilter}
                             onEdit={inv.handleEditProduct}
                             onRestock={(product) => setReceivingProduct(product)}
+                            onDispose={(product, variantId) => setDisposalSelection({product, variantId})}
                             onDelete={inv.requestDeleteProduct}
                         />
                     </>
@@ -2900,6 +2911,24 @@ export default function ManagerInventory() {
             <InventoryDialogs inv={inv} />
             <SuccessToast toast={restockToast} onClose={closeRestockToast} />
             {showSupplierPayables && <SupplierPayablesDialog onClose={() => setShowSupplierPayables(false)} />}
+            {disposalSelection && (
+                <ExpiredStockDisposalDialog
+                    product={disposalSelection.product}
+                    variantId={disposalSelection.variantId}
+                    onClose={() => setDisposalSelection(null)}
+                    onCompleted={async (quantity) => {
+                        const disposedName = disposalSelection.product.name;
+                        await inv.refreshAll();
+                        setStockActivityRefreshKey((current) => current + 1);
+                        window.dispatchEvent(new Event("stocknbook:stock-activity-refresh"));
+                        setDisposalSelection(null);
+                        setRestockToast({
+                            title: "Expired stock disposal recorded",
+                            message: `${formatNumber(quantity)} units of “${disposedName}” were recorded as physically disposed. History is retained.`,
+                        });
+                    }}
+                />
+            )}
             {receivingProduct && (
                 <ReceiveStockDialog
                     product={receivingProduct}
@@ -3030,6 +3059,138 @@ function receiveStockInitialMarkup(cost: number, sellingPrice: number, savedMark
     // For products previously configured as manual, an implied markup provides
     // an editable starting suggestion; it does not force a change in pricing.
     return cost > 0 ? String(Number(Math.max(0, (sellingPrice / cost - 1) * 100).toFixed(4))) : "0";
+}
+
+// An expired batch is never deleted automatically. Managers record only the
+// physically disposed quantity; the backend retains batch and movement history.
+type ExpiredDisposalBatch = {
+    batchId: number;
+    batchCode: string | null;
+    remainingQuantity: number;
+    expirationDate: string;
+    status: string;
+};
+
+function ExpiredStockDisposalDialog({product, variantId, onClose, onCompleted}: {
+    product: Product;
+    variantId: number | null;
+    onClose: () => void;
+    onCompleted: (quantity: number) => Promise<void>;
+}) {
+    const [batches, setBatches] = React.useState<ExpiredDisposalBatch[]>([]);
+    const [loading, setLoading] = React.useState(true);
+    const [saving, setSaving] = React.useState(false);
+    const [batchId, setBatchId] = React.useState("");
+    const [quantity, setQuantity] = React.useState("");
+    const [reason, setReason] = React.useState("");
+    const [physicallyRemoved, setPhysicallyRemoved] = React.useState(false);
+    const [error, setError] = React.useState("");
+    const requestKey = React.useRef<string | null>(null);
+    React.useEffect(() => {
+        const controller = new AbortController();
+        const read = async () => {
+            setLoading(true);
+            try {
+                const token = sessionStorage.getItem("token");
+                if (!token) throw new Error("Session expired. Sign in again.");
+                const res = await fetch("/api/products", {
+                    method: "POST", cache: "no-store", signal: controller.signal,
+                    headers: {"Content-Type": "application/json", Authorization: `Bearer ${token}`},
+                    body: JSON.stringify({action: "get_expired_batches", productId: product.id, variantId}),
+                });
+                const body = await res.json().catch(() => ({}));
+                if (!res.ok || !body.success) throw new Error(body.error || "Unable to load expired batches.");
+                if (!controller.signal.aborted) {
+                    const rows = Array.isArray(body.batches) ? body.batches : [];
+                    setBatches(rows);
+                    setBatchId(rows.length ? String(rows[0].batchId) : "");
+                }
+            } catch (caught) {
+                if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : "Unable to load batches.");
+            } finally { if (!controller.signal.aborted) setLoading(false); }
+        };
+        void read();
+        return () => controller.abort();
+    }, [product.id, variantId]);
+    const selected = batches.find(batch => String(batch.batchId) === batchId);
+    const amount = Number(quantity);
+    const valid = Boolean(selected && Number.isSafeInteger(amount) && amount > 0 && amount <= Number(selected.remainingQuantity)
+        && reason.trim().length >= 8 && physicallyRemoved);
+    const confirmDisposal = async () => {
+        if (!valid || !selected || saving) return;
+        setSaving(true);
+        setError("");
+        try {
+            const token = sessionStorage.getItem("token");
+            if (!token) throw new Error("Session expired. Sign in again.");
+            if (!requestKey.current) requestKey.current = `expired-disposal:${crypto.randomUUID()}`;
+            const response = await fetch("/api/products", {
+                method: "POST", cache: "no-store",
+                headers: {"Content-Type": "application/json", Authorization: `Bearer ${token}`},
+                body: JSON.stringify({action: "dispose_expired_batch", productId: product.id, variantId,
+                    batchId: selected.batchId, quantity: amount, reason: reason.trim(),
+                    physicallyRemoved: true, requestKey: requestKey.current}),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || "Disposal was not saved.");
+            await onCompleted(amount);
+        } catch (caught) {
+            setError(caught instanceof Error ? caught.message : "Unable to record disposal.");
+        } finally { setSaving(false); }
+    };
+    return <div role="presentation" className="fixed inset-0 z-[160] flex items-center justify-center bg-black/50 px-3 py-5">
+        <div role="dialog" aria-modal="true" aria-label="Dispose expired stock"
+             className="flex max-h-[92vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-[#E9E1EE] px-5 py-4">
+                <div><h2 className="text-lg font-bold text-[#21132E]">Dispose Expired Stock</h2>
+                    <p className="mt-1 text-xs text-[#806A8C]">{product.name} · Product No. {product.productNumber || "—"}</p></div>
+                <button type="button" disabled={saving} onClick={onClose} aria-label="Close disposal dialog"
+                        className="rounded-lg px-2 py-1 text-lg text-[#806A8C] hover:bg-[#F7F1FF]">×</button>
+            </div>
+            <div className="space-y-4 overflow-y-auto px-5 py-4">
+                <p className="rounded-xl border border-[#F3D0D5] bg-[#FFF4F4] p-3 text-xs leading-5 text-[#AA2435]">
+                    Expired batches are already unavailable for POS and Bookings. This action records physical disposal; it does not delete the product or its history. Confirm the actual units removed before saving.
+                </p>
+                {loading ? <p className="text-sm text-[#806A8C]">Loading expired batches...</p>
+                    : batches.length === 0 ? <p className="text-sm text-[#806A8C]">No expired units remain pending disposal for this product or variant.</p>
+                        : <>
+                            <div className="space-y-1"><label className={labelClass} htmlFor="expired-disposal-batch">Expired batch</label>
+                                <select id="expired-disposal-batch" className={fieldClass} value={batchId} disabled={saving}
+                                        onChange={e => {setBatchId(e.target.value);setQuantity("");setPhysicallyRemoved(false);requestKey.current=null;}}>
+                                    {batches.map(b => <option key={b.batchId} value={String(b.batchId)}>
+                                        {b.batchCode || `Batch #${b.batchId}`} · Exp. {b.expirationDate} · {b.remainingQuantity} recorded units
+                                    </option>)}
+                                </select></div>
+                            <div className="space-y-1"><label className={labelClass} htmlFor="expired-disposal-quantity">Physically removed units</label>
+                                <input id="expired-disposal-quantity" type="number" min={1} max={selected?.remainingQuantity}
+                                       step={1} value={quantity} className={fieldClass} disabled={saving}
+                                       onChange={e => {setQuantity(e.target.value);requestKey.current=null;}} placeholder="Enter the verified removed quantity" />
+                                <p className="text-[11px] text-[#806A8C]">Maximum recorded for this batch: {selected?.remainingQuantity ?? 0} units. Partial disposal is allowed.</p>
+                            </div>
+                            <div className="space-y-1"><label className={labelClass} htmlFor="expired-disposal-reason">Disposal reason (required)</label>
+                                <textarea id="expired-disposal-reason" value={reason} rows={3} maxLength={500}
+                                          disabled={saving} className={fieldClass}
+                                          onChange={e => {setReason(e.target.value);requestKey.current=null;}}
+                                          placeholder="Example: Expired stock physically removed and segregated for disposal" />
+                            </div>
+                            <label className="flex items-start gap-2 text-xs text-[#4F3A5A]">
+                                <input type="checkbox" checked={physicallyRemoved} disabled={saving}
+                                       onChange={e => {setPhysicallyRemoved(e.target.checked);requestKey.current=null;}} />
+                                I confirm the specified units have been physically removed from inventory and checked against this batch.
+                            </label>
+                        </>}
+                {error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{error}</p>}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-[#E9E1EE] bg-white px-5 py-4">
+                <button type="button" onClick={onClose} disabled={saving}
+                        className="rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 text-sm font-semibold text-[#2B174C]">Cancel</button>
+                <button type="button" disabled={!valid || loading || saving} onClick={() => void confirmDisposal()}
+                        className="rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
+                    {saving ? "Recording..." : "Record Disposal"}
+                </button>
+            </div>
+        </div>
+    </div>;
 }
 
 function ReceiveStockDialog({ product, onClose, onSaved }: {
@@ -3470,12 +3631,14 @@ function StockActionCenter({
                                rows,
                                onEdit,
                                onReceive,
+                               onDispose,
                                onDelete,
                                onVariantRemoved,
                            }: {
     rows: ActionCenterRow[];
     onEdit: (product: Product) => void;
     onReceive: (product: Product) => void;
+    onDispose: (product: Product, variantId: number | null) => void;
     onDelete: (product: Product) => void;
     onVariantRemoved: (name: string, mode: "archive" | "permanent") => Promise<void>;
 }) {
@@ -3581,6 +3744,8 @@ function StockActionCenter({
                                         onClick={() => {
                                             if (row.action === "Restock" || row.action === "Restock Now") {
                                                 onReceive(row.product);
+                                            } else if (row.issue === "Expired") {
+                                                onDispose(row.product, row.variantId ?? null);
                                             } else if (row.action === "Review / Remove" || row.action === "Prioritize Sale") {
                                                 setReviewRow(row);
                                             } else {
@@ -4521,6 +4686,7 @@ function ManagerInventoryTable({
                                    onStatusFilterChange,
                                    onEdit,
                                    onRestock,
+                                   onDispose,
                                    onDelete,
                                }: {
     inv: InventoryController;
@@ -4535,6 +4701,7 @@ function ManagerInventoryTable({
     onStatusFilterChange: (value: string) => void;
     onEdit: (product: Product) => void;
     onRestock: (product: Product) => void;
+    onDispose: (product: Product, variantId: number | null) => void;
     onDelete: (product: Product) => void;
 }) {
     const [expandedIds, setExpandedIds] = React.useState<Record<number, boolean>>(
@@ -4725,6 +4892,14 @@ function ManagerInventoryTable({
                                         </td>
                                         <td className="break-words px-3 py-2.5 font-semibold text-[#2B174C]">
                                             <span>{product.name}</span>
+                                            {product.ledgerMismatch && (
+                                                <span
+                                                    className="mt-1 block text-[10px] font-medium text-[#C03945]"
+                                                    title={`Catalog: ${product.stock}; Branch: ${product.branchStock ?? 0}; Batches: ${product.batchStock ?? 0}. Verify physical stock and receipts before receiving more.`}
+                                                >
+                                                    Stock records need review
+                                                </span>
+                                            )}
                                         </td>
                                         <td className="break-words px-2 py-2.5 text-[#5F4E75]">
                                             {product.category || "—"}
@@ -4760,6 +4935,14 @@ function ManagerInventoryTable({
                                                     <PackagePlus size={11} />
                                                     Restock
                                                 </button>
+                                                {Number(product.expiredBatchUnits || 0) > 0 && !product.hasVariants && (
+                                                    <button type="button" onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        onDispose(product, null);
+                                                    }} className="inline-flex items-center gap-1 rounded-lg bg-[#FFF0F0] px-2 py-1.5 text-[10px] font-semibold text-[#B42335] hover:bg-[#FFE2E2]">
+                                                        Dispose Expired ({product.expiredBatchUnits})
+                                                    </button>
+                                                )}
                                                 <button
                                                     type="button"
                                                     onClick={(event) => {
@@ -4796,7 +4979,7 @@ function ManagerInventoryTable({
                                                 productName: product.name,
                                                 category: product.category,
                                                 variantName: getVariantName(variant),
-                                                stock: Number(variant.stock || 0),
+                                                stock: Number(variant.sellableStock ?? variant.stock ?? 0),
                                                 alertLevel: Number(
                                                     variant.alertLevel || 0
                                                 ),
@@ -4840,7 +5023,14 @@ function ManagerInventoryTable({
                                                             status={getLineStatus(line)}
                                                         />
                                                     </td>
-                                                    <td className="px-2 py-2.5" />
+                                                    <td className="px-2 py-2.5 text-center">
+                                                        {Number(variant.expiredBatchUnits || 0) > 0 && (
+                                                            <button type="button" onClick={() => onDispose(product, variant.id)}
+                                                                    className="rounded-lg bg-[#FFF0F0] px-2 py-1.5 text-[10px] font-semibold text-[#B42335] hover:bg-[#FFE2E2]">
+                                                                Dispose Expired ({variant.expiredBatchUnits})
+                                                            </button>
+                                                        )}
+                                                    </td>
                                                 </tr>
                                             );
                                         })}

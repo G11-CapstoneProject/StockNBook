@@ -333,16 +333,27 @@ async function attachVariants(connection, products) {
              CASE WHEN EXISTS (
                  SELECT 1 FROM branch_inventory bi JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
                  WHERE bi.variant_id=product_variants.id AND ib.status='active' AND ib.remaining_quantity>0
+                   AND (ib.expiration_date IS NULL OR ib.expiration_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR))
              ) THEN (
                  SELECT MIN(ib.expiration_date) FROM branch_inventory bi
                                                          JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
                  WHERE bi.variant_id=product_variants.id AND ib.status='active' AND ib.remaining_quantity>0
+                   AND (ib.expiration_date IS NULL OR ib.expiration_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR))
+             ) WHEN EXISTS (
+                 SELECT 1 FROM branch_inventory bi JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                 WHERE bi.variant_id=product_variants.id AND ib.remaining_quantity>0
+                   AND ib.expiration_date IS NOT NULL
+             ) THEN (
+                 SELECT MIN(ib.expiration_date) FROM branch_inventory bi
+                     JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                 WHERE bi.variant_id=product_variants.id AND ib.remaining_quantity>0
+                   AND ib.expiration_date IS NOT NULL
              ) ELSE product_variants.expiration_date END AS expirationDate,
              created_at AS createdAt
          FROM product_variants
          WHERE product_id IN (${placeholders})
-           AND deleted_at IS NULL
-         ORDER BY id ASC`,
+        AND deleted_at IS NULL
+        ORDER BY id ASC`,
         productIds
     );
 
@@ -397,6 +408,7 @@ async function creditBranchInventoryBatch(connection, {
     storeId, branchId, productId, variantId = null, quantity, expectedBefore,
     reorderLevel, costPrice, salesPrice, expirationDate = null, reference,
     actorId = null, actorRole = "system", actorName = "System", isOpening = false,
+    allowVerifiedReceiptWithCatalogDrift = false,
 }) {
     if (!Number.isSafeInteger(quantity) || quantity <= 0 ||
         !Number.isSafeInteger(expectedBefore) || expectedBefore < 0 ||
@@ -430,11 +442,18 @@ async function creditBranchInventoryBatch(connection, {
     if (isOpening && before === quantity && batchTotal === quantity && expectedBefore === 0) {
         return {alreadySeeded:true,inventoryId:inventory.id};
     }
-    if (before !== expectedBefore || batchTotal !== before) {
+    // A new verified supplier delivery is independent of an OLD catalog-only
+    // discrepancy. Credit only the new quantity; do not invent an old batch or
+    // quietly change catalog stock. Branch and batches MUST agree first.
+    const catalogDrift = expectedBefore - before;
+    if (!Number.isSafeInteger(before) || before < 0 ||
+        !Number.isSafeInteger(batchTotal) || batchTotal < 0 ||
+        before + quantity > 2147483647 || batchTotal !== before ||
+        (catalogDrift !== 0 && (!allowVerifiedReceiptWithCatalogDrift || catalogDrift < 0))) {
         throw new Error(
             `Stock ledger mismatch for product ${productId}${variantId ? ` variant ${variantId}` : ""}: `+
             `catalog=${expectedBefore}, branch=${before}, batches=${batchTotal}. `+
-            `Reconcile verified receipts and reservations before receiving more stock.`);
+            `Branch and batch balances must agree; reconcile unsupported stock before making it sellable.`);
     }
     const after = before + quantity;
     const batchCode = String(reference).slice(0,100);
@@ -455,8 +474,10 @@ async function creditBranchInventoryBatch(connection, {
         [storeId,branchId,inventory.id,isOpening?'OPENING_STOCK':'MANAGER_RECEIPT',
             quantity,before,after,isOpening?'PRODUCT_OPENING':'STOCK_RECEIPT',
             String(reference).slice(0,255),actorId,actorRole,actorName,
-            isOpening?'New product opening stock':'Manager-authorized supplier stock receipt']);
-    return {inventoryId:inventory.id,before,after};
+            isOpening?'New product opening stock':catalogDrift
+                ? `Manager-authorized supplier stock receipt. Pre-existing catalog drift: +${catalogDrift} unit(s) (catalog=${expectedBefore}, branch=${before}); historical units NOT credited.`
+                : 'Manager-authorized supplier stock receipt']);
+    return {inventoryId:inventory.id,before,after,catalogDrift};
 }
 
 // Physical stock corrections must also update V2 batches, not only products.stock.
@@ -514,7 +535,9 @@ async function adjustSynchronizedStock(connection, {storeId,branchId,productId,v
 
 // End-of-transaction verification catches unexpected DB triggers that would
 // otherwise update a ledger a second time after the catalog UPDATE.
-async function assertInventoryLineSynchronized(connection,{storeId,branchId,productId,variantId=null,expected}) {
+async function assertInventoryLineSynchronized(connection,{
+    storeId,branchId,productId,variantId=null,expected,expectedCatalog=expected,
+}) {
     const [rows]=await connection.execute(
         `SELECT bi.quantity_on_hand AS branchStock,
                 (SELECT COALESCE(SUM(b.remaining_quantity),0) FROM inventory_batches b
@@ -527,7 +550,7 @@ async function assertInventoryLineSynchronized(connection,{storeId,branchId,prod
             : `SELECT stock FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL`,
         variantId!=null?[variantId,productId]:[productId,storeId,branchId]);
     if(!rows.length || !catalog.length || Number(rows[0].branchStock)!==expected ||
-        Number(rows[0].batchStock)!==expected || Number(catalog[0].stock)!==expected) {
+        Number(rows[0].batchStock)!==expected || Number(catalog[0].stock)!==expectedCatalog) {
         throw new Error(`Inventory synchronization check failed for product ${productId} variant ${variantId ?? 'regular'}; transaction rolled back.`);
     }
 }
@@ -600,12 +623,26 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
                 WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
                   AND bi.product_id=products.id AND bi.variant_id IS NULL
                   AND ib.status='active' AND ib.remaining_quantity>0
+                  AND (ib.expiration_date IS NULL OR ib.expiration_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR))
             ) THEN (
                 SELECT MIN(ib.expiration_date) FROM branch_inventory bi
                                                         JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
                 WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
                   AND bi.product_id=products.id AND bi.variant_id IS NULL
                   AND ib.status='active' AND ib.remaining_quantity>0
+                  AND (ib.expiration_date IS NULL OR ib.expiration_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR))
+            ) WHEN EXISTS (
+                SELECT 1 FROM branch_inventory bi
+                    JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
+                  AND bi.product_id=products.id AND bi.variant_id IS NULL
+                  AND ib.remaining_quantity>0 AND ib.expiration_date IS NOT NULL
+            ) THEN (
+                SELECT MIN(ib.expiration_date) FROM branch_inventory bi
+                    JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
+                  AND bi.product_id=products.id AND bi.variant_id IS NULL
+                  AND ib.remaining_quantity>0 AND ib.expiration_date IS NOT NULL
             ) ELSE products.expiration_date END AS expirationDate,
             products.has_variants AS hasVariants,
             products.created_at AS createdAt
@@ -645,31 +682,59 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
                 COALESCE(SUM(CASE WHEN ib.status='active'
                     AND ib.remaining_quantity>0
                     AND (ib.expiration_date IS NULL OR ib.expiration_date>=?)
-                                      THEN ib.remaining_quantity ELSE 0 END),0) AS eligibleBatches
+                                      THEN ib.remaining_quantity ELSE 0 END),0) AS eligibleBatches,
+                COALESCE(SUM(ib.remaining_quantity),0) AS allBatches,
+                COALESCE(SUM(CASE WHEN ib.remaining_quantity>0
+                    AND ib.expiration_date IS NOT NULL AND ib.expiration_date<?
+                    AND ib.status IN ('active','expired')
+                                      THEN ib.remaining_quantity ELSE 0 END),0) AS expiredBatches
          FROM branch_inventory bi
                   LEFT JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
          WHERE bi.store_id=? AND bi.status='active'
              ${activeBranchId ? 'AND bi.branch_id=?' : ''}
          GROUP BY bi.id,bi.branch_id,bi.product_id,bi.variant_id,bi.quantity_on_hand`,
-        activeBranchId ? [today,storeId,activeBranchId] : [today,storeId]);
-    const sellableByKey = new Map(balances.map(row => [
+        activeBranchId ? [today,today,storeId,activeBranchId] : [today,today,storeId]);
+    const ledgerByKey = new Map(balances.map(row => [
         `${Number(row.branchId)}:${Number(row.productId)}:${row.variantId==null?'regular':Number(row.variantId)}`,
-        Math.max(0,Math.floor(Math.min(Number(row.onHand||0),Number(row.eligibleBatches||0))))
+        {physical:Math.max(0,Number(row.onHand||0)),
+            batches:Math.max(0,Number(row.allBatches||0)),
+            eligible:Math.max(0,Number(row.eligibleBatches||0)),
+            expired:Math.max(0,Number(row.expiredBatches||0))}
     ]));
     const enriched = await attachVariants(connection, rows);
     return enriched.map(product=>{
         const branchId=Number(product.branchId);
         const baseKey=`${branchId}:${Number(product.id)}`;
-        const variants=(product.variants||[]).map(variant=>({
-            ...variant,
-            sellableStock:Math.max(0,Math.min(Number(variant.stock||0),
-                sellableByKey.get(`${baseKey}:${Number(variant.id)}`)||0))
-        }));
+        const variants=(product.variants||[]).map(variant=>{
+            const ledger=ledgerByKey.get(`${baseKey}:${Number(variant.id)}`)
+                || {physical:0,batches:0,eligible:0,expired:0};
+            const catalog=Math.max(0,Number(variant.stock||0));
+            return {...variant,
+                // Once all batches are depleted/disposed, the legacy catalog
+                // expiry is historical, not an active expired-stock warning.
+                expirationDate:ledger.batches===0 ? null : variant.expirationDate,
+                sellableStock:Math.max(0,Math.min(catalog,ledger.physical,ledger.eligible)),
+                branchStock:ledger.physical,batchStock:ledger.batches,
+                expiredBatchUnits:ledger.expired,
+                ledgerMismatch:catalog!==ledger.physical||ledger.physical!==ledger.batches};
+        });
+        const base=ledgerByKey.get(`${baseKey}:regular`)
+            || {physical:0,batches:0,eligible:0,expired:0};
         const sellableStock=product.hasVariants
             ? variants.reduce((total,variant)=>total+variant.sellableStock,0)
-            : Math.max(0,Math.min(Number(product.stock||0),
-                sellableByKey.get(`${baseKey}:regular`)||0));
-        return {...product,variants,sellableStock};
+            : Math.max(0,Math.min(Number(product.stock||0),base.physical,base.eligible));
+        const branchStock=product.hasVariants
+            ? variants.reduce((total,variant)=>total+variant.branchStock,0):base.physical;
+        const batchStock=product.hasVariants
+            ? variants.reduce((total,variant)=>total+variant.batchStock,0):base.batches;
+        const expiredBatchUnits=product.hasVariants
+            ? variants.reduce((total,variant)=>total+variant.expiredBatchUnits,0):base.expired;
+        const ledgerMismatch=Number(product.stock||0)!==branchStock ||
+            branchStock!==batchStock || variants.some(variant=>variant.ledgerMismatch);
+        // Read-only diagnostic: never make a mismatched catalog quantity sellable.
+        return {...product,variants,
+            expirationDate:!product.hasVariants && base.batches===0 ? null : product.expirationDate,
+            sellableStock,branchStock,batchStock,expiredBatchUnits,ledgerMismatch};
     });
 }
 
@@ -4145,11 +4210,26 @@ exports.handler = async (event) => {
                                 "Stock, cost, or pricing changed since Receive Stock was opened. Close and reopen the dialog before confirming."});
                     }
                 }
-                // Moving weighted average uses units still on hand, NOT the
-                // entire history of purchases. Original receipt unit costs are
-                // preserved in inventory_stock_receipt_items for auditing.
-                const averageCost = roundMoney((currentStock * oldAverageCost +
-                    line.quantity * line.unitPurchaseCost) / (currentStock + line.quantity));
+                // Use the branch balance for weighted-average receiving cost.
+                // A legacy catalog-only discrepancy is not physical stock and
+                // must not inflate the cost weighting of a new supplier receipt.
+                const [valuationRows] = await connection.execute(
+                    `SELECT quantity_on_hand FROM branch_inventory
+                     WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ?
+                       AND status='active' LIMIT 1 FOR UPDATE`,
+                    [storeId,activeBranchId,productId,line.variantId]);
+                if (!valuationRows.length) {
+                    await safeRollback(connection);
+                    return jsonResponse(409,headers,{error:'Active branch inventory is missing. Reconcile before receiving stock.'});
+                }
+                const valuationStock = Number(valuationRows[0].quantity_on_hand);
+                if (!Number.isSafeInteger(valuationStock) || valuationStock < 0) {
+                    await safeRollback(connection);
+                    return jsonResponse(409,headers,{error:'Invalid branch inventory balance. Reconcile before receiving stock.'});
+                }
+                // Original receipt unit costs remain recorded separately for audit.
+                const averageCost = roundMoney((valuationStock * oldAverageCost +
+                    line.quantity * line.unitPurchaseCost) / (valuationStock + line.quantity));
                 const impliedMarkup = oldAverageCost > 0
                     ? Math.max(0, (oldSellingPrice / oldAverageCost - 1) * 100) : 0;
                 const targetMarkup = line.pricingMarkupPercentage !== null
@@ -4200,12 +4280,14 @@ exports.handler = async (event) => {
             const receiptId = ledger.receiptId;
             const purchaseId = ledger.purchaseId;
             const totalQuantity = cleanLines.reduce((sum, line) => sum + line.quantity, 0);
-            // Lock and credit V2 quantities BEFORE changing catalog stock; any
-            // mismatch rolls the entire financial receipt and stock change back.
+            // Credit the NEW verified delivery into branch and batch records.
+            // An older positive catalog-only discrepancy is retained for a
+            // separate physical audit, not treated as available stock.
             const actingEmployee = await getActingEmployee(connection, decoded, tokenRole, storeId);
+            const creditResults = [];
             for (const [lineIndex,line] of receiptLines.entries()) {
                 const match = isVariantProduct ? variants.get(line.variantId) : current;
-                await creditBranchInventoryBatch(connection,{
+                creditResults.push(await creditBranchInventoryBatch(connection,{
                     storeId,branchId:activeBranchId,productId,variantId:line.variantId,
                     quantity:line.quantity,expectedBefore:line.stockBefore,
                     reorderLevel:Number(match.alert_level ?? match.alertLevel ?? current.alert_level ?? 0),
@@ -4214,7 +4296,8 @@ exports.handler = async (event) => {
                     reference:`RCV-${receiptId}-${lineIndex + 1}`,
                     actorId:Number(decoded?.manager_id||decoded?.owner_id||0)||null,
                     actorRole:tokenRole,actorName:actingEmployee.name,
-                });
+                    allowVerifiedReceiptWithCatalogDrift:true,
+                }));
             }
             for (const line of receiptLines) {
                 if (line.variantId !== null) {
@@ -4260,16 +4343,24 @@ exports.handler = async (event) => {
                     [totalQuantity, line.averageCost, line.selectedPrice, line.selectedMethod,
                         line.selectedMarkup, productId, storeId, activeBranchId]);
             }
-            for (const line of receiptLines) {
+            for (const [index,line] of receiptLines.entries()) {
                 await assertInventoryLineSynchronized(connection,{
                     storeId,branchId:activeBranchId,productId,variantId:line.variantId,
-                    expected:line.stockBefore+line.quantity});
+                    expected:creditResults[index].after,
+                    expectedCatalog:line.stockBefore+line.quantity});
             }
+            const reconciliationWarnings = creditResults.flatMap((result,index) =>
+                result.catalogDrift > 0 ? [{
+                    productId,variantId:receiptLines[index].variantId,
+                    catalogMinusBranch:result.catalogDrift,
+                    message:'Historical catalog-only units remain unverified and unavailable. Reconcile separately.',
+                }] : []);
             await logEmployeeAction(connection, {
                 storeId, branchId: activeBranchId, employee: actingEmployee,
                 module: "Inventory", referenceNumber: current.product_number || String(productId),
                 action: "Restocked inventory", referenceId: String(productId),
-                details: `Received ${totalQuantity} unit(s) of ${current.name} from ${supplier} (Receipt #${receiptId})`,
+                details: `Received ${totalQuantity} unit(s) of ${current.name} from ${supplier} (Receipt #${receiptId})`+
+                    (reconciliationWarnings.length ? `; pre-existing catalog discrepancies preserved: ${JSON.stringify(reconciliationWarnings)}` : ''),
             });
             await connection.commit();
             return jsonResponse(200, headers, {
@@ -4277,6 +4368,8 @@ exports.handler = async (event) => {
                 totalQuantity, purchaseTotal: ledger.purchaseTotal,
                 amountPaid: ledger.amountPaid,
                 outstandingBalance: ledger.outstandingBalance,
+                reconciliationRequired:reconciliationWarnings.length>0,
+                reconciliationWarnings,
             });
         }
 
@@ -4373,6 +4466,157 @@ exports.handler = async (event) => {
                                       VALUES (?,?,?,?)`,[purchaseId,amountCents/100,date,requestKey]);
             await connection.commit();
             return jsonResponse(200,headers,{success:true,outstandingBalance:(balanceCents-amountCents)/100});
+        }
+
+        // Expired goods are excluded from availability automatically. The physical
+        // ledger changes only after a Manager confirms actual disposal. Retain
+        // the batch, product, receiving documents, and audited movement history.
+        if (action === "get_expired_batches") {
+            if (tokenRole !== "manager" || !activeBranchId) return unauthorized(headers,"Manager Inventory permission required.");
+            const productId = Number(body.productId);
+            const variantId = body.variantId == null ? null : Number(body.variantId);
+            if (!Number.isSafeInteger(productId) || productId < 1 ||
+                (variantId !== null && (!Number.isSafeInteger(variantId) || variantId < 1))) {
+                return badRequest(headers,"Choose a valid product or variant.");
+            }
+            const [rows] = await connection.execute(
+                `SELECT b.id AS batchId,b.batch_code AS batchCode,b.remaining_quantity AS remainingQuantity,
+                        DATE_FORMAT(b.expiration_date,'%Y-%m-%d') AS expirationDate,b.status
+                 FROM inventory_batches b
+                 JOIN branch_inventory bi ON bi.id=b.branch_inventory_id
+                 JOIN products p ON p.id=bi.product_id
+                 WHERE p.id=? AND p.store_id=? AND p.branch_id=? AND p.deleted_at IS NULL
+                   AND bi.store_id=? AND bi.branch_id=? AND bi.status='active'
+                   AND bi.variant_id <=> ?
+                   AND b.store_id=? AND b.branch_id=?
+                   AND b.remaining_quantity>0 AND b.status IN ('active','expired')
+                   AND b.expiration_date IS NOT NULL
+                   AND b.expiration_date < DATE(UTC_TIMESTAMP()+INTERVAL 8 HOUR)
+                 ORDER BY b.expiration_date ASC,b.id ASC`,
+                [productId,storeId,activeBranchId,storeId,activeBranchId,variantId,storeId,activeBranchId]);
+            return jsonResponse(200,headers,{success:true,batches:rows});
+        }
+        if (action === "dispose_expired_batch") {
+            if (tokenRole !== "manager" || !activeBranchId) return unauthorized(headers,"Manager authorization is required to record disposal.");
+            const productId=Number(body.productId);
+            const variantId=body.variantId==null?null:Number(body.variantId);
+            const batchId=Number(body.batchId),quantity=Number(body.quantity);
+            const reason=toSafeString(body.reason,500);
+            const requestKey=toSafeString(body.requestKey,80);
+            if(!Number.isSafeInteger(productId)||productId<1||
+                (variantId!==null&&(!Number.isSafeInteger(variantId)||variantId<1))||
+                !Number.isSafeInteger(batchId)||batchId<1||
+                !Number.isSafeInteger(quantity)||quantity<1||quantity>2147483647||
+                reason.length<8||!requestKey||!parseBooleanFlag(body.physicallyRemoved)) {
+                return badRequest(headers,"Select an expired batch, enter the physically removed quantity and reason (8+ characters), and confirm physical removal.");
+            }
+            await connection.beginTransaction();
+            // Lock the parent product first so independent stock operations on
+            // this product cannot race this disposal. No new receipt is created.
+            const [products]=await connection.execute(
+                `SELECT id,product_number AS productNumber,name,stock,has_variants AS hasVariants
+                 FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
+                [productId,storeId,activeBranchId]);
+            if(!products.length){await safeRollback(connection);return notFound(headers,"Product not found in this branch.");}
+            const product=products[0];
+            if(Boolean(product.hasVariants)!==(variantId!==null)){
+                await safeRollback(connection);return badRequest(headers,"Choose the correct variant for this product.");
+            }
+            let catalogLine=Number(product.stock);
+            if(variantId!==null){
+                const [variants]=await connection.execute(
+                    `SELECT stock FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL FOR UPDATE`,
+                    [variantId,productId]);
+                if(!variants.length){await safeRollback(connection);return notFound(headers,"Variant is unavailable.");}
+                catalogLine=Number(variants[0].stock);
+            }
+            const [inventories]=await connection.execute(
+                `SELECT id,quantity_on_hand FROM branch_inventory
+                 WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ? AND status='active'
+                 LIMIT 1 FOR UPDATE`,
+                [storeId,activeBranchId,productId,variantId]);
+            if(!inventories.length){await safeRollback(connection);return notFound(headers,"Branch inventory record is missing.");}
+            const inventory=inventories[0];
+            const [existing]=await connection.execute(
+                `SELECT id FROM inventory_movements WHERE store_id=? AND branch_id=?
+                 AND branch_inventory_id=? AND reference_type='EXPIRED_DISPOSAL' AND reference_id=? LIMIT 1`,
+                [storeId,activeBranchId,inventory.id,requestKey]);
+            if(existing.length){await connection.commit();return jsonResponse(200,headers,{success:true,alreadyProcessed:true});}
+            const [allBatches]=await connection.execute(
+                `SELECT id,remaining_quantity,expiration_date,status FROM inventory_batches
+                 WHERE branch_inventory_id=? ORDER BY id FOR UPDATE`,[inventory.id]);
+            const before=Number(inventory.quantity_on_hand);
+            const batchBefore=allBatches.reduce((sum,row)=>sum+Number(row.remaining_quantity),0);
+            // Preserve known historical catalog drift, but never allow disposing
+            // more than physically recorded, or into an inconsistent branch/batch ledger.
+            if(!Number.isSafeInteger(before)||before<quantity||batchBefore!==before||
+                catalogLine<quantity||Number(product.stock)<quantity){
+                await safeRollback(connection);
+                return badRequest(headers,`Physical ledger mismatch or insufficient recorded stock: branch=${before}, batches=${batchBefore}, catalog=${catalogLine}. Reconcile before disposal.`);
+            }
+            const selected=allBatches.find(row=>Number(row.id)===batchId);
+            const exp=selected?.expiration_date instanceof Date
+                ?selected.expiration_date.toISOString().slice(0,10)
+                :String(selected?.expiration_date||'').slice(0,10);
+            const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Manila'});
+            if(!selected||Number(selected.remaining_quantity)<quantity||
+                !['active','expired'].includes(String(selected.status))||!exp||exp>=today){
+                await safeRollback(connection);return badRequest(headers,"The selected batch is not expired, already disposed, or has insufficient remaining units.");
+            }
+            const remainingAfter=Number(selected.remaining_quantity)-quantity;
+            await connection.execute(
+                `UPDATE inventory_batches SET remaining_quantity=?,status=?
+                 WHERE id=? AND branch_inventory_id=?`,
+                [remainingAfter,remainingAfter===0?'disposed':'expired',batchId,inventory.id]);
+            await connection.execute(
+                `UPDATE branch_inventory SET quantity_on_hand=quantity_on_hand-? WHERE id=?`,[quantity,inventory.id]);
+            if(variantId!==null){
+                await connection.execute(`UPDATE product_variants SET stock=stock-? WHERE id=? AND product_id=?`,[quantity,variantId,productId]);
+            }
+            await connection.execute(
+                `UPDATE products SET stock=stock-? WHERE id=? AND store_id=? AND branch_id=?`,
+                [quantity,productId,storeId,activeBranchId]);
+            const employee=await getActingEmployee(connection,decoded,tokenRole,storeId);
+            await connection.execute(
+                `INSERT INTO inventory_movements
+                 (store_id,branch_id,branch_inventory_id,movement_type,quantity_delta,
+                  quantity_before,quantity_after,reference_type,reference_id,
+                  actor_id,actor_role,actor_name,notes)
+                 VALUES (?,?,?,'EXPIRED_DISPOSAL',?,?,?,'EXPIRED_DISPOSAL',?,?,?,?,?)`,
+                [storeId,activeBranchId,inventory.id,-quantity,before,before-quantity,
+                    requestKey,employee.id,employee.role,employee.name,
+                    `Batch ${batchId}, expiry ${exp}; ${reason}`.slice(0,500)]);
+            // Check the remaining physical ledger inside the transaction.
+            const [post]=await connection.execute(
+                `SELECT COALESCE(SUM(remaining_quantity),0) AS total FROM inventory_batches
+                 WHERE branch_inventory_id=?`,[inventory.id]);
+            if(Number(post[0].total)!==before-quantity){
+                throw new Error("Disposal verification failed; the transaction was rolled back.");
+            }
+            // Resolve a Staff expired-condition report only when the product
+            // line has no other expired units awaiting physical removal.
+            if(await tableExists(connection,'staff_stock_condition_reports')){
+                const [stillExpired]=await connection.execute(
+                    `SELECT COUNT(*) AS total FROM inventory_batches
+                     WHERE branch_inventory_id=? AND remaining_quantity>0
+                       AND status IN ('active','expired') AND expiration_date IS NOT NULL
+                       AND expiration_date<DATE(UTC_TIMESTAMP()+INTERVAL 8 HOUR)`,[inventory.id]);
+                if(Number(stillExpired[0]?.total||0)===0){
+                    await connection.execute(
+                        `UPDATE staff_stock_condition_reports
+                         SET status='resolved',resolved_by=?,resolved_at=CURRENT_TIMESTAMP
+                         WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ?
+                           AND issue_type='expired' AND status='open'`,
+                        [employee.id,storeId,activeBranchId,productId,variantId]);
+                }
+            }
+            await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,
+                module:'Inventory',referenceNumber:product.productNumber||String(productId),
+                action:'Disposed expired batch',referenceId:String(batchId),
+                details:`Removed ${quantity} expired units from batch ${batchId} (${exp}); reason: ${reason}`});
+            await connection.commit();
+            return jsonResponse(200,headers,{success:true,productId,variantId,batchId,disposedQuantity:quantity,
+                remainingBranchStock:before-quantity});
         }
 
         if (action === "adjust_stock") {

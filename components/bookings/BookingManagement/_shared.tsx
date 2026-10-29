@@ -107,9 +107,6 @@ export type Booking = {
 
     required_down_payment?: number | string | null;
     requiredDownPayment?: number | string | null;
-    downPaymentDeadline?: string | null;
-    down_payment_deadline?: string | null;
-    booking_dp_deadline?: string | null;
 
     down_payment_amount?: number | string | null;
     downPaymentAmount?: number | string | null;
@@ -505,7 +502,6 @@ export function normalizeBooking(
             rawValue(raw, "down_payment_amount") ??
             rawValue(raw, "downPaymentAmount") ??
             0,
-        downPaymentDeadline: rawString(raw,"downPaymentDeadline") || rawString(raw,"booking_dp_deadline") || rawString(raw,"down_payment_deadline") || null,
         amount_paid: rawValue(raw, "amount_paid") ?? rawValue(raw, "amountPaid") ?? 0,
         balance: rawValue(raw, "balance") ?? null,
         payment_status: normalizePaymentStatus(

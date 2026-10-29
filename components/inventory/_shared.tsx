@@ -25,6 +25,7 @@ export type ProductVariant = {
     variantValues: Record<string, string>;
     stock: number;
     sellableStock?: number; // Display-only; backend stock changes continue to use stock.
+    expiredBatchUnits?: number; // Recorded expired units awaiting physical disposal.
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
@@ -54,6 +55,7 @@ export type Product = {
     category: string;
     stock: number;
     sellableStock?: number; // Display-only; backend stock changes continue to use stock.
+    expiredBatchUnits?: number; // Recorded expired units awaiting physical disposal.
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
@@ -249,6 +251,7 @@ export function normalizeProductVariant(raw: any): ProductVariant {
         variantValues: parsedVariantValues,
         stock: Number(raw.stock ?? 0),
         sellableStock: raw.sellableStock == null ? undefined : Number(raw.sellableStock),
+        expiredBatchUnits: raw.expiredBatchUnits == null ? undefined : Number(raw.expiredBatchUnits),
         alertLevel: Number(raw.alertLevel ?? raw.alert_level ?? 0),
         originalPrice: Number(raw.originalPrice ?? raw.original_price ?? 0),
         salesPrice: Number(raw.salesPrice ?? raw.sales_price ?? 0),
@@ -275,6 +278,7 @@ export function normalizeProduct(raw: any): Product {
         category: raw.category || "",
         stock: Number(raw.stock ?? 0),
         sellableStock: raw.sellableStock == null ? undefined : Number(raw.sellableStock),
+        expiredBatchUnits: raw.expiredBatchUnits == null ? undefined : Number(raw.expiredBatchUnits),
         alertLevel: Number(raw.alertLevel ?? raw.alert_level ?? 0),
         originalPrice: Number(raw.originalPrice ?? raw.original_price ?? 0),
         salesPrice: Number(raw.salesPrice ?? raw.sales_price ?? 0),

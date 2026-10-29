@@ -598,8 +598,7 @@ async function getBookingStatement(db,bookingId,storeId,branchId,includeWaiverRe
     const [bs]=await db.execute(`SELECT id,booking_reference AS reference,name,phone,booking_type AS bookingType,
                                         package_name AS packageName,DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate,
                                         status,agreed_price AS agreedPrice,package_price AS packagePrice,
-                                        required_down_payment AS downPayment,amount_paid AS bookingPayments,balance,
-                                        CONCAT(DATE_FORMAT(booking_dp_deadline,'%Y-%m-%dT%H:%i:%s'),'Z') AS dpDeadline
+                                        required_down_payment AS downPayment,amount_paid AS bookingPayments,balance
                                  FROM bookings WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,[bookingId,storeId,branchId]);
     if(!bs.length)throw rentalError('Booking not found in assigned branch.');
     const b=bs[0];
@@ -628,8 +627,7 @@ async function getBookingStatement(db,bookingId,storeId,branchId,includeWaiverRe
     const claimBalance=claims.reduce((sum,c)=>sum+Math.max(0,Number(c.amount)-Number(c.amountPaid)-Number(c.depositApplied)),0);
     return {booking:{id:b.id,reference:b.reference,name:b.name,eventDate:b.eventDate,status:b.status,
             bookingType:b.bookingType,packageName:b.packageName,agreedPrice:b.agreedPrice,
-            downPayment:Number(b.downPayment||0),bookingPayments:Number(b.bookingPayments||0),balance:Number(b.balance||0),
-            dpDeadline:b.dpDeadline||null},
+            downPayment:Number(b.downPayment||0),bookingPayments:Number(b.bookingPayments||0),balance:Number(b.balance||0)},
         ...numbers,depositWaiverReason:includeWaiverReason?(fin.deposit_waiver_reason||null):null,
         salesSubtotal,agreedCharges,claimBalance,
         salesItems:salesItems.map(i=>({...i,quantity:Number(i.quantity),unitPrice:Number(i.unitPrice),amount:Number(i.amount)})),depositHeld:Math.max(0,numbers.depositCollected-numbers.depositApplied-numbers.depositRefunded),
@@ -1515,7 +1513,7 @@ async function inspectBookingForConfirmation(connection, {bookingId,storeId,bran
     const [rows] = await connection.execute(
         `SELECT id,store_id,branch_id,status,booking_reference,name,booking_type,custom_order,
                 package_json,package_price,agreed_price,required_down_payment,amount_paid,phone,
-                CONCAT(DATE_FORMAT(booking_dp_deadline,'%Y-%m-%dT%H:%i:%s'),'Z') AS booking_dp_deadline,booking_no_dp_approved_by
+                booking_no_dp_approved_by
          FROM bookings WHERE id=? AND store_id=? AND branch_id=? ${lock ? "FOR UPDATE" : ""}`,
         [bookingId,storeId,branchId]
     );
@@ -1642,8 +1640,7 @@ function requireBookingDeposit(booking){
     if(paid+.005<dp)throw rentalError('Verify and record the required down payment before confirming and allocating items.');
     if(dp<=0 && !String(booking.booking_no_dp_approved_by||'').trim())
         throw rentalError('No-DP reservations require an explicit Manager authorization.');
-    if(dp>0 && booking.booking_dp_deadline && new Date(booking.booking_dp_deadline).getTime()<Date.now())
-        throw rentalError('The down-payment deadline has passed. Ask the Manager to extend it before confirming.');
+    // No time limit applies to down-payment confirmation. Verify the payment amount only.
 }
 
 // Resolve operational access from the current database row, not a cached browser permission.
@@ -1977,7 +1974,6 @@ function bookingPageSelectFields() {
         COALESCE(bookings.package_price, 0)      AS packagePrice,
         COALESCE(bookings.required_down_payment, 0) AS required_down_payment,
         COALESCE(bookings.required_down_payment, 0) AS requiredDownPayment,
-        CONCAT(DATE_FORMAT(bookings.booking_dp_deadline,'%Y-%m-%dT%H:%i:%s'),'Z') AS downPaymentDeadline,
         COALESCE(bookings.amount_paid, 0)        AS amount_paid,
         COALESCE(bookings.amount_paid, 0)        AS amountPaid,
         COALESCE(bookings.balance, 0)            AS balance,
@@ -4130,7 +4126,7 @@ exports.handler = async (event) => {
                         throw rentalError('A zero-down-payment reservation requires Manager approval.');
                     await checkAvailableBeforePayment(connection,{bookingId,storeId:store_id,branchId});
                     const [updated]=await connection.execute(`UPDATE bookings
-                                                              SET status='Awaiting Down Payment',booking_dp_deadline=DATE_ADD(UTC_TIMESTAMP(),INTERVAL 24 HOUR)
+                                                              SET status='Awaiting Down Payment'
                                                               WHERE id=? AND store_id=? AND branch_id=? AND status='Pending Review'`,
                         [bookingId,store_id,branchId]);
                     if(updated.affectedRows!==1)throw rentalError('Booking status changed. Refresh and retry.');
@@ -4277,18 +4273,6 @@ exports.handler = async (event) => {
             }
         }
 
-        if(action==='extend_booking_dp_deadline'){
-            if(tokenRole!=='manager')return response(403,{error:'Only the branch Manager may extend the DP deadline.'});
-            const bookingId=Number(body.booking_id);
-            if(!Number.isSafeInteger(bookingId)||bookingId<=0)return response(400,{error:'Invalid booking ID.'});
-            const [updated]=await connection.execute(`UPDATE bookings
-                                                      SET booking_dp_deadline=DATE_ADD(UTC_TIMESTAMP(),INTERVAL 24 HOUR)
-                                                      WHERE id=? AND store_id=? AND branch_id=? AND status='Awaiting Down Payment'`,
-                [bookingId,store_id,tokenBranchId]);
-            if(updated.affectedRows!==1)return response(409,{error:'Only an awaiting-payment booking can be extended.'});
-            return response(200,{success:true});
-        }
-
         // ── PROTECTED: update_status (enhanced) ────────────────────────────────
         if (tokenRole === 'owner' && new Set(['update_status','update_price','update_payment']).has(action)) {
             return response(403,{error:'Operational booking changes require an authorized Manager or Staff workflow.'});
@@ -4413,7 +4397,6 @@ exports.handler = async (event) => {
                 // 1️⃣ Update booking status. Approval does not allocate inventory.
                 let query = `UPDATE bookings SET status = ?`;
                 const params = [status];
-                if(status==='Awaiting Down Payment')query+=`, booking_dp_deadline=DATE_ADD(UTC_TIMESTAMP(),INTERVAL 24 HOUR)`;
                 if (agreed_price !== undefined && agreed_price !== null) {
                     const newPrice=financeCurrency(agreed_price,'Agreed booking price');
                     const [f]=await connection.execute('SELECT package_base,rental_subtotal,delivery_fee,setup_fee FROM booking_financial_details WHERE booking_id=?',[Number(booking_id)]);

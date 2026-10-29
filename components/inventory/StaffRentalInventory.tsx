@@ -666,7 +666,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                     </tr></thead>
                     <tbody>{visibleEquipment.map(e=>{
                         const readyNow=Math.max(0,e.totalUnits-e.rentedOutUnits-e.maintenanceUnits-e.missingUnits);
-                        const availability=readyNow<=0?'Unavailable':e.alertLevel>0&&readyNow<=e.alertLevel?'Low Availability':readyNow===e.totalUnits?'Fully Available':'Available';
+                        const availability=e.bookableToday<=0?(readyNow>0?'Fully Booked':'Unavailable'):e.alertLevel>0&&e.bookableToday<=e.alertLevel?'Low Availability':e.bookableToday===e.totalUnits?'Fully Available':'Available';
                         const condition=[...(e.missingUnits>0?['Needs Review']:[]),...(e.maintenanceUnits>0?['On Hold']:[])];
                         const availabilityColor=availability==='Fully Available'||availability==='Available'?'bg-[#E5F8EC] text-[#23834A]':availability==='Low Availability'?'bg-[#FFF2D3] text-[#A66A00]':'bg-[#FFE7EA] text-[#D92C3F]';
                         return <tr key={e.id} className="h-14 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
@@ -674,7 +674,10 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                             <td className="break-words px-3 py-2.5 font-semibold">{e.name}</td>
                             <td className="break-words px-2 py-2.5 text-[#5F4E75]">{e.category}</td>
                             <td className="px-2 py-2.5 text-center font-semibold">{e.totalUnits}</td>
-                            <td className="px-2 py-2.5 text-center font-semibold">{readyNow}</td>
+                            <td className="px-2 py-2.5 text-center font-semibold" title="Physical ready units; confirmed reservations are shown separately below">
+                                {readyNow}
+                                <span className="block text-[9px] font-normal text-[#806A8C]">Bookable today: {e.bookableToday}</span>
+                            </td>
                             <td className="px-2 py-2.5 text-center">{e.rentedOutUnits}</td>
                             <td className="px-2 py-2.5 text-center" title={`On Hold breakdown: ${holdBreakdown.get(e.id)?.inspection??0} pending inspection, ${holdBreakdown.get(e.id)?.cleaning??0} cleaning, ${holdBreakdown.get(e.id)?.routine??0} routine care, ${holdBreakdown.get(e.id)?.repairs??0} repair/safety review`}>{e.maintenanceUnits}</td>
                             <td className="px-1 py-2.5 text-center"><span className={`inline-flex max-w-full justify-center rounded-full px-2 py-1 text-center text-[10px] font-semibold leading-4 ${availabilityColor}`}>{availability}</span></td>
@@ -692,7 +695,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                 </table>
                 {rental.connected&&visibleEquipment.length===0&&<Empty>No rental equipment found in this branch.</Empty>}
             </div>
-            <p className="px-4 py-2 text-[11px] text-[#806A8C]">This table shows physical equipment belonging to the branch. On Hold includes inspection, cleaning, and repairs; missing units appear under Condition. View Schedule shows booking-date reservations, not physical release. Release equipment only through a confirmed booking.</p>
+            <p className="px-4 py-2 text-[11px] text-[#806A8C]">Ready Now is physical stock; Bookable Today already excludes confirmed reservations on today's date. Future event dates must be checked with View Schedule. This table shows physical equipment belonging to the branch. On Hold includes inspection, cleaning, and repairs; missing units appear under Condition. View Schedule shows booking-date reservations, not physical release. Release equipment only through a confirmed booking.</p>
         </section>
         {/* Only the queue presentation changes: equipment actions still use their existing confirmation dialogs and API. */}
         {selectedQueueBooking && <div role="presentation" className="fixed inset-0 z-[80] flex items-center justify-center bg-[#21132E]/55 p-4"

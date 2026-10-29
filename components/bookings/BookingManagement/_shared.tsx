@@ -1032,6 +1032,15 @@ export function BookingRow({
     // Status transitions change rental allocations; reload the displayed
     // inventory lines when a booking moves to its next operational step.
     useEffect(() => { setItemsLoaded(false); }, [b.status]);
+    // Availability changes when another employee receives stock, sells via POS,
+    // or confirms a booking. Refresh the active Items tab without page reload.
+    useEffect(() => {
+        if (!open || (hideSummaryRow && detailTab !== "Items")) return;
+        const refresh = () => { if (document.visibilityState === "visible") setItemsLoaded(false); };
+        const interval = window.setInterval(refresh, 12000);
+        window.addEventListener("focus", refresh);
+        return () => { window.clearInterval(interval); window.removeEventListener("focus", refresh); };
+    }, [open, hideSummaryRow, detailTab, b.id]);
 
     const isCustom = isCustomBooking(b);
     // Read the saved estimate without treating it as the manager's final agreed price.
@@ -1051,7 +1060,7 @@ export function BookingRow({
         void (async () => {
             try {
                 const res = await fetch("/api/bookings", {
-                    method: "POST",
+                    method: "POST", cache: "no-store",
                     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
                     body: JSON.stringify({ action: "get_booking_financial_statement", booking_id: b.id,
                         ...(branchId ? { branch_id: Number(branchId) } : {}) }),
@@ -1165,7 +1174,7 @@ export function BookingRow({
         let cancelled = false;
 
         async function loadBookingItems() {
-            setItemsLoading(true);
+            setItemsLoading(!itemsLoaded && bookingItems.length === 0 && bookingRentalItems.length === 0);
             setItemsError("");
 
             try {

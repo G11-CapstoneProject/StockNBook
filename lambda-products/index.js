@@ -330,7 +330,14 @@ async function attachVariants(connection, products) {
              sales_price AS salesPrice,
              pricing_method AS pricingMethod,
              markup_percentage AS markupPercentage,
-             expiration_date AS expirationDate,
+             CASE WHEN EXISTS (
+                 SELECT 1 FROM branch_inventory bi JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                 WHERE bi.variant_id=product_variants.id AND ib.status='active' AND ib.remaining_quantity>0
+             ) THEN (
+                 SELECT MIN(ib.expiration_date) FROM branch_inventory bi
+                                                         JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                 WHERE bi.variant_id=product_variants.id AND ib.status='active' AND ib.remaining_quantity>0
+             ) ELSE product_variants.expiration_date END AS expirationDate,
              created_at AS createdAt
          FROM product_variants
          WHERE product_id IN (${placeholders})
@@ -382,6 +389,195 @@ function hideProductCostsForNonOwners(products, tokenRole) {
     }));
 }
 
+
+// V2 branch inventory is authoritative for sales/booking availability. This helper
+// runs inside the SAME SQL transaction as a catalog creation or supplier receipt.
+// Never repair pre-existing drift by copying products.stock into V2 balances.
+async function creditBranchInventoryBatch(connection, {
+    storeId, branchId, productId, variantId = null, quantity, expectedBefore,
+    reorderLevel, costPrice, salesPrice, expirationDate = null, reference,
+    actorId = null, actorRole = "system", actorName = "System", isOpening = false,
+}) {
+    if (!Number.isSafeInteger(quantity) || quantity <= 0 ||
+        !Number.isSafeInteger(expectedBefore) || expectedBefore < 0 ||
+        expectedBefore + quantity > 2147483647) {
+        throw new Error("Invalid stock quantity for synchronized receipt.");
+    }
+    const [matches] = await connection.execute(
+        `SELECT id, quantity_on_hand FROM branch_inventory
+         WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ?
+           AND status='active' LIMIT 1 FOR UPDATE`,
+        [storeId,branchId,productId,variantId]);
+    let inventory = matches[0];
+    if (!inventory) {
+        if (!isOpening || expectedBefore !== 0) {
+            throw new Error("Branch inventory row is missing. Reconcile this product before receiving additional stock.");
+        }
+        const [insert] = await connection.execute(
+            `INSERT INTO branch_inventory
+             (store_id,branch_id,product_id,variant_id,quantity_on_hand,reorder_level,cost_price,sales_price,status)
+             VALUES (?,?,?,?,0,?,?,?,'active')`,
+            [storeId,branchId,productId,variantId,reorderLevel,costPrice,salesPrice]);
+        inventory = {id: Number(insert.insertId),quantity_on_hand:0};
+    }
+    const before = Number(inventory.quantity_on_hand);
+    const [batchRows] = await connection.execute(
+        `SELECT COALESCE(SUM(remaining_quantity),0) AS total
+         FROM inventory_batches WHERE branch_inventory_id=?`,[inventory.id]);
+    const batchTotal = Number(batchRows[0]?.total || 0);
+    // In a newly created product, a legacy trigger might have already populated
+    // both ledgers. Do not double-credit such a complete opening balance.
+    if (isOpening && before === quantity && batchTotal === quantity && expectedBefore === 0) {
+        return {alreadySeeded:true,inventoryId:inventory.id};
+    }
+    if (before !== expectedBefore || batchTotal !== before) {
+        throw new Error(
+            `Stock ledger mismatch for product ${productId}${variantId ? ` variant ${variantId}` : ""}: `+
+            `catalog=${expectedBefore}, branch=${before}, batches=${batchTotal}. `+
+            `Reconcile verified receipts and reservations before receiving more stock.`);
+    }
+    const after = before + quantity;
+    const batchCode = String(reference).slice(0,100);
+    await connection.execute(
+        `UPDATE branch_inventory SET quantity_on_hand=?,reorder_level=?,cost_price=?,sales_price=?
+         WHERE id=?`,[after,reorderLevel,costPrice,salesPrice,inventory.id]);
+    await connection.execute(
+        `INSERT INTO inventory_batches
+         (store_id,branch_id,branch_inventory_id,batch_code,received_quantity,remaining_quantity,
+          unit_cost,received_at,expiration_date,status)
+         VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,?,'active')`,
+        [storeId,branchId,inventory.id,batchCode,quantity,quantity,costPrice,expirationDate]);
+    await connection.execute(
+        `INSERT INTO inventory_movements
+         (store_id,branch_id,branch_inventory_id,movement_type,quantity_delta,
+          quantity_before,quantity_after,reference_type,reference_id,actor_id,actor_role,actor_name,notes)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [storeId,branchId,inventory.id,isOpening?'OPENING_STOCK':'MANAGER_RECEIPT',
+            quantity,before,after,isOpening?'PRODUCT_OPENING':'STOCK_RECEIPT',
+            String(reference).slice(0,255),actorId,actorRole,actorName,
+            isOpening?'New product opening stock':'Manager-authorized supplier stock receipt']);
+    return {inventoryId:inventory.id,before,after};
+}
+
+// Physical stock corrections must also update V2 batches, not only products.stock.
+// A correction is not a supplier receipt and does not create an invoice.
+async function adjustSynchronizedStock(connection, {storeId,branchId,productId,variantId,
+    before,target,requestKey,costPrice,expirationDate,employee,reason}) {
+    const [rows]=await connection.execute(
+        `SELECT id,quantity_on_hand FROM branch_inventory
+         WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ?
+           AND status='active' LIMIT 1 FOR UPDATE`,[storeId,branchId,productId,variantId]);
+    if(!rows.length) throw new Error('Active branch inventory is missing. Reconcile before correcting stock.');
+    const inventory=rows[0];
+    const branchBefore=Number(inventory.quantity_on_hand);
+    const [batches]=await connection.execute(
+        `SELECT id,remaining_quantity FROM inventory_batches WHERE branch_inventory_id=?
+                                                               AND remaining_quantity>0 ORDER BY (expiration_date IS NULL) ASC,expiration_date ASC,received_at ASC,id ASC FOR UPDATE`,
+        [inventory.id]);
+    const batchBefore=batches.reduce((sum,b)=>sum+Number(b.remaining_quantity),0);
+    if(before!==branchBefore || before!==batchBefore) throw new Error(
+        `Stock mismatch: catalog ${before}, branch ${branchBefore}, batches ${batchBefore}. Reconcile before correcting.`);
+    const [duplicates]=await connection.execute(
+        `SELECT id FROM inventory_movements WHERE store_id=? AND branch_id=?
+                                              AND reference_type='STOCK_ADJUSTMENT' AND reference_id=? LIMIT 1`,
+        [storeId,branchId,requestKey]);
+    if(duplicates.length) throw new Error('This stock correction was already processed. Refresh stock.');
+    const delta=target-before;
+    if(delta>0){
+        await connection.execute(
+            `INSERT INTO inventory_batches
+             (store_id,branch_id,branch_inventory_id,batch_code,received_quantity,remaining_quantity,
+              unit_cost,received_at,expiration_date,status)
+             VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP,?,'active')`,
+            [storeId,branchId,inventory.id,`ADJ-${requestKey}`.slice(0,100),delta,delta,costPrice,expirationDate]);
+    } else {
+        let remaining=-delta;
+        for(const batch of batches){
+            if(remaining<=0)break;
+            const used=Math.min(remaining,Number(batch.remaining_quantity));
+            await connection.execute(
+                `UPDATE inventory_batches SET remaining_quantity=remaining_quantity-?,
+                                              status=CASE WHEN remaining_quantity-?=0 THEN 'depleted' ELSE status END WHERE id=?`,
+                [used,used,batch.id]);
+            remaining-=used;
+        }
+        if(remaining!==0)throw new Error('Batch balances cannot cover the correction. No stock was changed.');
+    }
+    await connection.execute(`UPDATE branch_inventory SET quantity_on_hand=? WHERE id=?`,[target,inventory.id]);
+    await connection.execute(
+        `INSERT INTO inventory_movements
+         (store_id,branch_id,branch_inventory_id,movement_type,quantity_delta,quantity_before,
+          quantity_after,reference_type,reference_id,actor_id,actor_role,actor_name,notes)
+         VALUES(?,?,?,'STOCK_ADJUSTMENT',?,?,?,'STOCK_ADJUSTMENT',?,?,?,?,?)`,
+        [storeId,branchId,inventory.id,delta,before,target,requestKey,employee.id,employee.role,employee.name,reason]);
+}
+
+// End-of-transaction verification catches unexpected DB triggers that would
+// otherwise update a ledger a second time after the catalog UPDATE.
+async function assertInventoryLineSynchronized(connection,{storeId,branchId,productId,variantId=null,expected}) {
+    const [rows]=await connection.execute(
+        `SELECT bi.quantity_on_hand AS branchStock,
+                (SELECT COALESCE(SUM(b.remaining_quantity),0) FROM inventory_batches b
+                 WHERE b.branch_inventory_id=bi.id) AS batchStock
+         FROM branch_inventory bi
+         WHERE bi.store_id=? AND bi.branch_id=? AND bi.product_id=? AND bi.variant_id <=> ?
+           AND bi.status='active' LIMIT 1`,[storeId,branchId,productId,variantId]);
+    const [catalog]=await connection.execute(variantId!=null
+            ? `SELECT stock FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`
+            : `SELECT stock FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL`,
+        variantId!=null?[variantId,productId]:[productId,storeId,branchId]);
+    if(!rows.length || !catalog.length || Number(rows[0].branchStock)!==expected ||
+        Number(rows[0].batchStock)!==expected || Number(catalog[0].stock)!==expected) {
+        throw new Error(`Inventory synchronization check failed for product ${productId} variant ${variantId ?? 'regular'}; transaction rolled back.`);
+    }
+}
+
+async function requireSynchronizedInventoryTables(connection) {
+    for (const name of ["branch_inventory","inventory_batches","inventory_movements"]) {
+        if (!(await tableExists(connection,name))) {
+            throw new Error(`Required synchronized inventory table ${name} is missing.`);
+        }
+    }
+}
+
+// Product creation and imports require a V2 row and one batch per stocked variant.
+// Products with zero opening stock remain zero, and can receive their first batch later.
+async function createOpeningBranchStock(connection, {storeId,branchId,productId,variants,stock,
+    reorderLevel,costPrice,salesPrice,expirationDate,actorName}) {
+    if (variants && variants.length) {
+        for (const variant of variants) {
+            if (Number(variant.stock) <= 0) continue;
+            await creditBranchInventoryBatch(connection,{
+                storeId,branchId,productId,variantId:Number(variant.id),
+                quantity:Number(variant.stock),expectedBefore:0,
+                reorderLevel:Number(variant.alertLevel),costPrice:Number(variant.originalPrice),
+                salesPrice:Number(variant.salesPrice),expirationDate:variant.expirationDate||null,
+                reference:`OPEN-${productId}-${variant.id}`,actorName,isOpening:true});
+        }
+    } else if (Number(stock) > 0) {
+        await creditBranchInventoryBatch(connection,{
+            storeId,branchId,productId,quantity:Number(stock),expectedBefore:0,
+            reorderLevel:Number(reorderLevel),costPrice:Number(costPrice),salesPrice:Number(salesPrice),
+            expirationDate:expirationDate||null,reference:`OPEN-${productId}-BASE`,
+            actorName,isOpening:true});
+    }
+    // Keep a zero-stock V2 row for variants and regular products too, so a
+    // subsequent first restock can lock an existing branch-scoped inventory row.
+    const entries = variants && variants.length ? variants.map(v=>({id:Number(v.id),reorder:Number(v.alertLevel),
+            cost:Number(v.originalPrice),price:Number(v.salesPrice)})) :
+        [{id:null,reorder:Number(reorderLevel),cost:Number(costPrice),price:Number(salesPrice)}];
+    for (const entry of entries) {
+        const [found] = await connection.execute(
+            `SELECT id FROM branch_inventory WHERE store_id=? AND branch_id=? AND product_id=?
+                                               AND variant_id <=> ? AND status='active' LIMIT 1`,[storeId,branchId,productId,entry.id]);
+        if (!found.length) await connection.execute(
+            `INSERT INTO branch_inventory
+             (store_id,branch_id,product_id,variant_id,quantity_on_hand,reorder_level,cost_price,sales_price,status)
+             VALUES (?,?,?,?,0,?,?,?,'active')`,
+            [storeId,branchId,productId,entry.id,entry.reorder,entry.cost,entry.price]);
+    }
+}
+
 async function getProducts(connection, storeId, activeBranchId, productId = null) {
     let query = `
         SELECT
@@ -398,7 +594,19 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
             products.sales_price AS salesPrice,
             products.pricing_method AS pricingMethod,
             products.markup_percentage AS markupPercentage,
-            products.expiration_date AS expirationDate,
+            CASE WHEN EXISTS (
+                SELECT 1 FROM branch_inventory bi
+                                  JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
+                  AND bi.product_id=products.id AND bi.variant_id IS NULL
+                  AND ib.status='active' AND ib.remaining_quantity>0
+            ) THEN (
+                SELECT MIN(ib.expiration_date) FROM branch_inventory bi
+                                                        JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
+                  AND bi.product_id=products.id AND bi.variant_id IS NULL
+                  AND ib.status='active' AND ib.remaining_quantity>0
+            ) ELSE products.expiration_date END AS expirationDate,
             products.has_variants AS hasVariants,
             products.created_at AS createdAt
         FROM products
@@ -425,7 +633,44 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
 
     const [rows] = await connection.execute(query, params);
 
-    return attachVariants(connection, rows);
+    // UI-only sellable quantity: the same active, non-expired branch batches
+    // checked by POS and Bookings. Keep `stock` untouched for financial restock
+    // and stock-correction concurrency checks. Never backfill legacy drift here.
+    const today = new Intl.DateTimeFormat('en-CA', {
+        timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'
+    }).format(new Date());
+    const [balances] = await connection.execute(
+        `SELECT bi.branch_id AS branchId, bi.product_id AS productId,
+                bi.variant_id AS variantId, bi.quantity_on_hand AS onHand,
+                COALESCE(SUM(CASE WHEN ib.status='active'
+                    AND ib.remaining_quantity>0
+                    AND (ib.expiration_date IS NULL OR ib.expiration_date>=?)
+                                      THEN ib.remaining_quantity ELSE 0 END),0) AS eligibleBatches
+         FROM branch_inventory bi
+                  LEFT JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+         WHERE bi.store_id=? AND bi.status='active'
+             ${activeBranchId ? 'AND bi.branch_id=?' : ''}
+         GROUP BY bi.id,bi.branch_id,bi.product_id,bi.variant_id,bi.quantity_on_hand`,
+        activeBranchId ? [today,storeId,activeBranchId] : [today,storeId]);
+    const sellableByKey = new Map(balances.map(row => [
+        `${Number(row.branchId)}:${Number(row.productId)}:${row.variantId==null?'regular':Number(row.variantId)}`,
+        Math.max(0,Math.floor(Math.min(Number(row.onHand||0),Number(row.eligibleBatches||0))))
+    ]));
+    const enriched = await attachVariants(connection, rows);
+    return enriched.map(product=>{
+        const branchId=Number(product.branchId);
+        const baseKey=`${branchId}:${Number(product.id)}`;
+        const variants=(product.variants||[]).map(variant=>({
+            ...variant,
+            sellableStock:Math.max(0,Math.min(Number(variant.stock||0),
+                sellableByKey.get(`${baseKey}:${Number(variant.id)}`)||0))
+        }));
+        const sellableStock=product.hasVariants
+            ? variants.reduce((total,variant)=>total+variant.sellableStock,0)
+            : Math.max(0,Math.min(Number(product.stock||0),
+                sellableByKey.get(`${baseKey}:regular`)||0));
+        return {...product,variants,sellableStock};
+    });
 }
 
 async function getProductById(connection, storeId, activeBranchId, productId) {
@@ -2004,7 +2249,7 @@ async function getProductRemovalImpact(
                                  ON b.id = bi.booking_id
              WHERE bi.product_id = ?
                AND LOWER(TRIM(COALESCE(b.status, ''))) IN
-                   ('pending review', 'confirmed', 'preparing')`,
+                   ('pending review','approved','approved - awaiting payment','awaiting payment','confirmed','preparing','released','return inspection','pending settlement','event in progress')`,
             [productId]
         );
 
@@ -2246,7 +2491,7 @@ async function getVariantRemovalImpact(connection, storeId, activeBranchId, prod
             `SELECT COUNT(*) AS total FROM booking_items bi
                                                JOIN bookings b ON b.id=bi.booking_id
              WHERE bi.product_id=?${condition}
-               AND LOWER(TRIM(COALESCE(b.status,''))) IN ('pending review','confirmed','preparing')`, args
+               AND LOWER(TRIM(COALESCE(b.status,''))) IN ('pending review','approved','approved - awaiting payment','awaiting payment','confirmed','preparing','released','return inspection','pending settlement','event in progress')`, args
         );
         if (Number(activeRows[0]?.total || 0) > 0) {
             blockers.push("This variant may be needed for an active booking. Complete or cancel the booking first.");
@@ -2488,7 +2733,7 @@ async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}
                                                         p.alert_level AS alertLevel,DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS expiresAt,p.has_variants AS hasVariants,
                                                         DATE_FORMAT(p.created_at,'%Y-%m-%d') AS createdDate,
                                                         ${hasVariants ? "v.id AS variantId,v.stock AS variantStock,v.alert_level AS variantAlert,DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS variantExpiry" :
-            'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
+                                                                'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
                                                  FROM products p ${hasVariants ? 'LEFT JOIN product_variants v ON v.product_id=p.id AND v.deleted_at IS NULL' : ''}
                                                  WHERE p.store_id=? AND p.deleted_at IS NULL ${branchId ? 'AND p.branch_id=?' : ''}
                                                  ORDER BY p.id`, args);
@@ -2872,22 +3117,48 @@ exports.handler = async (event) => {
             const [matchingBranches] = await connection.execute(
                 'SELECT id FROM branches WHERE store_id=? AND id=? LIMIT 1',[sid,bid]);
             if (!matchingBranches.length) return notFound(headers,"Branch not found for this store.");
-            const products = await getProducts(connection,sid,bid);
-            const now = new Intl.DateTimeFormat('en-CA', {
+            const today = new Intl.DateTimeFormat('en-CA', {
                 timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'
             }).format(new Date());
-            const validDate = d => !d || String(d instanceof Date ? d.toISOString().slice(0,10) : d).slice(0,10) >= now;
-            // Rebuild a public response rather than leaking cost price or stock ledgers.
-            const safeProducts = products.filter(p => validDate(p.expirationDate) &&
-                (!p.hasVariants || (Array.isArray(p.variants) && p.variants.some(v=>validDate(v.expirationDate))))).map(p => ({
-                id:Number(p.id),branchId:bid,name:String(p.name),category:String(p.category||'Other'),
-                stock:Number(p.stock||0),salesPrice:Number(p.salesPrice||0),
-                hasVariants:Boolean(p.hasVariants),
-                variants:(Array.isArray(p.variants)?p.variants:[])
-                    .filter(v=>validDate(v.expirationDate))
-                    .map(v=>({id:Number(v.id),stock:Number(v.stock||0),salesPrice:Number(v.salesPrice||0),variantValues:v.variantValues||{}}))
+            const requestedDate=String(body.eventDate ?? body.event_date ?? '').trim();
+            const validCalendarDate=value=>/^\d{4}-\d{2}-\d{2}$/.test(value) &&
+                !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
+                new Date(`${value}T00:00:00Z`).toISOString().slice(0,10)===value;
+            if(requestedDate && !validCalendarDate(requestedDate))
+                return badRequest(headers,'Choose a valid event date.');
+            const eligibleOn=requestedDate||today;
+            // The public quantity must not exceed ANY balance needed to fulfill a
+            // booking: catalog/variant, active branch row, or eligible batches.
+            // Legacy catalog expiry is not authoritative when a fresh batch exists.
+            // Reservations/POS already decrease these balances transactionally.
+            const [balances]=await connection.execute(
+                `SELECT bi.product_id AS productId, bi.variant_id AS variantId,
+                        bi.quantity_on_hand AS onHand,
+                        COALESCE(SUM(ib.remaining_quantity),0) AS eligibleBatches
+                 FROM branch_inventory bi
+                          LEFT JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                     AND ib.status='active' AND ib.remaining_quantity>0
+                     AND (ib.expiration_date IS NULL OR ib.expiration_date>=?)
+                 WHERE bi.store_id=? AND bi.branch_id=? AND bi.status='active'
+                 GROUP BY bi.id,bi.product_id,bi.variant_id,bi.quantity_on_hand`,
+                [eligibleOn,sid,bid]);
+            const available=new Map(balances.map(row=>[
+                `${Number(row.productId)}:${row.variantId==null?'regular':Number(row.variantId)}`,
+                Math.max(0,Math.floor(Math.min(Number(row.onHand||0),Number(row.eligibleBatches||0))))
+            ]));
+            const products=await getProducts(connection,sid,bid);
+            // Use an explicit allowlist: never expose supplier costs, batch details,
+            // employee activity, or other nonpublic inventory records.
+            const safeProducts=products.map(pr=>({
+                id:Number(pr.id),branchId:bid,name:String(pr.name),category:String(pr.category||'Other'),
+                stock:Math.max(0,Math.min(Number(pr.stock||0),available.get(`${Number(pr.id)}:regular`)||0)),
+                salesPrice:Number(pr.salesPrice||0),hasVariants:Boolean(pr.hasVariants),
+                variants:(Array.isArray(pr.variants)?pr.variants:[]).map(v=>({
+                    id:Number(v.id),stock:Math.max(0,Math.min(Number(v.stock||0),available.get(`${Number(pr.id)}:${Number(v.id)}`)||0)),
+                    salesPrice:Number(v.salesPrice||0),variantValues:v.variantValues||{}
+                }))
             }));
-            return jsonResponse(200,headers,{products:safeProducts});
+            return jsonResponse(200,headers,{products:safeProducts,branchId:bid,availabilityDate:eligibleOn});
         }
 
         const authHeader =
@@ -3233,8 +3504,8 @@ exports.handler = async (event) => {
                             COALESCE(pv.expiration_date,p.expiration_date) AS expirationDate,
                             r.created_at AS createdAt
                      FROM staff_stock_condition_reports r
-                     JOIN products p ON p.id=r.product_id AND p.store_id=r.store_id AND p.branch_id=r.branch_id
-                     LEFT JOIN product_variants pv ON pv.id=r.variant_id AND pv.product_id=p.id
+                              JOIN products p ON p.id=r.product_id AND p.store_id=r.store_id AND p.branch_id=r.branch_id
+                              LEFT JOIN product_variants pv ON pv.id=r.variant_id AND pv.product_id=p.id
                      WHERE r.store_id=? AND r.branch_id=? AND r.status='open'
                      ORDER BY r.created_at DESC, r.id DESC LIMIT 100`,
                     [storeId,activeBranchId]);
@@ -3406,6 +3677,15 @@ exports.handler = async (event) => {
                 if (!inventory.length) {await safeRollback(connection);return jsonResponse(409,headers,{error:"V2 inventory row missing; ask a manager to reconcile stock."});}
                 const before = Number(inventory[0].quantity_on_hand);
                 if (!Number.isSafeInteger(before) || before + quantity > 2147483647) {await safeRollback(connection);return badRequest(headers,"Stock quantity out of range.");}
+                // Staff receipts also require consistent V2 balances. A missing
+                // historical batch must be reconciled rather than masked by receipt.
+                const [batchCounts]=await connection.execute(
+                    `SELECT COALESCE(SUM(remaining_quantity),0) AS total
+                     FROM inventory_batches WHERE branch_inventory_id=?`,[inventory[0].id]);
+                if (Number(batchCounts[0]?.total||0)!==before) {
+                    await safeRollback(connection);
+                    return jsonResponse(409,headers,{error:"Inventory batch balance differs from branch stock. Ask the Manager to reconcile this product first."});
+                }
                 if (variantId !== null) {
                     const [v] = await connection.execute(`SELECT id,stock FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL FOR UPDATE`,[variantId,task.product_id]);
                     if (!v.length) {await safeRollback(connection);return jsonResponse(409,headers,{error:"Variant no longer available."});}
@@ -3444,6 +3724,9 @@ exports.handler = async (event) => {
                          received_by=?,received_at=CURRENT_TIMESTAMP,request_key=?,last_receiving_notes=?
                      WHERE id=?`,
                     [quantity,quantity,staffId,requestKey,receivingNotes || null,taskId]);
+                await assertInventoryLineSynchronized(connection,{
+                    storeId,branchId:activeBranchId,productId:task.product_id,variantId,
+                    expected:before+quantity});
                 await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,module:"Inventory",
                     referenceNumber:product.product_number,action:"Received authorized stock",referenceId:String(taskId),
                     details:`Received ${quantity} units of ${product.name} for delivery ${task.delivery_reference}; ${remaining-quantity} pending${receivingNotes ? `; ${receivingNotes}` : ""}`});
@@ -3485,7 +3768,7 @@ exports.handler = async (event) => {
                 }
                 const [duplicate]=await connection.execute(
                     `SELECT id FROM staff_stock_condition_reports WHERE store_id=? AND branch_id=? AND product_id=?
-                     AND variant_id <=> ? AND issue_type=? AND status='open' LIMIT 1`,
+                                                                    AND variant_id <=> ? AND issue_type=? AND status='open' LIMIT 1`,
                     [storeId,activeBranchId,productId,variantId,issueType]);
                 if (duplicate.length) {await safeRollback(connection);return jsonResponse(409,headers,{error:"This product condition is already reported and awaiting review."});}
                 const [created] = await connection.execute(
@@ -3726,6 +4009,9 @@ exports.handler = async (event) => {
                 if (expirationDate && expirationDate < receivedDate) {
                     return badRequest(headers, "An incoming batch cannot be expired before Date Received.");
                 }
+                if (expirationDate && expirationDate < todayInPhilippines) {
+                    return badRequest(headers, "Do not receive an already expired batch into sellable stock.");
+                }
                 const key = String(variantId ?? "regular");
                 if (seen.has(key)) return badRequest(headers, "Duplicate receiving variant line.");
                 seen.add(key);
@@ -3786,13 +4072,15 @@ exports.handler = async (event) => {
                 !(await tableExists(connection, "inventory_stock_receipt_items"))) {
                 return badRequest(headers, "Run the Receive Stock SQL migration before receiving stock.");
             }
+            try { await requireSynchronizedInventoryTables(connection); }
+            catch (error) { return jsonResponse(503,headers,{error:error.message}); }
             const requestKey = toSafeString(body.requestKey, 80);
             if (!requestKey) return badRequest(headers, "Receiving request key is required to prevent duplicate stock receipts.");
             await connection.beginTransaction();
             // Lock the parent product to serialize concurrent receives for it.
             const [lockedProducts] = await connection.execute(
                 `SELECT id, name, has_variants, product_number, stock,
-                        original_price, sales_price, pricing_method, markup_percentage FROM products
+                        original_price, sales_price, pricing_method, markup_percentage, alert_level FROM products
                  WHERE id = ? AND store_id = ? AND branch_id = ? AND deleted_at IS NULL
                      FOR UPDATE`, [productId, storeId, activeBranchId]);
             if (!lockedProducts.length) { await safeRollback(connection); return notFound(headers, "Product not found."); }
@@ -3810,7 +4098,7 @@ exports.handler = async (event) => {
             const variants = new Map();
             if (isVariantProduct) {
                 const [rows] = await connection.execute(
-                    `SELECT id, stock, variant_values, original_price, sales_price,
+                    `SELECT id, stock, variant_values, original_price, sales_price, alert_level,
                             pricing_method, markup_percentage FROM product_variants
                      WHERE product_id = ? AND deleted_at IS NULL FOR UPDATE`, [productId]);
                 for (const variant of rows) variants.set(Number(variant.id), variant);
@@ -3912,6 +4200,22 @@ exports.handler = async (event) => {
             const receiptId = ledger.receiptId;
             const purchaseId = ledger.purchaseId;
             const totalQuantity = cleanLines.reduce((sum, line) => sum + line.quantity, 0);
+            // Lock and credit V2 quantities BEFORE changing catalog stock; any
+            // mismatch rolls the entire financial receipt and stock change back.
+            const actingEmployee = await getActingEmployee(connection, decoded, tokenRole, storeId);
+            for (const [lineIndex,line] of receiptLines.entries()) {
+                const match = isVariantProduct ? variants.get(line.variantId) : current;
+                await creditBranchInventoryBatch(connection,{
+                    storeId,branchId:activeBranchId,productId,variantId:line.variantId,
+                    quantity:line.quantity,expectedBefore:line.stockBefore,
+                    reorderLevel:Number(match.alert_level ?? match.alertLevel ?? current.alert_level ?? 0),
+                    costPrice:line.averageCost,salesPrice:line.selectedPrice,
+                    expirationDate:line.expirationDate,
+                    reference:`RCV-${receiptId}-${lineIndex + 1}`,
+                    actorId:Number(decoded?.manager_id||decoded?.owner_id||0)||null,
+                    actorRole:tokenRole,actorName:actingEmployee.name,
+                });
+            }
             for (const line of receiptLines) {
                 if (line.variantId !== null) {
                     await connection.execute(
@@ -3956,7 +4260,11 @@ exports.handler = async (event) => {
                     [totalQuantity, line.averageCost, line.selectedPrice, line.selectedMethod,
                         line.selectedMarkup, productId, storeId, activeBranchId]);
             }
-            const actingEmployee = await getActingEmployee(connection, decoded, tokenRole, storeId);
+            for (const line of receiptLines) {
+                await assertInventoryLineSynchronized(connection,{
+                    storeId,branchId:activeBranchId,productId,variantId:line.variantId,
+                    expected:line.stockBefore+line.quantity});
+            }
             await logEmployeeAction(connection, {
                 storeId, branchId: activeBranchId, employee: actingEmployee,
                 module: "Inventory", referenceNumber: current.product_number || String(productId),
@@ -4108,10 +4416,32 @@ exports.handler = async (event) => {
             if(current!==expected){await safeRollback(connection);return badRequest(headers,`Stock changed since opening this dialog (now ${current}). Reopen and retry.`);}
             if(target===current){await safeRollback(connection);return badRequest(headers,"Corrected quantity must differ from current stock.");}
             if(aggregateStock>2147483647){await safeRollback(connection);return badRequest(headers,"Total stock would exceed the supported limit.");}
+            // Reconcile the V2 count and expiration-aware batch ledger in the
+            // very same transaction. Fail closed on pre-existing drift.
+            const employee=await getActingEmployee(connection,decoded,tokenRole,storeId);
+            const [priceInfo]=await connection.execute(
+                variantId!==null
+                    ? `SELECT original_price AS cost FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`
+                    : `SELECT original_price AS cost FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL`,
+                variantId!==null?[variantId,productId]:[productId,storeId,activeBranchId]);
+            if(!priceInfo.length){await safeRollback(connection);return notFound(headers,"Product/variant pricing unavailable.");}
+            let correctionExpiry;
+            try {correctionExpiry=normalizeOptionalDate(body.expirationDate);}
+            catch(error){await safeRollback(connection);return badRequest(headers,error.message);}
+            const correctionDateParts=new Intl.DateTimeFormat('en-GB',{
+                timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit',
+            }).formatToParts(new Date());
+            const correctionDayPart=kind=>correctionDateParts.find(piece=>piece.type===kind)?.value||'';
+            const correctionToday=`${correctionDayPart('year')}-${correctionDayPart('month')}-${correctionDayPart('day')}`;
+            if(correctionExpiry && correctionExpiry<correctionToday && target>current){
+                await safeRollback(connection);return badRequest(headers,"Do not increase sellable stock with an expired date.");
+            }
+            await adjustSynchronizedStock(connection,{storeId,branchId:activeBranchId,productId,variantId,
+                before:current,target,requestKey,costPrice:Number(priceInfo[0].cost),
+                expirationDate:correctionExpiry||null,employee,reason});
             // A correction is never a purchase receipt or POS sale.
             if(variantId!==null) await connection.execute("UPDATE product_variants SET stock=? WHERE id=? AND product_id=?",[target,variantId,productId]);
             await connection.execute("UPDATE products SET stock=? WHERE id=? AND store_id=? AND branch_id=?",[aggregateStock,productId,storeId,activeBranchId]);
-            const employee=await getActingEmployee(connection,decoded,tokenRole,storeId);
             if (hasAdjustmentLedger) {
                 await connection.execute(
                     `INSERT INTO inventory_stock_adjustments
@@ -4119,6 +4449,8 @@ exports.handler = async (event) => {
                      VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
                     [storeId,activeBranchId,productId,variantId,current,target,target-current,reason,employee.name,employee.role,requestKey]);
             }
+            await assertInventoryLineSynchronized(connection,{
+                storeId,branchId:activeBranchId,productId,variantId,expected:target});
             await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,
                 module:"Inventory",referenceNumber:p.productNumber||String(productId),action:"Corrected stock level",referenceId:String(productId),
                 details:`Corrected ${variantId?`variant ${variantId}`:"regular product"} stock ${current} -> ${target} (${target-current>=0?"+":""}${target-current}); reason: ${reason}`});
@@ -4364,6 +4696,25 @@ exports.handler = async (event) => {
                         lines:purchaseLines,receivedBy:actingEmployee.name,
                     });
                 }
+                // Seed V2 for every imported product and its stocked variants.
+                // This runs atomically with the existing invoice creation.
+                await requireSynchronizedInventoryTables(connection);
+                for (const saved of created) {
+                    const sourceItem=clean.find(item=>item.name===saved.name);
+                    if (!sourceItem) throw new Error("Imported product stock source was not found.");
+                    const variantRows=sourceItem.hasVariants
+                        ? (await connection.execute(
+                            `SELECT id,stock,alert_level AS alertLevel,original_price AS originalPrice,
+                                    sales_price AS salesPrice,expiration_date AS expirationDate
+                             FROM product_variants WHERE product_id=? AND deleted_at IS NULL ORDER BY id`,
+                            [saved.id]))[0] : [];
+                    await createOpeningBranchStock(connection,{
+                        storeId,branchId:activeBranchId,productId:saved.id,
+                        variants:variantRows,stock:sourceItem.stock,
+                        reorderLevel:sourceItem.alertLevel,costPrice:sourceItem.cost,
+                        salesPrice:sourceItem.price,expirationDate:sourceItem.expirationDate,
+                        actorName:actingEmployee.name});
+                }
                 await connection.commit();
                 return jsonResponse(201, headers, {success:true, products:created});
             } catch (error) {
@@ -4569,6 +4920,17 @@ exports.handler = async (event) => {
                 details: `Added ${name}${hasVariants ? ` with ${incomingVariants.length} variant(s)` : ""} to inventory`,
             });
 
+            await requireSynchronizedInventoryTables(connection);
+            const savedOpeningVariants=hasVariants ? (await connection.execute(
+                `SELECT id,stock,alert_level AS alertLevel,original_price AS originalPrice,
+                        sales_price AS salesPrice,expiration_date AS expirationDate
+                 FROM product_variants WHERE product_id=? AND deleted_at IS NULL ORDER BY id`,
+                [productId]))[0] : [];
+            await createOpeningBranchStock(connection,{
+                storeId,branchId:activeBranchId,productId,
+                variants:savedOpeningVariants,stock,alertLevel,costPrice:originalPrice,
+                reorderLevel:alertLevel,salesPrice,expirationDate,
+                actorName:actingEmployee.name});
             await connection.commit();
 
             const product = await getProductById(
@@ -4866,7 +5228,18 @@ exports.handler = async (event) => {
                     }
                 }
                 const added=incomingVariants.filter(v=>!v.id);
-                if (added.length) await insertProductVariants(connection,id,added);
+                if (added.length) {
+                    const addedRows=await insertProductVariants(connection,id,added);
+                    await requireSynchronizedInventoryTables(connection);
+                    for (const [index,row] of addedRows.entries()) {
+                        const v=added[index];
+                        await connection.execute(
+                            `INSERT INTO branch_inventory
+                             (store_id,branch_id,product_id,variant_id,quantity_on_hand,reorder_level,cost_price,sales_price,status)
+                             VALUES (?,?,?,?,0,?,?,?,'active')`,
+                            [storeId,Number(existing.branchId),id,row.id,v.alertLevel,v.originalPrice,v.salesPrice]);
+                    }
+                }
             }
             const product = await getProductById(
                 connection,
@@ -5056,6 +5429,24 @@ exports.handler = async (event) => {
             let finalMode = impact.mode;
 
             try {
+                // Serialize removal with bookings, stock receipts and corrections.
+                // A pending booking may become Confirmed after the impact preview.
+                const [lockedProducts]=await connection.execute(
+                    `SELECT id FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
+                    [id,storeId,Number(existing.branchId)]);
+                if (!lockedProducts.length) {
+                    const stale=new Error("Product changed or was removed. Refresh Inventory.");
+                    stale.statusCode=409; throw stale;
+                }
+                const liveImpact=await getProductRemovalImpact(connection,storeId,activeBranchId,existing);
+                if (liveImpact.mode === "blocked") {
+                    const blocked=new Error(liveImpact.blockers[0] || "This product now has an active booking.");
+                    blocked.statusCode=409;throw blocked;
+                }
+                if (liveImpact.mode !== impact.mode) {
+                    const stale=new Error("Product usage changed since the deletion preview. Reopen Delete and review its impact.");
+                    stale.statusCode=409;throw stale;
+                }
                 if (impact.mode === "archive") {
                     const affectedRows = await archiveProduct(
                         connection,
@@ -5109,12 +5500,21 @@ exports.handler = async (event) => {
                 // A foreign-key relationship unknown to this Lambda may still
                 // prevent a physical delete. In that situation, never destroy
                 // history: safely archive instead.
-                if (impact.mode !== "permanent") {
+                if (impact.mode !== "permanent" || !["ER_ROW_IS_REFERENCED","ER_ROW_IS_REFERENCED_2"].includes(removalError.code)) {
                     throw removalError;
                 }
 
                 await connection.beginTransaction();
-
+                // Retry may race with another confirmation: protect bookings before archiving.
+                await connection.execute(
+                    `SELECT id FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
+                    [id,storeId,Number(existing.branchId)]);
+                const retryImpact=await getProductRemovalImpact(connection,storeId,activeBranchId,existing);
+                if (retryImpact.mode === "blocked") {
+                    await safeRollback(connection);
+                    const blocked=new Error(retryImpact.blockers[0]||"This product now has an active booking.");
+                    blocked.statusCode=409;throw blocked;
+                }
                 const archivedRows = await archiveProduct(
                     connection,
                     storeId,
@@ -5159,6 +5559,9 @@ exports.handler = async (event) => {
         return badRequest(headers, "Invalid action");
     } catch (err) {
         await safeRollback(connection);
+        // A booking becoming active while deletion is being confirmed is an
+        // expected conflict, not a server failure.
+        if (err?.statusCode === 409) return jsonResponse(409,headers,{error:err.message});
         return serverError(headers, err);
     } finally {
         if (connection) {

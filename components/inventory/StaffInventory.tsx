@@ -812,11 +812,16 @@ export default function StaffInventory() {
                                         const variants=product.hasVariants&&product.variants?.length?product.variants:[];
                                         const expandable=variants.length>0;
                                         const expanded=Boolean(expandedProductIds[product.id]);
-                                        const stock=expandable?variants.reduce((sum,v)=>sum+Math.max(0,Number(v.stock||0)),0):Math.max(0,Number(product.stock||0));
                                         const reorder=expandable?variants.reduce((sum,v)=>sum+Math.max(0,Number(v.alertLevel||0)),0):Math.max(0,Number(product.alertLevel||0));
                                         const expirations=(expandable?variants.map(v=>v.expirationDate):[product.expirationDate]).filter((v):v is string=>!!v);
                                         const expiration=expirations.map(v=>v.slice(0,10)).sort()[0]||null;
                                         const productLine=lines.find(line=>line.product.id===product.id);
+                                        const sellableProduct={...product,
+                                            stock:product.sellableStock ?? product.stock,
+                                            variants:variants.map(v=>({...v,stock:v.sellableStock ?? v.stock}))};
+                                        const availableStock=expandable
+                                            ? variants.reduce((total,v)=>total+Number(v.sellableStock ?? v.stock),0)
+                                            : Number(product.sellableStock ?? product.stock);
                                         return <React.Fragment key={product.id}>
                                             <tr className={`h-12 border-b border-[#EFE8F2] text-[#2B174C] hover:bg-[#FFFCF8] ${expandable?'cursor-pointer':''}`}
                                                 onClick={expandable?()=>setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]})):undefined}>
@@ -825,11 +830,11 @@ export default function StaffInventory() {
                                                 </td>
                                                 <td className="break-words px-3 py-2 font-semibold">{product.name}</td>
                                                 <td className="break-words px-2 py-2 text-[#5F4E75]">{product.category||"—"}</td>
-                                                <td className="px-2 py-2 text-center font-semibold">{stock.toLocaleString('en-PH')}</td>
+                                                <td className="px-2 py-2 text-center font-semibold">{availableStock.toLocaleString('en-PH')}</td>
                                                 <td className="px-2 py-2 text-center text-[#5F4E75]">{reorder.toLocaleString('en-PH')}</td>
                                                 <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.productDates[product.id])}</td>
                                                 <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(expiration)}</td>
-                                                <td className="px-1 py-2 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(product))}</td>
+                                                <td className="px-1 py-2 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(sellableProduct))}</td>
                                                 <td className="px-1 py-2 text-center"><button type="button" className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                                                                                               onClick={e=>{e.stopPropagation();if(expandable)setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]}));else if(productLine)openProductReview(productLine);}}>{expandable?(expanded?'Hide':'Variants'):'View'}</button></td>
                                             </tr>
@@ -839,11 +844,11 @@ export default function StaffInventory() {
                                                     <td className="break-all px-2 py-2 text-center font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">{variant.variantNumber||"—"}</td>
                                                     <td className="break-words px-3 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {staffVariantDisplayName(variant.variantValues)}</td>
                                                     <td className="px-2 py-2 text-[#8A7D90]">Variant</td>
-                                                    <td className="px-2 py-2 text-center font-semibold">{Number(variant.stock||0).toLocaleString('en-PH')}</td>
+                                                    <td className="px-2 py-2 text-center font-semibold">{Number(variant.sellableStock ?? variant.stock ?? 0).toLocaleString('en-PH')}</td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">{Number(variant.alertLevel||0).toLocaleString('en-PH')}</td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.variantDates[`${product.id}:${variant.id}`])}</td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(variant.expirationDate)}</td>
-                                                    <td className="px-1 py-2 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
+                                                    <td className="px-1 py-2 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.sellableStock ?? variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
                                                     <td className="px-1 py-2 text-center"><button type="button" disabled={!line} onClick={()=>line&&openProductReview(line)} className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">View</button></td>
                                                 </tr>;
                                             })}

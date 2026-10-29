@@ -12,6 +12,7 @@ export type RentalEquipment = {
     name: string;
     category: string;
     totalUnits: number;
+    bookableToday: number; // after confirmed reservations overlapping today
     rentedOutUnits: number;
     maintenanceUnits: number;
     missingUnits: number;
@@ -71,6 +72,7 @@ export type RentalActivity = {
     quantity: number;
     occurredAt: string;
     referenceNumber: string;
+    description?: string | null;
 };
 
 // One still-open maintenance record per repair/inspection transaction.
@@ -264,6 +266,7 @@ function normalizeEquipment(value: unknown): RentalEquipment | null {
         name: String(raw.name).trim(),
         category: String(raw.category ?? "Uncategorized").trim() || "Uncategorized",
         totalUnits: nonnegativeInteger(raw.totalUnits),
+        bookableToday: nonnegativeInteger(raw.bookableToday),
         rentedOutUnits: nonnegativeInteger(raw.rentedOutUnits),
         maintenanceUnits: nonnegativeInteger(raw.maintenanceUnits),
         missingUnits: nonnegativeInteger(raw.missingUnits),
@@ -295,6 +298,7 @@ function normalizeActivity(value: unknown): RentalActivity | null {
         id: String(raw.id), equipmentId: Number(raw.equipmentId) || 0,
         equipmentName: String(raw.equipmentName ?? "Equipment"),
         type, quantity: nonnegativeInteger(raw.quantity),
+        description: typeof raw.description === "string" ? raw.description : null,
         occurredAt: String(raw.occurredAt),
         referenceNumber: String(raw.referenceNumber ?? "").trim(),
     };
@@ -329,6 +333,8 @@ export type RentalMutation =
     rentalRatePerDay: number; initialPurchase?: RentalPurchaseDetails } & RentalPricingSelection
     | { action: "update_equipment"; equipmentId: number; name: string; category: string; alertLevel: number;
     rentalRatePerDay?: number } & RentalPricingSelection
+    | { action: "correct_equipment_stock"; equipmentId:number; totalUnits:number;
+    reason:string; physicalCountVerified:true }
     | ({ action: "receive_equipment"; equipmentId: number } & RentalPurchaseDetails)
     | { action: "start_maintenance"; equipmentId: number; quantity: number; reason: string;
     conditionStatus?: "In Repair" | "For Inspection"; estimatedCompletionDate?: string | null }
@@ -482,7 +488,7 @@ export function useRentalInventory(branchId?: number) {
         const onFocus = () => { if (document.visibilityState === "visible") void refresh(); };
         window.addEventListener("focus", onFocus);
         window.addEventListener("stocknbook:rental-inventory-refresh", onFocus);
-        const interval = window.setInterval(onFocus, 60_000);
+        const interval = window.setInterval(onFocus, 15_000);
         return () => {
             inFlight.current?.abort(); inFlight.current = null;
             window.removeEventListener("focus", onFocus);
@@ -534,7 +540,7 @@ export function useRentalInventory(branchId?: number) {
 export type StaffRentalEquipment = {
     id: number; equipmentNumber: string; name: string; category: string;
     totalUnits: number; rentedOutUnits: number; maintenanceUnits: number;
-    missingUnits: number; alertLevel: number;
+    missingUnits: number; alertLevel: number; bookableToday: number;
 };
 export type StaffRentalAllocation = {
     allocationId: number; bookingReference: string; equipmentId: number;
@@ -632,7 +638,8 @@ export function useStaffRentalInventory() {
         }, 20000);
         try {
             const response = await rentalRequest({ action: "get_staff_rental_workspace" }, abort.signal);
-            if (!Array.isArray(response.equipment) || !Array.isArray(response.allocations) || !Array.isArray(response.activity)) {
+            if (!Array.isArray(response.equipment) || !Array.isArray(response.allocations) || !Array.isArray(response.activity) ||
+                response.equipment.some(item => !Number.isSafeInteger(Number(item.bookableToday)) || Number(item.bookableToday)<0)) {
                 throw new Error("Rental inventory returned an invalid response.");
             }
             if (!abort.signal.aborted) {
@@ -668,7 +675,7 @@ export function useStaffRentalInventory() {
         void refresh();
         const onRefresh = () => { if (document.visibilityState === "visible") void refresh(); };
         window.addEventListener("focus", onRefresh);
-        const timer = window.setInterval(onRefresh, 60_000);
+        const timer = window.setInterval(onRefresh, 15_000);
         return () => {
             controller.current?.abort();
             controller.current = null; // Allow the next effect setup to start a fresh request.

@@ -32,6 +32,7 @@ export type ProductVariantApiRaw = {
     values?: Record<string, string> | string | null;
 
     stock?: number | string;
+    sellableStock?: number | string;
     alertLevel?: number | string;
     alert_level?: number | string;
     originalPrice?: number | string;
@@ -67,6 +68,7 @@ export type ProductApiRaw = {
     name: string;
     category: string;
     stock?: number | string;
+    sellableStock?: number | string;
     alertLevel?: number | string;
     alert_level?: number | string;
     originalPrice?: number | string;
@@ -344,7 +346,7 @@ export const mapVariant = (
         id: Number(rawId),
         productId: Number(v.productId ?? v.product_id ?? productId),
         name: variantName,
-        stock: Number(v.stock ?? 0),
+        stock: Number(v.sellableStock ?? v.stock ?? 0),
         alertLevel: Number(v.alertLevel ?? v.alert_level ?? 0),
         originalPrice: Number(v.originalPrice ?? v.original_price ?? 0),
         salesPrice: Number(v.salesPrice ?? v.sales_price ?? 0),
@@ -367,7 +369,7 @@ export const mapProduct = (p: ProductApiRaw): Product => {
         branchName: p.branchName ?? p.branch_name ?? null,
         name: String(p.name ?? ""),
         category: String(p.category ?? ""),
-        stock: Number(p.stock ?? 0),
+        stock: Number(p.sellableStock ?? p.stock ?? 0),
         alertLevel: Number(p.alertLevel ?? p.alert_level ?? 0),
         originalPrice: Number(p.originalPrice ?? p.original_price ?? 0),
         salesPrice: Number(p.salesPrice ?? p.sales_price ?? 0),

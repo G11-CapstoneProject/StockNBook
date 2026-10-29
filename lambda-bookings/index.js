@@ -678,8 +678,8 @@ async function validatePublicBookingSalesItems(connection, rawItems, storeId, br
         if(!p)throw rentalError(`Product #${productId} is not available from the selected branch.`);
         const dateText=v=>v instanceof Date?v.toISOString().slice(0,10):String(v||'').slice(0,10);
         const today=new Intl.DateTimeFormat('en-CA',{year:'numeric',month:'2-digit',day:'2-digit',timeZone:'Asia/Manila'}).format(new Date());
-        if(p.expiration_date && dateText(p.expiration_date)<today)
-            throw rentalError(`Product #${productId} is expired.`);
+        // Date eligibility is checked from real batches before approval/reservation,
+        // not from a possibly stale catalog expiration date.
         let price=Number(p.sales_price||0),variantName='';
         if(Number(p.has_variants)===1 || variantId!==null){
             if(variantId===null)throw rentalError(`Select a variant for ${p.name}.`);
@@ -688,8 +688,7 @@ async function validatePublicBookingSalesItems(connection, rawItems, storeId, br
                 `SELECT id,sales_price,variant_values,expiration_date FROM product_variants
                  WHERE id=? AND product_id=? AND deleted_at IS NULL LIMIT 1`,[variantId,productId]);
             const v=variants[0];
-            if(!v || (v.expiration_date && dateText(v.expiration_date)<today))
-                throw rentalError(`Selected variant is unavailable for ${p.name}.`);
+            if(!v) throw rentalError(`Selected variant is unavailable for ${p.name}.`);
             price=Number(v.sales_price||0);
             try {const values=typeof v.variant_values==='string'?JSON.parse(v.variant_values):v.variant_values;
                 variantName=Object.values(values||{}).map(String).join(', ');}catch{variantName='';}
@@ -1083,13 +1082,12 @@ async function reserveBookingInventory(connection, options) {
              WHERE p.id=? AND p.store_id=? AND p.branch_id=? LIMIT 1 FOR UPDATE`,
             [variantId,productId,storeId,branchId]);
         const product=productCheck[0];
-        const dateString=value=>value instanceof Date?value.toISOString().slice(0,10):String(value||'').slice(0,10);
+        // Do not reject fresh batches based on an old catalog-level expiration.
+        // consumeBookingV2Batches below enforces per-batch expiry on eventDate.
         if(!product || product.deleted_at ||
             (variantId && (!product.variant_found||product.variant_deleted)) ||
-            (!variantId && Number(product.has_variants)===1) ||
-            (product.expiration_date && dateString(product.expiration_date)<eventDate) ||
-            (variantId && product.variant_expiration && dateString(product.variant_expiration)<eventDate))
-            throw rentalError(`One booking item is unavailable or expired for ${eventDate}. Refresh the branch inventory.`);
+            (!variantId && Number(product.has_variants)===1))
+            throw rentalError(`One booking item is inactive for ${eventDate}. Refresh the branch inventory.`);
 
         const itemLabel = item.variant_name
             ? `${item.product_name} — ${item.variant_name}`
@@ -1604,8 +1602,21 @@ async function checkAvailableBeforePayment(db,{bookingId,storeId,branchId}) {
         const row=p[0];
         if(!row || row.deleted_at || row.vDeleted || Number(row.available||0)<Number(line.booked_quantity))
             throw rentalError('Insufficient sales inventory for the requested booking inclusions.');
-        const expiry=String(row.vExpiry||row.pExpiry||'').slice(0,10);
-        if(expiry && expiry < bk[0].eventDate)throw rentalError(`${row.name} expires before the event date.`);
+        // Legacy product/variant expiry dates are not proof that a newly
+        // received batch is expired. Check actual eligible batches below.
+        // Approval must use the same expiration-aware batch availability as
+        // the Items tab and the actual reservation transaction.
+        const [eligible] = await db.execute(
+            `SELECT COALESCE(SUM(batch.remaining_quantity),0) AS available
+             FROM inventory_batches batch
+             JOIN branch_inventory bi ON bi.id=batch.branch_inventory_id
+             WHERE bi.store_id=? AND bi.branch_id=? AND bi.product_id=?
+               AND bi.variant_id <=> ? AND bi.status='active'
+               AND batch.status='active' AND batch.remaining_quantity>0
+               AND (batch.expiration_date IS NULL OR batch.expiration_date>=?)`,
+            [storeId,branchId,line.product_id,line.variant_id,bk[0].eventDate]);
+        if(Number(eligible[0]?.available||0)<Number(line.booked_quantity))
+            throw rentalError(`Not enough eligible inventory batches for ${row.name} on the event date.`);
     }
     const [rentals]=await db.execute(`SELECT equipment_id,quantity,
                                              DATE_FORMAT(start_date,'%Y-%m-%d') AS fromDate,
@@ -2075,8 +2086,14 @@ exports.handler = async (event) => {
                                                     FROM rental_equipment WHERE store_id=? AND branch_id=? AND archived_at IS NULL
                                                                             AND rental_rate_per_day>0 AND total_units>maintenance_units+missing_units
                                                     ORDER BY name LIMIT 200`,[targetStoreId,requestedBranch]);
+            // Always calculate today's date-aware bookable units for the public
+            // catalog preview, even before the customer selects event dates.
+            // Selections/checkout still require explicit dates and server checks.
+            const today=rentalTodayManila();
+            const queryFrom=withDates && startDate<today?startDate:today;
+            const queryTo=withDates && endDate>today?endDate:today;
             const allocationsByEquipment=new Map();
-            if(withDates && items.length){
+            if(items.length){
                 const ids=items.map(e=>Number(e.id));
                 const placeholders=ids.map(()=>'?').join(',');
                 const [allocations]=await connection.execute(`SELECT equipment_id AS equipmentId,quantity,status,
@@ -2086,22 +2103,24 @@ exports.handler = async (event) => {
                                                               WHERE store_id=? AND branch_id=? AND equipment_id IN (${placeholders})
                                                                 AND status IN ('reserved','checked_out')
                                                                 AND start_date<=? AND (end_date>=? OR status='checked_out')`,
-                    [targetStoreId,requestedBranch,...ids,endDate,startDate]);
+                    [targetStoreId,requestedBranch,...ids,queryTo,queryFrom]);
                 for(const allocation of allocations){
                     const id=Number(allocation.equipmentId);
                     if(!allocationsByEquipment.has(id))allocationsByEquipment.set(id,[]);
                     allocationsByEquipment.get(id).push(allocation);
                 }
             }
-            const today=rentalTodayManila();
             return response(200,{branchId:requestedBranch,branchName:branches[0].branchName,
                 startDate,endDate,availabilityForDates:withDates,
                 equipment:items.map(e=>{
                     const capacity=Math.max(0,Number(e.totalUnits)-Number(e.maintenanceUnits)-Number(e.missingUnits));
                     const physicallyAvailable=Math.max(0,capacity-Number(e.rentedOutUnits));
-                    const reservedForDates=withDates?rentalPeakReserved(allocationsByEquipment.get(Number(e.id))||[],startDate,endDate,today):null;
+                    const allocations=allocationsByEquipment.get(Number(e.id))||[];
+                    const reservedToday=rentalPeakReserved(allocations,today,today,today);
+                    const bookableToday=Math.max(0,capacity-reservedToday);
+                    const reservedForDates=withDates?rentalPeakReserved(allocations,startDate,endDate,today):null;
                     return {id:Number(e.id),name:e.name,dailyRate:Number(e.dailyRate),physicallyAvailable,
-                        reservedForDates,availableForDates:withDates?Math.max(0,capacity-reservedForDates):null};
+                        bookableToday,reservedForDates,availableForDates:withDates?Math.max(0,capacity-reservedForDates):null};
                 })});
         }
 
@@ -3999,11 +4018,9 @@ exports.handler = async (event) => {
                         const record=matches[0];
                         if(!record || !record.inventoryId || (variantId!=null && !record.matchingVariant)){
                             reason='Active inventory record not found.';
-                        }else if(record.productDeleted || record.variantDeleted ||
-                            (record.productExpiry && record.productExpiry<eventDate) ||
-                            (record.variantExpiry && record.variantExpiry<eventDate)){
+                        }else if(record.productDeleted || record.variantDeleted){
                             available=0;
-                            reason='Product is inactive or expires before the event date.';
+                            reason='Product or variant is inactive.';
                         }else{
                             const [batches]=await connection.execute(
                                 `SELECT COALESCE(SUM(remaining_quantity),0) AS eligible

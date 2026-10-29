@@ -40,6 +40,7 @@ type ProductVariant = {
     variantNumber?: string | null;
     variantValues: Record<string, string>;
     stock: number;
+    sellableStock?: number; // Branch/batch eligible stock, read-only for availability display.
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
@@ -74,6 +75,7 @@ type Product = {
     name: string;
     category: string;
     stock: number;
+    sellableStock?: number; // Branch/batch eligible stock, read-only for availability display.
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
@@ -2984,6 +2986,7 @@ type ReceiveStockLine = {
     variantNumber?: string | null;
     variantName: string;
     currentStock: number;
+    currentSellableStock: number;
     currentAverageCost: number;
     currentSellingPrice: number;
     pricingMethod: InventoryPricingMethod;
@@ -3077,6 +3080,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                     ? (current.variants || []).map(v => ({
                         variantId: Number(v.id), variantNumber: v.variantNumber || null, variantName: getVariantName(v),
                         currentStock: Number(v.stock || 0),
+                        currentSellableStock: Math.max(0, Number(v.sellableStock ?? 0)),
                         currentAverageCost: Number(v.originalPrice || 0),
                         currentSellingPrice: Number(v.salesPrice || 0),
                         pricingMethod: v.pricingMethod === "markup" ? "markup" : "manual",
@@ -3091,6 +3095,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                     : [{
                         variantId: null, variantName: "Regular",
                         currentStock: Number(current.stock || 0),
+                        currentSellableStock: Math.max(0, Number(current.sellableStock ?? 0)),
                         currentAverageCost: Number(current.originalPrice || 0),
                         currentSellingPrice: Number(current.salesPrice || 0),
                         pricingMethod: current.pricingMethod === "markup" ? "markup" : "manual",
@@ -3126,6 +3131,41 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
         return () => abort.abort();
     }, [product.id]);
 
+    // A receiving dialog may remain open while Staff completes another receipt
+    // or POS/Bookings changes stock. Refresh its read-only balances without
+    // resetting quantities, expiration dates, supplier, or pricing inputs.
+    React.useEffect(() => {
+        if (loading || saving) return;
+        const controller = new AbortController();
+        const refreshBalances = async () => {
+            if (controller.signal.aborted || document.visibilityState !== "visible") return;
+            const token = sessionStorage.getItem("token");
+            if (!token) return;
+            try {
+                const response = await fetch("/api/products", {
+                    method: "POST", cache: "no-store", signal: controller.signal,
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ action: "get_product_editor_details", id: product.id }),
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok || !result.product || controller.signal.aborted) return;
+                const current = result.product as Product;
+                setDetails(current);
+                setLines(previous => previous.map(line => {
+                    const currentLine = line.variantId === null ? current :
+                        (current.variants || []).find(v => Number(v.id) === line.variantId);
+                    if (!currentLine) return line;
+                    return { ...line,
+                        currentStock: Number(currentLine.stock || 0),
+                        currentSellableStock: Math.max(0, Number(currentLine.sellableStock ?? 0)),
+                    };
+                }));
+            } catch { /* The save operation still revalidates on the server. */ }
+        };
+        const interval = window.setInterval(() => void refreshBalances(), 15000);
+        return () => { controller.abort(); window.clearInterval(interval); };
+    }, [product.id, loading, saving]);
+
     const updateLine = (index: number, field: "quantity" | "unitPurchaseCost" | "expirationDate" |
         "pricingDecision" | "manualSellingPrice" | "pricingMarkupInput", value: string) => {
         setLines(previous => previous.map((line, i) => i === index ? { ...line, [field]: value } : line));
@@ -3135,9 +3175,11 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
         (Number(line.quantity) || 0) * (Number(line.unitPurchaseCost) || 0), 0) + Number.EPSILON) * 100) / 100;
     const paid = paymentMethod === "cash" ? totalCost : Number(amountPaid || 0);
     const outstanding = Math.max(0, Math.round((totalCost - paid + Number.EPSILON) * 100) / 100);
-    const stockBefore = details.hasVariants && (details.variants || []).length
-        ? (details.variants || []).reduce((sum, v) => sum + Number(v.stock || 0), 0)
-        : Number(details.stock || 0);
+    // Cost calculations use catalog stock. The receiving summary must instead
+    // show the exact sellable balance used by POS and Bookings.
+    const catalogStockBefore = lines.reduce((sum, line) => sum + line.currentStock, 0);
+    const availableBefore = lines.reduce((sum, line) => sum + line.currentSellableStock, 0);
+    const inventoryNeedsReconciliation = lines.some(line => line.currentStock !== line.currentSellableStock);
 
     const saveReceiving = async (event: React.SyntheticEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -3240,11 +3282,14 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                             <h3 className="text-base font-bold text-[#21132E]">{details.name}</h3>
                             <p className="mt-1 text-xs text-[#806A8C]">Product No. {getProductNumber(details) || "—"} · {details.category}</p>
                             <div className="mt-3 grid grid-cols-2 gap-3 rounded-xl bg-[#F7F1FF] p-4">
-                                <div><div className="text-xs text-[#806A8C]">Current Total Stock</div>
-                                    <div className="mt-1 text-xl font-bold text-[#2B174C]">{formatNumber(stockBefore)}</div></div>
-                                <div><div className="text-xs text-[#806A8C]">Stock After Receiving</div>
-                                    <div className="mt-1 text-xl font-bold text-[#2B174C]">{formatNumber(stockBefore + totalQuantity)}</div></div>
+                                <div><div className="text-xs text-[#806A8C]">Available Now (POS / Bookings)</div>
+                                    <div className="mt-1 text-xl font-bold text-[#2B174C]">{loading ? "—" : formatNumber(availableBefore)}</div></div>
+                                <div><div className="text-xs text-[#806A8C]">Available After Receiving</div>
+                                    <div className="mt-1 text-xl font-bold text-[#2B174C]">{loading || inventoryNeedsReconciliation ? "—" : formatNumber(availableBefore + totalQuantity)}</div></div>
                             </div>
+                            {!loading && inventoryNeedsReconciliation && <p role="alert" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                                The catalog records {formatNumber(catalogStockBefore)} units, but only {formatNumber(availableBefore)} are currently sellable in this branch. This difference may reflect old stock records, expired batches, or missing batch balances. Reconcile the affected stock before recording another receipt; no new availability is projected until the records agree.
+                            </p>}
                         </div>
                         {loading ? <p className="text-sm text-[#806A8C]">Loading receiving details...</p> : (
                             <>
@@ -3256,7 +3301,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                                             <div className="flex justify-between gap-3">
                                                 <div><strong className="text-sm text-[#2B174C]">{line.variantName}</strong>
                                                     {line.variantNumber && <p className="mt-1 text-[11px] text-[#806A8C]">Variant No. {line.variantNumber}</p>}</div>
-                                                <span className="text-xs text-[#806A8C]">Current: {formatNumber(line.currentStock)} pcs</span>
+                                                <span className="text-xs text-[#806A8C]">Available: {formatNumber(line.currentSellableStock)} pcs</span>
                                             </div>
                                             <div className="grid gap-3 sm:grid-cols-2">
                                                 <div className="space-y-1"><label className={labelClass}>Quantity to Add</label>
@@ -3272,7 +3317,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                                                 <input type="date" value={line.expirationDate}
                                                        onChange={e => updateLine(i, "expirationDate", e.target.value)}
                                                        className={fieldClass}/></div>
-                                            <p className="text-xs text-[#806A8C]">Stock after receiving: {formatNumber(line.currentStock + (Number(line.quantity) || 0))} pcs</p>
+                                            <p className="text-xs text-[#806A8C]">Available after receiving: {line.currentStock !== line.currentSellableStock ? "Reconciliation required" : `${formatNumber(line.currentSellableStock + (Number(line.quantity) || 0))} pcs`}</p>
                                         </div>
                                     ))}
                                     <div className="flex justify-between border-t border-[#E3D8EA] pt-3 text-sm font-semibold text-[#2B174C]">
@@ -3826,7 +3871,7 @@ function RecentStockActivity({
                         Recent Stock Activity
                     </h2>
                     <p className="mt-0.5 text-[11px] text-[#86778F]">
-                        Today's stock movements from additions, restocks, and POS sales.
+                        Today&apos;s stock movements from additions, restocks, and POS sales.
                     </p>
                 </div>
             </div>
@@ -3989,6 +4034,7 @@ function EditProductStockCorrection({inv}: {inv: InventoryController}) {
     const [loading, setLoading] = React.useState(true);
     const [line, setLine] = React.useState("");
     const [newStock, setNewStock] = React.useState("");
+    const [correctionExpiry,setCorrectionExpiry]=React.useState("");
     const [reason, setReason] = React.useState("");
     const [confirm, setConfirm] = React.useState(false);
     const [saving, setSaving] = React.useState(false);
@@ -4052,6 +4098,7 @@ function EditProductStockCorrection({inv}: {inv: InventoryController}) {
                 body: JSON.stringify({action: "adjust_stock", productId: current.id,
                     variantId: selectedVariant?.id ?? null,
                     expectedStock: before, newStock: target,
+                    expirationDate: target>before ? (correctionExpiry||null) : null,
                     reason: reason.trim(), requestKey: requestKey.current}),
             });
             const result = await res.json().catch(() => ({}));
@@ -4103,6 +4150,11 @@ function EditProductStockCorrection({inv}: {inv: InventoryController}) {
                 <div className="space-y-1"><label className={labelClass}>Corrected Stock</label>
                     <input className={fieldClass} type="number" min="0" max="2147483647" step="1" value={newStock} onChange={e => {setNewStock(e.target.value);setNotice("");}} /></div>
             </div>
+            {target>before && <div className="space-y-1">
+                <label className={labelClass}>Expiration Date for Additional Units (if applicable)</label>
+                <input type="date" className={fieldClass} value={correctionExpiry} onChange={e=>setCorrectionExpiry(e.target.value)}/>
+                <p className="text-[11px] text-[#806A8C]">Only leave blank for verified non-expiring stock. For supplier deliveries use Receive Stock instead.</p>
+            </div>}
             <div className="space-y-1"><label className={labelClass}>Reason for Correction (Required)</label>
                 <textarea className={fieldClass} rows={2} value={reason} onChange={e => setReason(e.target.value)} placeholder="Example: Physical recount found five missing items" /></div>
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -4629,7 +4681,14 @@ function ManagerInventoryTable({
                             const expandable = product.hasVariants && variants.length > 0;
                             const expanded = Boolean(expandedIds[product.id]);
                             const expiration = getProductExpiration(product);
-                            const status = getProductStatus(product);
+                            // The column is "Available Stock", so display eligible batch
+                            // stock, not legacy catalog stock used for receiving accounting.
+                            const sellableProduct = {
+                                ...product,
+                                stock: product.sellableStock ?? product.stock,
+                                variants: variants.map(v=>({...v,stock:v.sellableStock ?? v.stock})),
+                            };
+                            const status = getProductStatus(sellableProduct);
 
                             return (
                                 <React.Fragment key={product.id}>
@@ -4671,7 +4730,7 @@ function ManagerInventoryTable({
                                             {product.category || "—"}
                                         </td>
                                         <td className="px-2 py-2.5 text-center font-semibold text-[#2B174C]">
-                                            {formatNumber(getProductTotalStock(product))}
+                                            {formatNumber(getProductTotalStock(sellableProduct))}
                                         </td>
                                         <td className="px-2 py-2.5 text-center text-[#5F4E75]">
                                             {formatNumber(getProductReorderLevel(product))}
@@ -4763,7 +4822,7 @@ function ManagerInventoryTable({
                                                         Variant
                                                     </td>
                                                     <td className="px-2 py-2.5 text-center font-semibold text-[#2B174C]">
-                                                        {formatNumber(variant.stock)}
+                                                        {formatNumber(variant.sellableStock ?? variant.stock)}
                                                     </td>
                                                     <td className="px-2 py-2.5 text-center text-[#5F4E75]">
                                                         {formatNumber(variant.alertLevel)}

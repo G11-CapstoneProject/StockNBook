@@ -691,6 +691,18 @@ export function usePOS() {
 
         return () => window.clearTimeout(timer);
     }, [refreshAll]);
+    // Other employees may restock, reserve, or sell stock in a different session.
+    // Read the backend periodically; the server still enforces stock at checkout.
+    useEffect(() => {
+        const refreshVisible = () => {
+            if (document.visibilityState === "visible" && readRole() !== "owner") {
+                void loadData();
+            }
+        };
+        const timer = window.setInterval(refreshVisible, 15000);
+        window.addEventListener("focus", refreshVisible);
+        return () => { window.clearInterval(timer); window.removeEventListener("focus", refreshVisible); };
+    }, [loadData]);
 
     useEffect(() => {
         const sync = () => {

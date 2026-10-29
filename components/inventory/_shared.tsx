@@ -24,6 +24,7 @@ export type ProductVariant = {
     variantNumber?: string | null;
     variantValues: Record<string, string>;
     stock: number;
+    sellableStock?: number; // Display-only; backend stock changes continue to use stock.
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
@@ -52,6 +53,7 @@ export type Product = {
     name: string;
     category: string;
     stock: number;
+    sellableStock?: number; // Display-only; backend stock changes continue to use stock.
     alertLevel: number;
     originalPrice: number;
     salesPrice: number;
@@ -246,6 +248,7 @@ export function normalizeProductVariant(raw: any): ProductVariant {
         variantNumber: raw.variantNumber ?? raw.variant_number ?? null,
         variantValues: parsedVariantValues,
         stock: Number(raw.stock ?? 0),
+        sellableStock: raw.sellableStock == null ? undefined : Number(raw.sellableStock),
         alertLevel: Number(raw.alertLevel ?? raw.alert_level ?? 0),
         originalPrice: Number(raw.originalPrice ?? raw.original_price ?? 0),
         salesPrice: Number(raw.salesPrice ?? raw.sales_price ?? 0),
@@ -271,6 +274,7 @@ export function normalizeProduct(raw: any): Product {
         name: raw.name || "",
         category: raw.category || "",
         stock: Number(raw.stock ?? 0),
+        sellableStock: raw.sellableStock == null ? undefined : Number(raw.sellableStock),
         alertLevel: Number(raw.alertLevel ?? raw.alert_level ?? 0),
         originalPrice: Number(raw.originalPrice ?? raw.original_price ?? 0),
         salesPrice: Number(raw.salesPrice ?? raw.sales_price ?? 0),

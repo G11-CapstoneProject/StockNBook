@@ -1216,6 +1216,16 @@ export function useInventoryController() {
     useEffect(() => {
         void refreshAll();
     }, [refreshAll]);
+    // Reflect stock changes from bookings/POS/another employee without
+    // reloading categories, packages, or the entire inventory page.
+    useEffect(() => {
+        const refreshVisible = () => {
+            if (document.visibilityState === "visible") void loadProducts();
+        };
+        const timer = window.setInterval(refreshVisible, 15000);
+        window.addEventListener("focus", refreshVisible);
+        return () => { window.clearInterval(timer); window.removeEventListener("focus", refreshVisible); };
+    }, [loadProducts]);
 
     const branchGroups = useMemo(() => {
         const groups: Record<string, Product[]> = {};

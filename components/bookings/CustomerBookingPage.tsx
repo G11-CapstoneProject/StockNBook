@@ -101,6 +101,7 @@ type RentalCatalogItem = {
     category?: string;
     dailyRate: number;
     physicallyAvailable: number;
+    bookableToday: number; // preview only; not a future-date guarantee
     // Null until the customer chooses a valid event date range.
     reservedForDates: number | null;
     availableForDates: number | null;
@@ -166,6 +167,15 @@ const STATUS_MAP: Record<string, { color: string; icon: React.ReactNode }> = {
 };
 
 const TIMELINE_STEPS = ["Pending Review", "Awaiting Down Payment", "Confirmed", "Preparing", "Completed"];
+
+// Format YYYY-MM-DD without converting a rental event date to the browser timezone.
+function formatRentalCalendarDate(isoDate: string): string {
+    const [year, month, day] = isoDate.split("-").map(Number);
+    return new Intl.DateTimeFormat("en-PH", {
+        month: "short", day: "numeric", year: "numeric", timeZone: "UTC"
+    }).format(new Date(Date.UTC(year, month - 1, day)));
+}
+
 
 function getPackageCoverImage(
     pkg: Pick<PackageItem, "name" | "description" | "category" | "cover_image">
@@ -1061,6 +1071,7 @@ export default function CustomerBookingPage() {
 
     const [inventoryItems, setInventoryItems] = useState<CustomInventoryItem[]>([]);
     const [loadingInventory, setLoadingInventory] = useState(false);
+    const [inventoryError, setInventoryError] = useState("");
     const [inventorySearch, setInventorySearch] = useState("");
     // The custom picker has two categories only: consumables and rentals.
     const [activeGoodsTab, setActiveGoodsTab] = useState<"consumable" | "rental">("consumable");
@@ -1106,6 +1117,22 @@ export default function CustomerBookingPage() {
     const packageBranchId = selectedPackageData
         ? Number(selectedPackageData.branch_id ?? selectedPackageData.branchId ?? 0) || null : null;
     const customBranchId = bookingType === "package" ? packageBranchId : selectedCustomBranchId;
+    // Consumable stock is date-specific: expire-at-event batches cannot fulfill a request.
+    const consumableAvailabilityDate = date || "";
+    const liveConsumablesByKey = useMemo(() => new Map(inventoryItems.map(item => [item.key,item])),[inventoryItems]);
+    const consumableSelectionConflict = selectedCustomItems.map(selected => ({
+        selected, current: liveConsumablesByKey.get(selected.key)
+    })).find(({selected,current}) => !current || selected.quantity > current.stock);
+    const consumablePriceChanged = selectedCustomItems.find(selected => {
+        const current = liveConsumablesByKey.get(selected.key);
+        return !!current && Math.abs(current.salesPrice-selected.salesPrice)>0.009;
+    });
+    // A package is a request until Manager review. Show stock warnings for its
+    // included consumables, but never incorrectly claim that browsing reserved them.
+    const packageStockIssues = (selectedPackageData?.inclusions || []).filter(line => {
+        const key = line.variantId ? `product:${line.productId}:variant:${line.variantId}` : `product:${line.productId}:regular`;
+        return (liveConsumablesByKey.get(key)?.stock ?? 0) < Number(line.quantity || 0);
+    });
     const selectedBranchName = branches.find(b => b.id === customBranchId)?.name || "";
     const eventEndDate = eventDurationType === "multiple" ? rentalEndDate : date;
     const requestedEventDays = date && eventEndDate && eventEndDate >= date
@@ -1130,6 +1157,15 @@ export default function CustomerBookingPage() {
         now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
         return now.toISOString().slice(0, 10);
     })();
+    // Before dates are selected, the API's bookableToday preview is for the
+    // current day in the store's Manila timezone, not for an unspecified event.
+    const rentalPreviewTodayLabel = new Intl.DateTimeFormat("en-PH", {
+        timeZone: "Asia/Manila", month: "short", day: "numeric", year: "numeric"
+    }).format(new Date());
+    const rentalSelectedDateLabel = rentalAvailabilityReady
+        ? (date === eventEndDate ? formatRentalCalendarDate(date)
+            : `${formatRentalCalendarDate(date)} – ${formatRentalCalendarDate(eventEndDate)}`)
+        : "";
     const estimatedDelivery = serviceDelivery && !(bookingType === "package" && feePolicy.deliveryIncludedPackage) ? feePolicy.deliveryFee : 0;
     const estimatedSetup = serviceSetup && !(bookingType === "package" && feePolicy.setupIncludedPackage) ? feePolicy.setupFee : 0;
     const estimatedBase = bookingType === "package" ? Number(selectedPackageData?.package_price || 0) : 0;
@@ -1239,9 +1275,10 @@ export default function CustomerBookingPage() {
 
     function updateSelectedCustomQty(itemKey: string, quantity: number) {
         setSelectedCustomItems(prev => {
-            if (quantity <= 0) return prev.filter(item => item.key !== itemKey);
+            const available = Math.max(0,liveConsumablesByKey.get(itemKey)?.stock ?? 0);
+            if (quantity <= 0 || available <= 0) return prev.filter(item => item.key !== itemKey);
             return prev.map(item => item.key === itemKey
-                ? { ...item, quantity: Math.min(quantity, Math.max(1, item.stock)) }
+                ? { ...item, quantity: Math.min(quantity,available) }
                 : item);
         });
     }
@@ -1269,6 +1306,12 @@ export default function CustomerBookingPage() {
                     : "Please select at least one inventory item or describe your custom request.";
         }
 
+        if (bookingType === "custom" && selectedCustomItems.length && (loadingInventory || inventoryError))
+            errors.selection = inventoryError || 'Wait for current consumable availability to load.';
+        else if (bookingType === "custom" && consumableSelectionConflict)
+            errors.selection = `${consumableSelectionConflict.selected.displayName} needs ${consumableSelectionConflict.selected.quantity} unit(s), but only ${consumableSelectionConflict.current?.stock ?? 0} are available for the selected event date.`;
+        else if (bookingType === "custom" && consumablePriceChanged)
+            errors.selection = `The price of ${consumablePriceChanged.displayName} changed. Review your selection before submitting.`;
         if (selectedRentalItems.length && (!rentalDuration || !rentalAvailabilityReady))
             errors.selection = 'Select valid event dates and wait for rental availability to load.';
         else if (rentalSelectionConflict)
@@ -1470,6 +1513,7 @@ export default function CustomerBookingPage() {
             try {
                 const response = await fetch('/api/bookings', {
                     method: 'POST',
+                    cache: 'no-store',
                     headers: {'Content-Type': 'application/json'},
                     signal: controller.signal,
                     body: JSON.stringify({
@@ -1496,6 +1540,51 @@ export default function CustomerBookingPage() {
         })();
         return () => controller.abort();
     }, [store?.id, customBranchId, branches, rentalPeriodKey, date, eventEndDate]);
+
+    // Refresh today's availability preview before event dates are selected,
+    // and the actual date-range availability once valid dates are selected.
+    // Neither preview nor browsing reserves equipment.
+    useEffect(() => {
+        if(!store?.id || !customBranchId ||
+            !branches.some(branch=>branch.id===customBranchId))return;
+        const controller=new AbortController();
+        let refreshInFlight=false;
+        const refresh=async()=>{
+            if(controller.signal.aborted || refreshInFlight)return;
+            refreshInFlight=true;
+            try {
+                const response=await fetch('/api/bookings',{
+                    method:'POST',cache:'no-store',signal:controller.signal,
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({action:'get_public_rental_catalog',
+                        storeId:store.id,branchId:customBranchId,
+                        ...(rentalPeriodKey ? {startDate:date,endDate:eventEndDate} : {})})
+                });
+                const data=await response.json();
+                if(!response.ok || Number(data.branchId)!==customBranchId ||
+                    Boolean(data.availabilityForDates)!==Boolean(rentalPeriodKey) ||
+                    (rentalPeriodKey && (data.startDate!==date || data.endDate!==eventEndDate)))
+                    throw new Error(data.error||'Unable to verify current rental availability.');
+                if(!controller.signal.aborted){
+                    setRentalCatalog(Array.isArray(data.equipment)?data.equipment:[]);
+                    setRentalCatalogPeriodKey(rentalPeriodKey);
+                    setRentalCatalogError('');
+                }
+            } catch(error) {
+                if(!controller.signal.aborted)setRentalCatalogError(
+                    error instanceof Error?error.message:'Unable to refresh rental availability.');
+            } finally {
+                refreshInFlight=false;
+            }
+        };
+        const interval=window.setInterval(()=>{
+            if(document.visibilityState==='visible')void refresh();
+        },10000);
+        const onFocus=()=>{if(document.visibilityState==='visible')void refresh();};
+        window.addEventListener('focus',onFocus);
+        document.addEventListener('visibilitychange',onFocus);
+        return ()=>{controller.abort();window.clearInterval(interval);window.removeEventListener('focus',onFocus);document.removeEventListener('visibilitychange',onFocus);};
+    },[store?.id,customBranchId,branches,rentalPeriodKey,date,eventEndDate]);
 
     function warnRentalAvailability(item: RentalCatalogItem, requested: number) {
         setRentalAvailabilityWarning({equipmentId: item.id, name: item.name,
@@ -1524,28 +1613,68 @@ export default function CustomerBookingPage() {
         clearError('selection');
     }
 
+    // Reset consumable selections ONLY when changing the storefront/branch.
+    // Date or stock refresh must preserve the customer's quantity for review.
     useEffect(() => {
-        setInventoryItems([]); setSelectedCustomItems([]);
+        setSelectedCustomItems([]);
+        setInventoryItems([]);
+        setInventoryError("");
+    }, [store?.id, customBranchId]);
+
+    // A single branch/date-scoped public inventory source serves both the picker
+    // and the pre-submission check. The backend takes min(branch stock, sellable
+    // batches); it never trusts product.stock alone.
+    const loadPublicConsumables = useCallback(async (signal?: AbortSignal): Promise<CustomInventoryItem[]> => {
+        if (!store?.id || !customBranchId) return [];
+        const response=await fetch('/api/products',{
+            method:'POST',cache:'no-store',signal,
+            headers:{'Content-Type':'application/json','Cache-Control':'no-cache'},
+            body:JSON.stringify({action:'get_public_products',store_id:store.id,
+                branch_id:customBranchId,...(consumableAvailabilityDate?{eventDate:consumableAvailabilityDate}:{})})
+        });
+        const data=await response.json();
+        if(!response.ok)throw new Error(data.error||'Unable to load public inventory.');
+        if(Number(data.branchId)!==customBranchId ||
+            (consumableAvailabilityDate && data.availabilityDate!==consumableAvailabilityDate))
+            throw new Error('Product availability did not match the selected branch and date.');
+        return buildCustomInventoryItems(Array.isArray(data.products)?data.products:[],customBranchId);
+    }, [store?.id,customBranchId,consumableAvailabilityDate]);
+
+    useEffect(() => {
         if (!store || !customBranchId || !branches.some(b=>b.id===customBranchId)) {
+            setInventoryItems([]);
             setLoadingInventory(false);
             return;
         }
-        let cancelled=false;
+        const controller=new AbortController();
         setLoadingInventory(true);
-        void (async()=>{
-            try {
-                const response=await fetch('/api/products',{
-                    method:'POST',headers:{'Content-Type':'application/json'},
-                    body:JSON.stringify({action:'get_public_products',store_id:store.id,branch_id:customBranchId})});
-                const data=await response.json();
-                if(!response.ok)throw new Error(data.error||'Unable to load public inventory.');
-                if(!cancelled)setInventoryItems(buildCustomInventoryItems(
-                    Array.isArray(data.products)?data.products:[],customBranchId));
-            }catch(err){if(!cancelled){console.error('Public inventory:',err);setInventoryItems([]);}}
-            finally{if(!cancelled)setLoadingInventory(false);}
-        })();
-        return ()=>{cancelled=true;};
-    },[store,customBranchId,branches]);
+        setInventoryError("");
+        void loadPublicConsumables(controller.signal).then(items=>{
+            if(!controller.signal.aborted){setInventoryItems(items);setInventoryError("");}
+        }).catch(error=>{
+            if(!controller.signal.aborted){setInventoryError(error instanceof Error?error.message:'Unable to load public inventory.');}
+        }).finally(()=>{if(!controller.signal.aborted)setLoadingInventory(false);});
+        // Keep an open public portal in sync with Manager/Staff/POS actions.
+        // The backend remains authoritative at final booking confirmation.
+        const poll=window.setInterval(()=>{
+            if(document.visibilityState!=='visible' || controller.signal.aborted)return;
+            void loadPublicConsumables(controller.signal).then(items=>{
+                if(!controller.signal.aborted){setInventoryItems(items);setInventoryError("");}
+            }).catch(error=>{
+                if(!controller.signal.aborted)setInventoryError(error instanceof Error?error.message:'Unable to refresh public inventory.');
+            });
+        },15000);
+        const onFocus=()=>{
+            if(controller.signal.aborted || document.visibilityState!=='visible')return;
+            void loadPublicConsumables(controller.signal).then(items=>{
+                if(!controller.signal.aborted){setInventoryItems(items);setInventoryError("");}
+            }).catch(error=>{
+                if(!controller.signal.aborted)setInventoryError(error instanceof Error?error.message:'Unable to refresh public inventory.');
+            });
+        };
+        window.addEventListener('focus',onFocus);
+        return ()=>{controller.abort();window.clearInterval(poll);window.removeEventListener('focus',onFocus);};
+    },[store?.id,customBranchId,branches,loadPublicConsumables]);
 
     function peso(n: number) {
         return `₱${Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -1612,6 +1741,35 @@ export default function CustomerBookingPage() {
 
         try {
             setSubmitting(true);
+            if (bookingType === 'custom' && selectedCustomItems.length) {
+                // Polling helps presentation; the final read catches changes made
+                // immediately before checkout by POS, restock or other bookings.
+                let currentItems: CustomInventoryItem[];
+                try { currentItems=await loadPublicConsumables(); }
+                catch(error) {
+                    const message=error instanceof Error?error.message:'Unable to verify consumable availability.';
+                    setInventoryError(message);
+                    setFieldErrors(prev=>({...prev,selection:`Could not verify live stock: ${message}. Please retry.`}));
+                    return;
+                }
+                setInventoryItems(currentItems);
+                setInventoryError("");
+                const latest=new Map(currentItems.map(item=>[item.key,item]));
+                const shortage=selectedCustomItems.find(item=>
+                    !latest.has(item.key) || item.quantity > (latest.get(item.key)?.stock ?? 0));
+                if(shortage){
+                    setFieldErrors(prev=>({...prev,selection:`${shortage.displayName}: requested ${shortage.quantity}, available ${latest.get(shortage.key)?.stock ?? 0}. Update the quantity before submitting.`}));
+                    formRef.current?.scrollIntoView({behavior:'smooth'});
+                    return;
+                }
+                const changed=selectedCustomItems.find(item=>
+                    Math.abs((latest.get(item.key)?.salesPrice ?? item.salesPrice)-item.salesPrice)>0.009);
+                if(changed){
+                    setFieldErrors(prev=>({...prev,selection:`The price of ${changed.displayName} changed. Remove and reselect it to review the current quotation.`}));
+                    formRef.current?.scrollIntoView({behavior:'smooth'});
+                    return;
+                }
+            }
             // Recheck immediately before submission; no inventory is held here.
             // Confirmation will repeat this check transactionally.
             if (selectedRentalItems.length) {
@@ -1749,6 +1907,13 @@ export default function CustomerBookingPage() {
                                                                 className="text-xs font-semibold text-[#5A35A5] hover:underline">Clear</button>}
                     </div>
                 </div>
+                {inventoryError && <p role="alert" className="mb-2 text-xs text-red-700">{inventoryError}</p>}
+                {consumableSelectionConflict && <p role="alert" className="mb-2 text-xs text-amber-800">
+                    {consumableSelectionConflict.selected.displayName}: requested {consumableSelectionConflict.selected.quantity}, but {consumableSelectionConflict.current?.stock ?? 0} available for this date. Reduce the quantity or choose another item.
+                </p>}
+                {consumablePriceChanged && <p role="alert" className="mb-2 text-xs text-amber-800">
+                    The price of {consumablePriceChanged.displayName} has changed. Remove and reselect the product to review the new quotation.
+                </p>}
                 <div className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
                     <div className="hidden grid-cols-[minmax(0,1.6fr)_100px_120px_162px] gap-3 border-b border-[#E6DDF0] bg-[#FBF8FD] px-4 py-3 text-[11px] font-bold text-[#806A8C] md:grid">
                         <span>Product</span><span>Price</span><span>Availability</span><span>Quantity</span>
@@ -1767,7 +1932,7 @@ export default function CustomerBookingPage() {
                                     </div>
                                     <p className="text-xs font-semibold text-[#2B174C] md:text-sm">{peso(item.salesPrice)} <span className="font-normal text-[#806A8C]">/ item</span></p>
                                     <div><span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${unavailable ? "bg-red-50 text-red-700" : item.stock <= 5 ? "bg-amber-50 text-amber-700" : "bg-green-50 text-green-700"}`}>
-                                    {unavailable ? "Unavailable" : item.stock <= 5 ? "Low stock" : "Available"}
+                                    {unavailable ? "Unavailable (0)" : item.stock <= 5 ? `Low stock (${item.stock})` : `Available (${item.stock})`}
                                 </span></div>
                                     <QuantityStepper value={qty} max={Math.max(0, item.stock)}
                                                      label={`${item.displayName} quantity`}
@@ -1796,9 +1961,9 @@ export default function CustomerBookingPage() {
                         Rates are per item, per day. Items are only reserved after confirmation.
                     </p>
                     <p className="mt-2 text-xs font-medium text-[#5A35A5]" aria-live="polite">
-                        {!date ? "Choose your event date above to check rental availability."
-                            : eventDurationType === "multiple" && !rentalEndDate ? "Choose your event end date above."
-                                : rentalDuration > 0 ? `Rental duration: ${rentalDuration} ${rentalDuration === 1 ? "day" : "days"}.` : "Choose valid event dates above."}
+                        {!date ? `Showing today's available units (${rentalPreviewTodayLabel}). Choose event dates above for the quantity available on your event date.`
+                            : eventDurationType === "multiple" && !rentalEndDate ? `Showing today's available units (${rentalPreviewTodayLabel}). Choose your event end date above.`
+                                : rentalDuration > 0 ? `Availability for ${formatRentalCalendarDate(date)}${date !== eventEndDate ? ` – ${formatRentalCalendarDate(eventEndDate)}` : ""} · ${rentalDuration} ${rentalDuration === 1 ? "day" : "days"}.` : "Choose valid event dates above."}
                     </p>
                 </div>
                 {rentalSelectionConflict && <p role="alert" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
@@ -1836,6 +2001,7 @@ export default function CustomerBookingPage() {
                             </p> : matching.map(item => {
                                 const chosen = selectedRentalItems.find(x => x.id === item.id);
                                 const available = item.availableForDates;
+                                const todayAvailable = Math.max(0, Number(item.bookableToday ?? 0));
                                 const canAdd = rentalAvailabilityReady && available != null && available > 0;
                                 const maxQty = Math.max(0, available ?? 0);
                                 const qty = chosen?.quantity ?? 0;
@@ -1844,9 +2010,16 @@ export default function CustomerBookingPage() {
                                     <div className="min-w-0"><p className="break-words text-sm font-semibold text-[#24153B]">{item.name}</p>
                                         <p className="mt-0.5 text-xs text-[#806A8C]">Rental equipment</p></div>
                                     <p className="text-xs font-semibold text-[#2B174C] md:text-sm">{peso(item.dailyRate)} <span className="font-normal text-[#806A8C]">/ day</span></p>
-                                    <div><span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${!rentalAvailabilityReady ? "bg-[#F7F1FF] text-[#674A8E]" : canAdd ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>
-                                    {!rentalAvailabilityReady ? "Choose dates" : canAdd ? "Available" : "Unavailable"}
-                                </span>{rentalAvailabilityReady && <p className="mt-1 text-[11px] text-[#806A8C]">{available ?? 0} for selected dates</p>}</div>
+                                    <div>
+                                        <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${!rentalAvailabilityReady ? (todayAvailable > 0 ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700") : canAdd ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>
+                                            {!rentalAvailabilityReady
+                                                ? (todayAvailable > 0 ? `Available (${todayAvailable})` : "Unavailable (0)")
+                                                : canAdd ? `Available (${available})` : "Unavailable (0)"}
+                                        </span>
+                                        <p className="mt-1 text-[10px] leading-4 text-[#806A8C]">
+                                            {rentalAvailabilityReady ? `For ${rentalSelectedDateLabel}` : `Today, ${rentalPreviewTodayLabel} · Choose dates for your event`}
+                                        </p>
+                                    </div>
                                     <QuantityStepper value={qty} max={maxQty} label={`${item.name} quantity`}
                                                      onChange={quantity => updateRentalQuantity(item, quantity)}
                                                      inputDisabled={!rentalAvailabilityReady}
@@ -2438,6 +2611,8 @@ export default function CustomerBookingPage() {
                                                 ))}
                                             </select>
                                             {selectedPackageData && <p className="mt-2 text-xs text-[#806A8C]">Handled by: <strong>{selectedBranchName || `Branch #${packageBranchId}`}</strong></p>}
+                                            {selectedPackageData && !loadingInventory && !inventoryError && packageStockIssues.length > 0 &&
+                                                <p role="status" className="mt-2 text-xs text-amber-800">{packageStockIssues.length} package inclusion(s) currently have insufficient sellable stock for the chosen date. You may still send a request; the Manager must verify availability before approval.</p>}
                                             {fieldErrors.selection && <p className="mt-2 text-xs text-red-600">{fieldErrors.selection}</p>}
                                         </div>
                                         <p className="text-xs text-[#806A8C]">You can also select a package from the Available packages cards above.</p>
@@ -2492,7 +2667,7 @@ export default function CustomerBookingPage() {
                                                             <p className="break-words text-sm font-bold text-[#1A1220]">{item.displayName}</p>
                                                             <p className="mt-0.5 text-xs text-[#7A6A84]">{item.category} · {peso(item.salesPrice)} each</p>
                                                         </div>
-                                                        <QuantityStepper value={item.quantity} max={Math.max(0, item.stock)}
+                                                        <QuantityStepper value={item.quantity} max={Math.max(0, liveConsumablesByKey.get(item.key)?.stock ?? 0)}
                                                                          label={`${item.displayName} selected quantity`}
                                                                          onChange={quantity => updateSelectedCustomQty(item.key, quantity)} />
                                                         <p className="text-sm font-bold text-[#2B174C]">{peso(item.salesPrice * item.quantity)}</p>

@@ -313,6 +313,40 @@ async function mutate(db,scope,body) {
                     pricing.residual,pricing.operating,pricing.margin,pricing.basis,current.id]);
             return { equipmentId:current.id,referenceNumber:current.equipment_number };
         }
+        case "correct_equipment_stock": {
+            // Sales Inventory's audited stock correction equivalent: no fake
+            // purchase, no staff delivery, no double count on a browser retry.
+            const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
+            const target=whole(body.totalUnits,"Verified total equipment units");
+            const reason=requiredText(body.reason,500,"Stock correction reason");
+            if(reason.length<10)fail(400,"Explain the stock count correction in at least 10 characters.");
+            if(body.physicalCountVerified!==true)
+                fail(400,"Confirm that the corrected quantity was physically counted. Use Restock for supplier purchases.");
+            const before=Number(current.total_units);
+            if(target===before)fail(400,"The corrected total must differ from the current total.");
+            // Lock commitments under the equipment row (same order as Booking
+            // confirmation), then calculate peak overlapping reservations.
+            const [reservations]=await db.execute(`SELECT quantity,status,
+                DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
+                DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
+                FROM rental_booking_allocations
+                WHERE store_id=? AND branch_id=? AND equipment_id=?
+                  AND status IN ('reserved','checked_out')
+                ORDER BY start_date,id FOR UPDATE`,[scope.storeId,scope.branchId,current.id]);
+            const dates=reservations.flatMap(r=>[String(r.startDate),String(r.endDate)]).sort();
+            const peak=dates.length?computePeak(reservations,dates[0],dates[dates.length-1],todayPh()):0;
+            const activeHeld=Number(current.maintenance_units)+Number(current.missing_units);
+            const minimum=Math.max(Number(current.rented_out_units),peak)+activeHeld;
+            if(target<minimum)
+                fail(409,`Cannot reduce total below ${minimum}: confirmed bookings, rented-out, held and missing equipment must remain accounted for.`);
+            await db.execute(`UPDATE rental_equipment SET total_units=? WHERE id=? AND store_id=? AND branch_id=?`,
+                [target,current.id,scope.storeId,scope.branchId]);
+            const difference=target-before;
+            await appendMovement(db,scope,current.id,'adjustment',Math.abs(difference),current.equipment_number,
+                `Physical stock correction ${difference>0?'+':''}${difference}: ${reason}`);
+            return {equipmentId:current.id,referenceNumber:current.equipment_number,
+                previousTotal:before,correctedTotal:target,quantityChange:difference};
+        }
         case "receive_equipment": {
             const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
             const purchase=await receivePurchase(db,scope,current,body,"receive");
@@ -493,7 +527,25 @@ async function mutate(db,scope,body) {
         default: fail(400,"Unsupported rental inventory action.");
     }
 }
+// Bookable units and physical units are intentionally separate. A confirmed booking
+// reserves equipment on its event dates, without pretending units were handed out.
+// Using the allocation ledger here keeps the Rental Inventory view consistent with
+// Booking approval, the customer portal, and date-specific availability.
+async function rentalBookableToday(db,scope) {
+    const today=todayPh();
+    const [rows]=await db.execute(`SELECT equipment_id AS equipmentId,COALESCE(SUM(quantity),0) AS bookedUnits
+                                   FROM rental_booking_allocations
+                                   WHERE store_id=? AND branch_id=? AND status IN ('reserved','checked_out')
+                                     AND start_date<=? AND (end_date>=? OR status='checked_out')
+                                   GROUP BY equipment_id`,[scope.storeId,scope.branchId,today,today]);
+    return new Map(rows.map(r=>[Number(r.equipmentId),Number(r.bookedUnits)]));
+}
+function rentalBookableProjection(item,bookedUnits) {
+    return Math.max(0,Number(item.totalUnits)-Number(item.maintenanceUnits)-
+        Number(item.missingUnits)-Number(bookedUnits||0));
+}
 async function getInventory(db,scope) {
+    const bookedToday=await rentalBookableToday(db,scope);
     const [equipment]=await db.execute(`SELECT e.id,e.equipment_number AS equipmentNumber,e.name,
                                                c.name AS category,e.total_units AS totalUnits,e.rented_out_units AS rentedOutUnits,
                                                e.maintenance_units AS maintenanceUnits,e.missing_units AS missingUnits,e.alert_level AS alertLevel,
@@ -510,7 +562,7 @@ async function getInventory(db,scope) {
     const [activity]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,
                                               COALESCE(e.name,'Archived equipment') AS equipmentName,m.type,m.quantity,
                                               DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
-                                              COALESCE(m.reference_number,'') AS referenceNumber
+                                              COALESCE(m.reference_number,'') AS referenceNumber,m.description AS description
                                        FROM rental_stock_movements m LEFT JOIN rental_equipment e ON e.id=m.equipment_id
                                        WHERE m.store_id=? AND m.branch_id=? ORDER BY m.occurred_at DESC,m.id DESC LIMIT 100`,
         [scope.storeId,scope.branchId]);
@@ -615,6 +667,7 @@ async function getInventory(db,scope) {
     const [categories]=await db.execute(`SELECT name FROM rental_categories WHERE store_id=? AND branch_id=? AND archived_at IS NULL ORDER BY name`,
         [scope.storeId,scope.branchId]);
     return {success:true, storeId:scope.storeId, branchId:scope.branchId, storeName:scope.storeName, branchName:scope.branchName, bookingSyncConnected: process.env.RENTAL_BOOKING_SYNC_ENABLED === "true", equipment:equipment.map(row=>({ ...row,id:Number(row.id),totalUnits:Number(row.totalUnits),
+            bookableToday:rentalBookableProjection(row,bookedToday.get(Number(row.id))),
             rentedOutUnits:Number(row.rentedOutUnits),maintenanceUnits:Number(row.maintenanceUnits),missingUnits:Number(row.missingUnits),
             alertLevel:Number(row.alertLevel),active:Boolean(row.active),rentalRatePerDay:Number(row.rentalRatePerDay),
             averageUnitCost:row.averageUnitCost===null?null:Number(row.averageUnitCost),
@@ -756,6 +809,7 @@ async function staffEquipmentSchedule(db,scope,body) {
 // Staff operations consume existing booking allocations; there is no equipment/catalog write access.
 // Bookings must already be confirmed by the existing booking workflow.
 async function staffRentalWorkspace(db, scope) {
+    const bookedToday=await rentalBookableToday(db,scope);
     const [equipment] = await db.execute(`SELECT e.id,e.equipment_number AS equipmentNumber,e.name,c.name AS category,
                                                  e.total_units AS totalUnits,e.rented_out_units AS rentedOutUnits,e.maintenance_units AS maintenanceUnits,
                                                  e.missing_units AS missingUnits,e.alert_level AS alertLevel
@@ -824,6 +878,7 @@ async function staffRentalWorkspace(db, scope) {
                                                WHERE m.store_id=? AND m.branch_id=? AND e.archived_at IS NULL AND m.quantity_remaining>0
                                                ORDER BY m.opened_at DESC LIMIT 200`,[scope.storeId,scope.branchId]);
     return {success:true,equipment:equipment.map(x=>({...x,id:Number(x.id),totalUnits:Number(x.totalUnits),
+            bookableToday:rentalBookableProjection(x,bookedToday.get(Number(x.id))),
             rentedOutUnits:Number(x.rentedOutUnits),maintenanceUnits:Number(x.maintenanceUnits),
             missingUnits:Number(x.missingUnits),alertLevel:Number(x.alertLevel)})),
         allocations:allocations.map(x=>({...x,allocationId:Number(x.allocationId),equipmentId:Number(x.equipmentId),quantity:Number(x.quantity),
@@ -1519,7 +1574,7 @@ const STAFF_WRITE_ACTIONS = new Set(["prepare_rental_allocation","release_rental
     "release_rental_booking","return_rental_booking",
     "staff_receive_rental_purchase","staff_report_equipment_issue",
     "staff_complete_routine_maintenance","staff_mark_repaired_ready","staff_mark_missing_recovered"]);
-const WRITE_ACTIONS = new Set(["create_equipment","import_equipment","update_equipment","receive_equipment",
+const WRITE_ACTIONS = new Set(["create_equipment","import_equipment","update_equipment","correct_equipment_stock","receive_equipment",
     "approve_maintenance_repair","approve_repair_completion","resolve_missing_equipment","archive_equipment",
     "create_rental_category","rename_rental_category",
     "archive_rental_category","pay_rental_supplier_purchase"]);

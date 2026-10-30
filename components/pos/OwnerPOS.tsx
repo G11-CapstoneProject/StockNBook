@@ -17,6 +17,7 @@ import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import type { UsePOSReturn } from "@/hooks/usePOS";
 import {
     StatCard,
+    formatPOSOrderTime,
     peso,
     type Branch,
     type Order,
@@ -356,14 +357,14 @@ function OwnerAuditTable({
                 <p className="mt-0.5 text-xs text-[#7A6A84]">{subtitle}</p>
             </div>
 
-            <div className="max-h-[520px] overflow-y-auto overflow-x-hidden">
-                <div className="sticky top-0 z-10 grid grid-cols-[1.25fr_1.2fr_0.95fr_1fr_1.25fr_1fr] gap-2 border-b border-[#E6DDF0] bg-white px-4 py-3 text-[10px] font-semibold text-[#806A8C]">
+            <div className="h-[440px] min-h-0 overflow-y-auto overflow-x-auto overscroll-contain">
+                <div className="sticky top-0 z-10 grid min-w-[1050px] grid-cols-[1.25fr_1.2fr_0.95fr_1fr_1.25fr_1fr] gap-2 border-b border-[#E6DDF0] bg-white px-4 py-3 text-[10px] font-semibold text-[#806A8C]">
                     <div>Control / Order</div>
                     <div>Customer / Branch</div>
                     <div>Payment / Tax</div>
                     <div>Processed By</div>
                     <div>Financials</div>
-                    <div>Status / Date</div>
+                    <div>Date / Time</div>
                 </div>
 
                 {orders.length === 0 ? (
@@ -372,8 +373,6 @@ function OwnerAuditTable({
                     </div>
                 ) : (
                     orders.map((order) => {
-                        const transactionStatus = String(order.status || "COMPLETED").toUpperCase();
-                        const collectionStatus = String(order.collectionStatus || "").toUpperCase();
                         const processedBy =
                             order.cashierName ||
                             [order.cashierRole, order.cashierId ? `#${order.cashierId}` : ""]
@@ -384,7 +383,7 @@ function OwnerAuditTable({
                         return (
                             <div
                                 key={order.id}
-                                className="grid grid-cols-[1.25fr_1.2fr_0.95fr_1fr_1.25fr_1fr] gap-2 border-b border-[#EFE7F4] px-4 py-3 text-[11px] last:border-0 hover:bg-[#FFFCF7]"
+                                className="grid min-w-[1050px] grid-cols-[1.25fr_1.2fr_0.95fr_1fr_1.25fr_1fr] gap-2 border-b border-[#EFE7F4] px-4 py-3 text-[11px] last:border-0 hover:bg-[#FFFCF7]"
                             >
                                 <div className="min-w-0">
                                     <p className="break-all font-bold text-[#2B174C]">
@@ -403,7 +402,7 @@ function OwnerAuditTable({
 
                                 <div className="min-w-0">
                                     <p className="font-semibold text-[#1A1220]">
-                                        {String(order.paymentMode || "").toUpperCase() === "CREDIT" ? "Credit" : "Cash"}
+                                        {({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer", CREDIT: "Credit" } as Record<string, string>)[String(order.paymentMode || "CASH").toUpperCase()] || "—"}
                                     </p>
                                     <p className="mt-1 text-[10px] text-[#806A8C]">
                                         {String(order.taxType || "").toUpperCase() === "VAT" ? "VAT 12%" : "Non-VAT"}
@@ -422,23 +421,8 @@ function OwnerAuditTable({
                                 </div>
 
                                 <div className="min-w-0">
-                                    <span
-                                        className={`inline-flex rounded-full px-2 py-0.5 text-[9px] font-bold ${
-                                            transactionStatus === "VOIDED"
-                                                ? "bg-red-50 text-red-600"
-                                                : transactionStatus === "MODIFIED"
-                                                    ? "bg-amber-50 text-amber-700"
-                                                    : "bg-emerald-50 text-emerald-700"
-                                        }`}
-                                    >
-                                        {transactionStatus}
-                                    </span>
-                                    {collectionStatus && String(order.paymentMode || "").toUpperCase() === "CREDIT" && (
-                                        <p className={`mt-1 text-[9px] font-bold ${collectionStatus === "OVERDUE" ? "text-red-600" : "text-[#5B2FC6]"}`}>
-                                            {collectionStatus}
-                                        </p>
-                                    )}
-                                    <p className="mt-1 text-[10px] text-[#806A8C]">{order.date}</p>
+                                    <p className="font-semibold text-[#2B174C]">{order.date}</p>
+                                    <p className="mt-1 text-[10px] text-[#806A8C]">{formatPOSOrderTime(order)}</p>
                                 </div>
                             </div>
                         );
@@ -455,7 +439,6 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
     const [branchQuery, setBranchQuery] = useState("All Branches");
     const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
     const [orderIdQuery, setOrderIdQuery] = useState("");
-    const [taxSaving, setTaxSaving] = useState(false);
     const [startDate, setStartDate] = useState(() =>
         pos.ownerOrderStartDate || getLocalDateInputValue()
     );
@@ -850,29 +833,6 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
         setCurrentDateTime(new Date());
     };
 
-    const handleTaxRegistrationChange = async (value: string) => {
-        const registration = value === "NON_VAT" ? "NON_VAT" : "VAT_REGISTERED";
-        const currentRegistration =
-            pos.taxType === "NON_VAT" ? "NON_VAT" : "VAT_REGISTERED";
-
-        if (registration === currentRegistration) return;
-
-        const label =
-            registration === "NON_VAT"
-                ? "Non-VAT Registered"
-                : "VAT Registered (12%)";
-
-        const confirmed = window.confirm(
-            `Change the business tax registration to ${label}? This applies to future POS transactions only and does not recalculate historical sales.`
-        );
-
-        if (!confirmed) return;
-
-        setTaxSaving(true);
-        await pos.updateTaxRegistration(registration);
-        setTaxSaving(false);
-    };
-
     const tableTitle = isAllBranchesView
         ? "All Branches Orders"
         : `${selectedBranch?.branchName || "Branch"} Orders`;
@@ -982,30 +942,6 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                             valueClassName="text-[#245EDB]"
                         />
                     </div>
-
-                    <section className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-3 shadow-sm">
-                        <div>
-                            <p className="text-sm font-bold text-[#1A1220]">Business Tax Registration</p>
-                            <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                Owner-controlled. Manager and Staff POS only read this setting. Changes apply to future POS transactions only.
-                            </p>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                            <select
-                                value={pos.taxType === "NON_VAT" ? "NON_VAT" : "VAT_REGISTERED"}
-                                onChange={(event) => void handleTaxRegistrationChange(event.target.value)}
-                                disabled={taxSaving}
-                                className="h-[42px] min-w-[210px] rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm font-semibold text-[#1A1220] outline-none focus:border-[#2B174C] disabled:opacity-50"
-                            >
-                                <option value="VAT_REGISTERED">VAT Registered (12%)</option>
-                                <option value="NON_VAT">Non-VAT Registered</option>
-                            </select>
-                            {taxSaving && (
-                                <span className="text-xs font-medium text-[#806A8C]">Saving...</span>
-                            )}
-                        </div>
-                    </section>
 
                     <section className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_190px_190px_290px]">
                         <div className="relative">
@@ -1253,30 +1189,28 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                         }
                     />
 
-                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-3 shadow-sm">
-                        <p className="text-xs text-[#7A6A84]">
-                            Page {pos.ownerOrderPage} of {pos.ownerOrderTotalPages} · {pos.ownerOrderTotal} matching transaction{pos.ownerOrderTotal !== 1 ? "s" : ""}
-                        </p>
-
-                        <div className="flex items-center gap-2">
-                            <button
-                                type="button"
-                                onClick={() => pos.setOwnerOrderPage(Math.max(1, pos.ownerOrderPage - 1))}
-                                disabled={pos.ownerOrderPage <= 1}
-                                className="rounded-xl border border-[#D8CBE7] px-3.5 py-2 text-xs font-semibold text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                                Previous
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => pos.setOwnerOrderPage(Math.min(pos.ownerOrderTotalPages, pos.ownerOrderPage + 1))}
-                                disabled={pos.ownerOrderPage >= pos.ownerOrderTotalPages}
-                                className="rounded-xl bg-[#2B174C] px-3.5 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                                Next
-                            </button>
+                    {pos.ownerOrderTotalPages > 1 && (
+                        <div className="flex justify-end gap-3 rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-3 shadow-sm">
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => pos.setOwnerOrderPage(Math.max(1, pos.ownerOrderPage - 1))}
+                                    disabled={pos.ownerOrderPage <= 1}
+                                    className="rounded-xl border border-[#D8CBE7] px-3.5 py-2 text-xs font-semibold text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                    Previous
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => pos.setOwnerOrderPage(Math.min(pos.ownerOrderTotalPages, pos.ownerOrderPage + 1))}
+                                    disabled={pos.ownerOrderPage >= pos.ownerOrderTotalPages}
+                                    className="rounded-xl bg-[#2B174C] px-3.5 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                    Next
+                                </button>
+                            </div>
                         </div>
-                    </div>
+                    )}
                 </div>
             </main>
         </div>

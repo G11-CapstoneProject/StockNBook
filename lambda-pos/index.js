@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
-const fs = require("fs");
 
 const JWT_SECRET = "stocknbook-secret-key";
 
@@ -66,7 +65,11 @@ function normalizeOperationalAccess(permissions, moduleName, role) {
         ? ["bookings", "booking_access", "bookings_access"]
         : ["pos", "pos_access", "sales_access"];
     const selected = keys.find((key) => Object.prototype.hasOwnProperty.call(values, key));
-    if (!selected) return role === "manager" ? "full" : "none";
+    if (!selected) {
+        // Sensible legacy defaults: Manager sees branch sales; Staff runs checkout.
+        if (moduleName === "pos") return role === "manager" ? "view" : role === "staff" ? "full" : "none";
+        return role === "manager" ? "full" : "none";
+    }
     const access = values[selected];
     if (access === true || access === 1 || access === "1" || access === "true" || access === "full") return "full";
     if (access === "view" || access === "view_only" || access === "viewOnly") return "view";
@@ -170,7 +173,7 @@ async function getOutstandingCreditForContact(
                 REPLACE(
                     REPLACE(
                         REPLACE(
-                            REPLACE(COALESCE(o.customer_contact_number, ''), ' ', ''),
+                            REPLACE(COALESCE(cd.customer_contact_number, ''), ' ', ''),
                             '+', ''
                         ),
                         '-', ''
@@ -187,28 +190,30 @@ async function getOutstandingCreditForContact(
         `SELECT
              o.order_id,
              o.control_number,
-             o.customer_contact_number,
+             cd.customer_contact_number,
              o.total,
              o.customer_payment,
-             o.credit_due_date,
+             cd.credit_due_date,
              COALESCE(SUM(cc.amount), 0) AS collected
          FROM orders AS o
+                  INNER JOIN pos_credit_details AS cd
+                             ON cd.order_id = o.order_id AND cd.store_id = o.store_id
                   LEFT JOIN credit_collections AS cc
                             ON cc.store_id = o.store_id
                                 AND cc.order_id = o.order_id
          WHERE o.store_id = ?
            AND UPPER(COALESCE(o.payment_mode, '')) = 'CREDIT'
-           AND o.customer_contact_number IS NOT NULL
+           AND cd.customer_contact_number IS NOT NULL
            AND ${normalizedContactSql} IN (?, ?)
-           AND LOWER(TRIM(COALESCE(o.status, ''))) NOT IN
+           AND LOWER(TRIM(${POS_ORDER_STATUS_SQL})) NOT IN
                ('void', 'voided', 'cancelled', 'canceled', 'refunded')
          GROUP BY
              o.order_id,
              o.control_number,
-             o.customer_contact_number,
+             cd.customer_contact_number,
              o.total,
              o.customer_payment,
-             o.credit_due_date`,
+             cd.credit_due_date`,
         [storeId, normalizedContact, internationalContact]
     );
 
@@ -328,8 +333,31 @@ function getOwnerDashboardPeriodStarts(referenceDate) {
     };
 }
 
+// Details that do not belong in the core orders sale header are normalized.
+// A missing exception means a normal completed POS sale.
+const POS_ORDER_STATUS_SQL = `COALESCE((SELECT ex.order_status
+    FROM pos_order_exceptions ex
+    WHERE ex.order_id = o.order_id AND ex.store_id = o.store_id LIMIT 1), 'COMPLETED')`;
+const POS_ORDER_STATUS_IO_SQL = `COALESCE((SELECT ex.order_status
+    FROM pos_order_exceptions ex
+    WHERE ex.order_id = io.order_id AND ex.store_id = io.store_id LIMIT 1), 'COMPLETED')`;
+const POS_CASHIER_NAME_SQL = `(SELECT ea.employee_name FROM employee_actions ea
+    WHERE ea.store_id = o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
+      AND ea.action = 'Completed POS transaction'
+    ORDER BY ea.id DESC LIMIT 1)`;
+const POS_CASHIER_ROLE_SQL = `(SELECT ea.employee_role FROM employee_actions ea
+    WHERE ea.store_id = o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
+      AND ea.action = 'Completed POS transaction'
+    ORDER BY ea.id DESC LIMIT 1)`;
+
+const POS_WALKIN_ORDER_FILTER_SQL = `(
+    UPPER(TRIM(COALESCE(o.customer_type, ''))) = 'WALK_IN'
+    OR o.order_id LIKE '%-POS-%'
+    OR o.control_number LIKE 'INV-%'
+)`;
+
 const OWNER_DASHBOARD_EXCLUDED_STATUSES_SQL = `
-    LOWER(TRIM(COALESCE(o.status, ''))) NOT IN (
+    LOWER(TRIM(${POS_ORDER_STATUS_SQL})) NOT IN (
         'pending',
         'pending payment',
         'unpaid',
@@ -341,6 +369,7 @@ const OWNER_DASHBOARD_EXCLUDED_STATUSES_SQL = `
         'draft',
         'failed'
     )
+    AND ${POS_WALKIN_ORDER_FILTER_SQL}
 `;
 
 function normalizeDashboardNumber(value) {
@@ -547,9 +576,9 @@ async function rebuildPosDashboardSummaryForDay(
              WHERE io.store_id = ?
                AND io.branch_id = ?
                AND io.order_date = ?
-               AND LOWER(TRIM(COALESCE(io.status, ''))) NOT IN (
-                                                                'pending', 'pending payment', 'unpaid', 'cancelled', 'canceled',
-                                                                'refunded', 'void', 'voided', 'draft', 'failed'
+               AND LOWER(TRIM(${POS_ORDER_STATUS_IO_SQL})) NOT IN (
+                                                                   'pending', 'pending payment', 'unpaid', 'cancelled', 'canceled',
+                                                                   'refunded', 'void', 'voided', 'draft', 'failed'
                  )
              GROUP BY oi.store_id, oi.order_id
          ) item_cost
@@ -1741,9 +1770,9 @@ async function logEmployeeAction(connection, entry) {
     );
 }
 
-async function getStoreTaxType(connection, storeId) {
+async function getStoreTaxType(connection, storeId, lock = false) {
     const [rows] = await connection.execute(
-        `SELECT tax_registration AS taxRegistration FROM stores WHERE id = ? LIMIT 1`,
+        `SELECT tax_registration AS taxRegistration FROM stores WHERE id = ? LIMIT 1${lock ? " FOR SHARE" : ""}`,
         [storeId]
     );
 
@@ -1914,7 +1943,7 @@ exports.handler = async (event) => {
             return jsonResponse(403, headers, { error: "POS access is not permitted for this account." });
         }
         const posReadActions = new Set([
-            "get_orders", "get_collection_history", "get_owner_dashboard_summary",
+            "get_orders", "get_collection_history", "get_owner_dashboard_summary", "get_tax_registration",
         ]);
         if (posAccess !== "full" && !posReadActions.has(action)) {
             return jsonResponse(403, headers, { error: "Full POS access is required for this action." });
@@ -1971,6 +2000,15 @@ exports.handler = async (event) => {
             }
         }
 
+        if (action === "get_tax_registration") {
+            const taxType = await getStoreTaxType(connection, storeId);
+            return jsonResponse(200, headers, {
+                success: true,
+                taxType,
+                taxRegistration: taxType === "VAT" ? "VAT_REGISTERED" : "NON_VAT",
+            });
+        }
+
         if (action === "check_customer_credit") {
             if (tokenRole !== "manager" || !tokenBranchId) {
                 return badRequest(
@@ -2019,18 +2057,8 @@ exports.handler = async (event) => {
 
         if (action === "create_order") {
             const requestedOrderId = toSafeString(body.order_id, 255);
-            const submittedCustomerName =
-                toSafeString(body.customer_name, 120) || "Walk-in";
-            const submittedCustomerAddress =
-                toSafeString(body.customer_address, 255) || "N/A";
-            const customerContactNumber = toSafeString(
-                body.customer_contact_number ?? body.customerContactNumber,
-                40
-            );
             const paymentMode =
                 toSafeString(body.payment_mode, 20).toUpperCase() || "CASH";
-            const creditTerm =
-                toSafeString(body.credit_term, 30) || "N/A";
             const orderDate =
                 toISODate(body.order_date) || getManilaISODate();
             const rawOrderLines = getOrderLines(body);
@@ -2042,83 +2070,23 @@ exports.handler = async (event) => {
                 return badRequest(headers, "order_id is required.");
             }
 
-            if (!isBranchUser || !tokenBranchId) {
-                return badRequest(
-                    headers,
-                    "Only an assigned Manager or Staff branch can create POS orders."
-                );
+            if (tokenRole !== "staff" || !tokenBranchId) {
+                return jsonResponse(403, headers, { error: "Only assigned Staff can create POS transactions." });
             }
 
             if (rawOrderLines.length === 0) {
                 return badRequest(headers, "At least one POS item is required.");
             }
 
-            if (!["CASH", "CREDIT"].includes(paymentMode)) {
+            if (!["CASH", "GCASH", "BANK_TRANSFER"].includes(paymentMode)) {
                 return badRequest(headers, "Invalid payment mode.");
             }
 
-            if (paymentMode === "CREDIT" && tokenRole !== "manager") {
-                return badRequest(
-                    headers,
-                    "Only an assigned Manager can create credit sales."
-                );
-            }
-
-            if (
-                paymentMode === "CREDIT" &&
-                !["15 Days", "30 Days"].includes(creditTerm)
-            ) {
-                return badRequest(
-                    headers,
-                    "A valid credit term is required for credit sales."
-                );
-            }
-
+            // This checkout accepts walk-in sales only. Customer names, addresses,
+            // contact information, credit terms, and due dates are not collected.
             if (customerPayment < 0) {
                 return badRequest(headers, "Customer payment cannot be negative.");
             }
-
-            if (paymentMode === "CREDIT") {
-                if (isPlaceholderCreditValue(submittedCustomerName)) {
-                    return badRequest(
-                        headers,
-                        "Customer full name is required for credit sales."
-                    );
-                }
-
-                if (!isValidCreditContact(customerContactNumber)) {
-                    return badRequest(
-                        headers,
-                        "A valid Philippine mobile number is required for credit sales."
-                    );
-                }
-
-                const existingCredit = await getOutstandingCreditForContact(
-                    connection,
-                    storeId,
-                    customerContactNumber
-                );
-
-                if (existingCredit.outstandingBalance > 0) {
-                    const statusLabel =
-                        existingCredit.overdueBalance > 0
-                            ? "overdue"
-                            : "outstanding";
-
-                    return badRequest(
-                        headers,
-                        `New credit is blocked because this customer has an ${statusLabel} balance of ₱${existingCredit.outstandingBalance.toFixed(2)} across ${existingCredit.openOrders} open credit transaction(s). Settle the previous balance first.`
-                    );
-                }
-            }
-
-            // Tax treatment is controlled by the Owner's business tax profile.
-            // The frontend value is display-only and is never trusted here.
-            const taxType = await getStoreTaxType(connection, storeId);
-            const customerName =
-                paymentMode === "CREDIT" ? submittedCustomerName : "Walk-in";
-            const customerAddress =
-                paymentMode === "CREDIT" ? submittedCustomerAddress : "N/A";
 
             let orderId = await getNextAvailablePosOrderId(
                 connection,
@@ -2137,6 +2105,8 @@ exports.handler = async (event) => {
                 await connection.beginTransaction();
 
                 try {
+                    // Lock tax registration for the sale; owner edits wait until checkout commits.
+                    const taxType = await getStoreTaxType(connection, storeId, true);
                     /*
                      * Product IDs and quantities come from the browser, but all
                      * prices, stock, tenant/branch ownership, and sellable batch
@@ -2159,6 +2129,11 @@ exports.handler = async (event) => {
                         )
                     );
 
+                    if (["GCASH", "BANK_TRANSFER"].includes(paymentMode) && customerPayment !== total) {
+                        await connection.rollback();
+                        return badRequest(headers, "GCash and bank-transfer amounts must equal the POS order total.");
+                    }
+
                     if (paymentMode === "CASH" && customerPayment < total) {
                         await connection.rollback();
                         return badRequest(
@@ -2167,38 +2142,17 @@ exports.handler = async (event) => {
                         );
                     }
 
-                    if (paymentMode === "CREDIT" && customerPayment > total) {
-                        await connection.rollback();
-                        return badRequest(
-                            headers,
-                            "Credit sale payment cannot exceed the order total."
-                        );
-                    }
-
+                    // total is the VAT-INCLUSIVE GRAND TOTAL, not a pre-tax subtotal.
+                    // Never add the VAT amount on top of total a second time.
+                    // NON_VAT stores retain the full sales amount as total with 0 VAT.
                     const vatableSales =
                         taxType === "VAT" ? roundMoney(total / 1.12) : 0;
                     const vatAmount =
-                        taxType === "VAT" ? roundMoney(vatableSales * 0.12) : 0;
+                        taxType === "VAT" ? roundMoney(total - vatableSales) : 0;
                     const changeDue =
                         paymentMode === "CASH"
                             ? roundMoney(customerPayment - total)
                             : 0;
-                    const creditDays =
-                        paymentMode === "CREDIT" && creditTerm.startsWith("30")
-                            ? 30
-                            : 15;
-                    const creditDueDate =
-                        paymentMode === "CREDIT"
-                            ? addDaysToISODate(orderDate, creditDays)
-                            : null;
-                    const collectionStatus =
-                        paymentMode !== "CREDIT"
-                            ? "PAID"
-                            : customerPayment >= total
-                                ? "PAID"
-                                : customerPayment > 0
-                                    ? "PARTIAL"
-                                    : "PENDING";
                     const item = toSafeString(
                         formatOrderItems(orderLines),
                         255
@@ -2208,35 +2162,36 @@ exports.handler = async (event) => {
                         orderDate
                     );
 
+                    // Record the cashier once when creating the sales header.
+                    const actingEmployee = await getActingEmployee(
+                        connection,
+                        decodedToken
+                    );
+
+                    // One order header. Product details belong in order_items.
+                    // Credit/void metadata is kept separately, only when applicable.
                     await connection.execute(
                         `INSERT INTO orders
                          (
                              order_id, control_number, store_id, branch_id,
-                             customer_name, customer_address, customer_contact_number,
-                             payment_mode, credit_term, credit_due_date, collection_status,
-                             tax_type, vatable_sales, vat_amount, customer_payment,
-                             change_due, cashier_id, cashier_role, item, total, order_date
+                             cashier_id, customer_type, payment_mode, tax_type,
+                             vatable_sales, vat_amount, customer_payment, change_due,
+                             item, total, order_date
                          )
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                         [
                             orderId,
                             controlNumber,
                             storeId,
                             tokenBranchId,
-                            customerName,
-                            customerAddress,
-                            paymentMode === "CREDIT" ? customerContactNumber : null,
+                            actingEmployee.id,
+                            "WALK_IN",
                             paymentMode,
-                            paymentMode === "CREDIT" ? creditTerm : "N/A",
-                            creditDueDate,
-                            collectionStatus,
                             taxType,
                             vatableSales,
                             vatAmount,
                             customerPayment,
                             changeDue,
-                            null,
-                            tokenRole,
                             item,
                             total,
                             orderDate,
@@ -2249,11 +2204,6 @@ exports.handler = async (event) => {
                         storeId,
                         tokenBranchId,
                         orderLines
-                    );
-
-                    const actingEmployee = await getActingEmployee(
-                        connection,
-                        decodedToken
                     );
 
                     await decreaseStockForOrder(
@@ -2278,18 +2228,6 @@ exports.handler = async (event) => {
                         items: orderItemSummary.items,
                     });
 
-                    await connection.execute(
-                        `UPDATE orders
-                         SET cashier_id = ?, cashier_role = ?
-                         WHERE order_id = ? AND store_id = ?`,
-                        [
-                            actingEmployee.id,
-                            actingEmployee.role,
-                            orderId,
-                            storeId,
-                        ]
-                    );
-
                     await logEmployeeAction(connection, {
                         storeId,
                         branchId: tokenBranchId,
@@ -2298,7 +2236,7 @@ exports.handler = async (event) => {
                         referenceNumber: controlNumber,
                         action: "Completed POS transaction",
                         referenceId: orderId,
-                        details: `${item} — Total ₱${total} — ${paymentMode} — ${taxType} — VAT ₱${vatAmount}`,
+                        details: `${item} — Grand Total ₱${total} — ${paymentMode} — ${taxType} — VATable ₱${vatableSales} — VAT ₱${vatAmount}`,
                     });
 
                     await connection.commit();
@@ -2311,14 +2249,15 @@ exports.handler = async (event) => {
                              COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branchName,
                              COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branch,
                              o.control_number AS controlNumber,
-                             o.customer_name AS customerName,
-                             o.customer_address AS customerAddress,
-                             o.customer_contact_number AS customerContactNumber,
+                             'Walk-in' AS customerName,
+                             o.customer_type AS customerType,
+                             NULL AS customerAddress,
+                             NULL AS customerContactNumber,
                              o.payment_mode AS paymentMode,
-                             o.credit_term AS creditTerm,
-                             DATE_FORMAT(o.credit_due_date, '%Y-%m-%d') AS creditDueDate,
-                             o.collection_status AS collectionStatus,
-                             o.status AS status,
+                             NULL AS creditTerm,
+                             NULL AS creditDueDate,
+                             'PAID' AS collectionStatus,
+                             'COMPLETED' AS status,
                              o.tax_type AS taxType,
                              o.vatable_sales AS vatableSales,
                              o.vat_amount AS vatAmount,
@@ -2327,28 +2266,19 @@ exports.handler = async (event) => {
                              GREATEST(0, o.total - o.customer_payment) AS balance,
                              o.change_due AS changeDue,
                              o.cashier_id AS cashierId,
-                             CASE
-                                 WHEN LOWER(o.cashier_role) = 'manager' THEN (
-                                     SELECT m.manager_name FROM managers m
-                                     WHERE m.id = o.cashier_id AND m.store_id = o.store_id LIMIT 1
-                             )
-                                 WHEN LOWER(o.cashier_role) = 'staff' THEN (
-                                     SELECT st.staff_name FROM staff st
-                                     WHERE st.id = o.cashier_id AND st.store_id = o.store_id LIMIT 1
-                                 )
-                                 ELSE NULL
-                        END AS cashierName,
-                             o.cashier_role AS cashierRole,
+                             NULL AS cashierName,
+                             NULL AS cashierRole,
                              o.item,
                              o.total,
+                             o.total AS grandTotal,
                              DATE_FORMAT(o.order_date, '%Y-%m-%d') AS orderDate,
-                             o.created_at AS createdAt
+                             DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS createdAt
                          FROM orders o
                                   LEFT JOIN branches b
                                             ON b.id = o.branch_id
                                                 AND b.store_id = o.store_id
                          WHERE o.order_id = ? AND o.store_id = ?
-                         LIMIT 1`,
+                             LIMIT 1`,
                         [orderId, storeId]
                     );
 
@@ -2362,6 +2292,8 @@ exports.handler = async (event) => {
                         success: true,
                         order: {
                             ...rows[0],
+                            cashierName: actingEmployee.name,
+                            cashierRole: actingEmployee.role,
                             orderItems:
                                 orderItemsById.get(String(orderId)) || [],
                         },
@@ -2916,7 +2848,8 @@ exports.handler = async (event) => {
                 : null;
             const offset = paginationEnabled ? (page - 1) * pageSize : 0;
 
-            const whereClauses = ["o.store_id = ?"];
+            // The POS register is strictly for walk-in POS sales, not bookings.
+            const whereClauses = ["o.store_id = ?", POS_WALKIN_ORDER_FILTER_SQL];
             const scopeParams = [storeId];
 
             if (isBranchUser && tokenBranchId) {
@@ -2940,7 +2873,7 @@ exports.handler = async (event) => {
             if (requestedSearch) {
                 const like = `%${requestedSearch}%`;
                 whereClauses.push(
-                    "(o.order_id LIKE ? OR o.control_number LIKE ? OR o.customer_name LIKE ?)"
+                    "(o.order_id LIKE ? OR o.control_number LIKE ? OR EXISTS (SELECT 1 FROM pos_credit_details q WHERE q.order_id=o.order_id AND q.store_id=o.store_id AND q.customer_name LIKE ?))"
                 );
                 scopeParams.push(like, like, like);
             }
@@ -2952,7 +2885,7 @@ exports.handler = async (event) => {
             if (creditOpenOnly) {
                 whereClauses.push("UPPER(COALESCE(o.payment_mode, '')) = 'CREDIT'");
                 whereClauses.push(
-                    "LOWER(TRIM(COALESCE(o.status, ''))) NOT IN ('void','voided','cancelled','canceled','refunded')"
+                    `LOWER(TRIM(${POS_ORDER_STATUS_SQL})) NOT IN ('void','voided','cancelled','canceled','refunded')`
                 );
                 whereClauses.push(`
                     o.total - (
@@ -2987,7 +2920,7 @@ exports.handler = async (event) => {
                         o.total
                     ) AS totalCost,
                     (
-                        o.total - COALESCE(
+                        o.total - COALESCE(o.vat_amount, 0) - COALESCE(
                             SUM(
                                 CASE
                                     WHEN oi.id IS NULL THEN NULL
@@ -3023,12 +2956,13 @@ exports.handler = async (event) => {
                     COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branchName,
                     COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branch,
                     o.control_number AS controlNumber,
-                    o.customer_name AS customerName,
-                    o.customer_address AS customerAddress,
-                    o.customer_contact_number AS customerContactNumber,
+                    COALESCE(cd.customer_name, 'Walk-in') AS customerName,
+                    o.customer_type AS customerType,
+                    cd.customer_address AS customerAddress,
+                    cd.customer_contact_number AS customerContactNumber,
                     o.payment_mode AS paymentMode,
-                    o.credit_term AS creditTerm,
-                    DATE_FORMAT(o.credit_due_date, '%Y-%m-%d') AS creditDueDate,
+                    cd.credit_term AS creditTerm,
+                    DATE_FORMAT(cd.credit_due_date, '%Y-%m-%d') AS creditDueDate,
                     o.tax_type AS taxType,
                     o.vatable_sales AS vatableSales,
                     o.vat_amount AS vatAmount,
@@ -3049,7 +2983,7 @@ exports.handler = async (event) => {
                                 )
                     ) AS balance,
                     CASE
-                        WHEN LOWER(TRIM(COALESCE(o.status, ''))) IN ('void', 'voided', 'cancelled', 'canceled', 'refunded')
+                        WHEN LOWER(TRIM(${POS_ORDER_STATUS_SQL})) IN ('void', 'voided', 'cancelled', 'canceled', 'refunded')
                             THEN 'VOIDED'
                         WHEN UPPER(o.payment_mode) <> 'CREDIT' THEN 'PAID'
                         WHEN o.total - (
@@ -3058,7 +2992,7 @@ exports.handler = async (event) => {
                                       FROM credit_collections cc
                                       WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
                             ) <= 0 THEN 'PAID'
-                        WHEN o.credit_due_date IS NOT NULL AND DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')) > o.credit_due_date THEN 'OVERDUE'
+                        WHEN cd.credit_due_date IS NOT NULL AND DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')) > cd.credit_due_date THEN 'OVERDUE'
                     WHEN (
                     COALESCE(o.customer_payment, 0) +
                     COALESCE((SELECT SUM(cc.amount)
@@ -3069,28 +3003,21 @@ exports.handler = async (event) => {
                 END AS collectionStatus,
                     o.change_due AS changeDue,
                     o.cashier_id AS cashierId,
-                    CASE
-                        WHEN LOWER(o.cashier_role) = 'manager' THEN (
-                            SELECT m.manager_name FROM managers m
-                            WHERE m.id = o.cashier_id AND m.store_id = o.store_id LIMIT 1
-                        )
-                        WHEN LOWER(o.cashier_role) = 'staff' THEN (
-                            SELECT st.staff_name FROM staff st
-                            WHERE st.id = o.cashier_id AND st.store_id = o.store_id LIMIT 1
-                        )
-                        ELSE NULL
-                END AS cashierName,
-                    o.cashier_role AS cashierRole,
-                    o.status AS status,
-                    o.item,
-                    o.total,
-                    (SELECT s.tax_registration FROM stores s WHERE s.id = o.store_id LIMIT 1) AS taxRegistration,
+                ${POS_CASHIER_NAME_SQL} AS cashierName,
+                ${POS_CASHIER_ROLE_SQL} AS cashierRole,
+                ${POS_ORDER_STATUS_SQL} AS status,
+                o.item,
+                o.total,
+                o.total AS grandTotal,
+                CASE WHEN UPPER(o.tax_type) = 'VAT' THEN 'VAT_REGISTERED' WHEN UPPER(o.tax_type) = 'NON_VAT' THEN 'NON_VAT' ELSE NULL END AS taxRegistration,
                 ${financialMetricsSelect}
                 DATE_FORMAT(o.order_date, '%Y-%m-%d') AS orderDate,
-                o.created_at AS createdAt
+                DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS createdAt
                 FROM orders o
                 LEFT JOIN branches b
                 ON b.id = o.branch_id AND b.store_id = o.store_id
+                LEFT JOIN pos_credit_details cd
+                ON cd.order_id = o.order_id AND cd.store_id = o.store_id
                 ${financialJoins}
                 WHERE ${whereSql}
             `;
@@ -3099,11 +3026,11 @@ exports.handler = async (event) => {
                 query += `
                     GROUP BY
                         o.order_id, o.store_id, o.branch_id, b.branch_name,
-                        o.control_number, o.customer_name, o.customer_address,
-                        o.customer_contact_number, o.payment_mode, o.credit_term,
-                        o.credit_due_date, o.collection_status, o.status, o.tax_type,
+                        o.control_number, o.customer_type, o.payment_mode, o.tax_type,
+                        cd.customer_name, cd.customer_address, cd.customer_contact_number,
+                        cd.credit_term, cd.credit_due_date,
                         o.vatable_sales, o.vat_amount, o.customer_payment, o.change_due,
-                        o.cashier_id, o.cashier_role, o.item, o.total, o.order_date,
+                        o.cashier_id, o.item, o.total, o.order_date,
                         o.created_at
                 `;
             }
@@ -3125,7 +3052,8 @@ exports.handler = async (event) => {
             const [rows] = await connection.execute(query, queryParams);
 
             const includeOrderItems =
-                body.include_order_items === true || body.includeOrderItems === true;
+                body.include_order_items === true || body.includeOrderItems === true ||
+                tokenRole === "manager" || tokenRole === "staff";
             let orders = rows;
 
             if (includeOrderItems && rows.length > 0) {
@@ -3161,7 +3089,7 @@ exports.handler = async (event) => {
             }
 
             if (includeFinancialMetrics) {
-                const realizedStatusFilter = `LOWER(TRIM(COALESCE(o.status, ''))) NOT IN
+                const realizedStatusFilter = `LOWER(TRIM(${POS_ORDER_STATUS_SQL})) NOT IN
                     ('pending','pending payment','unpaid','cancelled','canceled','refunded','void','voided','draft','failed')`;
 
                 const [summaryRows] = await connection.execute(
@@ -3169,7 +3097,7 @@ exports.handler = async (event) => {
                          COUNT(*) AS transactions,
                          COALESCE(SUM(o.total), 0) AS sales,
                          COALESCE(SUM(COALESCE(costs.totalCost, o.total)), 0) AS cost,
-                         COALESCE(SUM(o.total - COALESCE(costs.totalCost, o.total)), 0) AS profit
+                         COALESCE(SUM(o.total - COALESCE(o.vat_amount, 0) - COALESCE(costs.totalCost, o.total)), 0) AS profit
                      FROM orders o
                               LEFT JOIN (
                          SELECT
@@ -3238,12 +3166,14 @@ exports.handler = async (event) => {
 
             try {
                 const [orderRows] = await connection.execute(
-                    `SELECT order_id, control_number, branch_id, customer_name,
-                            payment_mode, total, customer_payment, credit_due_date
-                     FROM orders
-                     WHERE order_id = ?
-                       AND store_id = ?
-                       AND branch_id = ?
+                    `SELECT o.order_id, o.control_number, o.branch_id, cd.customer_name,
+                            o.payment_mode, o.total, o.customer_payment, cd.credit_due_date
+                     FROM orders o
+                              INNER JOIN pos_credit_details cd
+                                         ON cd.order_id = o.order_id AND cd.store_id = o.store_id
+                     WHERE o.order_id = ?
+                       AND o.store_id = ?
+                       AND o.branch_id = ?
                          LIMIT 1
                      FOR UPDATE`,
                     [orderId, storeId, tokenBranchId]
@@ -3312,7 +3242,7 @@ exports.handler = async (event) => {
                     newBalance <= 0 ? "PAID" : overdue ? "OVERDUE" : "PARTIAL";
 
                 await connection.execute(
-                    `UPDATE orders
+                    `UPDATE pos_credit_details
                      SET collection_status = ?
                      WHERE order_id = ? AND store_id = ?`,
                     [collectionStatus, orderId, storeId]
@@ -3394,22 +3324,30 @@ exports.handler = async (event) => {
                 return badRequest(headers, "Invalid tax registration.");
             }
 
-            await connection.execute(
-                `UPDATE stores SET tax_registration = ? WHERE id = ?`,
-                [registration, storeId]
-            );
-
-            const actingEmployee = await getActingEmployee(connection, decodedToken);
-            await logEmployeeAction(connection, {
-                storeId,
-                branchId: null,
-                employee: actingEmployee,
-                module: "Sales / POS",
-                referenceNumber: null,
-                action: "Updated business tax registration",
-                referenceId: String(storeId),
-                details: registration,
-            });
+            // Commit the owner setting and audit trail together. A concurrent
+            // sale locks the store record while taking its tax snapshot.
+            await connection.beginTransaction();
+            try {
+                await connection.execute(
+                    `UPDATE stores SET tax_registration = ? WHERE id = ?`,
+                    [registration, storeId]
+                );
+                const actingEmployee = await getActingEmployee(connection, decodedToken);
+                await logEmployeeAction(connection, {
+                    storeId,
+                    branchId: null,
+                    employee: actingEmployee,
+                    module: "Sales / POS",
+                    referenceNumber: null,
+                    action: "Updated business tax registration",
+                    referenceId: String(storeId),
+                    details: registration,
+                });
+                await connection.commit();
+            } catch (error) {
+                await connection.rollback();
+                throw error;
+            }
 
             return jsonResponse(200, headers, {
                 success: true,
@@ -3447,13 +3385,16 @@ exports.handler = async (event) => {
                 const [orderRows] = await connection.execute(
                     `SELECT
                          order_id, control_number, item, total, branch_id, order_date,
-                         payment_mode, customer_payment, status
+                         payment_mode, customer_payment,
+                         (SELECT ex.order_status FROM pos_order_exceptions ex
+                          WHERE ex.order_id = orders.order_id AND ex.store_id = orders.store_id
+                             LIMIT 1) AS status
                      FROM orders
                      WHERE order_id = ?
                        AND store_id = ?
                        AND branch_id = ?
                          LIMIT 1
-                     FOR UPDATE`,
+                         FOR UPDATE`,
                     [orderId, storeId, tokenBranchId]
                 );
 
@@ -3501,10 +3442,12 @@ exports.handler = async (event) => {
                 );
 
                 await connection.execute(
-                    `UPDATE orders
-                     SET status = 'VOIDED', collection_status = 'VOIDED'
-                     WHERE order_id = ? AND store_id = ? AND branch_id = ?`,
-                    [orderId, storeId, tokenBranchId]
+                    `INSERT INTO pos_order_exceptions
+                     (order_id, store_id, branch_id, order_status,
+                      reason, actor_id, actor_role, occurred_at)
+                     VALUES (?, ?, ?, 'VOIDED', ?, ?, ?, CURRENT_TIMESTAMP)`,
+                    [orderId, storeId, tokenBranchId, reason.slice(0, 255),
+                        actingEmployee.id, actingEmployee.role]
                 );
 
                 await rebuildPosDashboardSummaryForDay(

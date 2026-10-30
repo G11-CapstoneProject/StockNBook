@@ -6,7 +6,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
     Boxes, CalendarClock, CheckCircle2,
     PackagePlus, Pencil, Plus, Search, Settings2, Wrench, X, Trash2,
-    Download, Upload, ChevronDown, Wallet, ArrowRight, Truck,
+    Download, Upload, ChevronDown, Wallet, ArrowRight,
 } from "lucide-react";
 import {
     useRentalInventory, availableNow, hasRentalStockDiscrepancy,
@@ -141,7 +141,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     : mutation.action === "approve_repair_completion"
                         ? "Repaired units released to ready stock after Manager approval."
                         : ["receive_equipment","import_equipment"].includes(mutation.action) || (mutation.action==="create_equipment" && Boolean(mutation.initialPurchase))
-                            ? `Purchase recorded${reference ? ` · ${reference}` : ""}. Staff must confirm physical receipt before stock increases.`
+                            ? `Rental units received and recorded${reference ? ` · ${reference}` : ""}. Availability and today’s stock activity have been updated.`
                             : `Rental inventory saved${reference ? ` · ${reference}` : ""}.`);
     };
     const downloadExport = (format:"xlsx"|"pdf") => {
@@ -179,14 +179,6 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     <button type="button" onClick={() => setNotice("")} aria-label="Dismiss missing equipment update"><X size={16}/></button>
                 </div>
             ) : null}
-            {rental.pendingReceipts.length>0&&<section aria-label="Deliveries awaiting staff confirmation" className="flex flex-wrap items-center gap-3 rounded-xl border border-[#E7DFEC] bg-[#FAF8FC] px-4 py-3 text-xs text-[#4F3A5A]" style={{backgroundColor:"#F5F1FF"}}>
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-[#665679]" style={{backgroundColor:"#ECE3FF",color:"#5A35A5"}} aria-hidden="true"><Truck size={19}/></span>
-                <div className="min-w-0 flex-1">
-                    <strong className="text-[#21132E]">{rental.pendingReceipts.length} {rental.pendingReceipts.length===1?"Delivery":"Deliveries"} Awaiting Staff Confirmation</strong>
-                    <p className="mt-0.5 text-[11px] text-[#86778F]">Purchased equipment will be added to available stock after Staff confirms receipt.</p>
-                </div>
-                <span className="rounded-full border border-[#E6DDF0] bg-white px-3 py-1 font-semibold text-[#695D75]" style={{backgroundColor:"#FFF0D7",color:"#93600A"}}>Pending</span>
-            </section>}
 
             <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
                 {/* Read-only oversight: Staff owns routine repairs/recoveries. */}
@@ -641,22 +633,27 @@ function PanelSkeleton() {
         {[0,1,2].map(index => <div key={index} className="h-8 animate-pulse rounded-lg bg-[#F3EFF8]"/>)}
     </div>;
 }
-function RentalMetric({label,value,description,icon,tone,loading}:{
-    label:string;value:RentalSummary[keyof RentalSummary];description:string;
-    icon:React.ReactNode;tone:"purple"|"green"|"blue"|"amber";loading:boolean;
+function RentalMetric({label,value,description,icon,tone,loading}: {
+    label:string; value:RentalSummary[keyof RentalSummary]; description:string;
+    icon:React.ReactNode; tone:"purple"|"green"|"blue"|"amber"; loading:boolean;
 }) {
-    const toneStyle = {
-        purple:"bg-[#F1ECFF] text-[#5F35D8]",green:"bg-[#E5F8EC] text-[#23834A]",
-        blue:"bg-[#E9F2FF] text-[#1E6FE8]",amber:"bg-[#FFF3DE] text-[#E68A00]",
+    const iconClassName = {
+        purple:"bg-[#F1ECFF] text-[#5F35D8]",
+        green:"bg-[#E5F8EC] text-[#23834A]",
+        blue:"bg-[#E9F2FF] text-[#1E6FE8]",
+        amber:"bg-[#FFF3DE] text-[#E68A00]",
     }[tone];
-    return <section className="rounded-2xl border border-[#E7DFEC] bg-white p-4 shadow-sm">
-        <div className="flex items-start justify-between gap-3"><div>
-            <p className="text-sm font-bold text-[#21132E]">{label}</p>
-            {loading ? <div className="mt-2 h-8 w-16 animate-pulse rounded bg-[#F3EFF8]"/> :
-                <p className="mt-2 text-[27px] font-bold leading-none text-[#4E2C66]">{value === null ? "—" : value.toLocaleString("en-PH")}</p>}
-            <p className="mt-1.5 text-[11px] leading-4 text-[#86778F]">{description}</p>
-        </div><span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${toneStyle}`}>{icon}</span></div>
-    </section>;
+    return (
+        <section aria-busy={loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
+            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`} aria-hidden="true">{icon}</span>
+            <span className="min-w-0 flex-1">
+                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
+                {loading ? <span className="mt-1 block h-7 w-24 max-w-full animate-pulse rounded-md bg-[#F1EBF8]" role="status" aria-label={`Loading ${label}`}/> :
+                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{value === null ? "—" : value.toLocaleString("en-PH")}</span>}
+                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{description}</span>
+            </span>
+        </section>
+    );
 }
 const activityNames:Record<RentalActivity["type"],string> = {
     received:"Stock Received",rented_out:"Rented Out",returned:"Returned",
@@ -847,9 +844,9 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                     <div className="grid gap-3 sm:grid-cols-2">
                         <div className="space-y-1"><label className={rentalLabelClass}>Stock (Units)</label>
                             <input type="number" min="0" step="1" required readOnly={mode==="edit"} value={mode==="edit"?item?.totalUnits??0:quantity}
-                                   title={mode==="edit"?"Record a supplier purchase and have Staff confirm its physical receipt":undefined}
+                                   title={mode==="edit"?"Record only equipment that was physically received through Restock":undefined}
                                    onChange={e=>setQuantity(e.target.value)} className={rentalFieldClass}/>
-                            {mode==="edit"&&<div className="space-y-2"><p className="text-xs text-[#9B8AAA]">Stock is read-only here. Staff confirms supplier deliveries through Restock; verified count errors use a separate audited correction.</p>
+                            {mode==="edit"&&<div className="space-y-2"><p className="text-xs text-[#9B8AAA]">Stock is read-only here. Record physically received equipment through Restock; verified count errors use a separate audited correction.</p>
                                 <button type="button" onClick={()=>onNavigate("correct")} className="rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-3 py-2 text-xs font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">Correct Stock Count</button>
                             </div>}
                         </div>
@@ -865,7 +862,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                             <p className="text-xs text-[#9B8AAA]">Charge for ONE item for ONE day. For example, 10 tables × this daily price × 2 days. Set your business's daily rental price; confirmed past bookings aren't repriced.</p>
                         </div>
                     </div>
-                    {mode==="edit"&&<p className="text-xs text-[#86778F]">Supplier purchasing history is not edited here. Use the Restock action in the equipment list to record new purchases; Staff verifies the delivered units.</p>}
+                    {mode==="edit"&&<p className="text-xs text-[#86778F]">Supplier purchasing history is not edited here. Use Restock for newly received units; do not count deliveries that have not arrived.</p>}
                     {mode==="add"&&qty===0&&<p className="rounded-xl bg-[#FFFCF7] p-3 text-xs text-[#86778F]">Zero opening stock: you can create a catalog item without a purchase cost and receive equipment later.</p>}
                 </>}
                 {mode==="correct"&&item&&<section className="space-y-4 rounded-xl border border-[#E6DDF0] bg-[#FFFCF8] p-4">
@@ -907,9 +904,9 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                 </>}
                 {purchaseVisible&&<section className="space-y-3 border-t border-[#E6DDF0] pt-5">
                     <h3 className="text-sm font-bold text-[#1A1220]">{mode==="receive"?"Supplier & Purchase Details":"Initial Purchase Details"}</h3>
-                    <p className="text-xs text-[#806A8C]">Purchase totals and supplier balances are transaction records; changing equipment details will not rewrite previous purchases.</p>
+                    <p className="text-xs text-[#806A8C]">Enter only quantities actually received and counted. Confirming this purchase immediately adds the units to rental stock and records the receipt and activity; editing equipment will not rewrite past purchases.</p>
                     {mode==="receive"&&<div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-1"><label className={rentalLabelClass}>Units to Purchase</label><input required type="number" min="1" step="1" className={rentalFieldClass} value={quantity} onChange={e=>setQuantity(e.target.value)}/></div>
+                        <div className="space-y-1"><label className={rentalLabelClass}>Units Physically Received</label><input required type="number" min="1" step="1" className={rentalFieldClass} value={quantity} onChange={e=>setQuantity(e.target.value)}/></div>
                         <div className="space-y-1"><label className={rentalLabelClass}>Unit Purchase Cost (₱)</label><input required type="number" min="0" step="0.01" className={rentalFieldClass} value={unitCost} onChange={e=>setUnitCost(e.target.value)}/></div>
                     </div>}
                     <div className="space-y-1"><label className={rentalLabelClass}>Supplier</label><input required maxLength={150} value={supplier} onChange={e=>setSupplier(e.target.value)} className={rentalFieldClass} placeholder="Enter supplier name"/></div>
@@ -933,14 +930,14 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                 <div className="flex justify-end gap-2 border-t border-[#E6DDF0] pt-4">
                     <button type="button" disabled={submitting} onClick={close} className="rounded-xl border border-[#E6DDF0] px-5 py-3 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]">{mode==="review"?"Close":"Cancel"}</button>
                     {mode!=="review"&&<button type="submit" disabled={saving||submitting||(mode==="maintenance"&&limited===0)} className={btn}>
-                        {mode==="add"?"Save Equipment":mode==="edit"?"Update Equipment":mode==="receive"?"Record Restock":mode==="correct"?"Save Correction":"Save Maintenance"}</button>}
+                        {mode==="add"?"Save Equipment":mode==="edit"?"Update Equipment":mode==="receive"?"Confirm Stock In":mode==="correct"?"Save Correction":"Save Maintenance"}</button>}
                 </div>
             </form>
         </div>
         {pending&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/50 p-4" role="presentation">
             <div role="alertdialog" aria-modal="true" aria-label="Confirm rental inventory changes" className="w-full max-w-md space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
-                <h3 className="text-lg font-bold text-[#1A1220]">{mode==="add"?"Confirm Add Equipment":mode==="edit"?"Confirm Update":mode==="receive"?"Confirm Purchase":mode==="correct"?"Confirm Stock Correction":"Confirm Maintenance"}</h3>
-                <p className="text-sm text-[#6A5D6F]">{mode==="add"?`Add ${name.trim()} to rental inventory?`:mode==="edit"?`Save the changes to ${name.trim()}?`:mode==="receive"?`Record an order for ${qty} unit(s) of ${item?.name}? Staff will confirm physical receipt later.`:mode==="correct"?`Change the verified physical total of ${item?.name} from ${item?.totalUnits} to ${qty} units? Confirmed reservations and held units are protected.`:`Record this maintenance action for ${item?.name}?`}</p>
+                <h3 className="text-lg font-bold text-[#1A1220]">{mode==="add"?"Confirm Add Equipment":mode==="edit"?"Confirm Update":mode==="receive"?"Confirm Received Stock":mode==="correct"?"Confirm Stock Correction":"Confirm Maintenance"}</h3>
+                <p className="text-sm text-[#6A5D6F]">{mode==="add"?`Add ${name.trim()} to rental inventory${qty>0 ? ` with ${qty} physically received units` : ""}?`:mode==="edit"?`Save the changes to ${name.trim()}?`:mode==="receive"?`Confirm ${qty} unit(s) of ${item?.name} have been physically received? This immediately updates rental availability and today’s stock activity.`:mode==="correct"?`Change the verified physical total of ${item?.name} from ${item?.totalUnits} to ${qty} units? Confirmed reservations and held units are protected.`:`Record this maintenance action for ${item?.name}?`}</p>
                 <p className="text-xs text-[#806A8C]">Physical stock and supplier transactions will be confirmed by the Rental backend, not generated by the interface.</p>
                 <div className="flex justify-end gap-2"><button type="button" disabled={submitting} onClick={()=>setPending(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm">Back</button>
                     <button type="button" disabled={saving||submitting} onClick={()=>void confirm()} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{submitting?"Saving...":"Confirm"}</button></div>
@@ -1310,7 +1307,7 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
             </>:<>
                 <div className="flex shrink-0 justify-between gap-4 border-b border-[#E6DDF0] px-5 py-4 sm:px-6">
                     <div><h2 className="text-[19px] font-bold text-[#1A1220]">Confirm Imported Rental Products</h2>
-                        <p className="mt-1 text-sm text-[#6A5D6F]">Review all equipment under one supplier purchase before importing.</p>
+                        <p className="mt-1 text-sm text-[#6A5D6F]">Import only quantities already physically received and counted. Confirming the import posts stock receipts and activity under one supplier purchase.</p>
                         <p className="mt-1 text-xs font-semibold text-[#5A476A]">{preview?.rows.length??0} equipment product(s) • One supplier purchase</p>
                     </div><button type="button" disabled={submitting} onClick={close} aria-label="Close preview" className="text-[#9B8AAA]"><X size={18}/></button>
                 </div>

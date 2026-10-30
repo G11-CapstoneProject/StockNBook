@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import {
     CheckCircle2,
@@ -16,12 +16,13 @@ import {
     Trash2,
     X,
     Phone,
-    Printer,
     WalletCards,
 } from "lucide-react";
 import type { UsePOSReturn } from "@/hooks/usePOS";
 import {
     OrdersTable,
+    formatPOSOrderTime,
+    formatPOSCustomerType,
     POSLayout,
     StatCard,
     peso,
@@ -110,12 +111,149 @@ function maskCreditContact(value?: string | null) {
     return `${digits.slice(0, 2)}${"*".repeat(Math.max(4, digits.length - 6))}${digits.slice(-4)}`;
 }
 
+/** Management view: business sales and transactions from the assigned branch only. */
+function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
+    const [query, setQuery] = useState("");
+    const [from, setFrom] = useState("");
+    const [to, setTo] = useState("");
+    // POS API scopes get_orders to the logged-in Manager's assigned branch.
+    const allBranchOrders = pos.orders.filter(isWalkInPosOrder);
+    const filteredOrders = allBranchOrders.filter((order) => {
+        const date = String(order.date || "").slice(0, 10);
+        if (from && date < from) return false;
+        if (to && date > to) return false;
+        const term = query.trim().toLowerCase();
+        return !term || [order.id, formatPOSCustomerType(order)]
+            .some((value) => String(value || "").toLowerCase().includes(term));
+    });
+    const validOrders = filteredOrders.filter((order) =>
+        !["VOID", "VOIDED", "CANCELLED", "CANCELED", "REFUNDED", "FAILED", "SCHEDULED", "PENDING", "PENDING PAYMENT", "UNPAID", "DRAFT"]
+            .includes(String(order.status || "").toUpperCase())
+    );
+    const sales = validOrders.reduce((sum, order) => sum + Number(order.total || 0), 0);
+    const vat = validOrders.reduce((sum, order) => sum + Number(order.vatAmount || 0), 0);
+
+    return (
+        <POSLayout role="manager" isOwner={false} activeBranchName={pos.activeBranchName} onRefresh={() => pos.refreshAll()}>
+            <div className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <StatCard label="Branch Sales" value={peso(sales)} helper="Recorded sales for the selected period (VAT-inclusive)"
+                              icon={<CircleDollarSign size={18} />} />
+                    <StatCard label="Transactions" value={validOrders.length} helper="Non-voided branch transactions in the selected period"
+                              icon={<ReceiptText size={18} />} />
+                    <StatCard label="VAT in Sales" value={peso(vat)} helper="12% VAT contained in VAT-registered transactions"
+                              icon={<WalletCards size={18} />} iconClassName="bg-[#E9F8EF] text-[#168A48]" />
+                    <StatCard label="Average Sale" value={peso(validOrders.length ? sales / validOrders.length : 0)}
+                              helper="Average completed transaction value"
+                              icon={<ShoppingBag size={18} />} iconClassName="bg-[#FFF2E5] text-[#C8791D]" />
+                </div>
+                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
+                    <h2 className="mb-3 text-base font-bold text-[#1A1220]">Branch Transaction List</h2>
+                    <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_180px]">
+                        <label className="sr-only" htmlFor="manager-pos-search">Search transactions</label>
+                        <input id="manager-pos-search" value={query} onChange={(e) => setQuery(e.target.value)}
+                               placeholder="Search Order ID or customer type..."
+                               className="h-10 rounded-xl border border-[#E6DDF0] px-3 text-sm outline-none focus:border-[#5F3CB0]" />
+                        <label className="sr-only" htmlFor="manager-pos-from">Date from</label>
+                        <input id="manager-pos-from" type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)}
+                               className="h-10 rounded-xl border border-[#E6DDF0] px-3 text-sm outline-none focus:border-[#5F3CB0]" />
+                        <label className="sr-only" htmlFor="manager-pos-to">Date to</label>
+                        <input id="manager-pos-to" type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)}
+                               className="h-10 rounded-xl border border-[#E6DDF0] px-3 text-sm outline-none focus:border-[#5F3CB0]" />
+                    </div>
+                    <p className="my-3 text-xs text-[#806A8C]">{filteredOrders.length} transactions found. Staff handle checkout; managers can review branch sales here.</p>
+                    <div className="max-h-[560px] overflow-auto rounded-xl border border-[#E6DDF0]">
+                        <table className="w-full min-w-[1080px] text-left text-xs">
+                            <thead className="sticky top-0 bg-[#F9F6FD] text-[#5F4E75]">
+                            <tr>{["Order ID", "Date", "Customer Type", "Payment", "Tax", "VAT Amount", "Total", "Processed By", "Download Receipt"].map((heading) =>
+                                <th key={heading} className="px-3 py-3 font-semibold">{heading}</th>
+                            )}</tr>
+                            </thead>
+                            <tbody>
+                            {filteredOrders.length === 0 ? (
+                                <tr><td colSpan={9} className="px-3 py-9 text-center text-[#806A8C]">No branch transactions found.</td></tr>
+                            ) : filteredOrders.map((order) => (
+                                <tr key={order.id} className="border-t border-[#E6DDF0] hover:bg-[#FFFCF7]">
+                                    <td className="px-3 py-3 font-semibold text-[#2B174C]">{order.id}</td>
+                                    <td className="px-3 py-3">
+                                        <div className="font-medium text-[#2B174C]">{order.date}</div>
+                                        <div className="mt-1 text-[11px] text-[#806A8C]">{formatPOSOrderTime(order)}</div>
+                                    </td>
+                                    <td className="px-3 py-3">{formatPOSCustomerType(order)}</td>
+                                    <td className="px-3 py-3">{order.paymentMode || "Cash"}</td>
+                                    <td className="px-3 py-3">{String(order.taxType || "").toUpperCase() === "VAT" ? "VAT 12%" : "Non-VAT"}</td>
+                                    <td className="px-3 py-3">{peso(Number(order.vatAmount || 0))}</td>
+                                    <td className="px-3 py-3 font-bold">{peso(order.total)}</td>
+                                    <td className="px-3 py-3">{order.cashierName || (order.cashierId ? `Staff #${order.cashierId}` : "—")}</td>
+                                    <td className="px-3 py-3">
+                                        <button type="button" onClick={() => downloadSalesReceiptPDF(order)}
+                                                className="inline-flex items-center gap-1.5 rounded-lg border border-[#D8CBE7] bg-white px-3 py-1.5 font-semibold text-[#2B174C] hover:bg-[#F7F1FF]"
+                                                title="Download this sales receipt as PDF">
+                                            <ReceiptText size={14} /> Download
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+        </POSLayout>
+    );
+}
+
+/** Compact booking-style KPI: circular icon at left, content at right. */
+function StaffBookingStyleStat({
+                                   label,
+                                   value,
+                                   helper,
+                                   icon,
+                                   iconBackground,
+                                   iconColor,
+                               }: {
+    label: string;
+    value: string | number;
+    helper: string;
+    icon: ReactNode;
+    iconBackground: string;
+    iconColor: string;
+}) {
+    return (
+        <section className="flex min-h-[128px] items-center gap-4 rounded-[18px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
+            <div className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconBackground} ${iconColor}`}>
+                {icon}
+            </div>
+            <div className="min-w-0">
+                <h2 className="text-[14px] font-medium text-[#2B174C]">{label}</h2>
+                <p className="mt-0.5 text-[26px] font-bold leading-tight text-[#1A1220]">{value}</p>
+                <p className="mt-1 text-xs text-[#806A8C]">{helper}</p>
+            </div>
+        </section>
+    );
+}
+
+function isWalkInPosOrder(order: Order) {
+    if (String(order.customerType || "").toUpperCase() === "WALK_IN") return true;
+    const customer = String(order.customer || "").trim().toLowerCase();
+    const posOrder = String(order.id || "").toUpperCase().includes("-POS-");
+    const posInvoice = String(order.controlNumber || "").toUpperCase().startsWith("INV-");
+    return (customer === "walk-in" || customer === "walk-in customer") && (posOrder || posInvoice);
+}
+
+function isCompletedPosOrder(order: Order) {
+    return !["VOID", "VOIDED", "CANCELLED", "CANCELED", "REFUNDED", "FAILED", "PENDING", "UNPAID"]
+        .includes(String(order.status || "COMPLETED").trim().toUpperCase());
+}
+
 export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
     const isManager = pos.role === "manager";
     const [voidTarget, setVoidTarget] = useState<Order | null>(null);
-    const lowStockCount = pos.displayProducts.filter(
-        (product) => Number(product.stock || 0) <= Number(product.alertLevel || 0)
-    ).length;
+    // Only Staff render checkout; Manager has a separate read-only sales view.
+    if (isManager) return <ManagerSalesView pos={pos} />;
+    const staffTodayOrders = pos.todayOrders.filter(isWalkInPosOrder);
+    const completedTodayOrders = staffTodayOrders.filter(isCompletedPosOrder);
+    const staffTodaySales = completedTodayOrders.reduce((total, order) => total + Number(order.total || 0), 0);
 
     return (
         <POSLayout
@@ -124,34 +262,39 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
             activeBranchName={pos.activeBranchName}
             onRefresh={() => pos.refreshAll()}
         >
-            <div className={`mb-3 grid gap-3 ${isManager ? "sm:grid-cols-2 xl:grid-cols-3" : "sm:grid-cols-2"}`}>
-                <StatCard
-                    label={isManager ? "Branch Sales Today" : "Today's Branch Sales"}
-                    value={peso(pos.todayRevenue)}
-                    helper={isManager ? "Sales recorded at this branch today" : "Sales recorded at your assigned branch"}
-                    icon={<CircleDollarSign size={18} strokeWidth={1.9} />}
-                    iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
+            <div className="mb-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <StaffBookingStyleStat
+                    label="Today's Branch Sales"
+                    value={peso(staffTodaySales)}
+                    helper="Completed walk-in sales at your branch today"
+                    icon={<CircleDollarSign size={24} strokeWidth={1.9} />}
+                    iconBackground="bg-[#F1E8FF]"
+                    iconColor="text-[#7036D6]"
                 />
-
-                <StatCard
-                    label={isManager ? "Branch Transactions" : "Today's Transactions"}
-                    value={pos.todayCompletedOrders.length}
-                    helper={isManager ? "Completed branch transactions today" : "Completed transactions at your branch today"}
-                    icon={<ReceiptText size={18} strokeWidth={1.9} />}
-                    iconClassName="bg-[#EAF1FF] text-[#245EDB]"
-                    valueClassName="text-[#245EDB]"
+                <StaffBookingStyleStat
+                    label="Today's Transactions"
+                    value={completedTodayOrders.length}
+                    helper="Completed walk-in POS transactions today"
+                    icon={<ReceiptText size={24} strokeWidth={1.9} />}
+                    iconBackground="bg-[#E8F0FF]"
+                    iconColor="text-[#2865D9]"
                 />
-
-                {isManager && (
-                    <StatCard
-                        label="Low Stock Items"
-                        value={lowStockCount}
-                        helper="Items at or below alert level"
-                        icon={<Boxes size={18} strokeWidth={1.9} />}
-                        iconClassName="bg-[#FFF2E5] text-[#D56A1F]"
-                        valueClassName="text-[#D56A1F]"
-                    />
-                )}
+                <StaffBookingStyleStat
+                    label="VAT Collected"
+                    value={peso(completedTodayOrders.reduce((sum, order) => sum + Number(order.vatAmount || 0), 0))}
+                    helper="VAT included in today's completed sales"
+                    icon={<WalletCards size={24} strokeWidth={1.9} />}
+                    iconBackground="bg-[#E7F8EF]"
+                    iconColor="text-[#168A48]"
+                />
+                <StaffBookingStyleStat
+                    label="Average Sale"
+                    value={peso(completedTodayOrders.length ? staffTodaySales / completedTodayOrders.length : 0)}
+                    helper="Average value of today's transactions"
+                    icon={<ShoppingBag size={24} strokeWidth={1.9} />}
+                    iconBackground="bg-[#FFF3E4]"
+                    iconColor="text-[#C8791D]"
+                />
             </div>
 
             <div className="space-y-3">
@@ -191,43 +334,18 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
                     <CurrentOrderPanel pos={pos} />
                 </div>
 
-                <div className={`grid gap-3 ${isManager ? "lg:grid-cols-2" : "grid-cols-1"}`}>
-                    {isManager && (
-                        <PendingCollections pos={pos} />
-                    )}
-
+                <div className="grid grid-cols-1 gap-3">
                     <OrdersTable
                         title="Today's Orders"
-                        subtitle={`${pos.todayOrders.length} recorded order${
-                            pos.todayOrders.length !== 1 ? "s" : ""
-                        } today`}
-                        orders={pos.todayOrders}
-                        emptyText="No orders for today yet."
-                        containerClassName="h-[320px] min-h-0 flex flex-col"
-                        scrollAreaClassName="min-h-0 flex-1 overflow-y-auto"
-                        allowHorizontalScroll={false}
+                        subtitle={`${staffTodayOrders.length} walk-in POS transaction${staffTodayOrders.length !== 1 ? "s" : ""} recorded today`}
+                        orders={staffTodayOrders}
+                        emptyText="No walk-in POS orders recorded today."
+                        containerClassName="min-h-[320px] flex flex-col"
+                        scrollAreaClassName="max-h-[380px] flex-1 overflow-y-auto"
+                        allowHorizontalScroll
                         stickyHeader
-                        renderActions={
-                            isManager
-                                ? (order) => {
-                                    const status = String(order.status || "COMPLETED").toUpperCase();
-                                    const alreadyVoided = ["VOID", "VOIDED", "CANCELLED", "CANCELED", "REFUNDED"].includes(status);
-
-                                    return (
-                                        <button
-                                            type="button"
-                                            onClick={() => setVoidTarget(order)}
-                                            disabled={alreadyVoided}
-                                            className="inline-flex items-center gap-1 rounded-lg border border-[#F1C8C8] bg-[#FFF7F7] px-2.5 py-1.5 text-[11px] font-semibold text-[#B42318] transition hover:bg-[#FFECEC] disabled:cursor-not-allowed disabled:opacity-40"
-                                            title={alreadyVoided ? "Transaction already voided" : "Void this completed transaction"}
-                                        >
-                                            <Trash2 size={12} />
-                                            {alreadyVoided ? "Voided" : "Void"}
-                                        </button>
-                                    );
-                                }
-                                : undefined
-                        }
+                        showPayment
+                        showTimeOnly
                     />
                 </div>
             </div>
@@ -612,7 +730,7 @@ function VoidOrderModal({
         }
 
         const confirmed = window.confirm(
-            `Void transaction ${order.controlNumber || order.id}? Stock will be restored and the transaction will remain in the audit history.`
+            `Void transaction ${order.id}? Stock will be restored and the transaction will remain in the audit history.`
         );
         if (!confirmed) return;
 
@@ -634,7 +752,7 @@ function VoidOrderModal({
                     <div>
                         <h3 className="text-lg font-bold text-[#1A1220]">Void POS Transaction</h3>
                         <p className="mt-1 text-xs text-[#806A8C]">
-                            {order.controlNumber || order.id} · {peso(Number(order.total || 0))}
+                            {order.id} · {peso(Number(order.total || 0))}
                         </p>
                     </div>
                     <button type="button" onClick={onClose} disabled={saving} className="text-[#806A8C]">
@@ -738,226 +856,172 @@ function SaleSuccessToast({
     );
 }
 
-function escapeInvoiceText(value: unknown) {
-    return String(value ?? "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-}
-
-function printSalesInvoice(order: Order) {
-    const businessName =
+/** An 80-mm receipt-size PDF generated in-browser without new dependencies.
+ *  Uses the stored VAT, sale amount, and purchased lines; no tax re-computation.
+ *  Designed for internal transaction receipts, not a substitute for a registered invoice.
+ */
+function downloadSalesReceiptPDF(order: Order) {
+    const storeName =
         sessionStorage.getItem("business_name") ||
         sessionStorage.getItem("store_name") ||
         sessionStorage.getItem("stocknbook_store_name") ||
         "StockNBook Store";
-    const businessAddress =
-        sessionStorage.getItem("business_address") ||
-        sessionStorage.getItem("store_address") ||
-        "";
-    const tin =
-        sessionStorage.getItem("tin") ||
-        sessionStorage.getItem("store_tin") ||
-        "";
+    const branchName = order.branchName || "Assigned Branch";
+    const control = order.controlNumber || order.id;
+    const cashier = order.cashierName ||
+        (order.cashierId ? `Employee #${order.cashierId}` : "Not available");
+    const time = formatPOSOrderTime(order);
+    const paymentLabels: Record<string, string> = {
+        CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer", CREDIT: "Credit",
+    };
+    const paymentLabel = paymentLabels[String(order.paymentMode || "CASH").toUpperCase()] ||
+        String(order.paymentMode || "Cash");
+    const currency = (value: unknown) =>
+        `PHP ${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    // Core PDF fonts only support WinAnsi. Use ASCII so PDF byte offsets are accurate.
+    const ascii = (value: unknown) => String(value ?? "")
+        .normalize("NFKD").replace(/[^\x20-\x7E]/g, "-");
+    const escapePDF = (value: unknown) => ascii(value)
+        .replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 
-    const itemsHtml = (order.items || [])
-        .map((item) => {
-            const unitPrice = Number(
-                item.unitPrice ??
-                (item.quantity > 0 ? Number(item.lineTotal || 0) / item.quantity : 0)
-            );
-            const lineTotal = Number(
-                item.lineTotal ?? unitPrice * Number(item.quantity || 0)
-            );
+    const width = 227; // approximately 80 mm
+    const margin = 13;
+    const right = width - margin;
+    const usable = right - margin;
+    const entries: Array<{ kind: "text" | "rule"; text?: string; y: number; x?: number; font?: "F1" | "F2"; size?: number }> = [];
+    let top = 16;
+    const measuredWidth = (text: string, size: number) =>
+        Array.from(ascii(text)).reduce((n, ch) => n + ("WM@%".includes(ch) ? 0.82 : "il1.,:;!| ".includes(ch) ? 0.28 : 0.52) * size, 0);
+    const drawText = (value: unknown, size = 9, font: "F1" | "F2" = "F1", align: "left" | "center" | "right" = "left", gap = 13) => {
+        const text = ascii(value);
+        let x = margin;
+        if (align === "right") x = right - measuredWidth(text, size);
+        if (align === "center") x = margin + (usable - measuredWidth(text, size)) / 2;
+        entries.push({ kind: "text", text, size, font, x: Math.max(4, x), y: top });
+        top += gap;
+    };
+    const rule = () => { top += 2; entries.push({ kind: "rule", y: top }); top += 10; };
+    const wrapped = (value: unknown, size = 9, font: "F1" | "F2" = "F1") => {
+        const words = ascii(value).split(/\s+/).filter(Boolean);
+        let line = "";
+        for (const word of words) {
+            const next = line ? `${line} ${word}` : word;
+            if (line && measuredWidth(next, size) > usable) {
+                drawText(line, size, font, "left", 12);
+                line = word;
+            } else {
+                line = next;
+            }
+        }
+        if (line) drawText(line, size, font, "left", 12);
+    };
+    const amountRow = (label: string, amount: unknown, bold = false, size = 9) => {
+        const font = bold ? "F2" : "F1";
+        const labelText = ascii(label);
+        const amountText = currency(amount);
+        const priceX = Math.max(margin + 73, right - measuredWidth(amountText, size));
+        entries.push({ kind: "text", text: labelText, size, font, x: margin, y: top });
+        entries.push({ kind: "text", text: amountText, size, font, x: priceX, y: top });
+        top += bold ? 18 : 14;
+    };
 
-            return `
-                <tr>
-                    <td>${escapeInvoiceText(item.name)}</td>
-                    <td style="text-align:center">${Number(item.quantity || 0)}</td>
-                    <td style="text-align:right">${escapeInvoiceText(peso(unitPrice))}</td>
-                    <td style="text-align:right">${escapeInvoiceText(peso(lineTotal))}</td>
-                </tr>
-            `;
-        })
-        .join("");
+    drawText(storeName, 13, "F2", "center", 18);
+    drawText(branchName, 9, "F1", "center", 14);
+    drawText("SALES RECEIPT", 11, "F2", "center", 20);
+    rule();
+    wrapped(`Order: ${order.id}`, 8);
+    wrapped(`Control: ${control}`, 8);
+    drawText(`Date: ${order.date}`, 8, "F1", "left", 12);
+    drawText(`Time: ${time}`, 8, "F1", "left", 12);
+    wrapped(`Processed By: ${cashier}`, 8);
+    drawText(`Payment: ${paymentLabel}`, 8, "F1", "left", 12);
+    drawText(`Tax: ${String(order.taxType || "NON_VAT").toUpperCase() === "VAT" ? "VAT Registered (12%)" : "Non-VAT"}`, 8, "F1", "left", 13);
+    rule();
+    drawText("ITEMS PURCHASED", 9, "F2", "left", 16);
 
-    const totalPaid = Number(order.totalPaid ?? order.customerPayment ?? 0);
-    const balance = Math.max(
-        0,
-        Number(order.balance ?? Number(order.total || 0) - totalPaid)
-    );
-    const isCredit = String(order.paymentMode || "").toUpperCase() === "CREDIT";
-    const taxLabel =
-        String(order.taxType || "").toUpperCase() === "VAT"
-            ? "VAT Registered (12%)"
-            : "Non-VAT Registered";
-
-    const popup = window.open("", "_blank", "width=900,height=720");
-    if (!popup) {
-        alert("Please allow pop-ups to print the sales invoice.");
-        return;
+    if (Array.isArray(order.items) && order.items.length) {
+        for (const item of order.items) {
+            wrapped(item.name || "Product", 9, "F2");
+            const qty = Math.max(0, Number(item.quantity || 0));
+            const hasUnitPrice = item.unitPrice !== undefined && item.unitPrice !== null;
+            const hasLineTotal = item.lineTotal !== undefined && item.lineTotal !== null;
+            if (hasUnitPrice || hasLineTotal) {
+                // These are the original prices saved in order_items, not
+                // reconstructed from the grand total or current inventory.
+                const unit = hasUnitPrice
+                    ? Number(item.unitPrice)
+                    : qty > 0 ? Number(item.lineTotal) / qty : 0;
+                const lineTotal = hasLineTotal
+                    ? Number(item.lineTotal)
+                    : unit * qty;
+                // Clearly label both values while staying within 80-mm paper.
+                drawText(`Qty: ${qty}  |  Unit Price: ${currency(unit)}`, 8, "F1", "left", 13);
+                amountRow("Item Total", lineTotal, true, 8);
+            } else {
+                drawText(`Qty: ${qty}  |  Price not available in historical record`, 7, "F1", "left", 13);
+            }
+            top += 5;
+        }
+    } else {
+        drawText("Item detail unavailable in POS data", 8, "F1", "left", 14);
     }
-
-    popup.document.write(`
-        <!doctype html>
-        <html lang="en">
-        <head>
-            <title>Sales Invoice ${escapeInvoiceText(order.controlNumber || order.id)}</title>
-            <style>
-                body { font-family: Arial, sans-serif; color:#1a1220; margin:32px; }
-                .head { display:flex; justify-content:space-between; gap:24px; margin-bottom:20px; }
-                h1 { margin:0 0 6px; font-size:24px; }
-                p { margin:3px 0; font-size:12px; }
-                table { width:100%; border-collapse:collapse; margin-top:16px; font-size:12px; }
-                th, td { padding:9px 8px; border-bottom:1px solid #ddd; }
-                th { text-align:left; background:#f8f5fa; }
-                .summary { width:360px; margin-left:auto; margin-top:18px; }
-                .row { display:flex; justify-content:space-between; gap:20px; padding:4px 0; font-size:12px; }
-                .grand { border-top:1px solid #999; margin-top:4px; padding-top:8px; font-weight:700; }
-                .credit { margin-top:18px; border:1px solid #ddd; padding:12px; border-radius:8px; }
-                .footer { margin-top:28px; font-size:10px; color:#666; }
-                @media print { button { display:none; } body { margin:18px; } }
-            </style>
-        </head>
-        <body>
-            <div class="head">
-                <div>
-                    <h1>${escapeInvoiceText(businessName)}</h1>
-                    ${businessAddress ? `<p>${escapeInvoiceText(businessAddress)}</p>` : ""}
-                    ${tin ? `<p>TIN: ${escapeInvoiceText(tin)}</p>` : ""}
-                    <p>${escapeInvoiceText(taxLabel)}</p>
-                </div>
-                <div style="text-align:right">
-                    <h2 style="margin:0 0 6px">Sales Invoice</h2>
-                    <p><strong>Control No.:</strong> ${escapeInvoiceText(order.controlNumber || order.id)}</p>
-                    <p><strong>Date:</strong> ${escapeInvoiceText(order.date)}</p>
-                    <p><strong>Branch:</strong> ${escapeInvoiceText(order.branchName || "—")}</p>
-                    <p><strong>Processed By:</strong> ${escapeInvoiceText(order.cashierName || order.cashierRole || "—")}</p>
-                </div>
-            </div>
-
-            <div>
-                <p><strong>Customer:</strong> ${escapeInvoiceText(order.customer || "—")}</p>
-                ${order.customerContactNumber ? `<p><strong>Contact:</strong> ${escapeInvoiceText(maskCreditContact(order.customerContactNumber))}</p>` : ""}
-            </div>
-
-            <table>
-                <thead>
-                    <tr><th>Item</th><th style="text-align:center">Qty</th><th style="text-align:right">Unit Price</th><th style="text-align:right">Amount</th></tr>
-                </thead>
-                <tbody>${itemsHtml}</tbody>
-            </table>
-
-            <div class="summary">
-                ${
-        String(order.taxType || "").toUpperCase() === "VAT"
-            ? `
-                            <div class="row"><span>VATable Sales</span><strong>${escapeInvoiceText(peso(Number(order.vatableSales || 0)))}</strong></div>
-                            <div class="row"><span>VAT Amount (12%)</span><strong>${escapeInvoiceText(peso(Number(order.vatAmount || 0)))}</strong></div>
-                        `
-            : `<div class="row"><span>Non-VAT Sales</span><strong>${escapeInvoiceText(peso(Number(order.total || 0)))}</strong></div>`
+    rule();
+    if (String(order.taxType || "").toUpperCase() === "VAT") {
+        amountRow("VATable Sales", order.vatableSales ?? 0);
+        amountRow("VAT Amount (12%)", order.vatAmount ?? 0);
+    } else {
+        amountRow("Non-VAT Sales", order.total);
+        amountRow("VAT Amount", 0);
     }
-                <div class="row grand"><span>Grand Total</span><strong>${escapeInvoiceText(peso(Number(order.total || 0)))}</strong></div>
-                <div class="row"><span>Amount Paid</span><strong>${escapeInvoiceText(peso(totalPaid))}</strong></div>
-                <div class="row"><span>${isCredit ? "Balance Due" : "Change"}</span><strong>${escapeInvoiceText(peso(isCredit ? balance : Number(order.changeDue || 0)))}</strong></div>
-            </div>
+    rule();
+    amountRow("GRAND TOTAL", order.total, true, 10);
+    amountRow("Amount Received", order.customerPayment ?? order.total);
+    amountRow("Change", order.changeDue ?? 0);
+    rule();
+    drawText("THANK YOU FOR YOUR PURCHASE!", 9, "F2", "center", 15);
+    drawText("Generated by StockNBook POS", 7, "F1", "center", 12);
 
-            ${
-        isCredit
-            ? `<div class="credit">
-                        <p><strong>Payment Type:</strong> Credit</p>
-                        <p><strong>Credit Term:</strong> ${escapeInvoiceText(order.creditTerm || "—")}</p>
-                        <p><strong>Due Date:</strong> ${escapeInvoiceText(
-                order.creditDueDate
-                    ? formatCollectionDate(addDaysToDate(order.creditDueDate, 0))
-                    : "—"
-            )}</p>
-                       </div>`
-            : `<div class="credit"><p><strong>Payment Type:</strong> Cash</p></div>`
+    const height = Math.max(330, top + 15);
+    const stream = entries.map((entry) => {
+        if (entry.kind === "rule") {
+            const yy = height - entry.y;
+            return `0.72 G 0.45 w ${margin} ${yy} m ${right} ${yy} l S`;
+        }
+        const yy = height - entry.y;
+        const isHeading = entry.font === "F2";
+        const gray = isHeading ? "0.10 g" : "0.23 g";
+        return `${gray} BT /${entry.font || "F1"} ${entry.size || 9} Tf 1 0 0 1 ${(entry.x || margin).toFixed(2)} ${yy.toFixed(2)} Tm (${escapePDF(entry.text)}) Tj ET`;
+    }).join("\n");
+
+    const objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>`,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+        `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    ];
+    let source = "%PDF-1.4\n";
+    const offsets = [0];
+    objects.forEach((obj, index) => {
+        offsets.push(source.length);
+        source += `${index + 1} 0 obj\n${obj}\nendobj\n`;
+    });
+    const xref = source.length;
+    source += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (let index = 1; index < offsets.length; index++) {
+        source += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
     }
-
-            <p class="footer">Generated by StockNBook POS.</p>
-            <script>window.onload = () => window.print();</script>
-        </body>
-        </html>
-    `);
-    popup.document.close();
-}
-
-function InvoiceModal({
-                          order,
-                          onClose,
-                      }: {
-    order: Order | null;
-    onClose: () => void;
-}) {
-    if (!order) return null;
-
-    const totalPaid = Number(order.totalPaid ?? order.customerPayment ?? 0);
-    const balance = Math.max(
-        0,
-        Number(order.balance ?? Number(order.total || 0) - totalPaid)
-    );
-    const isCredit = String(order.paymentMode || "").toUpperCase() === "CREDIT";
-
-    return (
-        <div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/35 p-4">
-            <div className="w-full max-w-xl rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-2xl">
-                <div className="flex items-start justify-between gap-4">
-                    <div>
-                        <h3 className="text-lg font-bold text-[#1A1220]">Sales Invoice Ready</h3>
-                        <p className="mt-1 text-xs text-[#806A8C]">
-                            {order.controlNumber || order.id}
-                        </p>
-                    </div>
-                    <button type="button" onClick={onClose} className="text-[#806A8C]">
-                        <X size={18} />
-                    </button>
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 gap-3 rounded-xl bg-[#FAF7FC] p-4 text-xs">
-                    <div>
-                        <p className="text-[#806A8C]">Customer</p>
-                        <p className="mt-1 font-semibold">{order.customer || "—"}</p>
-                    </div>
-                    <div>
-                        <p className="text-[#806A8C]">Payment</p>
-                        <p className="mt-1 font-semibold">{isCredit ? "Credit Sale" : "Cash Sale"}</p>
-                    </div>
-                    <div>
-                        <p className="text-[#806A8C]">Grand Total</p>
-                        <p className="mt-1 font-semibold">{peso(Number(order.total || 0))}</p>
-                    </div>
-                    <div>
-                        <p className="text-[#806A8C]">{isCredit ? "Balance Due" : "Change"}</p>
-                        <p className="mt-1 font-semibold">
-                            {peso(isCredit ? balance : Number(order.changeDue || 0))}
-                        </p>
-                    </div>
-                </div>
-
-                <div className="mt-4 flex justify-end gap-2">
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        className="rounded-xl border border-[#D8CBE7] px-4 py-2 text-sm font-semibold text-[#2B174C]"
-                    >
-                        Close
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => printSalesInvoice(order)}
-                        className="inline-flex items-center gap-2 rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white"
-                    >
-                        <Printer size={16} />
-                        Print Invoice
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
+    source += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+    const file = new Blob([source], { type: "application/pdf" });
+    const url = URL.createObjectURL(file);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `StockNBook-Receipt-${order.id.replace(/[^A-Za-z0-9_-]/g, "_")}.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
@@ -1047,6 +1111,12 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
             effectiveCreditRisk.restricted
         );
 
+    const staffPaymentMode = String(pos.paymentMode || "CASH").toUpperCase();
+    const isDigitalPayment = staffPaymentMode === "GCASH" || staffPaymentMode === "BANK_TRANSFER";
+
+    // Digital payments are entered and confirmed by Staff, never auto-filled.
+    // Do not generate a completed order before the full received amount is verified.
+
     const hasExpiredCartItem = pos.cartItems.some((item) =>
         isPOSItemExpired(item.expirationDate)
     );
@@ -1054,7 +1124,6 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
     const orderGridClass =
         "grid min-w-[360px] grid-cols-[minmax(0,1fr)_62px_76px_82px_24px]";
 
-    const [lastInvoice, setLastInvoice] = useState<Order | null>(null);
 
     const handlePlaceOrderClick = async () => {
         if (pos.cartItems.length === 0) return;
@@ -1088,7 +1157,12 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
         }
 
         if (!isCredit && paidAmount < pos.total) {
-            alert("Payment must be equal or greater than the total for a cash sale.");
+            alert("Amount Received must be equal to or greater than Grand Total.");
+            return;
+        }
+
+        if (isDigitalPayment && Math.round(paidAmount * 100) !== Math.round(pos.total * 100)) {
+            alert("GCash and Bank Transfer must be verified for the exact Grand Total; no change is given.");
             return;
         }
 
@@ -1151,11 +1225,10 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
             return;
         }
 
-        setLastInvoice(placedOrder);
         setSuccessToast({
             title: "Order placed successfully",
             message:
-                "The sale has been recorded, inventory was updated, and the invoice is ready to print.",
+                "Payment recorded and inventory updated.",
         });
 
         if (isCredit) {
@@ -1169,11 +1242,6 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
             <SaleSuccessToast
                 toast={successToast}
                 onClose={() => setSuccessToast(null)}
-            />
-
-            <InvoiceModal
-                order={lastInvoice}
-                onClose={() => setLastInvoice(null)}
             />
 
             <aside className="min-w-0 rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm xl:sticky xl:top-24 xl:self-start">
@@ -1370,7 +1438,7 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
                         ) : (
                             <div>
                                 <label className="mb-1 block text-xs font-medium text-[#5A476A]">
-                                    Customer
+                                    Customer Type
                                 </label>
                                 <div className="flex min-h-[42px] items-center rounded-xl border border-[#E3D8EA] bg-[#F8F5FA] px-4 py-2.5 text-sm font-semibold text-[#1A1220]">
                                     Walk-in
@@ -1382,30 +1450,25 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
                             <div>
                                 <label className="mb-1 block text-xs font-medium text-[#5A476A]">Payment Mode</label>
                                 <select
-                                    value={pos.paymentMode}
+                                    value={String(pos.paymentMode).toUpperCase()}
                                     onChange={(e) => {
-                                        const mode = e.target.value as "CASH" | "CREDIT";
-                                        pos.setPaymentMode(mode);
-
-                                        if (mode === "CASH") {
-                                            pos.setCreditTerm("N/A");
-                                            pos.setCustomerName("Walk-in");
-                                            pos.setCustomerAddress("N/A");
-                                            pos.setCustomerContactNumber("");
-                                            setCreditTermsAccepted(false);
-                                            setCreditRisk(EMPTY_CREDIT_CHECK);
-                                        } else if (pos.creditTerm === "N/A") {
-                                            pos.setCreditTerm("15 Days");
-                                            pos.setCustomerName("");
-                                            pos.setCustomerAddress("");
-                                        }
+                                        const mode = e.target.value as "CASH" | "GCASH" | "BANK_TRANSFER";
+                                        // Existing usePOS state is the source for checkout's payment_mode.
+                                        // Extend its PaymentMode union to include GCASH and BANK_TRANSFER.
+                                        pos.setPaymentMode(mode as Parameters<typeof pos.setPaymentMode>[0]);
+                                        pos.setCreditTerm("N/A");
+                                        pos.setCustomerName("Walk-in");
+                                        pos.setCustomerAddress("N/A");
+                                        pos.setCustomerContactNumber("");
+                                        setCreditTermsAccepted(false);
+                                        setCreditRisk(EMPTY_CREDIT_CHECK);
+                                        pos.setPayment("");
                                     }}
                                     className="w-full rounded-xl border border-[#E3D8EA] bg-white px-3 py-2.5 text-sm font-semibold text-[#1A1220] outline-none focus:border-[#2B174C]"
                                 >
-                                    <option value="CASH">Cash Sale</option>
-                                    {canUseCreditSales && (
-                                        <option value="CREDIT">Credit Sale</option>
-                                    )}
+                                    <option value="CASH">Cash</option>
+                                    <option value="GCASH">GCash</option>
+                                    <option value="BANK_TRANSFER">Bank Transfer</option>
                                 </select>
                             </div>
 
@@ -1565,12 +1628,13 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
                     <div className="space-y-3">
                         <div>
                             <label className="mb-1 block text-xs font-medium text-[#5A476A]">
-                                {pos.paymentMode === "CREDIT" ? "Initial Payment (Optional)" : "Customer Payment"}
+                                Amount Received
                             </label>
 
                             <input
                                 value={pos.payment}
                                 onChange={(e) => pos.setPayment(e.target.value)}
+                                title={isDigitalPayment ? "Enter the amount actually verified in GCash or the bank account" : undefined}
                                 inputMode="decimal"
                                 placeholder="0.00"
                                 className="w-full rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 text-sm text-[#1A1220] placeholder:text-[#9B8AAA] shadow-sm focus:border-[#2B174C] focus:outline-none"
@@ -1579,18 +1643,20 @@ function CurrentOrderPanel({ pos }: { pos: UsePOSReturn }) {
 
                         <div className="flex items-center justify-between rounded-xl border border-[#D8F0DD] bg-[#EEF9F0] px-4 py-3">
                             <span className="text-sm font-semibold text-green-700">
-                                {pos.paymentMode === "CREDIT" ? "Remaining Balance" : "Change"}
+                                {isDigitalPayment ? "Digital Payment" : "Change"}
                             </span>
 
                             <span className="text-sm font-semibold text-[#1A1220]">
-                                {peso(pos.paymentMode === "CREDIT" ? Math.max(0, pos.total - (Number(pos.payment) || 0)) : pos.change)}
+                                {isDigitalPayment ? "No cash change" : peso(pos.change)}
                             </span>
                         </div>
 
                         <button
                             onClick={() => void handlePlaceOrderClick()}
                             disabled={
-                                !pos.canPlaceOrder ||
+                                (isDigitalPayment
+                                    ? pos.cartItems.length === 0 || Math.round(Number(pos.payment || 0) * 100) !== Math.round(pos.total * 100)
+                                    : !pos.canPlaceOrder) ||
                                 hasExpiredCartItem ||
                                 creditSaleBlocked
                             }

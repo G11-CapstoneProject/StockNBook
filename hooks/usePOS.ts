@@ -243,15 +243,46 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
         cashierName: o.cashierName ?? null,
         cashierRole: o.cashierRole ?? null,
         status: o.status ?? null,
-        items: o.item
-            ? o.item.split(",").map((s: string) => {
-                const [name, qty] = s.split(" x");
+        // The backend's get_orders action joins order_items and provides the
+        // actual historical unit price and line total for each product.
+        // The legacy orders.item summary only contains names/quantities.
+        items: Array.isArray(o.orderItems) && o.orderItems.length > 0
+            ? o.orderItems.map((line): OrderItem => {
+                const quantity = Number(line.quantity ?? 0);
+                const rawUnitPrice = line.unitPrice;
+                const rawLineTotal = line.lineTotal;
+                const unitPrice = rawUnitPrice != null && rawUnitPrice !== ""
+                    ? Number(rawUnitPrice)
+                    : null;
+                const lineTotal = rawLineTotal != null && rawLineTotal !== ""
+                    ? Number(rawLineTotal)
+                    : null;
+
                 return {
-                    name: name.trim(),
-                    quantity: Number(qty || 0),
+                    name: String(line.name || "Product"),
+                    quantity: Number.isFinite(quantity) ? quantity : 0,
+                    ...(unitPrice !== null && Number.isFinite(unitPrice)
+                        ? { unitPrice }
+                        : lineTotal !== null && Number.isFinite(lineTotal) && quantity > 0
+                            ? { unitPrice: Number((lineTotal / quantity).toFixed(2)) }
+                            : {}),
+                    ...(lineTotal !== null && Number.isFinite(lineTotal)
+                        ? { lineTotal }
+                        : unitPrice !== null && Number.isFinite(unitPrice)
+                            ? { lineTotal: Number((unitPrice * quantity).toFixed(2)) }
+                            : {}),
+                    // Cost is not shown on customer-facing receipts.
+                    ...(line.costPrice != null && Number.isFinite(Number(line.costPrice))
+                        ? { costPrice: Number(line.costPrice) }
+                        : {}),
                 };
             })
-            : [],
+            : o.item
+                ? o.item.split(",").map((part: string) => {
+                    const [name, qty] = part.split(" x");
+                    return { name: name.trim(), quantity: Number(qty || 0) };
+                })
+                : [],
         total: Number(o.total || 0),
         cost: Number(
             o.totalCost ??
@@ -272,6 +303,9 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
             )
         ),
         date: formatISODateLong(orderDateISO),
+        // Actual MySQL orders.created_at timestamp, not the browser's current time.
+        // The backend returns YYYY-MM-DD HH:mm:ss in the store's local clock.
+        createdAt: o.createdAt ? String(o.createdAt) : null,
 
         branchId:
             rawBranchId === null ||
@@ -1131,6 +1165,7 @@ export function usePOS() {
                 order?: {
                     orderId?: string;
                     controlNumber?: string | null;
+                    createdAt?: string | null;
                     branchId?: number | string | null;
                     branchName?: string | null;
                     customerName?: string;
@@ -1184,6 +1219,9 @@ export function usePOS() {
                         newOrder.id
                     ),
                 controlNumber: orderData?.order?.controlNumber ?? null,
+                createdAt: orderData?.order?.createdAt
+                    ? String(orderData.order.createdAt)
+                    : null,
                 customer: orderData?.order?.customerName || newOrder.customer,
                 customerAddress:
                     orderData?.order?.customerAddress ?? newOrder.customerAddress,

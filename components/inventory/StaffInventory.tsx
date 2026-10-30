@@ -53,11 +53,54 @@ type SalesBookingItem = {
 };
 type SalesBooking = {
     bookingId:number; reference:string; clientName:string; bookingType:string;
-    packageName:string; eventDate:string; eventTime:string;
+    packageName:string; eventDate:string; eventTime:string; bookingStatus?:string|null;
+    booking_status?:string|null; status?:string|null;
     bookingTotal:number; amountPaid:number; balance:number;
     items:SalesBookingItem[];
 };
 type SalesQueueFilter = "all" | "prepare" | "release";
+
+// Prioritize today's scheduled bookings, then the most recent past dates, and
+// finally upcoming dates (nearest first). Keep date strings in YYYY-MM-DD form.
+function compareQueueEventDates(first: string, second: string, today: string): number {
+    const bucket = (date: string) => !/^\d{4}-\d{2}-\d{2}$/.test(date) ? 3 :
+        date === today ? 0 : date < today ? 1 : 2;
+    const difference = bucket(first) - bucket(second);
+    if (difference) return difference;
+    if (bucket(first) === 1) return second.localeCompare(first);
+    return first.localeCompare(second);
+}
+
+// Display the actual booking lifecycle status, like the Rental queue.
+// Support common API field names without inferring an incorrect status from task progress.
+function salesQueueBookingStatus(booking: SalesBooking): string {
+    const raw = String(booking.bookingStatus || booking.booking_status || booking.status || "").trim();
+    switch (raw.toLowerCase()) {
+        case "pending": case "pending review": return "Pending Review";
+        case "approved": case "awaiting down payment": case "waiting down payment":
+        case "awaiting payment": case "down payment required": return "Approved";
+        case "confirmed": return "Confirmed";
+        case "preparing": return "Preparing";
+        case "released": return "Released";
+        case "return inspection": return "Return Inspection";
+        case "pending settlement": return "Pending Settlement";
+        case "completed": return "Completed";
+        case "cancelled": case "canceled": return "Cancelled";
+        default: return raw || "Status unavailable";
+    }
+}
+const salesQueueStatusStyles: Record<string, string> = {
+    "Pending Review": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
+    "Approved": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
+    "Confirmed": "border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]",
+    "Preparing": "border-[#D8CBE7] bg-[#F7F1FF] text-[#4E2C66]",
+    "Released": "border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]",
+    "Return Inspection": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
+    "Pending Settlement": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
+    "Completed": "border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]",
+    "Cancelled": "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]",
+    "Status unavailable": "border-[#E6DDF0] bg-[#F7F1FF] text-[#806A8C]",
+};
 function displaySalesBookingDate(date:string) {
     if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return date || "—";
     return new Date(`${date}T12:00:00+08:00`).toLocaleDateString("en-US",{
@@ -241,13 +284,20 @@ function SectionHead({ icon, title, subtitle, children }: {icon: React.ReactNode
         </div>{children}
     </div>;
 }
-function Stat({label,value,helper,icon,color}: {label:string;value:number|null;helper:string;icon:React.ReactNode;color:string}) {
-    return <div className="flex h-[132px] flex-col rounded-[18px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-        <div className="flex items-start justify-between gap-2"><p className="pt-1 text-sm font-semibold text-[#1A1220]">{label}</p>
-            <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${color}`}>{icon}</span></div>
-        <p className="mt-3 text-[23px] font-bold leading-tight text-[#2B174C]">{value == null ? "—" : value.toLocaleString("en-PH")}</p>
-        <p className="mt-1 text-[11px] leading-4 text-[#8A7D90]">{helper}</p>
-    </div>;
+function Stat({label,value,helper,icon,color,loading=false}: {
+    label:string;value:number|null;helper:string;icon:React.ReactNode;color:string;loading?:boolean;
+}) {
+    return (
+        <div aria-busy={loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
+            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${color}`} aria-hidden="true">{icon}</span>
+            <span className="min-w-0 flex-1">
+                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
+                {loading ? <span className="mt-1 block h-7 w-24 max-w-full animate-pulse rounded-md bg-[#F1EBF8]" role="status" aria-label={`Loading ${label}`}/> :
+                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{value == null ? "—" : value.toLocaleString("en-PH")}</span>}
+                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{helper}</span>
+            </span>
+        </div>
+    );
 }
 
 export default function StaffInventory() {
@@ -385,8 +435,8 @@ export default function StaffInventory() {
             if(salesQueueFilter==="prepare" && !booking.items.some(item=>!item.prepared&&!item.issued))return false;
             if(salesQueueFilter==="release" && !(booking.items.length>0 && booking.items.every(item=>item.prepared&&!item.issued)))return false;
             return true;
-        }).sort((a,b)=>a.eventDate.localeCompare(b.eventDate)||a.reference.localeCompare(b.reference)),
-        [salesBookings,salesQueueFilter,search]);
+        }).sort((a,b)=>compareQueueEventDates(a.eventDate,b.eventDate,salesToday)||a.reference.localeCompare(b.reference)),
+        [salesBookings,salesQueueFilter,search,salesToday]);
     const selectedSalesBooking=salesBookings.find(booking=>booking.reference===selectedSalesBookingRef)||null;
     const selectedSalesReady=!!selectedSalesBooking && selectedSalesBooking.items.length>0 &&
         selectedSalesBooking.items.every(item=>item.prepared&&!item.issued);
@@ -651,8 +701,11 @@ export default function StaffInventory() {
     return <>
         <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
             <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-3">
-                <div className="flex items-center gap-3"><h1 className="text-[25px] font-bold text-[#1A1220]">Inventory</h1>
-                    <span className="rounded-lg bg-[#EFE8F8] px-3.5 py-1.5 text-sm font-medium text-[#4E2C66]">{branch}</span></div>
+                <div>
+                    <div className="flex items-center gap-3"><h1 className="text-[25px] font-bold text-[#1A1220]">Inventory</h1>
+                        <span className="rounded-lg bg-[#EFE8F8] px-3.5 py-1.5 text-sm font-medium text-[#4E2C66]">{branch}</span></div>
+                    <p className="mt-0.5 text-xs text-[#766983]">Manage products for sales and equipment for rentals.</p>
+                </div>
                 <div className="flex items-center gap-2.5">
                     <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">{now ? formatClock(now) : "Loading date..."}</span>
                     <button type="button" onClick={() => void refresh()} disabled={isRefreshing} className={primary}>
@@ -665,7 +718,7 @@ export default function StaffInventory() {
             <section className="flex flex-col gap-3 rounded-2xl bg-gradient-to-r from-[#F1F3FF] to-[#F7F5FF] px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-3">
                     <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#5A35A5]">{isRental ? <CalendarDays size={22}/> : <ShoppingCart size={22}/>}</span>
-                    <div><h2 className="text-[25px] font-bold text-[#1A1220]">{isRental ? "Rental Inventory" : "Sales Inventory"}</h2>
+                    <div><h2 className="text-[25px] font-bold text-[#1A1220]">{isRental ? "Rental Inventory" : "Consumable Inventory"}</h2>
                         <p className="mt-0.5 text-xs text-[#766983]">{isRental ? "Daily equipment preparation, releases, returns and inspections." : "Daily stock handling for products sold to customers."}</p></div>
                 </div>
                 <div className="grid grid-cols-2 gap-3" aria-label="Select inventory view">
@@ -674,7 +727,15 @@ export default function StaffInventory() {
                 </div>
             </section>
             {isRental ? <StaffRentalInventory key={rentalKey} branchName={branch}/> : inv.productsLoading ?
-                <ModuleSkeleton variant="inventory"/> : inv.productsError ?
+                <div className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        <Stat label="Items to Restock" value={null} helper="Products at or below their reorder point" color="bg-[#FFF3DE] text-[#E68A00]" icon={<PackagePlus size={19}/>} loading/>
+                        <Stat label="Low Stock Alerts" value={null} helper="Product variants approaching shortage" color="bg-[#FFF3DE] text-[#E68A00]" icon={<AlertTriangle size={19}/>} loading/>
+                        <Stat label="Out of Stock" value={null} helper="Product variants with no available stock" color="bg-[#FFE7EB] text-[#CF3348]" icon={<Package size={19}/>} loading/>
+                        <Stat label="Today's Stock Movements" value={null} helper="Actual branch inventory movements today (PH time)" color="bg-[#E9F2FF] text-[#1E6FE8]" icon={<ArrowLeftRight size={19}/>} loading/>
+                    </div>
+                    <ModuleSkeleton variant="inventory"/>
+                </div> : inv.productsError ?
                     <section role="alert" className={`${card} space-y-2 p-6`}><p className="font-semibold text-[#B92727]">Inventory could not be loaded.</p><p className="text-sm text-[#806A8C]">{inv.productsError}</p>
                         <button type="button" className={outline} onClick={()=>void refresh()}>Try Again</button></section> :
                     <div className="space-y-4">
@@ -682,7 +743,7 @@ export default function StaffInventory() {
                             <Stat label="Items to Restock" value={attention.length} helper="Products at or below their reorder point" color="bg-[#FFF3DE] text-[#E68A00]" icon={<PackagePlus size={19}/>}/>
                             <Stat label="Low Stock Alerts" value={low.length} helper="Product variants approaching shortage" color="bg-[#FFF3DE] text-[#E68A00]" icon={<AlertTriangle size={19}/>}/>
                             <Stat label="Out of Stock" value={out.length} helper="Product variants with no available stock" color="bg-[#FFE7EB] text-[#CF3348]" icon={<Package size={19}/>}/>
-                            <Stat label="Today's Stock Movements" value={activityLoading || activityError ? null : todayMovementCount} helper="Actual branch inventory movements today (PH time)" color="bg-[#E9F2FF] text-[#1E6FE8]" icon={<ArrowLeftRight size={19}/>}/>
+                            <Stat label="Today's Stock Movements" value={activityLoading || activityError ? null : todayMovementCount} loading={activityLoading} helper="Actual branch inventory movements today (PH time)" color="bg-[#E9F2FF] text-[#1E6FE8]" icon={<ArrowLeftRight size={19}/>}/>
                         </div>
                         {canReceive && receivingTasks.length > 0 && <section aria-label="Deliveries to receive" className="flex flex-wrap items-center gap-3 rounded-xl border border-[#E7DFEC] bg-[#F5F1FF] px-4 py-3 shadow-sm">
                             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#ECE3FF] text-[#5A35A5]"><PackagePlus size={19}/></span>
@@ -692,8 +753,65 @@ export default function StaffInventory() {
                             </div>
                             <button type="button" className={`${outline} h-9 px-3 text-xs`} onClick={()=>{setActionError("");chooseReceipt(null);setShowReceivingInfo(true);}}>View Deliveries</button>
                         </section>}
+                        <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`}>
+                            <SectionHead icon={<ClipboardList size={18}/>} title="Sales Operations Queue"
+                                         subtitle="Booking inclusions to prepare and hand over · no rental equipment">
+                                <select aria-label="Filter sales booking tasks" value={salesQueueFilter}
+                                        onChange={e=>setSalesQueueFilter(e.target.value as SalesQueueFilter)}
+                                        className="h-9 w-[104px] rounded-xl border border-[#E6DDF0] bg-white px-2 text-[11px] font-semibold text-[#2B174C] outline-none focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0 focus:border-[#E6DDF0]">
+                                    <option value="all">All Tasks</option>
+                                    <option value="prepare">Prepare</option>
+                                    <option value="release">Release</option>
+                                </select>
+                            </SectionHead>
+                            {salesQueueError&&<p role="alert" className="px-3 py-2 text-[11px] text-red-700">{salesQueueError}
+                                <button type="button" className="ml-2 underline" onClick={()=>setSalesQueueKey(key=>key+1)}>Retry</button></p>}
+                            {salesQueueLoading?<div className="space-y-3 p-4" aria-busy="true">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]"/>)}</div>:
+                                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Sales operations booking queue" tabIndex={0}>
+                                    <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                                        <colgroup><col className="w-[27%]"/><col className="w-[16%]"/><col className="w-[19%]"/><col className="w-[22%]"/><col className="w-[16%]"/></colgroup>
+                                        <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>
+                                            {["Client / Booking Ref","Schedule","Booking Type","Status","Action"].map(label=><th key={label} className={`${headClass} !px-2 !py-2`}>{label}</th>)}
+                                        </tr></thead>
+                                        <tbody>{visibleSalesBookings.map(booking=>{
+                                            const active=selectedSalesBookingRef===booking.reference;
+                                            const statusLabel=salesQueueBookingStatus(booking);
+                                            const open=()=>{setSelectedSalesBookingRef(booking.reference);setSalesQueueError("");};
+                                            return <tr key={booking.bookingId} tabIndex={0} aria-selected={active}
+                                                       onClick={open}
+                                                       onKeyDown={e=>{if(e.target===e.currentTarget&&(e.key==="Enter"||e.key===" ")){e.preventDefault();open();}}}
+                                                       className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"":"hover:bg-[#FCF9FF]"}`}>
+                                                <td className={`px-2 py-2 align-middle ${active?"border-l-4 border-[#6F3FD3] pl-2":""}`}>
+                                                    <span className="block break-words font-semibold">{booking.clientName}</span>
+                                                    <span className="mt-1 block break-all text-[10px] text-[#806A8C]">{booking.reference}</span>
+                                                </td>
+                                                <td className="px-2 py-2 align-middle">
+                                                    <span className="block font-medium">{displaySalesBookingDate(booking.eventDate)}</span>
+                                                    {booking.eventTime&&<span className="mt-1 block text-[10px] text-[#806A8C]">{booking.eventTime}</span>}
+                                                </td>
+                                                <td className="px-2 py-2 align-middle">
+                                                    <span className="block break-words font-medium">{salesBookingType(booking.bookingType)}</span>
+                                                    <span className="mt-1 block text-[10px] text-[#806A8C]">{booking.items.length} product {booking.items.length===1?"line":"lines"}</span>
+                                                </td>
+                                                <td className="px-2 py-2 align-top">
+                                                    <span className={`inline-flex max-w-full items-center justify-center rounded-full border px-2 py-1 text-center text-[10px] font-semibold leading-4 break-words ${salesQueueStatusStyles[statusLabel]||"border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>
+                                                        {statusLabel}
+                                                    </span>
+                                                </td>
+                                                <td className="px-1 py-2 text-center align-middle">
+                                                    <button type="button" aria-haspopup="dialog"
+                                                            onClick={e=>{e.stopPropagation();open();}}
+                                                            className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">
+                                                        View Items
+                                                    </button>
+                                                </td>
+                                            </tr>;
+                                        })}</tbody>
+                                    </table>
+                                    {visibleSalesBookings.length===0&&<p className="p-5 text-center text-xs text-[#806A8C]">No Sales product preparation tasks match this filter.</p>}
+                                </div>}
+                        </section>
                         <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-2">
-                            {/* Manager-inspired table sizing, with Staff-only review actions. */}
                             <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`}>
                                 <SectionHead icon={<ClipboardList size={18}/>} title="Stock Alerts to Review" subtitle="Low and out-of-stock products to verify or report.">
                                     <select aria-label="Filter sales tasks" value={taskFilter} onChange={e=>setTaskFilter(e.target.value)}
@@ -728,58 +846,25 @@ export default function StaffInventory() {
                                     {tasks.length===0 && <p className="px-5 py-8 text-center text-sm text-[#8A7D90]">No stock tasks match this filter.</p>}
                                 </div>
                             </section>
-                            <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`}>
-                                <SectionHead icon={<ClipboardList size={18}/>} title="Sales Operations Queue"
-                                             subtitle="Booking inclusions to prepare and hand over · no rental equipment">
-                                    <select aria-label="Filter sales booking tasks" value={salesQueueFilter}
-                                            onChange={e=>setSalesQueueFilter(e.target.value as SalesQueueFilter)}
-                                            className="h-9 w-[104px] rounded-xl border border-[#E6DDF0] bg-white px-2 text-[11px] font-semibold text-[#2B174C] outline-none focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0 focus:border-[#E6DDF0]">
-                                        <option value="all">All Tasks</option>
-                                        <option value="prepare">Prepare</option>
-                                        <option value="release">Release</option>
-                                    </select>
-                                </SectionHead>
-                                {salesQueueError&&<p role="alert" className="px-3 py-2 text-[11px] text-red-700">{salesQueueError}
-                                    <button type="button" className="ml-2 underline" onClick={()=>setSalesQueueKey(key=>key+1)}>Retry</button></p>}
-                                {salesQueueLoading?<div className="space-y-3 p-4" aria-busy="true">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]"/>)}</div>:
-                                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Sales operations booking queue" tabIndex={0}>
-                                        <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                                            <colgroup><col className="w-[34%]"/><col className="w-[19%]"/><col className="w-[28%]"/><col className="w-[19%]"/></colgroup>
-                                            <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>
-                                                {["Client / Booking Ref","Schedule","Booking Type","Action"].map(label=><th key={label} className={`${headClass} !px-2 !py-2`}>{label}</th>)}
-                                            </tr></thead>
-                                            <tbody>{visibleSalesBookings.map(booking=>{
-                                                const active=selectedSalesBookingRef===booking.reference;
-                                                const open=()=>{setSelectedSalesBookingRef(booking.reference);setSalesQueueError("");};
-                                                return <tr key={booking.bookingId} tabIndex={0} aria-selected={active}
-                                                           onClick={open}
-                                                           onKeyDown={e=>{if(e.target===e.currentTarget&&(e.key==="Enter"||e.key===" ")){e.preventDefault();open();}}}
-                                                           className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"":"hover:bg-[#FCF9FF]"}`}>
-                                                    <td className={`px-2 py-2 align-middle ${active?"border-l-4 border-[#6F3FD3] pl-2":""}`}>
-                                                        <span className="block break-words font-semibold">{booking.clientName}</span>
-                                                        <span className="mt-1 block break-all text-[10px] text-[#806A8C]">{booking.reference}</span>
-                                                    </td>
-                                                    <td className="px-2 py-2 align-middle">
-                                                        <span className="block font-medium">{displaySalesBookingDate(booking.eventDate)}</span>
-                                                        {booking.eventTime&&<span className="mt-1 block text-[10px] text-[#806A8C]">{booking.eventTime}</span>}
-                                                    </td>
-                                                    <td className="px-2 py-2 align-middle">
-                                                        <span className="block break-words font-medium">{salesBookingType(booking.bookingType)}</span>
-                                                        <span className="mt-1 block text-[10px] text-[#806A8C]">{booking.items.length} product {booking.items.length===1?"line":"lines"}</span>
-                                                    </td>
-                                                    <td className="px-1 py-2 text-center align-middle">
-                                                        <button type="button" aria-haspopup="dialog"
-                                                                onClick={e=>{e.stopPropagation();open();}}
-                                                                className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">
-                                                            View Items
-                                                        </button>
-                                                    </td>
-                                                </tr>;
-                                            })}</tbody>
-                                        </table>
-                                        {visibleSalesBookings.length===0&&<p className="p-5 text-center text-xs text-[#806A8C]">No Sales product preparation tasks match this filter.</p>}
-                                    </div>}
-                                <p className="border-t border-[#F0EAF4] px-3 py-2 text-[10px] text-[#806A8C]">Confirmed bookings only. Prepare each product, then release the complete Sales order after full payment. Rental equipment stays in the Rental queue.</p>
+                            <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`} aria-label="Today's Recent Consumable Activity">
+                                <SectionHead icon={<ArrowLeftRight size={18}/>} title="Today's Recent Consumable Activity" subtitle="Consumable stock movements recorded today (PH time, read-only)" />
+                                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" tabIndex={0} aria-label="Today's recent consumable activity">
+                                    {activityLoading ? <div aria-busy="true" className="space-y-3 p-4">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]" />)}</div> :
+                                        activityError ? <p role="alert" className="px-4 py-5 text-xs text-red-700">{activityError} <button type="button" className="ml-2 underline" onClick={()=>setActivityKey(key=>key+1)}>Retry</button></p> : <>
+                                            <table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                                                <colgroup><col className="w-[20%]"/><col className="w-[27%]"/><col className="w-[20%]"/><col className="w-[9%]"/><col className="w-[24%]"/></colgroup>
+                                                <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>{["Time","Product","Activity","Qty","Reference No."].map(label=><th key={label} className={`${headClass} !px-2 !py-2`}>{label}</th>)}</tr></thead>
+                                                <tbody>{todayActivities.map(item=><tr key={item.id} className="border-t border-[#F0EAF4] text-[#2B174C]">
+                                                    <td className="px-2 py-2 align-top">{safeDate(item.at)}</td>
+                                                    <td className="px-2 py-2 align-top font-medium">{item.item}</td>
+                                                    <td className="px-2 py-2 align-top"><span className={`inline-flex max-w-full break-words rounded-lg px-2 py-1 text-[10px] ${activityBadge(item.kind)}`}>{item.kind}</span></td>
+                                                    <td className="px-2 py-2 align-top font-semibold">{quantityLabel(item.quantity)}</td>
+                                                    <td className="break-all px-2 py-2 align-top">{item.reference}</td>
+                                                </tr>)}</tbody>
+                                            </table>
+                                            {todayActivities.length===0&&<p className="px-5 py-8 text-center text-sm text-[#8A7D90]">No consumable stock activity recorded today.</p>}
+                                        </>}
+                                </div>
                             </section>
                         </div>
                         <section id="staff-sales-list" className={card}>

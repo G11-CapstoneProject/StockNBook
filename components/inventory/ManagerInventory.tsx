@@ -10,7 +10,6 @@ import {
     CheckCircle2,
     ChevronDown,
     ClipboardList,
-    ClipboardCheck,
     PackagePlus,
     Download,
     Pencil,
@@ -2802,7 +2801,7 @@ export default function ManagerInventory() {
     return (
         <>
             <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
-                <div className="flex min-h-[74px] flex-wrap items-center justify-between gap-4 px-6 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-3">
                     <div>
                         <div className="flex items-center gap-3">
                             <h1 className="text-[25px] font-bold text-[#1A1220]">
@@ -2847,35 +2846,35 @@ export default function ManagerInventory() {
                         </span>
                         <div className="min-w-0">
                             <h2 className="text-[25px] font-bold text-[#1A1220]">
-                                {inventoryTab === "sales" ? "Sales Inventory" : "Rental Inventory"}
+                                {inventoryTab === "sales" ? "Consumable Inventory" : "Rental Inventory"}
                             </h2>
                             <p className="mt-0.5 text-xs text-[#766983]">
                                 {inventoryTab === "sales"
-                                    ? "Manage products sold to customers."
-                                    : "Manage reusable products and equipment for rentals."}
+                                    ? "Daily stock handling for products sold to customers."
+                                    : "Daily equipment preparation, releases, returns and inspections."}
                             </p>
                         </div>
                     </div>
-                    <div className="grid w-full grid-cols-2 gap-3 sm:w-auto" aria-label="Select inventory view">
+                    <div className="grid grid-cols-2 gap-3" aria-label="Select inventory view">
                         <button
                             type="button"
                             aria-pressed={inventoryTab === "sales"}
                             onClick={() => setInventoryTab("sales")}
-                            className={`inline-flex h-[42px] min-w-[136px] items-center justify-center gap-2.5 rounded-xl px-5 text-sm font-semibold shadow-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B31D4] ${inventoryTab === "sales"
+                            className={`inline-flex h-[42px] min-w-[145px] items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold shadow-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B31D4] ${inventoryTab === "sales"
                                 ? "bg-[#2B174C] text-white hover:bg-[#1B0D31]"
                                 : "border border-[#E2DCF2] bg-white text-[#24164D] hover:bg-[#F8F5FF]"}`}
                         >
-                            <ShoppingCart size={20} /> Sales
+                            <ShoppingCart size={17} /> Consumable
                         </button>
                         <button
                             type="button"
                             aria-pressed={inventoryTab === "rentals"}
                             onClick={() => setInventoryTab("rentals")}
-                            className={`inline-flex h-[42px] min-w-[136px] items-center justify-center gap-2.5 rounded-xl px-5 text-sm font-semibold shadow-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B31D4] ${inventoryTab === "rentals"
+                            className={`inline-flex h-[42px] min-w-[145px] items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold shadow-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B31D4] ${inventoryTab === "rentals"
                                 ? "bg-[#2B174C] text-white hover:bg-[#1B0D31]"
                                 : "border border-[#E2DCF2] bg-white text-[#24164D] hover:bg-[#F8F5FF]"}`}
                         >
-                            <CalendarClock size={20} /> Rentals
+                            <CalendarClock size={17} /> Rental
                         </button>
                     </div>
                 </section>
@@ -2888,6 +2887,7 @@ export default function ManagerInventory() {
                                 value={lowStockCount}
                                 helper="Positive stock at or below the reorder level"
                                 icon={<AlertTriangle size={20} />}
+                                loading={inv.productsLoading}
                                 tone="amber"
                             />
                             <ManagerMetricCard
@@ -2895,6 +2895,7 @@ export default function ManagerInventory() {
                                 value={outOfStockCount}
                                 helper="Stock lines with zero available units"
                                 icon={<Boxes size={20} />}
+                                loading={inv.productsLoading}
                                 tone="red"
                             />
                             <ManagerMetricCard
@@ -2902,6 +2903,7 @@ export default function ManagerInventory() {
                                 value={expiringExpiredCount}
                                 helper="Expiry within 30 days or already expired"
                                 icon={<CalendarClock size={20} />}
+                                loading={inv.productsLoading}
                                 tone="purple"
                             />
                             <ManagerMetricCard
@@ -2909,6 +2911,7 @@ export default function ManagerInventory() {
                                 value={reorderNeededCount}
                                 helper="Low/out-of-stock lines; may overlap other alerts"
                                 icon={<ShoppingCart size={20} />}
+                                loading={inv.productsLoading}
                                 tone="blue"
                             />
                         </div>
@@ -2960,9 +2963,6 @@ export default function ManagerInventory() {
                                 </button>
                             </div>
                         </section>
-
-                        {/* Existing manager authorization / staff shortage workspace. */}
-                        <ManagerStaffReceiving products={managerProducts} />
 
                         <ManagerInventoryTable
                             inv={inv}
@@ -3026,61 +3026,32 @@ export default function ManagerInventory() {
     );
 }
 
-function ManagerMetricCard({
-                               label,
-                               value,
-                               helper,
-                               icon,
-                               tone,
-                           }: {
+function ManagerMetricCard({label, value, helper, icon, tone, loading = false}: {
     label: string;
     value: number;
     helper: string;
     icon: React.ReactNode;
     tone: "amber" | "red" | "purple" | "blue";
+    loading?: boolean;
 }) {
-    const styles = {
-        amber: {
-            icon: "bg-[#FFF3DE] text-[#E68A00]",
-            value: "text-[#D87B00]",
-        },
-        red: {
-            icon: "bg-[#FFE8E8] text-[#E23B4A]",
-            value: "text-[#D52035]",
-        },
-        purple: {
-            icon: "bg-[#F1ECFF] text-[#5F35D8]",
-            value: "text-[#4E2DB8]",
-        },
-        blue: {
-            icon: "bg-[#E9F2FF] text-[#1E6FE8]",
-            value: "text-[#1E6FE8]",
-        },
+    const iconClassName = {
+        amber: "bg-[#FFF3DE] text-[#E68A00]",
+        red: "bg-[#FFE8E8] text-[#E23B4A]",
+        purple: "bg-[#F1ECFF] text-[#5F35D8]",
+        blue: "bg-[#E9F2FF] text-[#1E6FE8]",
     }[tone];
-
     return (
-        <section className="rounded-[16px] border border-[#E7DFEC] bg-white p-4 shadow-sm">
-            <div className="flex items-start justify-between gap-3">
-                <div>
-                    <p className="text-sm font-bold text-[#21132E]">{label}</p>
-                    <p className={`mt-2 text-[27px] font-bold leading-none ${styles.value}`}>
-                        {formatNumber(value)}
-                    </p>
-                    <p className="mt-1.5 text-[11px] leading-4 text-[#86778F]">
-                        {helper}
-                    </p>
-                </div>
-
-                <span
-                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${styles.icon}`}
-                >
-                    {icon}
-                </span>
-            </div>
+        <section aria-busy={loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
+            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`} aria-hidden="true">{icon}</span>
+            <span className="min-w-0 flex-1">
+                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
+                {loading ? <span className="mt-1 block h-7 w-24 max-w-full animate-pulse rounded-md bg-[#F1EBF8]" role="status" aria-label={`Loading ${label}`}/> :
+                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{formatNumber(value)}</span>}
+                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{helper}</span>
+            </span>
         </section>
     );
 }
-
 
 /* -------------------------------------------------------------------------- */
 /*              RECEIVE STOCK -- NEVER OPENS THE EDIT PRODUCT FORM            */
@@ -7958,135 +7929,4 @@ function VariantEditor({
         </div>
     );
 
-}
-
-// Staff receiving task authorization is co-located to avoid creating new UI files.
-type Task = { id: number; productId: number; variantId: number | null; productName: string; quantity: number; authorizedQuantity?: number; alreadyReceived?: number; lastReceivingNotes?: string | null; deliveryReference: string; createdAt: string };
-type Shortage = { id: number; productName: string; stockSnapshot: number; reorderSnapshot: number; notes: string };
-type StaffCondition = {id: number; productName: string; issueType: string; expirationDate?: string | null; notes: string; createdAt?: string};
-const btn = "rounded-xl border border-[#E5DCF0] px-3 py-2 text-xs font-semibold text-[#2B174C] hover:bg-[#F5EFFF] disabled:opacity-40";
-
-/** Supervisor authorizations change quantities only when the designated staff physically receives the delivery. */
-function ManagerStaffReceiving({ products }: { products: Product[] }) {
-    const [open, setOpen] = React.useState(false);
-    const [loading, setLoading] = React.useState(false);
-    const [busy, setBusy] = React.useState(false);
-    const [error, setError] = React.useState("");
-    const [notice, setNotice] = React.useState("");
-    const [tasks, setTasks] = React.useState<Task[]>([]);
-    const [partialReceiptSupported, setPartialReceiptSupported] = React.useState(false);
-    const [shortages, setShortages] = React.useState<Shortage[]>([]);
-    const [conditions, setConditions] = React.useState<StaffCondition[]>([]);
-    const [conditionReportingSupported,setConditionReportingSupported] = React.useState(false);
-    const [productId, setProductId] = React.useState("");
-    const [variantId, setVariantId] = React.useState("");
-    const [quantity, setQuantity] = React.useState("");
-    const [deliveryReference, setDeliveryReference] = React.useState("");
-    const [expirationDate, setExpirationDate] = React.useState("");
-    const [notes, setNotes] = React.useState("");
-    const selected = products.find(p => String(p.id) === productId);
-    const post = React.useCallback(async (payload: Record<string, unknown>) => {
-        const token = sessionStorage.getItem("token");
-        if (!token) throw new Error("Please sign in again.");
-        const response = await fetch("/api/products", { method: "POST", cache: "no-store", headers: {
-                "Content-Type": "application/json", Authorization: `Bearer ${token}`,
-            }, body: JSON.stringify(payload) });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok || !result.success) throw new Error(String(result.error || "Unable to complete request."));
-        return result;
-    }, []);
-    const load = React.useCallback(async () => {
-        setLoading(true); setError("");
-        try {
-            const result = await post({action:"get_staff_inventory_workspace"});
-            setTasks(Array.isArray(result.receivingTasks) ? result.receivingTasks : []);
-            setPartialReceiptSupported(result.supportsPartialReceiving === true);
-            setShortages(Array.isArray(result.shortages) ? result.shortages : []);
-            setConditions(Array.isArray(result.conditionReports) ? result.conditionReports : []);
-            setConditionReportingSupported(result.supportsConditionReports === true);
-        } catch (e) { setError(e instanceof Error ? e.message : "Failed to load receiving tasks."); }
-        finally { setLoading(false); }
-    }, [post]);
-    React.useEffect(() => { if (open) void load(); }, [open, load]);
-    const authorize = async (event: React.FormEvent) => {
-        event.preventDefault(); setBusy(true); setError(""); setNotice("");
-        try {
-            await post({ action:"authorize_staff_stock_receipt", productId:Number(productId),
-                variantId:selected?.hasVariants ? Number(variantId) : null,
-                quantity:Number(quantity), deliveryReference:deliveryReference.trim(),
-                expirationDate: expirationDate || null, notes:notes.trim() });
-            setNotice("Receiving task assigned. Stock is NOT increased until authorized staff confirms delivery.");
-            setDeliveryReference(""); setQuantity(""); setExpirationDate(""); setNotes("");
-            await load();
-        } catch (e) { setError(e instanceof Error ? e.message : "Unable to authorize."); }
-        finally { setBusy(false); }
-    };
-    const cancelTask = async (taskId:number) => {
-        if (!window.confirm("Cancel this pending receiving authorization?")) return;
-        setBusy(true);setError("");
-        try {await post({action:"cancel_staff_stock_receipt",taskId});await load();}
-        catch(e){setError(e instanceof Error?e.message:"Unable to cancel task.");}
-        finally {setBusy(false);}
-    };
-    const resolve = async (reportId: number) => {
-        setBusy(true); setError("");
-        try { await post({action:"resolve_staff_stock_shortage", reportId}); await load(); }
-        catch (e) { setError(e instanceof Error ? e.message : "Unable to resolve report."); }
-        finally { setBusy(false); }
-    };
-    const resolveCondition = async (reportId: number) => {
-        setBusy(true);setError("");
-        try {await post({action:"resolve_staff_stock_condition",reportId});await load();}
-        catch(e){setError(e instanceof Error ? e.message : "Unable to resolve condition report.");}
-        finally{setBusy(false);}
-    };
-    return <section className="rounded-2xl border border-[#E6DDF0] bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2"><ClipboardCheck size={19} className="text-[#6944C9]"/>
-                <div><h3 className="text-sm font-bold text-[#21132E]">Staff Reports & Delivery Receiving</h3>
-                    <p className="text-xs text-[#806A8C]">Review shortage reports and authorize physical receiving without granting purchasing or pricing access.</p></div></div>
-            <button type="button" onClick={()=>setOpen(v=>!v)} className={btn} aria-expanded={open}>{open ? "Hide Workspace" : "Manage Staff Stock Tasks"}</button>
-        </div>
-        {open && <div className="mt-4 space-y-4 border-t border-[#EEE7F5] pt-4">
-            {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-            {notice && <p role="status" className="text-sm text-green-700">{notice}</p>}
-            <form onSubmit={authorize} className="space-y-3 rounded-xl bg-[#FAF7FF] p-4">
-                <div className="flex items-center gap-2 text-sm font-semibold"><PackagePlus size={17}/> Authorize a staff stock receipt</div>
-                <p className="text-xs text-[#806A8C]">Authorize only an existing product and a delivery not already posted through Manager Receive Stock. This task does not create a supplier invoice; Staff adds only physically accepted units when confirming receipt.</p>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    <label className="text-xs">Product<select required value={productId} onChange={e=>{setProductId(e.target.value);setVariantId("");}} className="mt-1 w-full rounded-lg border p-2"><option value="">Select product</option>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-                    {selected?.hasVariants && <label className="text-xs">Variant<select required value={variantId} onChange={e=>setVariantId(e.target.value)} className="mt-1 w-full rounded-lg border p-2"><option value="">Select variant</option>{selected.variants?.map(v=><option key={v.id} value={v.id}>{Object.values(v.variantValues || {}).join(" / ") || `Variant ${v.id}`}</option>)}</select></label>}
-                    <label className="text-xs">Authorized Quantity<input required min={1} max={1000000} type="number" value={quantity} onChange={e=>setQuantity(e.target.value)} className="mt-1 w-full rounded-lg border p-2"/></label>
-                    <label className="text-xs">Delivery Reference<input required minLength={3} maxLength={100} value={deliveryReference} onChange={e=>setDeliveryReference(e.target.value)} className="mt-1 w-full rounded-lg border p-2" placeholder="DEL-2026-001"/></label>
-                    <label className="text-xs">Batch Expiration (if applicable)<input type="date" value={expirationDate} onChange={e=>setExpirationDate(e.target.value)} className="mt-1 w-full rounded-lg border p-2"/></label>
-                    <label className="text-xs">Receiving Notes<input maxLength={500} value={notes} onChange={e=>setNotes(e.target.value)} className="mt-1 w-full rounded-lg border p-2" placeholder="Delivery or batch instructions"/></label>
-                </div><button type="submit" disabled={busy || loading || !productId || !!selected?.hasVariants && !variantId} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-40">{busy ? "Saving..." : "Authorize Delivery"}</button>
-            </form>
-            <div className="flex justify-between"><h4 className="text-sm font-semibold">Pending Authorized Deliveries ({tasks.length})</h4><button onClick={()=>void load()} type="button" className={btn} disabled={loading}><RefreshCw size={13} className="inline"/> Refresh</button></div>
-            <div className="max-h-56 overflow-auto text-xs">{tasks.length === 0 ? <p className="text-[#806A8C]">No pending deliveries.</p> : tasks.map(t=>{
-                const total = Number(t.authorizedQuantity ?? t.quantity);
-                const received = Number(t.alreadyReceived ?? 0);
-                const remaining = Number(t.quantity);
-                return <div key={t.id} className="flex flex-wrap items-center justify-between gap-3 border-b border-[#EEE7F5] py-3">
-                    <div className="min-w-0 space-y-1">
-                        <p className="font-semibold text-[#2B174C]">{t.productName} <span className="font-normal text-[#806A8C]">· {t.deliveryReference}</span></p>
-                        <p className="text-[#695D75]">Authorized: <b>{total}</b> · Received: <b>{received}</b> · Remaining: <b>{remaining}</b></p>
-                        {received>0 && <span className="inline-flex rounded-full bg-[#F1EBFF] px-2 py-1 text-[10px] font-semibold text-[#5330B6]">Partially Received</span>}
-                        {t.lastReceivingNotes && <p className="max-w-2xl text-[#95600A]">Staff receipt notes: {t.lastReceivingNotes}</p>}
-                    </div>
-                    <button type="button" className={btn} disabled={busy} onClick={()=>void cancelTask(t.id)}>{received>0 ? "Cancel Remaining" : "Cancel"}</button>
-                </div>;
-            })}</div>
-            {!partialReceiptSupported && !loading && <p className="text-[11px] text-[#94611B]">Partial receipt API support is not active yet. Complete the SQL migration and backend patch before testing deliveries received in stages.</p>}
-            <h4 className="text-sm font-semibold">Open Product Condition Reports ({conditions.length})</h4>
-            {!conditionReportingSupported && !loading && <p className="text-[11px] text-[#926400]">Product condition reports require the accompanying backend patch and SQL migration.</p>}
-            <div className="max-h-56 space-y-2 overflow-auto">{conditions.length===0 ? <p className="text-xs text-[#806A8C]">No expired, expiring or damaged items reported.</p> : conditions.map(c=><div key={c.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#EEE7F5] px-3 py-2 text-xs">
-                <div><p className="font-semibold">{c.productName} · <span className="text-[#BA3751]">{c.issueType}</span></p><p className="text-[#806A8C]">{c.notes}</p>{c.expirationDate&&<p className="text-[#806A8C]">Expiration: {String(c.expirationDate).slice(0,10)}</p>}</div>
-                <button type="button" className={btn} disabled={busy} onClick={()=>void resolveCondition(c.id)}>Mark Reviewed</button>
-            </div>)}</div>
-            <p className="text-[11px] text-[#806A8C]">Mark Reviewed only after verifying the issue and completing any required disposal or inventory adjustment using existing Manager controls. This does not change stock.</p>
-            <h4 className="text-sm font-semibold">Open Shortage Reports ({shortages.length})</h4>
-            <div className="max-h-56 space-y-2 overflow-auto">{shortages.length===0 ? <p className="text-xs text-[#806A8C]">No open shortage reports.</p> : shortages.map(s=><div key={s.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs"><div><b>{s.productName}</b> · {s.stockSnapshot} on hand / {s.reorderSnapshot} reorder<p className="text-[#806A8C]">{s.notes}</p></div><button type="button" disabled={busy} onClick={()=>void resolve(s.id)} className={btn}>Mark Resolved</button></div>)}</div>
-        </div>}
-    </section>;
 }

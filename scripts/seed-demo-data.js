@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
+/* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * StockNBook demo seeder (plan-aligned demo/testing dataset).
  *

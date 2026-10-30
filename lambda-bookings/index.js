@@ -1607,7 +1607,7 @@ async function checkAvailableBeforePayment(db,{bookingId,storeId,branchId}) {
         const [eligible] = await db.execute(
             `SELECT COALESCE(SUM(batch.remaining_quantity),0) AS available
              FROM inventory_batches batch
-             JOIN branch_inventory bi ON bi.id=batch.branch_inventory_id
+                      JOIN branch_inventory bi ON bi.id=batch.branch_inventory_id
              WHERE bi.store_id=? AND bi.branch_id=? AND bi.product_id=?
                AND bi.variant_id <=> ? AND bi.status='active'
                AND batch.status='active' AND batch.remaining_quantity>0
@@ -2660,6 +2660,7 @@ exports.handler = async (event) => {
             if (action === 'get_staff_sales_booking_queue') {
                 const [rows] = await connection.execute(`SELECT b.id AS bookingId,b.booking_reference AS reference,
                                                                 b.name AS clientName,b.booking_type AS bookingType,b.package_name AS packageName,
+                                                                b.status AS bookingStatus,
                                                                 DATE_FORMAT(b.event_date,'%Y-%m-%d') AS eventDate,b.event_time AS eventTime,
                                                                 b.agreed_price AS bookingTotal,b.amount_paid AS amountPaid,b.balance,
                                                                 bi.id AS itemId,bi.product_name AS productName,bi.variant_name AS variantName,
@@ -2681,7 +2682,8 @@ exports.handler = async (event) => {
                     if(!booking){
                         booking={bookingId:Number(row.bookingId),reference:String(row.reference||''),
                             clientName:String(row.clientName||'Customer'),bookingType:String(row.bookingType||''),
-                            packageName:String(row.packageName||''),eventDate:String(row.eventDate||''),
+                            packageName:String(row.packageName||''),bookingStatus:String(row.bookingStatus||''),
+                            eventDate:String(row.eventDate||''),
                             eventTime:String(row.eventTime||''),bookingTotal:Number(row.bookingTotal),
                             amountPaid:Number(row.amountPaid),balance:Number(row.balance),items:[]};
                         groups.set(Number(row.bookingId),booking);

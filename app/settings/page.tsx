@@ -5,6 +5,7 @@ import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import RequirePermission from "@/components/permissions/RequirePermission";
 import { QRCodeCanvas } from "qrcode.react";
+import { usePOS } from "@/hooks/usePOS";
 import {
     Check,
     Copy,
@@ -16,6 +17,9 @@ import {
     RefreshCw,
     Save,
     Store,
+    ReceiptText,
+    AlertTriangle,
+    X,
 } from "lucide-react";
 
 function makeSlug(value: string) {
@@ -319,8 +323,8 @@ function OwnerSettings({
     onDownloadQR: () => void;
 }) {
     return (
-        <>
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+            <div className="space-y-4">
                 <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
                     <SettingsCardHeading
                         icon={<Store size={18} />}
@@ -376,39 +380,8 @@ function OwnerSettings({
                     </div>
                 </section>
 
-                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
-                    <SettingsCardHeading
-                        icon={<CreditCard size={18} />}
-                        title="Subscription & Billing"
-                        detail="Review your current plan and account billing options."
-                    />
+                <BusinessTaxSettings />
 
-                    <div className="mt-5 space-y-3">
-                        <div className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] p-4">
-                            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Current Plan
-                            </p>
-                            <p className="mt-2 text-[18px] font-bold text-[#1A1220]">
-                                Pro Plan
-                            </p>
-                            <p className="mt-1 text-sm font-medium text-[#5F4E75]">
-                                ₱2,999 / month
-                            </p>
-                        </div>
-
-                        <BillingRow
-                            title="Manage Subscription"
-                            detail="Change or review your current plan."
-                        />
-                        <BillingRow
-                            title="View Invoices"
-                            detail="Review past billing records and receipts."
-                        />
-                    </div>
-                </section>
-            </div>
-
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(360px,0.95fr)]">
                 <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
                     <SettingsCardHeading
                         icon={<Link2 size={18} />}
@@ -445,6 +418,38 @@ function OwnerSettings({
                         </button>
                     </div>
                 </section>
+            </div>
+            <div className="space-y-4">
+                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
+                    <SettingsCardHeading
+                        icon={<CreditCard size={18} />}
+                        title="Subscription & Billing"
+                        detail="Review your current plan and account billing options."
+                    />
+
+                    <div className="mt-5 space-y-3">
+                        <div className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] p-4">
+                            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
+                                Current Plan
+                            </p>
+                            <p className="mt-2 text-[18px] font-bold text-[#1A1220]">
+                                Pro Plan
+                            </p>
+                            <p className="mt-1 text-sm font-medium text-[#5F4E75]">
+                                ₱2,999 / month
+                            </p>
+                        </div>
+
+                        <BillingRow
+                            title="Manage Subscription"
+                            detail="Change or review your current plan."
+                        />
+                        <BillingRow
+                            title="View Invoices"
+                            detail="Review past billing records and receipts."
+                        />
+                    </div>
+                </section>
 
                 <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
                     <SettingsCardHeading
@@ -477,6 +482,248 @@ function OwnerSettings({
                     </button>
                 </section>
             </div>
+        </div>
+    );
+}
+
+/** Tax registration belongs to the store, and is saved by the existing POS API. */
+type TaxRegistration = "NON_VAT" | "VAT_REGISTERED";
+
+function BusinessTaxSettings() {
+    // Uses the SAME backend and permissions as the POS checkout.
+    const pos = usePOS();
+    const [pendingRegistration, setPendingRegistration] = useState<TaxRegistration | null>(null);
+    const [savedRegistration, setSavedRegistration] = useState<TaxRegistration | null>(null);
+    const [saving, setSaving] = useState(false);
+    const [message, setMessage] = useState("");
+    const [dialogError, setDialogError] = useState("");
+    const cancelButtonRef = useRef<HTMLButtonElement>(null);
+    const dialogRef = useRef<HTMLDivElement>(null);
+
+    // Never make a tax decision from sessionStorage; the POS hook reads the store setting.
+    const databaseRegistration: TaxRegistration =
+        pos.taxType === "NON_VAT" ? "NON_VAT" : "VAT_REGISTERED";
+    const currentRegistration = savedRegistration ?? databaseRegistration;
+
+    // Clear the temporary display value once the POS hook reflects the persisted value.
+    useEffect(() => {
+        if (savedRegistration && savedRegistration === databaseRegistration) {
+            setSavedRegistration(null);
+        }
+    }, [databaseRegistration, savedRegistration]);
+
+    useEffect(() => {
+        if (!pendingRegistration) return;
+        const previousFocus = document.activeElement as HTMLElement | null;
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+        cancelButtonRef.current?.focus();
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            previousFocus?.focus();
+        };
+    }, [pendingRegistration]);
+
+    const requestTaxChange = (next: TaxRegistration) => {
+        if (saving || next === currentRegistration) return;
+        setDialogError("");
+        setMessage("");
+        setPendingRegistration(next);
+    };
+
+    const closeDialog = () => {
+        if (saving) return;
+        setPendingRegistration(null);
+        setDialogError("");
+    };
+
+    const confirmTaxChange = async () => {
+        if (!pendingRegistration || saving) return;
+        const next = pendingRegistration;
+        setSaving(true);
+        setDialogError("");
+        setMessage("");
+
+        try {
+            // The Lambda verifies that the signed-in account is the owner and
+            // persists stores.tax_registration for all its branches.
+            const result: unknown = await pos.updateTaxRegistration(next);
+            if (result === false) {
+                throw new Error("The tax setting could not be saved. Please try again.");
+            }
+
+            // Only switch the radio after the backend call has completed successfully.
+            setSavedRegistration(next);
+            setPendingRegistration(null);
+            const label = next === "NON_VAT" ? "Non-VAT Registered" : "VAT Registered (12%)";
+            setMessage(`Tax setting saved: ${label}. Only future POS transactions are affected.`);
+
+            // Refresh the hook's store-wide tax snapshot. The save is already
+            // confirmed at this point; a refresh failure must not imply rollback.
+            try {
+                await pos.refreshAll();
+            } catch (refreshError) {
+                console.warn("Saved tax registration; POS refresh was unsuccessful:", refreshError);
+            }
+        } catch (error) {
+            setDialogError(
+                error instanceof Error ? error.message : "Unable to save the tax setting. Please try again."
+            );
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleDialogKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (event.key === "Escape") {
+            event.preventDefault();
+            closeDialog();
+        }
+        if (event.key !== "Tab") return;
+
+        const buttons = dialogRef.current?.querySelectorAll<HTMLButtonElement>(
+            'button:not([disabled])'
+        );
+        if (!buttons?.length) return;
+        const first = buttons[0];
+        const last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    };
+
+    const pendingLabel = pendingRegistration === "NON_VAT"
+        ? "Non-VAT Registered"
+        : "VAT Registered (12%)";
+
+    return (
+        <>
+            <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
+                <SettingsCardHeading
+                    icon={<ReceiptText size={18} />}
+                    title="Business Tax Settings"
+                    detail="Configure tax registration for all branches. Only the Owner can change this setting."
+                />
+                <fieldset className="mt-5 space-y-4" disabled={saving || pendingRegistration !== null}>
+                    <legend className="sr-only">Business tax registration</legend>
+                    <label className="flex cursor-pointer items-center gap-3 text-sm font-semibold text-[#1A1220]">
+                        <input
+                            type="radio"
+                            name="taxRegistration"
+                            value="NON_VAT"
+                            className="h-4 w-4 accent-[#5F3CB0]"
+                            checked={currentRegistration === "NON_VAT"}
+                            onChange={() => requestTaxChange("NON_VAT")}
+                        />
+                        Non-VAT Registered
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-3 text-sm font-semibold text-[#1A1220]">
+                        <input
+                            type="radio"
+                            name="taxRegistration"
+                            value="VAT_REGISTERED"
+                            className="h-4 w-4 accent-[#5F3CB0]"
+                            checked={currentRegistration === "VAT_REGISTERED"}
+                            onChange={() => requestTaxChange("VAT_REGISTERED")}
+                        />
+                        VAT Registered (12%)
+                    </label>
+                </fieldset>
+                <p className="mt-4 text-xs leading-5 text-[#7A6A84]">
+                    Listed POS product prices already include VAT when registered. Invoices separate
+                    VATable sales and VAT instead of adding another 12% at checkout.
+                </p>
+                {message && (
+                    <p role="status" className="mt-3 text-xs font-semibold text-[#237A44]">
+                        {message}
+                    </p>
+                )}
+            </section>
+
+            {pendingRegistration && (
+                <div
+                    className="fixed inset-0 z-[150] flex items-center justify-center bg-[#180C2B]/55 p-4 backdrop-blur-[2px]"
+                >
+                    <div
+                        ref={dialogRef}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="tax-confirm-title"
+                        aria-describedby="tax-confirm-description"
+                        onKeyDown={handleDialogKeyDown}
+                        className="w-full max-w-[470px] rounded-[20px] border border-[#E6DDF0] bg-white p-6 shadow-[0_20px_60px_rgba(30,12,50,0.25)]"
+                    >
+                        <div className="flex items-start justify-between gap-4">
+                            <div className="flex items-center gap-3">
+                                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1E9FF] text-[#5B2FC6]">
+                                    <AlertTriangle size={21} strokeWidth={1.8} />
+                                </span>
+                                <div>
+                                    <h2 id="tax-confirm-title" className="text-lg font-bold text-[#1A1220]">
+                                        Confirm Tax Registration
+                                    </h2>
+                                    <p className="mt-0.5 text-xs text-[#806A8C]">
+                                        Owner Settings
+                                    </p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                aria-label="Close confirmation dialog"
+                                onClick={closeDialog}
+                                disabled={saving}
+                                className="rounded-lg p-1 text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:opacity-50"
+                            >
+                                <X size={18} />
+                            </button>
+                        </div>
+
+                        <p id="tax-confirm-description" className="mt-5 text-sm leading-6 text-[#5F4E75]">
+                            Set this business to <strong className="text-[#1A1220]">{pendingLabel}</strong>?
+                            The change will apply to <strong>future POS sales across all branches</strong>.
+                            Existing invoices will keep their originally recorded tax information.
+                        </p>
+
+                        <div className="mt-4 rounded-xl border border-[#E6DDF0] bg-[#FBF9FE] px-4 py-3">
+                            <p className="text-xs font-semibold text-[#2B174C]">
+                                {pendingRegistration === "NON_VAT"
+                                    ? "Future POS sales will show zero VAT."
+                                    : "Future POS sales will show a 12% VAT-inclusive breakdown."}
+                            </p>
+                        </div>
+
+                        {dialogError && (
+                            <p role="alert" className="mt-4 text-xs font-medium text-[#B42318]">
+                                {dialogError}
+                            </p>
+                        )}
+
+                        <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                            <button
+                                ref={cancelButtonRef}
+                                type="button"
+                                onClick={closeDialog}
+                                disabled={saving}
+                                className="inline-flex h-[42px] w-full items-center justify-center rounded-xl border border-[#D8CBE7] bg-white px-5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B2FC6] disabled:opacity-50 sm:w-auto"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => void confirmTaxChange()}
+                                disabled={saving}
+                                className="inline-flex h-[42px] w-full items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-5 text-sm font-semibold text-white transition hover:bg-[#1B0D31] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B2FC6] disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+                            >
+                                {saving ? "Saving..." : "Confirm Change"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     );
 }

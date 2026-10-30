@@ -5,7 +5,7 @@ import * as XLSX from "xlsx";
 import { fieldClass, labelClass } from "./_shared";
 import {
     AlertTriangle, BarChart3, Box, Building2, CalendarDays, CheckCircle2,
-    ChevronDown, ChevronLeft, ChevronRight, Clock3, Download, MapPin, PieChart,
+    ChevronDown, Clock3, Download, PieChart,
     ReceiptText, RefreshCw, Search, ShoppingCart, TrendingUp, X,
 } from "lucide-react";
 
@@ -45,6 +45,7 @@ type BillStatus = "Paid" | "Overdue" | "Due soon" | "Partially paid" | "Unpaid";
 type DateRange = { startDate: string; endDate: string };
 
 const cardClass = "min-w-0 overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm";
+const scrollPanel = "min-h-0 w-full overflow-auto overscroll-contain border-t border-[#E9E1EE]";
 const headerCell = "px-3 py-2.5 text-[10px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]";
 const bodyCell = "px-3 py-2.5 text-xs text-[#4F3A5A]";
 
@@ -110,39 +111,48 @@ function SectionHeading({ icon, title, subtitle }: { icon: React.ReactNode; titl
             {subtitle && <p className="mt-0.5 text-[11px] text-[#86778F]">{subtitle}</p>}</div>
     </div>;
 }
-function MetricCard({ label, value, helper, icon, tone = "purple" }: {
-    label: string; value: string; helper: string; icon: React.ReactNode; tone?: "purple" | "green" | "blue" | "red";
+function MetricCard({ label, value, helper, icon, loading = false, tone = "purple" }: {
+    label: string; value: string; helper: string; icon: React.ReactNode;
+    loading?: boolean; tone?: "purple" | "green" | "blue" | "red";
 }) {
-    const tones = {
+    const iconClassName = {
         purple: "bg-[#F1ECFF] text-[#5F35D8]",
         green: "bg-[#E5F8EC] text-[#23834A]",
         blue: "bg-[#E9F2FF] text-[#1E6FE8]",
         red: "bg-[#FFE8E8] text-[#E23B4A]",
-    };
-    return <article className={cardClass + " flex min-h-[118px] flex-row-reverse items-start justify-between gap-3 p-4"}>
-        <span className={tones[tone] + " flex h-10 w-10 shrink-0 items-center justify-center rounded-full [&>svg]:h-5 [&>svg]:w-5"}>{icon}</span>
-        <div className="min-w-0"><p className="text-sm font-bold text-[#21132E]">{label}</p>
-            <p className={"mt-2 break-words text-[27px] font-bold leading-none tabular-nums " + (tone === 'red' ? 'text-[#D52035]' : tone === 'green' ? 'text-[#23834A]' : tone === 'blue' ? 'text-[#1E6FE8]' : 'text-[#4E2DB8]')}>{value}</p>
-            <p className={"mt-1.5 text-[11px] leading-4 text-[#86778F]"}>{helper}</p>
-        </div>
-    </article>;
+    }[tone];
+    return (
+        <article aria-busy={loading} className="flex min-h-[116px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
+            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`} aria-hidden="true">{icon}</span>
+            <span className="min-w-0 flex-1">
+                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
+                {loading ? <span className="mt-1 block h-7 w-24 max-w-full animate-pulse rounded-md bg-[#F1EBF8]" role="status" aria-label={`Loading ${label}`}/> :
+                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{value}</span>}
+                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{helper}</span>
+            </span>
+        </article>
+    );
 }
-function Pagination({ page, total, pageSize, onChange, label }: { page: number; total: number; pageSize: number; onChange: (page: number) => void; label: string }) {
-    const pages = Math.max(1, Math.ceil(total / pageSize));
-    const current = Math.min(page, pages);
-    const numbers = [...new Set([1, current - 1, current, current + 1, pages])].filter(value => value >= 1 && value <= pages).sort((a, b) => a - b);
-    return <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
-        <p className="text-[11px] text-[#7A6A84]">Showing {Math.min(pageSize, Math.max(0, total - (current - 1) * pageSize))} of {formatNumber(total)} items</p>
-        <nav aria-label={`${label} pages`} className="flex items-center gap-1.5">
-            <button type="button" aria-label={`Previous ${label} page`} disabled={current <= 1} onClick={() => onChange(current - 1)} className="rounded-xl border border-[#E3D8EA] bg-white p-2 text-[#5F4E75] hover:bg-[#F7F1FF] disabled:opacity-35"><ChevronLeft size={14}/></button>
-            {numbers.map((number, index) => <React.Fragment key={number}>
-                {index > 0 && number > numbers[index - 1] + 1 && <span className="px-1 text-xs text-[#7A6A84]">…</span>}
-                <button type="button" aria-current={number === current ? "page" : undefined} onClick={() => onChange(number)} className={`h-8 min-w-8 rounded-lg px-2 text-xs ${number === current ? "bg-[#2B174C] font-semibold text-white shadow-sm" : "text-[#5F4E75] hover:bg-[#F7F1FF]"}`}>{number}</button>
-            </React.Fragment>)}
-            <button type="button" aria-label={`Next ${label} page`} disabled={current >= pages} onClick={() => onChange(current + 1)} className="rounded-xl border border-[#E3D8EA] bg-white p-2 text-[#5F4E75] hover:bg-[#F7F1FF] disabled:opacity-35"><ChevronRight size={14}/></button>
-        </nav>
+// Align loading presentation with the manager's stable-height, independently scrolling panels.
+function OwnerPanelLoading({ label, chart = false }: { label: string; chart?: boolean }) {
+    return <div className="flex min-h-0 flex-1 flex-col justify-center gap-4 px-5 py-5" role="status" aria-label={label}>
+        <span className="sr-only">{label}</span>
+        {chart ? <div className="flex h-[195px] items-end gap-3 border-b border-[#E9E1EE] pb-2" aria-hidden="true">
+            {[45, 68, 56, 82, 72, 61, 88, 66].map((height, index) => <span key={index} className="flex-1 animate-pulse rounded-t-lg bg-[#F1EBF8]" style={{height: `${height}%`}} />)}
+        </div> : <div className="flex items-center justify-center gap-5" aria-hidden="true">
+            <div className="h-[165px] w-[165px] shrink-0 animate-pulse rounded-full border-[34px] border-[#F1EBF8]"/>
+            <div className="w-full max-w-[185px] space-y-4">{[0,1,2,3].map(index => <div key={index} className="h-5 animate-pulse rounded-lg bg-[#F1EBF8]"/>)}</div>
+        </div>}
     </div>;
 }
+
+function OwnerTableLoadingRow({ columns, label }: { columns: number; label: string }) {
+    return <tr><td colSpan={columns} className="px-4 py-7 text-center text-xs text-[#86778F]" role="status">
+        <span className="block">{label}</span>
+        <span className="mx-auto mt-3 block h-3 w-2/3 max-w-[330px] animate-pulse rounded-full bg-[#F1EBF8]" aria-hidden="true"/>
+    </td></tr>;
+}
+
 function RevenueTrend({ points, rentalRecorded, loading, unavailable, controls }: { points: TrendPoint[]; rentalRecorded: boolean; loading: boolean; unavailable: boolean; controls: React.ReactNode }) {
     const gradient = React.useId().replace(/:/g, "");
     const maximum = Math.max(1, ...points.flatMap(point => [point.consumableSales || 0, point.rentalRevenue || 0]));
@@ -165,17 +175,17 @@ function RevenueTrend({ points, rentalRecorded, loading, unavailable, controls }
     const line = (segment: Array<{ index: number; value: number }>) => segment.map((point, index) => `${index ? "L" : "M"}${x(point.index)},${y(point.value)}`).join(" ");
     const labels = [...new Set([0, Math.floor((points.length - 1) / 3), Math.floor((points.length - 1) * 2 / 3), points.length - 1])].filter(index => index >= 0);
     const tick = (value: number) => `₱${value >= 1000000 ? `${(value / 1000000).toLocaleString("en-PH", { maximumFractionDigits: 1 })}M` : value >= 1000 ? `${(value / 1000).toLocaleString("en-PH", { maximumFractionDigits: 1 })}K` : formatNumber(value)}`;
-    return <section className={`${cardClass} p-4`}>
-        <div className="mb-3 flex min-w-0 items-center justify-between gap-2 border-b border-[#E9E1EE] pb-3">
+    return <section className={`${cardClass} flex h-[390px] min-h-0 flex-col`}>
+        <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
             <div className="min-w-0 shrink-0"><SectionHeading icon={<BarChart3 size={24}/>} title="Revenue trend" subtitle="Combined revenue across all stores for the selected period."/></div>{controls}
-        </div><div className="mb-1 flex justify-end">
+        </div><div className="flex justify-end px-4 pt-3">
         <div className="flex flex-wrap gap-4 text-[10px] text-[#5F4E75]">
             <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-[#7C3AED]"/>Consumable sales</span>
             <span className={`inline-flex items-center gap-1.5 ${rentalRecorded ? "" : "text-[#9B8AAA]"}`}><span className="h-2.5 w-2.5 rounded-full bg-[#F5A623]"/>Rental revenue{!rentalRecorded && " · not recorded yet"}</span>
         </div>
     </div>
-        {loading || unavailable ? <div className="flex h-[215px] items-center justify-center text-sm text-[#7A6A84]">{loading ? "Loading revenue trend…" : "Recorded revenue is unavailable."}</div> :
-            <svg viewBox="0 0 720 220" role="img" aria-label="Daily consumable sales and recorded rental revenue for the selected period" className="h-[230px] w-full overflow-visible">
+        {loading ? <OwnerPanelLoading label="Loading revenue trend" chart/> : unavailable ? <div className="flex min-h-0 flex-1 items-center justify-center px-5 text-center text-sm text-[#7A6A84]">Recorded revenue is unavailable.</div> :
+            <div className="flex min-h-0 flex-1 items-center px-4 pb-4"><svg viewBox="0 0 720 220" role="img" aria-label="Daily consumable sales and recorded rental revenue for the selected period" className="max-h-[245px] w-full overflow-visible">
                 <defs><linearGradient id={`${gradient}-rental`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#F5A623" stopOpacity="0.16"/><stop offset="100%" stopColor="#F5A623" stopOpacity="0.025"/></linearGradient><linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7C3AED" stopOpacity="0.12"/><stop offset="100%" stopColor="#7C3AED" stopOpacity="0.015"/></linearGradient></defs>
                 {[0, 1, 2, 3, 4].map(index => <g key={index}>
                     <line x1="62" x2="688" y1={y(index * step)} y2={y(index * step)} stroke="#EFE7F4"/>
@@ -195,7 +205,7 @@ function RevenueTrend({ points, rentalRecorded, loading, unavailable, controls }
                     })}
                 </>}
                 {points.length === 0 && <text x="375" y="110" textAnchor="middle" fontSize="12" fill="#7A6A84">No recorded revenue for this period.</text>}
-            </svg>}
+            </svg></div>}
     </section>;
 }
 function ExpandedPurchaseProducts({ bill }: { bill: SupplierBill }) {
@@ -310,7 +320,7 @@ function SupplierBillDialog({ bill, onClose, onPaid }: { bill: SupplierBill; onC
                 </dl>
                 <section className="space-y-2 border-t border-[#E6DDF0] pt-4"><h3 className="text-sm font-bold text-[#1A1220]">Purchased items</h3>
                     {itemsError ? <p role="alert" className="text-xs text-[#C32F2F]">{itemsError}</p> : itemsLoading ? <p className="text-xs text-[#7A6A84]">Loading purchase details…</p> : items.length === 0 ? <p className="text-xs text-[#7A6A84]">No purchased items are available.</p> :
-                        <div className="overflow-x-auto"><table className="w-full min-w-[430px] text-left"><thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={headerCell}>Item</th><th className={`${headerCell} text-right`}>Qty</th><th className={`${headerCell} text-right`}>Unit cost</th><th className={`${headerCell} text-right`}>Total</th></tr></thead>
+                        <div className="overflow-x-auto"><table className="w-full min-w-[430px] text-left"><thead className="sticky top-0 z-10 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={headerCell}>Item</th><th className={`${headerCell} text-right`}>Qty</th><th className={`${headerCell} text-right`}>Unit cost</th><th className={`${headerCell} text-right`}>Total</th></tr></thead>
                             <tbody>{items.map((item, index) => <tr key={`${item.productId ?? item.equipmentId}-${item.variantId ?? ''}-${index}`} className="border-b border-[#EFE8F2] last:border-0 hover:bg-[#FFFCF8]"><td className={bodyCell}>{item.productName || item.name || "Recorded item"}<p className="mt-0.5 text-[10px] text-[#7A6A84]">{item.productNumber || item.equipmentNumber || ""}{item.variantNumber ? ` · ${item.variantNumber}` : ""}</p></td><td className={`${bodyCell} text-right`}>{formatNumber(Number(item.quantity))}</td><td className={`${bodyCell} text-right`}>{formatPeso(Number(item.unitCost))}</td><td className={`${bodyCell} text-right`}>{formatPeso(Number(item.lineTotal))}</td></tr>)}</tbody>
                         </table></div>}
                 </section>
@@ -384,11 +394,11 @@ function StockConditionOverview({ storeName, branches, branch, setBranch, refres
         try { if (format === 'pdf') exportOwnerTablePdf(table, details); else exportOwnerTableExcel(table, details); }
         catch (reason) { setError(reason instanceof Error ? reason.message : 'Export failed.'); }
     };
-    return <section className={`${cardClass} p-4`}>
-        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E9E1EE] pb-3"><SectionHeading icon={<PieChart size={24}/>} title="Stock Condition Overview" subtitle="Share of item types by primary status"/>
+    return <section className={`${cardClass} flex h-[390px] min-h-0 flex-col`}>
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5"><SectionHeading icon={<PieChart size={24}/>} title="Stock Condition Overview" subtitle="Share of item types by primary status"/>
             <div className="flex gap-2"><BranchPicker branches={branches} value={branch} onChange={setBranch} label="Stock condition"/><ExportMenu disabled={!data || loading} onExport={exportStock}/></div>
         </div>
-        {loading ? <div className="flex min-h-[235px] items-center justify-center text-sm text-[#7A6A84]">Loading stock conditions…</div> : error ? <div role="alert" className="flex min-h-[235px] flex-col items-center justify-center gap-3 px-5 text-center text-sm"><PieChart size={42} className="text-[#B7A6CB]"/><p className="font-semibold text-[#4F3A5A]">Stock condition data unavailable</p><p className="max-w-sm text-xs text-[#86778F]">{error === "Invalid action" ? "The inventory API does not recognize get_owner_stock_condition. The pie chart will display after this API action is implemented." : error}</p><button type="button" className={compactControl} onClick={() => setRetry(value => value + 1)}>Retry</button></div> : <div className="mt-2 grid items-center gap-3 sm:grid-cols-[minmax(150px,0.9fr)_1.3fr]">
+        {loading ? <OwnerPanelLoading label="Loading stock conditions" /> : error ? <div role="alert" className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-5 text-center text-sm"><PieChart size={42} className="text-[#B7A6CB]"/><p className="font-semibold text-[#4F3A5A]">Stock condition data unavailable</p><p className="max-w-sm text-xs text-[#86778F]">{error === "Invalid action" ? "The inventory API does not recognize get_owner_stock_condition. The pie chart will display after this API action is implemented." : error}</p><button type="button" className={compactControl} onClick={() => setRetry(value => value + 1)}>Retry</button></div> : <div className="grid min-h-0 flex-1 items-center gap-3 overflow-auto px-4 pb-4 pt-2 sm:grid-cols-[minmax(150px,0.9fr)_1.3fr]">
             <svg viewBox="0 0 240 240" role="img" aria-label={`Stock conditions: ${slices.map(row => `${row.label} ${row.count}`).join(', ')}`} className="mx-auto h-[230px] w-full max-w-[250px]">
                 {!data?.total && <><circle cx="120" cy="120" r="110" fill="#F1EBFF"/><text x="120" y="124" textAnchor="middle" fontSize="13" fill="#806A8C">No inventory items</text></>}
                 {slices.filter(row => row.count > 0).map(row => <g key={row.key}>
@@ -436,7 +446,6 @@ export default function OwnerInventory() {
     const [branchLoadError, setBranchLoadError] = React.useState("");
     const [supplierSearch, setSupplierSearch] = React.useState("");
     const [supplierFilter, setSupplierFilter] = React.useState("all");
-    const [supplierPage, setSupplierPage] = React.useState(1);
     const [selectedBill, setSelectedBill] = React.useState<SupplierBill | null>(null);
     const [expandedPurchaseKey, setExpandedPurchaseKey] = React.useState<string | null>(null);
     const [notice, setNotice] = React.useState("");
@@ -565,9 +574,7 @@ export default function OwnerInventory() {
         document.addEventListener("pointerdown", close);
         return () => document.removeEventListener("pointerdown", close);
     }, []);
-    React.useEffect(() => { setSupplierPage(1); }, [branch, range.startDate, range.endDate]);
-    React.useEffect(() => { setSupplierPage(1); }, [supplierSearch, supplierFilter]);
-    React.useEffect(() => { setExpandedPurchaseKey(null); }, [branch, supplierSearch, supplierFilter, supplierPage]);
+    React.useEffect(() => { setExpandedPurchaseKey(null); }, [branch, supplierSearch, supplierFilter]);
     React.useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(""), 6000); return () => window.clearTimeout(timer); }, [notice]);
 
     const outstanding = billsReady ? bills.reduce((sum, bill) => sum + Math.max(0, Number(bill.outstandingBalance) || 0), 0) : null;
@@ -588,7 +595,6 @@ export default function OwnerInventory() {
     const revenueTrendError = branch ? allStoresError : performanceError;
     const consumables = performance?.consumables || [];
     const rentals = performance?.rentals || [];
-    const currentSupplierPage = Math.min(supplierPage, Math.max(1, Math.ceil(filteredBills.length / 3)));
     const branchName = branch ? branches?.find(item => String(item.id) === branch)?.branchName || "Selected branch" : "All branches";
     const selectedLabel = `${shortDate(range.startDate, false)} – ${shortDate(range.endDate)}`;
     const applyRange = (next: DateRange) => { const message = validDateRange(next); setDateError(message); if (!message) { setRange(next); setCalendarOpen(false); } };
@@ -650,14 +656,14 @@ export default function OwnerInventory() {
             <main className="space-y-4 px-5 py-5">
                 {performanceError && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] p-4 text-sm text-[#C32F2F]"><p>Could not load the owner report: {performanceError}</p><button type="button" onClick={() => setRefresh(value => value + 1)} className="rounded-lg border border-current px-3 py-1.5 text-xs font-semibold">Retry</button></div>}
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    <MetricCard label="Total sales & rental revenue" value={shownMoney(performance?.totals.totalRevenue)} helper={performanceLoading ? "Loading recorded revenue…" : performance?.totals.rentalRevenue === null ? "Total available once rentals are recorded" : "Consumables + rentals"} icon={<BarChart3 size={19}/>}/>
-                    <MetricCard label="Consumable sales" value={shownMoney(performance?.totals.consumableSales)} helper={`Gross profit: ${shownMoney(performance?.totals.consumableGrossProfit)}`} icon={<TrendingUp size={19}/>} tone="green"/>
-                    <MetricCard label="Rental revenue" value={shownMoney(performance?.totals.rentalRevenue)} helper={performanceLoading ? "Loading recorded revenue…" : performance?.totals.rentalRevenue === null ? "No itemized charges" : "Selected period"} icon={<Box size={19}/>} tone="blue"/>
-                    <MetricCard label="Supplier balance" value={shownMoney(outstanding)} helper={billsLoading && !supplierError ? "Loading supplier balances…" : billsReady ? `${formatPeso(overdue || 0)} overdue` : "Supplier balances unavailable"} icon={<ReceiptText size={19}/>} tone="red"/>
+                    <MetricCard label="Total sales & rental revenue" value={shownMoney(performance?.totals.totalRevenue)} loading={performanceLoading} helper={performanceLoading ? "Loading recorded revenue…" : performance?.totals.rentalRevenue === null ? "Total available once rentals are recorded" : "Consumables + rentals"} icon={<BarChart3 size={19}/>}/>
+                    <MetricCard label="Consumable sales" value={shownMoney(performance?.totals.consumableSales)} loading={performanceLoading} helper={`Gross profit: ${shownMoney(performance?.totals.consumableGrossProfit)}`} icon={<TrendingUp size={19}/>} tone="green"/>
+                    <MetricCard label="Rental revenue" value={shownMoney(performance?.totals.rentalRevenue)} loading={performanceLoading} helper={performanceLoading ? "Loading recorded revenue…" : performance?.totals.rentalRevenue === null ? "No itemized charges" : "Selected period"} icon={<Box size={19}/>} tone="blue"/>
+                    <MetricCard label="Supplier balance" value={shownMoney(outstanding)} loading={billsLoading} helper={billsLoading && !supplierError ? "Loading supplier balances…" : billsReady ? `${formatPeso(overdue || 0)} overdue` : "Supplier balances unavailable"} icon={<ReceiptText size={19}/>} tone="red"/>
                 </div>
                 {performance && performance.warnings.length > 0 && <p role="note" className="rounded-lg bg-[#F7F1FF] px-3 py-2 text-[11px] leading-5 text-[#806A8C]">{performance.warnings.join(" ")}</p>}
                 <div className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                    <RevenueTrend controls={<div ref={controlsRef} className="flex shrink-0 flex-nowrap items-center justify-end gap-1.5"><div className="relative"><button type="button" aria-expanded={calendarOpen} onClick={() => { setDateDraft(range); setDateError(""); setCalendarOpen(!calendarOpen); }} className="inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-xl border border-[#E3D8EA] bg-white px-2.5 text-[11px] font-semibold text-[#2B174C] shadow-sm"><CalendarDays size={17}/>{selectedLabel}<ChevronDown size={14}/></button>
+                    <RevenueTrend controls={<div ref={controlsRef} className="flex w-full min-w-0 flex-wrap items-center justify-end gap-1.5 sm:w-auto"><div className="relative"><button type="button" aria-expanded={calendarOpen} onClick={() => { setDateDraft(range); setDateError(""); setCalendarOpen(!calendarOpen); }} className="inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-xl border border-[#E3D8EA] bg-white px-2.5 text-[11px] font-semibold text-[#2B174C] shadow-sm"><CalendarDays size={17}/>{selectedLabel}<ChevronDown size={14}/></button>
                         {calendarOpen && <section role="dialog" aria-label="Select revenue date range" className="absolute left-0 top-full mt-2 z-30 w-[min(340px,calc(100vw-40px))] sm:left-auto sm:right-0 space-y-3 rounded-xl border border-[#E6DDF0] bg-white p-4 shadow-xl">
                             <h2 className="text-sm font-bold">Revenue period</h2>
                             <form onSubmit={event => { event.preventDefault(); const values = new FormData(event.currentTarget); applyRange({ startDate: String(values.get("startDate") || ""), endDate: String(values.get("endDate") || "") }); }} className="space-y-3">
@@ -669,8 +675,8 @@ export default function OwnerInventory() {
                     </div><ExportMenu disabled={!revenueTrendPerformance || revenueTrendLoading} onExport={format => exportReport(format, "trend")}/></div>} points={revenueTrendPerformance?.trend || []} loading={revenueTrendLoading} rentalRecorded={revenueTrendPerformance?.totals.rentalRevenue != null} unavailable={!!revenueTrendError || revenueTrendPerformance?.totals.consumableSales === null}/>
                     <StockConditionOverview storeName={performance?.storeName || "Store"} branches={branches} branch={branch} setBranch={setBranch} refresh={refresh}/>
                 </div>
-                <section className={`${cardClass} pb-1`}>
-                    <div className="flex min-w-0 items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5 max-lg:flex-wrap">
+                <section className={`${cardClass} flex min-h-0 flex-col`}>
+                    <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
                         <SectionHeading icon={<ReceiptText size={19}/>} title="Supplier Payables" subtitle="Purchase-based supplier balances across sales and rental inventory. Pay outstanding bills or review settled purchases."/>
                         <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
                             <label className="relative block min-w-[180px] flex-1 sm:max-w-[310px]">
@@ -687,15 +693,15 @@ export default function OwnerInventory() {
                         </div>
                     </div>
                     {supplierError && <div role="alert" className="mx-4 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#FFF0F0] p-3 text-xs text-[#C32F2F]"><p>Some supplier records are unavailable. {supplierError}</p><button type="button" onClick={() => { setBillsLoading(true); if (branches === null) setRefresh(value => value + 1); else void loadBills(); }} className="rounded-md border border-current px-2.5 py-1 font-semibold">Retry</button></div>}
-                    <div className="overflow-x-auto px-4 pb-2 pt-3"><table className="w-full min-w-[1100px] text-left">
-                        <thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr>
+                    <div className={`${scrollPanel} max-h-[360px]`} role="region" aria-label="Supplier Payables scrollable table" tabIndex={0}><table className="w-full min-w-[1100px] text-left">
+                        <thead className="sticky top-0 z-10 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr>
                             <th className={headerCell}>Purchase</th><th className={headerCell}>Branch</th><th className={headerCell}>Supplier</th><th className={headerCell}>Method</th>
                             <th className={`${headerCell} text-right`}>Total</th><th className={`${headerCell} text-right`}>Paid</th>
                             <th className={`${headerCell} text-right`}>Outstanding</th><th className={headerCell}>Status</th>
                             <th className={`${headerCell} text-right`}>Action</th>
                         </tr></thead>
                         <tbody>
-                        {filteredBills.slice((currentSupplierPage - 1) * 3, currentSupplierPage * 3).map(bill => {
+                        {filteredBills.map(bill => {
                             const unpaid = Number(bill.outstandingBalance) > 0;
                             return <React.Fragment key={bill.key}><tr className="border-b border-[#EFE8F2] hover:bg-[#FFFCF8]">
                                 <td className={bodyCell}><button type="button" aria-expanded={expandedPurchaseKey === bill.key} aria-label={`${expandedPurchaseKey === bill.key ? "Hide" : "Show"} linked products for ${bill.purchaseNumber}`} onClick={() => setExpandedPurchaseKey(current => current === bill.key ? null : bill.key)} className="font-semibold text-[#5330B6] underline underline-offset-2 hover:text-[#2B174C] focus-visible:rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#5B31D4]">{bill.purchaseNumber}</button><p className="mt-1 text-[10px] text-[#7A6A84]">{bill.source === "rental" ? "Rental purchase" : "Sales purchase"}</p></td><td className={bodyCell}><span className="font-medium">{bill.branchName || branches?.find(item => item.id === bill.branchId)?.branchName || "Unknown branch"}</span></td>
@@ -708,33 +714,24 @@ export default function OwnerInventory() {
                                 <td className={`${bodyCell} text-right`}><button type="button" aria-label={`${unpaid ? "Pay" : "View"} supplier bill ${bill.purchaseNumber}`} onClick={event => { billTrigger.current = event.currentTarget; setSelectedBill(bill); }} className={`inline-flex min-w-[94px] items-center justify-center whitespace-nowrap rounded-lg border px-3 py-2 text-xs font-semibold shadow-sm transition ${unpaid ? "border-[#2B174C] bg-[#2B174C] text-white hover:bg-[#1B0D31]" : "border-[#D9CDF0] bg-[#F5F0FF] text-[#5330B6] hover:bg-[#ECE3FF]"}`}>{unpaid ? "Pay Now" : "View Bill"}</button></td>
                             </tr>{expandedPurchaseKey === bill.key && <ExpandedPurchaseProducts bill={bill}/>}</React.Fragment>;
                         })}
-                        {filteredBills.length === 0 && <tr><td colSpan={9} className="px-3 py-8 text-center text-xs text-[#7A6A84]">{supplierError ? "Supplier records are unavailable." : billsLoading ? "Loading supplier purchases…" : "No supplier purchases returned for the selected branches. Check Owner API access if Manager shows purchases."}</td></tr>}
+                        {filteredBills.length === 0 && (billsLoading ? <OwnerTableLoadingRow columns={9} label="Loading supplier purchases..."/> : <tr><td colSpan={9} className="px-3 py-8 text-center text-xs text-[#7A6A84]">{supplierError ? "Supplier records are unavailable." : "No supplier purchases returned for the selected branches. Check Owner API access if Manager shows purchases."}</td></tr>)}
                         </tbody>
                     </table></div>
-                    {filteredBills.length > 3 && <Pagination label="supplier bills" page={currentSupplierPage} total={filteredBills.length} pageSize={3} onChange={setSupplierPage}/>}
                 </section>
                 <div className="grid gap-4 xl:grid-cols-2">
                     <section className={cardClass}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5"><SectionHeading icon={<ShoppingCart size={23}/>} title="Consumable sales performance"/><div className="flex gap-2"><BranchPicker branches={branches} value={branch} onChange={setBranch} label="Consumable sales performance"/><ExportMenu disabled={!performance || performanceLoading} onExport={format => exportReport(format, "consumables")}/></div></div>
-                        <div className="h-[220px] overflow-auto px-4 [scrollbar-color:#7C3AED_#F1EBFF] [scrollbar-width:thin]"><table className="w-full min-w-[390px] text-left"><thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={`${headerCell}`}>Item</th><th className={`${headerCell} text-right`}>Units sold</th><th className={`${headerCell} text-right`}>Sales</th><th className={`${headerCell} text-right`}>Gross profit</th></tr></thead><tbody>
+                        <div className={`${scrollPanel} h-[360px]`} role="region" aria-label="Consumable sales performance scrollable table" tabIndex={0}><table className="w-full min-w-[390px] text-left"><thead className="sticky top-0 z-10 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={`${headerCell}`}>Item</th><th className={`${headerCell} text-right`}>Units sold</th><th className={`${headerCell} text-right`}>Sales</th><th className={`${headerCell} text-right`}>Gross profit</th></tr></thead><tbody>
                         {consumables.map(row => <tr key={row.key} className="border-b border-[#EFE8F2] last:border-0 hover:bg-[#FFFCF8]"><td className={bodyCell}>{row.name}</td><td className={`${bodyCell} text-right tabular-nums`}>{formatNumber(row.unitsSold)}</td><td className={`${bodyCell} text-right tabular-nums`}>{formatPeso(row.sales)}</td><td title={row.grossProfit === null ? "Historical cost is not available for every sold item." : undefined} className={`${bodyCell} text-right tabular-nums`}>{shownMoney(row.grossProfit)}</td></tr>)}
-                        {consumables.length === 0 && <tr><td colSpan={4} className="h-[123px] px-3 text-center text-xs text-[#7A6A84]">{performanceLoading ? "Loading consumable sales…" : performanceError ? "Sales report unavailable." : "No completed consumable sales in this period."}</td></tr>}
+                        {consumables.length === 0 && (performanceLoading ? <OwnerTableLoadingRow columns={4} label="Loading consumable sales..."/> : <tr><td colSpan={4} className="h-[123px] px-3 text-center text-xs text-[#7A6A84]">{performanceError ? "Sales report unavailable." : "No completed consumable sales in this period."}</td></tr>)}
                         </tbody></table></div>
                     </section>
                     <section className={cardClass}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5"><SectionHeading icon={<Box size={23}/>} title="Rental revenue performance"/><div className="flex gap-2"><BranchPicker branches={branches} value={branch} onChange={setBranch} label="Rental revenue performance"/><ExportMenu disabled={!performance || performanceLoading} onExport={format => exportReport(format, "rentals")}/></div></div>
-                        <div className="h-[220px] overflow-auto px-4 [scrollbar-color:#7C3AED_#F1EBFF] [scrollbar-width:thin]"><table className="w-full min-w-[360px] text-left"><thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={`${headerCell}`}>Item</th><th className={`${headerCell} text-right`}>Rental revenue</th><th className={`${headerCell} text-right`}>Revenue share</th></tr></thead><tbody>
+                        <div className={`${scrollPanel} h-[360px]`} role="region" aria-label="Rental revenue performance scrollable table" tabIndex={0}><table className="w-full min-w-[360px] text-left"><thead className="sticky top-0 z-10 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={`${headerCell}`}>Item</th><th className={`${headerCell} text-right`}>Rental revenue</th><th className={`${headerCell} text-right`}>Revenue share</th></tr></thead><tbody>
                         {rentals.map(row => <tr key={row.key} className="border-b border-[#EFE8F2] last:border-0 hover:bg-[#FFFCF8]"><td className={bodyCell}>{row.name}</td><td className={`${bodyCell} text-right tabular-nums`}>{formatPeso(row.revenue)}</td><td className={`${bodyCell} text-right tabular-nums`}>{row.share.toFixed(1)}%</td></tr>)}
-                        {rentals.length === 0 && <tr><td colSpan={3} className="h-[123px] px-5 text-center text-xs leading-5 text-[#7A6A84]">{performanceLoading ? "Loading rental revenue…" : performanceError ? "Rental report unavailable." : performance?.totals.rentalRevenue === null ? "No recorded itemized rental charges are available yet. Rental stock and daily rates alone are not rental revenue." : "No rental revenue recorded in this period."}</td></tr>}
+                        {rentals.length === 0 && (performanceLoading ? <OwnerTableLoadingRow columns={3} label="Loading rental revenue..."/> : <tr><td colSpan={3} className="h-[123px] px-5 text-center text-xs leading-5 text-[#7A6A84]">{performanceError ? "Rental report unavailable." : performance?.totals.rentalRevenue === null ? "No recorded itemized rental charges are available yet. Rental stock and daily rates alone are not rental revenue." : "No rental revenue recorded in this period."}</td></tr>)}
                         </tbody></table></div>
                     </section>
                 </div>
-                <details className="text-xs text-[#7A6A84]"><summary className="cursor-pointer py-2">Report details & revenue by branch</summary>                <p className="text-[11px] leading-5 text-[#7A6A84]">Revenue reflects {selectedLabel}. Supplier balances as of {shortDate(businessDateString())}. Gross profit uses recorded POS sales less recorded cost at sale, before operating expenses; POS totals include VAT where applicable.</p>
-                    <section className={`${cardClass} p-4`}><SectionHeading icon={<MapPin size={19}/>} title="Revenue by branch"/>
-                        <div className="mt-3 max-h-[214px] overflow-auto"><table className="w-full min-w-[330px] text-left"><thead className="sticky top-0 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr><th className={`${headerCell}`}>Branch</th><th className={`${headerCell} text-right`}>Consumables</th><th className={`${headerCell} text-right`}>Rentals</th></tr></thead><tbody>
-                        {performance?.branchRevenue.map(row => <tr key={row.branchId ?? row.branchName} className="border-b border-[#EFE8F2] last:border-0 hover:bg-[#FFFCF8]"><td className={bodyCell}>{row.branchName}</td><td className={`${bodyCell} text-right tabular-nums`}>{shownMoney(row.consumableSales)}</td><td className={`${bodyCell} text-right tabular-nums`}>{shownMoney(row.rentalRevenue)}</td></tr>)}
-                        {(!performance || performance.branchRevenue.length === 0) && <tr><td colSpan={3} className="px-3 py-8 text-center text-xs text-[#7A6A84]">{performanceLoading ? "Loading branches…" : performanceError ? "Report unavailable." : "No branch revenue recorded for this period."}</td></tr>}
-                        </tbody></table></div>
-                    </section></details>
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-[#806A8C]"><span>Branch selectors update all reports. Stock and supplier balances are current.</span><ExportMenu disabled={!performance || performanceLoading} onExport={format => exportReport(format, "all")}/></div>
             </main>
         </div>
         {notice && <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[150] flex max-w-[min(420px,calc(100vw-40px))] items-start gap-3 rounded-xl border border-[#E6DDF0] bg-white p-4 text-sm text-[#5F4E75] shadow-xl"><p>{notice}</p><button type="button" onClick={() => setNotice("")} aria-label="Dismiss notification"><X size={16}/></button></div>}

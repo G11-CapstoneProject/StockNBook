@@ -159,6 +159,36 @@ async function appendMovement(db, scope, equipmentId, type, quantity, ref, descr
                       VALUES(?,?,?,?,?,?,?,?)`,
         [scope.storeId, scope.branchId, equipmentId, type, quantity, ref || null, description, scope.actor]);
 }
+// One confirmed rental purchase receipt updates the equipment quantity, receipt,
+// purchase history and stock movement within the caller's existing transaction.
+// A purchase that has not physically arrived must NOT use this helper.
+async function postRentalPurchaseReceipt(db, scope, equipmentRow, purchaseId, purchaseItemId,
+                                         quantity, unitCents, referenceNumber) {
+    const existing = Number(equipmentRow.total_units);
+    const next = existing + quantity;
+    if (!Number.isSafeInteger(next) || next > 2147483647)
+        fail(409, "Rental stock exceeds the equipment quantity limit.");
+    const previousCostCents = Math.round(Number(equipmentRow.average_unit_cost || 0) * 100);
+    const averageCostCents = Math.round((existing * previousCostCents + quantity * unitCents) / next);
+    const [receipt] = await db.execute(`INSERT INTO rental_stock_receipts
+        (store_id,branch_id,purchase_item_id,equipment_id,quantity_received,unit_purchase_cost,received_date,received_by)
+        VALUES (?,?,?,?,?,?,?,?)`,
+        [scope.storeId,scope.branchId,purchaseItemId,equipmentRow.id,quantity,
+            intMoney(unitCents),todayPh(),scope.actor]);
+    const receiptId = Number(receipt.insertId);
+    const prefix = await branchCodes(db,scope);
+    const receivingNumber = `${prefix}-RRCV-${String(receiptId).padStart(6,"0")}`;
+    await db.execute(`UPDATE rental_stock_receipts SET receiving_number=? WHERE id=?`,
+        [receivingNumber,receiptId]);
+    await db.execute(`UPDATE rental_equipment SET total_units=?,average_unit_cost=?,
+        last_supplier=(SELECT supplier FROM rental_purchase_transactions WHERE id=?)
+        WHERE id=? AND store_id=? AND branch_id=?`,
+        [next,intMoney(averageCostCents),purchaseId,equipmentRow.id,scope.storeId,scope.branchId]);
+    await appendMovement(db,scope,equipmentRow.id,"received",quantity,referenceNumber,
+        `Rental stock received: ${receivingNumber}`);
+    return receivingNumber;
+}
+
 async function receivePurchase(db, scope, equipmentRow, data, source) {
     // Parent equipment row MUST already be locked to protect the moving average.
     const purchase = purchaseData(data);
@@ -172,18 +202,16 @@ async function receivePurchase(db, scope, equipmentRow, data, source) {
     await db.execute("UPDATE rental_purchase_transactions SET purchase_number=? WHERE id=?", [purchaseNumber,purchaseId]);
     const [item] = await db.execute(`INSERT INTO rental_purchase_items (purchase_id,equipment_id,quantity_ordered,unit_purchase_cost)
                                      VALUES (?,?,?,?)`, [purchaseId,equipmentRow.id,purchase.quantity,intMoney(purchase.unitCents)]);
-    // The Manager records the supplier purchase. Only Staff can physically receive it.
-    await db.execute(`INSERT INTO rental_receiving_tasks
-                      (store_id,branch_id,purchase_id,purchase_item_id,equipment_id,quantity_expected,unit_cost)
-                      VALUES(?,?,?,?,?,?,?)`,
-        [scope.storeId,scope.branchId,purchaseId,item.insertId,equipmentRow.id,purchase.quantity,intMoney(purchase.unitCents)]);
+    // Manager-confirmed Restock is an actual stock-in operation. Do not create a
+    // pending Staff receiving task or leave the availability unchanged.
+    const receivingNumber = await postRentalPurchaseReceipt(db,scope,equipmentRow,purchaseId,
+        Number(item.insertId),purchase.quantity,purchase.unitCents,purchaseNumber);
     if (purchase.paidCents > 0) {
         await db.execute(`INSERT INTO rental_supplier_payments (purchase_id,amount,payment_date,request_key) VALUES(?,?,?,?)`,
             [purchaseId,intMoney(purchase.paidCents),purchase.purchaseDate,`INITIAL-${purchaseId}`]);
     }
-    // Stock, average unit cost, and stock movements are updated only after Staff confirms receipt.
-    return {purchaseId,purchaseNumber,receivingNumber:null,amountPaid:intMoney(purchase.paidCents),
-        outstandingBalance:intMoney(purchase.totalCents-purchase.paidCents),awaitingReceipt:true};
+    return {purchaseId,purchaseNumber,receivingNumber,amountPaid:intMoney(purchase.paidCents),
+        outstandingBalance:intMoney(purchase.totalCents-purchase.paidCents),awaitingReceipt:false};
 }
 async function createEquipment(db,scope,raw,source, importedUnitCost = null) {
     const e = equipmentInput(raw, raw.initialPurchase?.unitCost ?? importedUnitCost);
@@ -282,10 +310,11 @@ async function mutate(db,scope,body) {
                 const [item] = await db.execute(`INSERT INTO rental_purchase_items
                                                      (purchase_id,equipment_id,quantity_ordered,unit_purchase_cost) VALUES(?,?,?,?)`,
                     [purchaseId,line.equipmentId,line.quantity,intMoney(line.unitCents)]);
-                await db.execute(`INSERT INTO rental_receiving_tasks
-                                  (store_id,branch_id,purchase_id,purchase_item_id,equipment_id,quantity_expected,unit_cost)
-                                  VALUES(?,?,?,?,?,?,?)`,
-                    [scope.storeId,scope.branchId,purchaseId,item.insertId,line.equipmentId,line.quantity,intMoney(line.unitCents)]);
+                // Imported opening stock has already been counted at import confirmation.
+                // Commit the physical stock and the audit movement together with its purchase.
+                const equipment = await lockEquipment(db,scope,line.equipmentId);
+                await postRentalPurchaseReceipt(db,scope,equipment,purchaseId,Number(item.insertId),
+                    line.quantity,line.unitCents,purchaseNumber);
             }
             return { imported: createdRows.length, equipment: createdRows.map(line=>({
                     equipmentId:line.equipmentId,equipmentNumber:line.equipmentNumber,name:line.name
@@ -327,12 +356,12 @@ async function mutate(db,scope,body) {
             // Lock commitments under the equipment row (same order as Booking
             // confirmation), then calculate peak overlapping reservations.
             const [reservations]=await db.execute(`SELECT quantity,status,
-                DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
-                DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
-                FROM rental_booking_allocations
-                WHERE store_id=? AND branch_id=? AND equipment_id=?
-                  AND status IN ('reserved','checked_out')
-                ORDER BY start_date,id FOR UPDATE`,[scope.storeId,scope.branchId,current.id]);
+                                                          DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
+                                                          DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
+                                                   FROM rental_booking_allocations
+                                                   WHERE store_id=? AND branch_id=? AND equipment_id=?
+                                                     AND status IN ('reserved','checked_out')
+                                                   ORDER BY start_date,id FOR UPDATE`,[scope.storeId,scope.branchId,current.id]);
             const dates=reservations.flatMap(r=>[String(r.startDate),String(r.endDate)]).sort();
             const peak=dates.length?computePeak(reservations,dates[0],dates[dates.length-1],todayPh()):0;
             const activeHeld=Number(current.maintenance_units)+Number(current.missing_units);

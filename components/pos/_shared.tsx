@@ -170,11 +170,14 @@ export type Order = {
     id: string;
     controlNumber?: string | null;
     customer?: string;
+    customerType?: string | null;
     customerAddress?: string | null;
     customerContactNumber?: string | null;
     items: OrderItem[];
     total: number;
     date: string;
+    /** Full timestamp from orders.created_at, passed through by hooks/usePOS. */
+    createdAt?: string | null;
     branchId?: number | null;
     branchName?: string | null;
     paymentMode?: string | null;
@@ -203,9 +206,18 @@ export type ApiOrder = {
     orderId: string;
     controlNumber?: string | null;
     customerName?: string;
+    customerType?: string | null;
     customerAddress?: string | null;
     customerContactNumber?: string | null;
     item?: string;
+    /** Detailed line items from order_items; preferred over the legacy orders.item summary. */
+    orderItems?: Array<{
+        name?: string | null;
+        quantity?: number | string | null;
+        unitPrice?: number | string | null;
+        lineTotal?: number | string | null;
+        costPrice?: number | string | null;
+    }> | null;
     total?: number;
 
     paymentMode?: string | null;
@@ -502,30 +514,49 @@ export function StatCard({
     valueClassName?: string;
 }) {
     return (
-        <div className="flex h-[132px] flex-col rounded-[18px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-            <div className="flex items-start justify-between gap-3">
-                <p className="pt-1 text-sm font-semibold text-[#1A1220]">
-                    {label}
-                </p>
-
-                <span
-                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
-                >
-                    {icon}
-                </span>
+        <section className="flex min-h-[128px] items-center gap-4 rounded-[18px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
+            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`}>
+                {icon}
+            </span>
+            <div className="min-w-0">
+                <h2 className="text-[14px] font-medium text-[#2B174C]">{label}</h2>
+                <p className={`mt-0.5 break-words text-[26px] font-bold leading-tight ${valueClassName}`}>{value}</p>
+                <p className="mt-1 text-xs text-[#806A8C]">{helper}</p>
             </div>
-
-            <p
-                className={`mt-3 break-words text-[23px] font-bold leading-tight tracking-[-0.025em] ${valueClassName}`}
-            >
-                {value}
-            </p>
-
-            <p className="mt-1 text-[11px] leading-4 text-[#8A7D90]">
-                {helper}
-            </p>
-        </div>
+        </section>
     );
+}
+
+/** The POS timestamp is saved in orders.created_at. Display clock time only for Today's Orders. */
+export function formatPOSOrderTime(order: Pick<Order, "createdAt" | "date">): string {
+    const raw = String(order.createdAt || "").trim();
+    // Previous APIs can return ISO UTC times with Z or an explicit offset.
+    if (raw && /(?:Z|[+-]\d\d:?\d\d)$/.test(raw)) {
+        const timestamp = new Date(raw);
+        if (!Number.isNaN(timestamp.getTime())) {
+            return timestamp.toLocaleTimeString("en-PH", {
+                timeZone: "Asia/Manila", hour: "numeric", minute: "2-digit", hour12: true,
+            });
+        }
+    }
+    // Our current POS Lambda returns MySQL clock time as YYYY-MM-DD HH:mm:ss.
+    const local = raw.match(/[T\s](\d{1,2}):(\d{2})/);
+    if (local) {
+        const hour24 = Number(local[1]);
+        if (hour24 >= 0 && hour24 <= 23) {
+            return `${hour24 % 12 || 12}:${local[2]} ${hour24 >= 12 ? "PM" : "AM"}`;
+        }
+    }
+    // Support existing hook mappings that retain a complete datetime in date.
+    const fallback = String(order.date || "");
+    const clock = fallback.match(/[T\s](\d{1,2}):(\d{2})/);
+    if (clock) {
+        const hour24 = Number(clock[1]);
+        if (hour24 >= 0 && hour24 <= 23) {
+            return `${hour24 % 12 || 12}:${clock[2]} ${hour24 >= 12 ? "PM" : "AM"}`;
+        }
+    }
+    return "—"; // Never invent a time if hooks/usePOS did not pass createdAt.
 }
 
 function formatCurrentDateTime(value: Date) {
@@ -584,7 +615,7 @@ export function POSLayout({
                     <div className="flex items-center justify-between px-6 py-3">
                         <div className="flex flex-wrap items-center gap-3">
                             <h1 className="text-[25px] font-bold text-[#1A1220]">
-                                {role === "owner" ? "Sales History & Audit" : "POS Register"}
+                                {role === "owner" ? "Sales History & Audit" : role === "manager" ? "Branch Sales" : "POS Register"}
                             </h1>
 
                             <span className="rounded-lg bg-[#EFE8F8] px-3.5 py-1.5 text-sm font-medium text-[#4E2C66]">
@@ -620,12 +651,29 @@ export function POSLayout({
     );
 }
 
+/** Show a customer classification, never a personal name. Legacy POS records may have NULL customer_type. */
+export function formatPOSCustomerType(order: Pick<Order, "id" | "customer" | "customerType">): string {
+    const explicitType = String(order.customerType || "").trim().toUpperCase();
+    if (explicitType === "WALK_IN" || explicitType === "WALK-IN" || explicitType === "WALKIN") return "Walk-in";
+    if (explicitType === "BOOKING") return "Booking";
+    if (explicitType) return explicitType.replace(/_/g, " ");
+
+    // Older POS records were created before customer_type was populated.
+    const orderId = String(order.id || "").toUpperCase();
+    const customer = String(order.customer || "").trim().toLowerCase();
+    if (orderId.includes("-POS-") && ["walk-in", "walk-in customer"].includes(customer)) return "Walk-in";
+    return "Unclassified";
+}
+
 export function OrdersTable({
                                 title,
                                 subtitle,
                                 orders,
                                 emptyText = "No orders yet.",
                                 showBranch = false,
+                                showCustomerType = false,
+                                showPayment = false,
+                                showTimeOnly = false,
                                 getBranchName,
                                 containerClassName = "",
                                 scrollAreaClassName = "",
@@ -638,6 +686,9 @@ export function OrdersTable({
     orders: Order[];
     emptyText?: string;
     showBranch?: boolean;
+    showCustomerType?: boolean;
+    showPayment?: boolean;
+    showTimeOnly?: boolean;
     getBranchName?: (order: Order) => string;
     containerClassName?: string;
     scrollAreaClassName?: string;
@@ -666,7 +717,7 @@ export function OrdersTable({
             >
                 <table
                     className={`w-full table-fixed text-sm ${
-                        showBranch ? "min-w-[980px]" : ""
+                        showBranch || showCustomerType || showPayment ? "min-w-[960px]" : ""
                     }`}
                 >
                     {showBranch && (
@@ -691,16 +742,24 @@ export function OrdersTable({
                             </th>
                         )}
 
+                        {showCustomerType && (
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">Customer Type</th>
+                        )}
+
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Items
                         </th>
+
+                        {showPayment && (
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">Payment</th>
+                        )}
 
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Total
                         </th>
 
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
-                            Date
+                            {showTimeOnly ? "Time" : "Date"}
                         </th>
 
                         {renderActions && (
@@ -715,7 +774,7 @@ export function OrdersTable({
                     {orders.length === 0 ? (
                         <tr>
                             <td
-                                colSpan={(showBranch ? 5 : 4) + (renderActions ? 1 : 0)}
+                                colSpan={(showBranch ? 5 : 4) + (showCustomerType ? 1 : 0) + (showPayment ? 1 : 0) + (renderActions ? 1 : 0)}
                                 className="px-4 py-10 text-center text-sm text-[#9B8AAA]"
                             >
                                 {emptyText}
@@ -739,6 +798,12 @@ export function OrdersTable({
                                     </td>
                                 )}
 
+                                {showCustomerType && (
+                                    <td className="truncate px-4 py-3 text-sm text-[#5F4E75]">
+                                        {formatPOSCustomerType(order)}
+                                    </td>
+                                )}
+
                                 <td className="px-4 py-3 text-sm text-[#7A6A84]">
                                     {Array.isArray(order.items) &&
                                     order.items.length > 0 ? (
@@ -757,12 +822,18 @@ export function OrdersTable({
                                     )}
                                 </td>
 
+                                {showPayment && (
+                                    <td className="truncate px-4 py-3 text-sm text-[#5F4E75]">
+                                        {({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer", CREDIT: "Credit" } as Record<string, string>)[String(order.paymentMode || "CASH").toUpperCase()] || "—"}
+                                    </td>
+                                )}
+
                                 <td className="truncate px-4 py-3 text-sm font-bold text-[#1A1220]">
                                     {peso(order.total)}
                                 </td>
 
                                 <td className="truncate px-4 py-3 text-sm text-[#7A6A84]">
-                                    {order.date}
+                                    {showTimeOnly ? formatPOSOrderTime(order) : order.date}
                                 </td>
 
                                 {renderActions && (

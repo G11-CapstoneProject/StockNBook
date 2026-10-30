@@ -316,7 +316,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     <button type="button" onClick={()=>{setFromDate("");setToDate("");resetDates();}}
                             className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-4 font-semibold text-[#2B174C]">Clear</button>
                     {datesError && <p role="alert" className="w-full text-red-700">{datesError}</p>}
-                    <p className="w-full text-[#86778F]">Checking dates changes the Availability status and bookable quantity for that period. Fully Booked counts only confirmed reservations. Physical stock and equipment conditions are shown separately.</p>
+                    <p className="w-full text-[#86778F]">Checking dates changes the Availability status and available quantity for that period. Fully Booked counts only confirmed reservations. Physical stock and equipment conditions are shown separately.</p>
                 </div>}
                 <div className="grid gap-3 px-4 pb-4 xl:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
                     <label className="relative min-w-0">
@@ -336,10 +336,10 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     </button>
                 </div>
                 {appliedDates && <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-xs font-medium text-[#5330B6]">
-                    Booking availability for {appliedDates.from} to {appliedDates.to} · The "Bookable" column and Availability badges refer to these dates.
+                    Booking availability for {appliedDates.from} to {appliedDates.to} · The "Available" column and Availability badges refer to these dates.
                 </p>}
                 <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-[11px] text-[#786887]">
-                    {appliedDates ? "Availability accounts for confirmed reservations during the selected dates. Physical Rented Out and On Hold counts stay separate." : "Bookable Today subtracts confirmed reservations overlapping today. Total Units and physically rented-out counts are unchanged by confirmation; check future dates using Date Availability."}
+                    {appliedDates ? "Availability accounts for confirmed reservations during the selected dates. Physical Rented Out and On Hold counts stay separate." : "Available Today excludes confirmed reservations overlapping today. Total Units and physically rented-out counts are unchanged by confirmation; check future dates using Date Availability."}
                     {" "}Low Availability uses the equipment's configured alert level. Needs Review identifies missing units or stock discrepancies without hiding remaining availability.
                 </p>
                 <div className="max-h-[360px] w-full overflow-auto overscroll-contain border-t border-[#E9E1EE]" style={{ maxHeight: 360 }} role="region" aria-label="Branch rental equipment list" tabIndex={0}>
@@ -350,34 +350,27 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                             <th className="px-3 py-3 font-semibold">Rental Product</th>
                             <th className="px-3 py-3 font-semibold">Category</th>
                             <th className="px-2 py-3 text-center font-semibold">Total Units</th>
-                            <th className="px-2 py-3 text-center font-semibold">{appliedDates ? "Bookable" : "Bookable Today"}</th>
+                            <th className="px-2 py-3 text-center font-semibold">{appliedDates ? "Available" : "Available Today"}</th>
                             <th className="px-2 py-3 text-center font-semibold">Rented Out</th>
                             <th className="px-2 py-3 text-center font-semibold">On Hold</th>
                             <th className="px-2 py-3 text-center font-semibold">Availability</th>
-                            <th className="px-2 py-3 text-center font-semibold">Condition</th>
                             <th className="px-3 py-3 text-center font-semibold">Action</th>
                         </tr>
                         </thead>
                         <tbody>
-                        {rental.loading ? <tr><td colSpan={10} className="p-5"><PanelSkeleton/></td></tr> :
-                            !rental.connected ? <tr><td colSpan={10} className="px-5 py-12 text-center text-sm text-[#86778F]">Rental data is not connected. No equipment is displayed here.</td></tr> :
-                                filtered.length === 0 ? <tr><td colSpan={10} className="px-5 py-12 text-center text-sm text-[#86778F]">No matching rental equipment.</td></tr> :
+                        {rental.loading ? <tr><td colSpan={9} className="p-5"><PanelSkeleton/></td></tr> :
+                            !rental.connected ? <tr><td colSpan={9} className="px-5 py-12 text-center text-sm text-[#86778F]">Rental data is not connected. No equipment is displayed here.</td></tr> :
+                                filtered.length === 0 ? <tr><td colSpan={9} className="px-5 py-12 text-center text-sm text-[#86778F]">No matching rental equipment.</td></tr> :
                                     filtered.map(item => (
                                         <tr key={item.id} className="border-b border-[#EFE8F2] last:border-0">
                                             <td className="px-4 py-3 text-[#4E2C66]">{item.equipmentNumber || "—"}</td>
                                             <td className="px-3 py-3 font-semibold text-[#2B174C]">{item.name}</td>
                                             <td className="px-3 py-3 text-[#5F4E75]">{item.category}</td>
                                             <td className="px-2 py-3 text-center font-semibold">{item.totalUnits}</td>
-                                            <td className="px-2 py-3 text-center font-semibold" title={appliedDates ? "Remaining bookable units for the selected date range" : "Bookable today after confirmed reservations; physically ready units are tracked separately"}>{appliedDates ? (datesAvailability?.get(item.id) ?? "—") : item.bookableToday}</td>
+                                            <td className="px-2 py-3 text-center font-semibold" title={appliedDates ? "Available units for the selected date range" : "Available today after confirmed reservations; physically ready units are tracked separately"}>{appliedDates ? (datesAvailability?.get(item.id) ?? "—") : item.bookableToday}</td>
                                             <td className="px-2 py-3 text-center">{item.rentedOutUnits}</td>
                                             <td className="px-2 py-3 text-center">{item.maintenanceUnits}</td>
                                             <td className="px-2 py-3 text-center"><IssueBadge issue={equipmentDisplayStatus(item, true, appliedDates ? datesAvailability?.get(item.id) : item.bookableToday)} /></td>
-                                            <td className="px-2 py-3 text-center">
-                                                {equipmentConditionLabels(item).length ?
-                                                    <div className="flex flex-wrap items-center justify-center gap-1">
-                                                        {equipmentConditionLabels(item).map(label=><IssueBadge key={label} issue={label}/>)}
-                                                    </div> : <span className="text-[#9B8AAA]">—</span>}
-                                            </td>
                                             <td className="px-3 py-3 text-center">
                                                 <div className="flex flex-wrap items-center justify-center gap-1.5">
                                                     <button type="button" onClick={()=>setDialog({mode:"receive",item})} disabled={!canManage||!item.active}
@@ -878,7 +871,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                 {mode==="correct"&&item&&<section className="space-y-4 rounded-xl border border-[#E6DDF0] bg-[#FFFCF8] p-4">
                     <h3 className="text-sm font-bold text-[#21132E]">Physical Count Correction</h3>
                     <p className="text-xs text-[#806A8C]">Use only after a verified physical recount. This is NOT a supplier restock or rental return and creates no payment. Existing confirmed reservations, rented-out units and held equipment remain protected.</p>
-                    <p className="text-xs text-[#5A476A]">Current total units: <strong>{item.totalUnits}</strong> · Physically ready: <strong>{availableNow(item)}</strong> · Bookable today: <strong>{item.bookableToday}</strong></p>
+                    <p className="text-xs text-[#5A476A]">Current total units: <strong>{item.totalUnits}</strong> · Physically ready: <strong>{availableNow(item)}</strong> · Available today: <strong>{item.bookableToday}</strong></p>
                     <label className="block space-y-1"><span className={rentalLabelClass}>Corrected Total Units</span>
                         <input required type="number" min="0" max="2147483647" step="1" className={rentalFieldClass} value={quantity} onChange={e=>setQuantity(e.target.value)}/>
                     </label>

@@ -4483,8 +4483,8 @@ exports.handler = async (event) => {
                 `SELECT b.id AS batchId,b.batch_code AS batchCode,b.remaining_quantity AS remainingQuantity,
                         DATE_FORMAT(b.expiration_date,'%Y-%m-%d') AS expirationDate,b.status
                  FROM inventory_batches b
-                 JOIN branch_inventory bi ON bi.id=b.branch_inventory_id
-                 JOIN products p ON p.id=bi.product_id
+                          JOIN branch_inventory bi ON bi.id=b.branch_inventory_id
+                          JOIN products p ON p.id=bi.product_id
                  WHERE p.id=? AND p.store_id=? AND p.branch_id=? AND p.deleted_at IS NULL
                    AND bi.store_id=? AND bi.branch_id=? AND bi.status='active'
                    AND bi.variant_id <=> ?
@@ -4495,6 +4495,32 @@ exports.handler = async (event) => {
                  ORDER BY b.expiration_date ASC,b.id ASC`,
                 [productId,storeId,activeBranchId,storeId,activeBranchId,variantId,storeId,activeBranchId]);
             return jsonResponse(200,headers,{success:true,batches:rows});
+        }
+        // Read the already-audited expired-stock removals for the Manager's
+        // Recent Stock Activity. Never recalculate or change stock here.
+        if (action === "get_recent_expired_disposals") {
+            if (tokenRole !== "manager" || !activeBranchId) {
+                return unauthorized(headers, "Manager Inventory permission required.");
+            }
+            const manilaToday = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+            const dayStartEpoch = Math.floor(Date.parse(`${manilaToday}T00:00:00Z`) / 1000) - 8 * 3600;
+            const [rows] = await connection.execute(
+                `SELECT m.id, m.created_at AS recordedAt, p.name AS productName,
+                        pv.variant_values AS variantValues, m.quantity_delta AS quantity
+                 FROM inventory_movements m
+                 JOIN branch_inventory bi ON bi.id = m.branch_inventory_id
+                       AND bi.store_id = m.store_id AND bi.branch_id = m.branch_id
+                 JOIN products p ON p.id = bi.product_id AND p.store_id = bi.store_id
+                       AND p.branch_id = bi.branch_id
+                 LEFT JOIN product_variants pv ON pv.id = bi.variant_id AND pv.product_id = p.id
+                 WHERE m.store_id = ? AND m.branch_id = ?
+                   AND m.movement_type = 'EXPIRED_DISPOSAL'
+                   AND m.created_at >= FROM_UNIXTIME(?)
+                   AND m.created_at < FROM_UNIXTIME(?)
+                 ORDER BY m.created_at DESC, m.id DESC LIMIT 100`,
+                [storeId, activeBranchId, dayStartEpoch, dayStartEpoch + 86400]
+            );
+            return jsonResponse(200, headers, { success: true, disposals: rows });
         }
         if (action === "dispose_expired_batch") {
             if (tokenRole !== "manager" || !activeBranchId) return unauthorized(headers,"Manager authorization is required to record disposal.");
@@ -4539,7 +4565,7 @@ exports.handler = async (event) => {
             const inventory=inventories[0];
             const [existing]=await connection.execute(
                 `SELECT id FROM inventory_movements WHERE store_id=? AND branch_id=?
-                 AND branch_inventory_id=? AND reference_type='EXPIRED_DISPOSAL' AND reference_id=? LIMIT 1`,
+                                                      AND branch_inventory_id=? AND reference_type='EXPIRED_DISPOSAL' AND reference_id=? LIMIT 1`,
                 [storeId,activeBranchId,inventory.id,requestKey]);
             if(existing.length){await connection.commit();return jsonResponse(200,headers,{success:true,alreadyProcessed:true});}
             const [allBatches]=await connection.execute(

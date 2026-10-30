@@ -277,6 +277,14 @@ type StockPurchaseReferencesResponse = {
     error?: string;
 };
 
+type ExpiredDisposalActivityRecord = {
+    id: number;
+    recordedAt?: string | null;
+    productName: string;
+    variantValues?: Record<string, string> | string | null;
+    quantity: number;
+};
+
 type RecentStockMovement = {
     id: string;
     productId: string;
@@ -284,8 +292,8 @@ type RecentStockMovement = {
     quantity: number;
     date: Date | null;
     hasRecordedTime?: boolean;
-    movement: "Stock In" | "Stock Out";
-    source: "Added" | "Restock" | "POS Sale";
+    movement: "Stock In" | "Stock Out" | "Disposed";
+    source: "Added" | "Restock" | "POS Sale" | "Expired Disposal";
     referenceNumber?: string;
 };
 
@@ -312,6 +320,7 @@ type ActionCenterRow = {
         | "Restock Now"
         | "Restock"
         | "Review / Remove"
+        | "Dispose Expired"
         | "Prioritize Sale"
         | "Do Not Restock";
 };
@@ -876,6 +885,38 @@ function getMatchingPurchaseReference(
     return distinct.length === 1 ? distinct[0] : "";
 }
 
+// The disposal is already recorded by the Products Lambda in inventory_movements.
+// Present that audited record; never infer disposal from current quantities.
+function buildExpiredDisposalMovements(records: ExpiredDisposalActivityRecord[]): RecentStockMovement[] {
+    return records.map((record) => {
+        let variantValues: Record<string, unknown> = {};
+        if (record.variantValues && typeof record.variantValues === "object") {
+            variantValues = record.variantValues;
+        } else if (typeof record.variantValues === "string") {
+            try {
+                const parsed: unknown = JSON.parse(record.variantValues);
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                    variantValues = parsed as Record<string, unknown>;
+                }
+            } catch { /* Preserve the base product name when variant metadata is unavailable. */ }
+        }
+        const variantName = Object.values(variantValues)
+            .map((value) => String(value ?? "").trim())
+            .filter(Boolean).join(", ");
+        const quantity = Math.abs(Number(record.quantity));
+        return {
+            id: `expired-disposal-${record.id}`,
+            productId: "",
+            productName: variantName ? `${record.productName} - ${variantName}` : record.productName,
+            quantity,
+            date: parseStockActivityDateTime(record.recordedAt),
+            movement: "Disposed" as const,
+            source: "Expired Disposal" as const,
+            referenceNumber: `DISP-${String(record.id).padStart(6, "0")}`,
+        };
+    }).filter((movement) => movement.quantity > 0 && Boolean(movement.productName));
+}
+
 function buildRecentStockMovements({
                                        salesMovements,
                                        restockRecords,
@@ -884,6 +925,7 @@ function buildRecentStockMovements({
                                        branchId,
                                        initialStockByProduct,
                                        purchaseReferences,
+                                       disposalRecords,
                                    }: {
     salesMovements: SalesMovement[];
     restockRecords: RestockHistoryRecord[];
@@ -892,6 +934,7 @@ function buildRecentStockMovements({
     branchId?: number;
     initialStockByProduct?: Record<number, number>;
     purchaseReferences?: StockPurchaseReference[];
+    disposalRecords: ExpiredDisposalActivityRecord[];
 }) {
     const restockMovements = buildRestockMovements(
         restockRecords,
@@ -926,6 +969,7 @@ function buildRecentStockMovements({
         ...addedMovements,
         ...restockMovements,
         ...stockOutMovements,
+        ...buildExpiredDisposalMovements(disposalRecords),
     ]
         .map((movement) => movement.movement === "Stock In"
             ? { ...movement, referenceNumber: getMatchingPurchaseReference(movement, purchaseReferences || []) }
@@ -2124,6 +2168,7 @@ export default function ManagerInventory() {
         RestockHistoryRecord[]
     >([]);
     const [stockPurchaseReferences, setStockPurchaseReferences] = React.useState<StockPurchaseReference[]>([]);
+    const [expiredDisposalActivity, setExpiredDisposalActivity] = React.useState<ExpiredDisposalActivityRecord[]>([]);
     const [inventoryEmployeeActions, setInventoryEmployeeActions] =
         React.useState<InventoryEmployeeAction[]>([]);
     const [stockActivityLoading, setStockActivityLoading] =
@@ -2407,6 +2452,37 @@ export default function ManagerInventory() {
         };
     }, [managerBranchId, stockActivityRefreshKey]);
 
+    // Refresh disposal history through the same event used by the receiving
+    // dialog. Branch scoping and authorization are enforced by the Lambda.
+    React.useEffect(() => {
+        let cancelled = false;
+        const loadExpiredDisposals = async () => {
+            const token = sessionStorage.getItem("token");
+            if (!token || !Number.isSafeInteger(managerBranchId) || managerBranchId <= 0) {
+                if (!cancelled) setExpiredDisposalActivity([]);
+                return;
+            }
+            try {
+                const response = await fetch("/api/products", {
+                    method: "POST",
+                    cache: "no-store",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ action: "get_recent_expired_disposals", branch_id: managerBranchId }),
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok || result.success === false || !Array.isArray(result.disposals)) {
+                    throw new Error(result.error || "Unable to load expired-stock disposal activity.");
+                }
+                if (!cancelled) setExpiredDisposalActivity(result.disposals);
+            } catch (error) {
+                console.warn("Manager expired-stock disposal activity loading failed:", error);
+                // Keep previously loaded rows when a background refresh fails.
+            }
+        };
+        void loadExpiredDisposals();
+        return () => { cancelled = true; };
+    }, [managerBranchId, stockActivityRefreshKey]);
+
     React.useEffect(() => {
         let cancelled = false;
 
@@ -2664,12 +2740,14 @@ export default function ManagerInventory() {
             branchId: managerBranchId,
             initialStockByProduct,
             purchaseReferences: stockPurchaseReferences,
+            disposalRecords: expiredDisposalActivity,
         }).filter((movement) =>
             Boolean(movement.date &&
                 movement.date.toLocaleDateString("en-PH", { timeZone: "Asia/Manila" }) === todayKey)
         );
     }, [
         inventoryEmployeeActions,
+        expiredDisposalActivity,
         managerBranchId,
         managerProducts,
         initialStockByProduct,
@@ -4033,10 +4111,10 @@ function RecentStockActivity({
                 </span>
                 <div>
                     <h2 className="text-[15px] font-bold text-[#21132E]">
-                        Recent Stock Activity
+                        Today&apos;s Consumable Stock Activity
                     </h2>
                     <p className="mt-0.5 text-[11px] text-[#86778F]">
-                        Today&apos;s stock movements from additions, restocks, and POS sales.
+                        Consumable additions, restocks, POS sales, and disposals recorded today.
                     </p>
                 </div>
             </div>

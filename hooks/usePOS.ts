@@ -9,8 +9,6 @@ import {
     type CartMap,
     type Category,
     type CategoryApiResponse,
-    type CreditCheckResult,
-    type CreditCollection,
     type Order,
     type OrderItem,
     type PosOrdersApiResponse,
@@ -97,31 +95,6 @@ function formatISODateLong(value: string) {
         day: "numeric",
         year: "numeric",
     });
-}
-
-function addDaysToISODate(value: string, days: number) {
-    const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!match) return "";
-
-    const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
-    date.setUTCDate(date.getUTCDate() + days);
-    return date.toISOString().slice(0, 10);
-}
-
-function isRealizedPOSOrder(order: Order) {
-    const status = String(order.status || "COMPLETED").trim().toUpperCase();
-    return ![
-        "PENDING",
-        "PENDING PAYMENT",
-        "UNPAID",
-        "CANCELLED",
-        "CANCELED",
-        "REFUNDED",
-        "VOID",
-        "VOIDED",
-        "DRAFT",
-        "FAILED",
-    ].includes(status);
 }
 
 function isExpiredPosDate(value?: string | null) {
@@ -216,11 +189,10 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
         id: o.orderId,
         controlNumber: o.controlNumber ?? null,
         customer: o.customerName,
+        customerType: o.customerType ?? null,
         customerAddress: o.customerAddress ?? null,
         customerContactNumber: o.customerContactNumber ?? null,
         paymentMode: o.paymentMode ?? null,
-        creditTerm: o.creditTerm ?? null,
-        creditDueDate: o.creditDueDate ?? null,
         taxType: o.taxType ?? null,
         vatableSales: Number(o.vatableSales ?? 0),
         vatAmount: Number(o.vatAmount ?? 0),
@@ -234,7 +206,6 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
                 Number(o.totalPaid ?? o.customerPayment ?? 0)
             )
         ),
-        collectionStatus: o.collectionStatus ?? null,
         changeDue: Number(o.changeDue ?? 0),
         cashierId:
             o.cashierId == null || o.cashierId === ""
@@ -242,7 +213,6 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
                 : Number(o.cashierId),
         cashierName: o.cashierName ?? null,
         cashierRole: o.cashierRole ?? null,
-        status: o.status ?? null,
         // The backend's get_orders action joins order_items and provides the
         // actual historical unit price and line total for each product.
         // The legacy orders.item summary only contains names/quantities.
@@ -325,9 +295,8 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
 
 export function usePOS() {
     const [orders, setOrders] = useState<Order[]>(() =>
-        readRole() === "owner" ? [] : readOrders()
+        readRole() === "staff" ? readOrders() : []
     );
-    const [pendingCreditOrders, setPendingCreditOrders] = useState<Order[]>([]);
     const [cart, setCart] = useState<CartMap>({});
     const [products, setProducts] = useState<Product[]>(() =>
         readRole() === "owner" ? [] : readProducts()
@@ -351,17 +320,10 @@ export function usePOS() {
     const [refreshing, setRefreshing] = useState(false);
     const hasLoadedRef = useRef(false);
 
-    /*
-     * Owner POS starts on today's Manila date instead of loading the entire
-     * order history. This keeps the first Owner render fast and makes the
-     * date inputs immediately show an actual date instead of dd/mm/yyyy.
-     */
-    const [ownerOrderStartDate, setOwnerOrderStartDate] = useState<string>(() =>
-        getManilaDateInputValue()
-    );
-    const [ownerOrderEndDate, setOwnerOrderEndDate] = useState<string>(() =>
-        getManilaDateInputValue()
-    );
+    // Owner history starts without date restrictions. The server paginates
+    // all branches rather than downloading every sale into the browser.
+    const [ownerOrderStartDate, setOwnerOrderStartDate] = useState<string>("");
+    const [ownerOrderEndDate, setOwnerOrderEndDate] = useState<string>("");
     const [ownerOrderSearch, setOwnerOrderSearchState] = useState("");
     const [ownerOrderPage, setOwnerOrderPage] = useState(1);
     const ownerOrderPageSize = 50;
@@ -373,6 +335,32 @@ export function usePOS() {
         cost: 0,
         profit: 0,
     });
+
+    // Manager sees the complete history of their assigned branch, in pages.
+    // Search and date filtering are performed by MySQL, not just on the current page.
+    const [managerOrderStartDate, setManagerOrderStartDate] = useState("");
+    const [managerOrderEndDate, setManagerOrderEndDate] = useState("");
+    const [managerOrderSearch, setManagerOrderSearchState] = useState("");
+    const [managerOrderPage, setManagerOrderPage] = useState(1);
+    const managerOrderPageSize = 50;
+    const [managerOrderTotal, setManagerOrderTotal] = useState(0);
+    const [managerOrderTotalPages, setManagerOrderTotalPages] = useState(1);
+    const [managerOrderSummary, setManagerOrderSummary] = useState({
+        transactions: 0,
+        sales: 0,
+        vat: 0,
+    });
+
+    const setManagerOrderDateRange = useCallback((startDate: string, endDate: string) => {
+        setManagerOrderStartDate(startDate);
+        setManagerOrderEndDate(endDate);
+        setManagerOrderPage(1);
+    }, []);
+
+    const setManagerOrderSearch = useCallback((value: string) => {
+        setManagerOrderSearchState(value);
+        setManagerOrderPage(1);
+    }, []);
 
     const setOwnerOrderDateRange = useCallback(
         (startDate: string, endDate: string) => {
@@ -399,13 +387,11 @@ export function usePOS() {
     const [customerName, setCustomerName] = useState<string>("Walk-in");
     const [customerAddress, setCustomerAddress] = useState<string>("N/A");
     const [customerContactNumber, setCustomerContactNumber] = useState<string>("");
-    const [paymentMode, setPaymentMode] = useState<"CASH" | "CREDIT">("CASH");
-    const [creditTerm, setCreditTerm] = useState<string>("N/A");
+    const [paymentMode, setPaymentMode] = useState<"CASH" | "GCASH" | "BANK_TRANSFER">("CASH");
     const [taxType, setTaxType] = useState<"VAT" | "NON_VAT">("VAT");
 
     const isOwner = role === "owner";
     const isBranchUser = role === "manager" || role === "staff";
-    const canUseCreditSales = role === "manager";
     const activeBranchId = assignedBranchId;
     const activeBranchName = assignedBranchName;
 
@@ -475,10 +461,8 @@ export function usePOS() {
                     body: JSON.stringify({ action: "get_categories" }),
                 });
 
-            /*
-             * Branch POS only needs today's orders for cards/table. Historical
-             * unpaid credit is loaded separately for Managers below.
-             */
+            // Staff sees today's sales. Manager and Owner see all historical
+            // transactions by default and may filter dates on the server.
             const ordersRequest = fetch("/api/pos", {
                 method: "POST",
                 headers: {
@@ -487,76 +471,45 @@ export function usePOS() {
                 },
                 body: JSON.stringify({
                     action: "get_orders",
-                    ...(
-                        isCurrentOwner && selectedSalesBranchId
-                            ? {
-                                branch_id: Number(
-                                    selectedSalesBranchId
-                                ),
-                            }
-                            : {}
-                    ),
-                    ...(
-                        isCurrentOwner && ownerOrderStartDate
-                            ? { date_from: ownerOrderStartDate }
-                            : {}
-                    ),
-                    ...(
-                        isCurrentOwner && ownerOrderEndDate
-                            ? { date_to: ownerOrderEndDate }
-                            : {}
-                    ),
-                    ...(
-                        isCurrentOwner
-                            ? {
-                                paginate: true,
-                                page: ownerOrderPage,
-                                page_size: ownerOrderPageSize,
-                                ...(ownerOrderSearch.trim()
-                                    ? { search: ownerOrderSearch.trim() }
-                                    : {}),
-                            }
-                            : {}
-                    ),
-                    ...(
-                        isCurrentBranchUser
-                            ? {
-                                date_from: todayISO,
-                                date_to: todayISO,
-                            }
-                            : {}
-                    ),
+                    ...(isCurrentOwner && selectedSalesBranchId
+                        ? { branch_id: Number(selectedSalesBranchId) }
+                        : {}),
+                    ...(isCurrentOwner && ownerOrderStartDate
+                        ? { date_from: ownerOrderStartDate }
+                        : {}),
+                    ...(isCurrentOwner && ownerOrderEndDate
+                        ? { date_to: ownerOrderEndDate }
+                        : {}),
+                    ...(isCurrentManager && managerOrderStartDate
+                        ? { date_from: managerOrderStartDate }
+                        : {}),
+                    ...(isCurrentManager && managerOrderEndDate
+                        ? { date_to: managerOrderEndDate }
+                        : {}),
+                    ...((isCurrentOwner || isCurrentManager)
+                        ? {
+                            paginate: true,
+                            page: isCurrentOwner ? ownerOrderPage : managerOrderPage,
+                            page_size: isCurrentOwner ? ownerOrderPageSize : managerOrderPageSize,
+                            ...((isCurrentOwner ? ownerOrderSearch : managerOrderSearch).trim()
+                                ? { search: (isCurrentOwner ? ownerOrderSearch : managerOrderSearch).trim() }
+                                : {}),
+                        }
+                        : {}),
+                    ...(currentRole === "staff"
+                        ? { date_from: todayISO, date_to: todayISO }
+                        : {}),
                 }),
             });
-
-            /*
-             * Pending Collections must not depend on loading the branch's entire
-             * POS history. Managers receive only open credit transactions.
-             */
-            const pendingCollectionsRequest = isCurrentManager
-                ? fetch("/api/pos", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_orders",
-                        credit_open_only: true,
-                    }),
-                })
-                : Promise.resolve<Response | null>(null);
 
             const [
                 productsRes,
                 categoriesRes,
                 ordersRes,
-                pendingCollectionsRes,
             ] = await Promise.all([
                 productsRequest,
                 categoriesRequest,
                 ordersRequest,
-                pendingCollectionsRequest,
             ]);
 
             const productsData = productsRes
@@ -566,10 +519,6 @@ export function usePOS() {
                 ? await safeJson<CategoryApiResponse>(categoriesRes)
                 : null;
             const ordersData = await safeJson<PosOrdersApiResponse>(ordersRes);
-            const pendingCollectionsData = pendingCollectionsRes
-                ? await safeJson<PosOrdersApiResponse>(pendingCollectionsRes)
-                : null;
-
             if (ordersRes.ok) {
                 const backendTaxType = String(ordersData.taxType || "").toUpperCase();
                 setTaxType(backendTaxType === "NON_VAT" ? "NON_VAT" : "VAT");
@@ -611,6 +560,17 @@ export function usePOS() {
                 const mapped = ordersData.orders.map(mapApiOrderToOrder);
                 setOrders(mapped);
 
+                if (isCurrentManager) {
+                    const pagination = ordersData.pagination;
+                    setManagerOrderTotal(Number(pagination?.total ?? mapped.length));
+                    setManagerOrderTotalPages(Math.max(1, Number(pagination?.totalPages ?? 1)));
+                    setManagerOrderSummary({
+                        transactions: Number(ordersData.summary?.transactions ?? 0),
+                        sales: Number(ordersData.summary?.sales ?? 0),
+                        vat: Number(ordersData.summary?.vat ?? 0),
+                    });
+                }
+
                 if (isCurrentOwner) {
                     const pagination = ordersData.pagination;
                     setOwnerOrderTotal(Number(pagination?.total ?? mapped.length));
@@ -628,11 +588,9 @@ export function usePOS() {
                     }
                 }
 
-                /*
-                 * Manager/Staff now cache only today's branch transactions.
-                 * Owner remains API-only to avoid sessionStorage growth.
-                 */
-                if (isCurrentOwner) {
+                // Only Staff caches today's small dataset. Owner and Manager
+                // both use server-paginated history, so do not cache a partial page.
+                if (isCurrentOwner || isCurrentManager) {
                     try {
                         sessionStorage.removeItem("stocknbook_orders");
                     } catch {
@@ -643,18 +601,6 @@ export function usePOS() {
                 }
             }
 
-            if (
-                isCurrentManager &&
-                pendingCollectionsRes?.ok &&
-                pendingCollectionsData &&
-                Array.isArray(pendingCollectionsData.orders)
-            ) {
-                setPendingCreditOrders(
-                    pendingCollectionsData.orders.map(mapApiOrderToOrder)
-                );
-            } else {
-                setPendingCreditOrders([]);
-            }
         } catch (err) {
             console.warn("POS loadData failed:", err);
         }
@@ -665,6 +611,10 @@ export function usePOS() {
         ownerOrderEndDate,
         ownerOrderSearch,
         ownerOrderPage,
+        managerOrderStartDate,
+        managerOrderEndDate,
+        managerOrderSearch,
+        managerOrderPage,
     ]);
 
     const loadBranches = useCallback(async () => {
@@ -758,7 +708,7 @@ export function usePOS() {
             setManualCategories(readCategories());
 
             if (currentRole === "manager") {
-                // Refresh today's orders plus the dedicated Pending Collections feed.
+                // Refresh today's branch POS orders from the API.
                 void loadData();
                 return;
             }
@@ -830,7 +780,6 @@ export function usePOS() {
         setCustomerAddress("N/A");
         setCustomerContactNumber("");
         setPaymentMode("CASH");
-        setCreditTerm("N/A");
     }
 
     function handleQty(key: string, change: number) {
@@ -961,7 +910,6 @@ export function usePOS() {
     }
 
     const paymentNumber = useMemo(() => {
-        if (paymentMode === "CREDIT" && payment.trim() === "") return 0;
         const val = Number(payment);
         return Number.isFinite(val) ? val : NaN;
     }, [payment, paymentMode]);
@@ -981,36 +929,11 @@ export function usePOS() {
         return Math.round((vatableSales * 0.12) * 100) / 100;
     }, [taxType, vatableSales]);
 
-    const creditDueDate = useMemo(() => {
-        if (paymentMode !== "CREDIT") return "";
-        const days = String(creditTerm || "").startsWith("30") ? 30 : 15;
-        const dueISO = addDaysToISODate(getManilaDateInputValue(), days);
-        return dueISO ? formatISODateLong(dueISO) : "";
-    }, [paymentMode, creditTerm]);
-
     const canPlaceOrder = useMemo(() => {
-        if (cartItems.length === 0) return false;
-        if (!customerName.trim()) return false;
-        if (!Number.isFinite(paymentNumber)) return false;
-
-        if (paymentMode === "CASH") {
-            return paymentNumber >= total;
-        }
-
-        if (!canUseCreditSales) return false;
-        if (!customerContactNumber.trim()) return false;
-        if (!creditTerm || creditTerm === "N/A") return false;
-        return paymentNumber >= 0 && paymentNumber <= total;
-    }, [
-        cartItems.length,
-        customerName,
-        customerContactNumber,
-        paymentNumber,
-        paymentMode,
-        creditTerm,
-        total,
-        canUseCreditSales,
-    ]);
+        if (cartItems.length === 0 || !Number.isFinite(paymentNumber) || total <= 0) return false;
+        const paid=Math.round(paymentNumber*100), due=Math.round(total*100);
+        return paymentMode==='CASH' ? paid>=due : paid===due;
+    },[cartItems.length,paymentNumber,total,paymentMode]);
 
     async function handlePlaceOrder(): Promise<Order | null> {
         if (!validateStockOrAlert()) return null;
@@ -1022,45 +945,14 @@ export function usePOS() {
 
         const existingOrders = orders;
 
-        const normalizedCustomerName = customerName.trim();
-        const normalizedCustomerAddress =
-            paymentMode === "CREDIT" && customerAddress.trim()
-                ? customerAddress.trim()
-                : "N/A";
-
-        if (!normalizedCustomerName) {
-            alert("Customer name is required.");
-            return null;
+        if (!['CASH','GCASH','BANK_TRANSFER'].includes(paymentMode)) {
+            alert('Unsupported payment method.'); return null;
         }
-
-        if (paymentMode === "CREDIT" && !canUseCreditSales) {
-            alert("Only an assigned Manager can create credit sales.");
-            return null;
+        if (!Number.isFinite(paymentNumber) || paymentNumber < total) {
+            alert('Amount Received must cover the Grand Total.'); return null;
         }
-
-        if (paymentMode === "CREDIT" && !customerContactNumber.trim()) {
-            alert("Customer contact number is required for credit sales.");
-            return null;
-        }
-
-        if (paymentMode === "CREDIT" && (!creditTerm || creditTerm === "N/A")) {
-            alert("Please select a credit term for credit sales.");
-            return null;
-        }
-
-        if (!Number.isFinite(paymentNumber)) {
-            alert("Please enter a valid payment amount.");
-            return null;
-        }
-
-        if (paymentMode === "CASH" && paymentNumber < total) {
-            alert("Payment must be equal or greater than the total for a cash sale.");
-            return null;
-        }
-
-        if (paymentMode === "CREDIT" && paymentNumber > total) {
-            alert("Customer payment cannot exceed the order total for a credit sale.");
-            return null;
+        if (paymentMode !== 'CASH' && Math.round(paymentNumber*100)!==Math.round(total*100)) {
+            alert('GCash and Bank Transfer require the exact Grand Total.'); return null;
         }
 
         const items: OrderItem[] = cartItems.map((i) => ({
@@ -1076,43 +968,13 @@ export function usePOS() {
         const dbDate = `${year}-${month}-${day}`;
         const todayKey = formatISODateLong(dbDate);
 
-        const finalCustomerName =
-            paymentMode === "CREDIT" ? normalizedCustomerName : "Walk-in";
-        const orderId = createPosTransactionId(existingOrders, now);
-
-        const newOrder: Order = {
-            id: orderId,
-            customer: finalCustomerName,
-            customerAddress: normalizedCustomerAddress,
-            customerContactNumber:
-                paymentMode === "CREDIT" ? customerContactNumber.trim() : null,
-            items,
-            total,
-            date: todayKey,
-            paymentMode,
-            creditTerm: paymentMode === "CREDIT" ? creditTerm : "N/A",
-            taxType,
-            vatableSales,
-            vatAmount,
-            customerPayment: paymentNumber,
-            changeDue: paymentMode === "CASH" ? change : 0,
-            creditDueDate: paymentMode === "CREDIT" ? creditDueDate : null,
-            totalPaid: paymentNumber,
-            balance: paymentMode === "CREDIT" ? Math.max(0, total - paymentNumber) : 0,
-            collectionStatus:
-                paymentMode === "CREDIT"
-                    ? paymentNumber >= total
-                        ? "PAID"
-                        : paymentNumber > 0
-                            ? "PARTIAL"
-                            : "PENDING"
-                    : "PAID",
-            branchId: activeBranchId
-                ? Number(activeBranchId)
-                : null,
-            branchName:
-                activeBranchName || null,
-        };
+        const orderId=createPosTransactionId(existingOrders,now);
+        const newOrder: Order={id:orderId,customer:'Walk-in',items,total,date:todayKey,
+            createdAt:now.toISOString(),paymentMode,taxType,vatableSales,vatAmount,
+            customerPayment:paymentNumber,changeDue:paymentMode==='CASH'?change:0,
+            totalPaid:paymentNumber,balance:0,
+            branchId:activeBranchId?Number(activeBranchId):null,
+            branchName:activeBranchName||null};
 
         const token = sessionStorage.getItem("token");
 
@@ -1136,12 +998,7 @@ export function usePOS() {
                 body: JSON.stringify({
                     action: "create_order",
                     order_id: newOrder.id,
-                    customer_name: newOrder.customer,
-                    customer_address: newOrder.customerAddress,
-                    customer_contact_number:
-                        paymentMode === "CREDIT" ? customerContactNumber.trim() : "",
                     payment_mode: paymentMode,
-                    credit_term: paymentMode === "CREDIT" ? creditTerm : "N/A",
                     tax_type: taxType,
                     customer_payment: Number(paymentNumber.toFixed(2)),
                     change_due: Number(change.toFixed(2)),
@@ -1164,8 +1021,8 @@ export function usePOS() {
                 error?: string;
                 order?: {
                     orderId?: string;
-                    controlNumber?: string | null;
                     createdAt?: string | null;
+                    controlNumber?: string | null;
                     branchId?: number | string | null;
                     branchName?: string | null;
                     customerName?: string;
@@ -1173,15 +1030,12 @@ export function usePOS() {
                     total?: number | string | null;
                     customerContactNumber?: string | null;
                     paymentMode?: string | null;
-                    creditTerm?: string | null;
-                    creditDueDate?: string | null;
                     taxType?: string | null;
                     vatableSales?: number | string | null;
                     vatAmount?: number | string | null;
                     customerPayment?: number | string | null;
                     totalPaid?: number | string | null;
                     balance?: number | string | null;
-                    collectionStatus?: string | null;
                     changeDue?: number | string | null;
                     cashierId?: number | string | null;
                     cashierName?: string | null;
@@ -1221,7 +1075,7 @@ export function usePOS() {
                 controlNumber: orderData?.order?.controlNumber ?? null,
                 createdAt: orderData?.order?.createdAt
                     ? String(orderData.order.createdAt)
-                    : null,
+                    : newOrder.createdAt,
                 customer: orderData?.order?.customerName || newOrder.customer,
                 customerAddress:
                     orderData?.order?.customerAddress ?? newOrder.customerAddress,
@@ -1231,9 +1085,6 @@ export function usePOS() {
                     newOrder.customerContactNumber ??
                     null,
                 paymentMode: orderData?.order?.paymentMode || newOrder.paymentMode,
-                creditTerm: orderData?.order?.creditTerm || newOrder.creditTerm,
-                creditDueDate:
-                    orderData?.order?.creditDueDate ?? newOrder.creditDueDate ?? null,
                 taxType: orderData?.order?.taxType || newOrder.taxType,
                 vatableSales: Number(
                     orderData?.order?.vatableSales ?? newOrder.vatableSales ?? 0
@@ -1250,10 +1101,6 @@ export function usePOS() {
                 balance: Number(
                     orderData?.order?.balance ?? newOrder.balance ?? 0
                 ),
-                collectionStatus:
-                    orderData?.order?.collectionStatus ??
-                    newOrder.collectionStatus ??
-                    null,
                 changeDue: Number(
                     orderData?.order?.changeDue ?? newOrder.changeDue ?? 0
                 ),
@@ -1345,182 +1192,6 @@ export function usePOS() {
         }
     }
 
-    const checkCustomerCredit = useCallback(async (
-        contactNumber: string
-    ): Promise<CreditCheckResult> => {
-        const unverified: CreditCheckResult = {
-            status: "UNVERIFIED",
-            restricted: false,
-            matchedOrders: 0,
-            openOrders: 0,
-            outstandingBalance: 0,
-            overdueBalance: 0,
-            oldestDueDate: null,
-        };
-
-        const token = sessionStorage.getItem("token");
-        if (!token || role !== "manager") return unverified;
-
-        try {
-            const res = await fetch("/api/pos", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    action: "check_customer_credit",
-                    customer_contact_number: contactNumber,
-                }),
-            });
-
-            const data = await safeJson<CreditCheckResult & { error?: string }>(res);
-
-            if (!res.ok) {
-                console.warn("Credit check failed:", data.error || res.statusText);
-                return unverified;
-            }
-
-            return {
-                status: data.status || "UNVERIFIED",
-                restricted: Boolean(data.restricted),
-                matchedOrders: Number(data.matchedOrders || 0),
-                openOrders: Number(data.openOrders || 0),
-                outstandingBalance: Number(data.outstandingBalance || 0),
-                overdueBalance: Number(data.overdueBalance || 0),
-                oldestDueDate: data.oldestDueDate || null,
-            };
-        } catch (error) {
-            console.warn("Customer credit check failed:", error);
-            return unverified;
-        }
-    }, [role]);
-
-    async function recordCreditPayment(
-        orderId: string,
-        amount: number,
-        paymentMethod: string,
-        referenceNumber = ""
-    ): Promise<boolean> {
-        const token = sessionStorage.getItem("token");
-        if (!token) {
-            alert("No token found. Please log in again.");
-            return false;
-        }
-
-        try {
-            const res = await fetch("/api/pos", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    action: "record_collection",
-                    order_id: orderId,
-                    amount,
-                    payment_method: paymentMethod,
-                    reference_number: referenceNumber,
-                }),
-            });
-
-            const data = await safeJson<{ success?: boolean; error?: string }>(res);
-
-            if (!res.ok || !data.success) {
-                alert(data.error || "Failed to record credit payment.");
-                return false;
-            }
-
-            await loadData();
-            return true;
-        } catch (error) {
-            console.error(error);
-            alert("Failed to record credit payment.");
-            return false;
-        }
-    }
-
-    const getCollectionHistory = useCallback(async (orderId: string): Promise<CreditCollection[]> => {
-        const token = sessionStorage.getItem("token");
-        if (!token) return [];
-
-        try {
-            const res = await fetch("/api/pos", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    action: "get_collection_history",
-                    order_id: orderId,
-                }),
-            });
-
-            const data = await safeJson<{
-                collections?: CreditCollection[];
-                error?: string;
-            }>(res);
-
-            if (!res.ok || !Array.isArray(data.collections)) {
-                return [];
-            }
-
-            return data.collections.map((entry) => ({
-                ...entry,
-                id: Number(entry.id),
-                amount: Number(entry.amount || 0),
-            }));
-        } catch (error) {
-            console.warn("Collection history fetch failed:", error);
-            return [];
-        }
-    }, []);
-
-    const voidPosOrder = useCallback(async (
-        orderId: string,
-        reason: string
-    ): Promise<boolean> => {
-        const token = sessionStorage.getItem("token");
-        if (!token) {
-            alert("No token found. Please log in again.");
-            return false;
-        }
-
-        if (role !== "manager") {
-            alert("Only an assigned Manager can void POS transactions.");
-            return false;
-        }
-
-        try {
-            const res = await fetch("/api/pos", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    action: "void_order",
-                    order_id: orderId,
-                    reason,
-                }),
-            });
-
-            const data = await safeJson<{ success?: boolean; error?: string }>(res);
-            if (!res.ok || !data.success) {
-                alert(data.error || "Failed to void POS transaction.");
-                return false;
-            }
-
-            await refreshAll({ silent: true });
-            return true;
-        } catch (error) {
-            console.error(error);
-            alert("Failed to void POS transaction.");
-            return false;
-        }
-    }, [role, refreshAll]);
-
     async function updateTaxRegistration(
         registration: "VAT_REGISTERED" | "NON_VAT"
     ): Promise<boolean> {
@@ -1569,12 +1240,12 @@ export function usePOS() {
     const todayOrders = orders.filter((o) => o.date === todayKey);
 
     const todayOrdersForSales = todayOrders.filter(
-        (o) => Number(o.total || 0) > 0 && isRealizedPOSOrder(o)
+        (o) => Number(o.total || 0) > 0
     );
 
-    const totalRevenue = orders
-        .filter(isRealizedPOSOrder)
-        .reduce((sum, o) => sum + Number(o.total || 0), 0);
+    const totalRevenue = orders.reduce(
+        (sum, o) => sum + Number(o.total || 0), 0
+    );
 
     const todayRevenue = todayOrdersForSales.reduce(
         (sum, o) => sum + Number(o.total || 0),
@@ -1693,7 +1364,6 @@ export function usePOS() {
 
     return {
         orders,
-        pendingCreditOrders,
         cart,
         products,
         allBuyableItems,
@@ -1718,6 +1388,18 @@ export function usePOS() {
         ownerOrderTotalPages,
         ownerOrderSummary,
 
+        managerOrderStartDate,
+        managerOrderEndDate,
+        setManagerOrderDateRange,
+        managerOrderSearch,
+        setManagerOrderSearch,
+        managerOrderPage,
+        setManagerOrderPage,
+        managerOrderPageSize,
+        managerOrderTotal,
+        managerOrderTotalPages,
+        managerOrderSummary,
+
         categoryFilter,
         setCategoryFilter,
 
@@ -1734,13 +1416,10 @@ export function usePOS() {
         setCustomerContactNumber,
         paymentMode,
         setPaymentMode,
-        creditTerm,
-        setCreditTerm,
         taxType,
         setTaxType,
 
         isOwner,
-        canUseCreditSales,
         activeBranchName,
 
         refreshAll,
@@ -1759,13 +1438,8 @@ export function usePOS() {
         change,
         vatableSales,
         vatAmount,
-        creditDueDate,
         canPlaceOrder,
         handlePlaceOrder,
-        checkCustomerCredit,
-        recordCreditPayment,
-        getCollectionHistory,
-        voidPosOrder,
         updateTaxRegistration,
 
         todayOrders,

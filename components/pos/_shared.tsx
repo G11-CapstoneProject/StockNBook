@@ -154,6 +154,7 @@ export type PosOrdersApiResponse = {
         sales: number;
         cost: number;
         profit: number;
+        vat?: number; // Manager-only aggregate; financial costs remain Owner-only.
     } | null;
     error?: string;
 };
@@ -181,17 +182,13 @@ export type Order = {
     branchId?: number | null;
     branchName?: string | null;
     paymentMode?: string | null;
-    creditTerm?: string | null;
-    creditDueDate?: string | null;
     taxType?: string | null;
     taxRegistration?: string | null;
-    status?: string | null;
     vatableSales?: number;
     vatAmount?: number;
     customerPayment?: number;
     totalPaid?: number;
     balance?: number;
-    collectionStatus?: string | null;
     changeDue?: number;
     cashierId?: number | null;
     cashierName?: string | null;
@@ -221,17 +218,13 @@ export type ApiOrder = {
     total?: number;
 
     paymentMode?: string | null;
-    creditTerm?: string | null;
-    creditDueDate?: string | null;
     taxType?: string | null;
     taxRegistration?: string | null;
-    status?: string | null;
     vatableSales?: number | string | null;
     vatAmount?: number | string | null;
     customerPayment?: number | string | null;
     totalPaid?: number | string | null;
     balance?: number | string | null;
-    collectionStatus?: string | null;
     changeDue?: number | string | null;
     cashierId?: number | string | null;
     cashierName?: string | null;
@@ -253,34 +246,6 @@ export type ApiOrder = {
 };
 
 
-
-export type CreditCollection = {
-    id: number;
-    orderId: string;
-    amount: number;
-    paymentMethod: string;
-    referenceNumber?: string | null;
-    paymentDate: string;
-    receivedByName?: string | null;
-    receivedByRole?: string | null;
-};
-
-export type CreditCheckStatus =
-    | "UNVERIFIED"
-    | "NEW"
-    | "CLEARED"
-    | "OUTSTANDING"
-    | "OVERDUE";
-
-export type CreditCheckResult = {
-    status: CreditCheckStatus;
-    restricted: boolean;
-    matchedOrders: number;
-    openOrders: number;
-    outstandingBalance: number;
-    overdueBalance: number;
-    oldestDueDate?: string | null;
-};
 
 export type CartItem = {
     key: string;
@@ -824,7 +789,7 @@ export function OrdersTable({
 
                                 {showPayment && (
                                     <td className="truncate px-4 py-3 text-sm text-[#5F4E75]">
-                                        {({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer", CREDIT: "Credit" } as Record<string, string>)[String(order.paymentMode || "CASH").toUpperCase()] || "—"}
+                                        {({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer",  } as Record<string, string>)[String(order.paymentMode || "CASH").toUpperCase()] || "—"}
                                     </td>
                                 )}
 

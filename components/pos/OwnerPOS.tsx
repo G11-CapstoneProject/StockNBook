@@ -42,20 +42,6 @@ function formatCurrentDateTime(value: Date) {
     return `${dateLabel} | ${timeLabel}`;
 }
 
-function getLocalDateInputValue(value = new Date()) {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "Asia/Manila",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-    }).formatToParts(value);
-
-    const readPart = (type: Intl.DateTimeFormatPartTypes) =>
-        parts.find((part) => part.type === type)?.value || "";
-
-    return `${readPart("year")}-${readPart("month")}-${readPart("day")}`;
-}
-
 function toTransactionDateValue(value: string) {
     const rawValue = String(value || "").trim();
     const isoDateMatch = rawValue.match(/^(\d{4}-\d{2}-\d{2})/);
@@ -402,7 +388,7 @@ function OwnerAuditTable({
 
                                 <div className="min-w-0">
                                     <p className="font-semibold text-[#1A1220]">
-                                        {({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer", CREDIT: "Credit" } as Record<string, string>)[String(order.paymentMode || "CASH").toUpperCase()] || "—"}
+                                        {({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer",  } as Record<string, string>)[String(order.paymentMode || "CASH").toUpperCase()] || "—"}
                                     </p>
                                     <p className="mt-1 text-[10px] text-[#806A8C]">
                                         {String(order.taxType || "").toUpperCase() === "VAT" ? "VAT 12%" : "Non-VAT"}
@@ -439,12 +425,9 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
     const [branchQuery, setBranchQuery] = useState("All Branches");
     const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
     const [orderIdQuery, setOrderIdQuery] = useState("");
-    const [startDate, setStartDate] = useState(() =>
-        pos.ownerOrderStartDate || getLocalDateInputValue()
-    );
-    const [endDate, setEndDate] = useState(() =>
-        pos.ownerOrderEndDate || getLocalDateInputValue()
-    );
+    // Show all transactions from all dates until a range is selected.
+    const [startDate, setStartDate] = useState(pos.ownerOrderStartDate);
+    const [endDate, setEndDate] = useState(pos.ownerOrderEndDate);
 
     const branchSelectorRef = useRef<HTMLDivElement>(null);
 
@@ -810,22 +793,11 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
     };
 
     const handleSelectBranch = (branch: Branch) => {
-        const today = getLocalDateInputValue();
-
         setIsAllBranchesView(false);
         pos.setSelectedSalesBranchId(String(branch.id));
         setBranchQuery(branch.branchName);
         setIsBranchMenuOpen(false);
-
-        /*
-         * Manager/Staff POS cards are "today" totals.
-         * Default the Owner's selected-branch view to today as well so the
-         * same store + same branch shows the same daily information.
-         * The Owner can still manually change the From/To dates afterward.
-         */
-        setStartDate(today);
-        setEndDate(today);
-        pos.setOwnerOrderDateRange(today, today);
+        // Keep any selected range. By default Owner sees all historical dates.
     };
 
     const handleRefresh = async () => {
@@ -1160,13 +1132,11 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                             <button
                                 type="button"
                                 onClick={() => {
-                                    const today = getLocalDateInputValue();
-
                                     setOrderIdQuery("");
                                     pos.setOwnerOrderSearch("");
-                                    setStartDate(today);
-                                    setEndDate(today);
-                                    pos.setOwnerOrderDateRange(today, today);
+                                    setStartDate("");
+                                    setEndDate("");
+                                    pos.setOwnerOrderDateRange("", "");
                                 }}
                                 className="text-xs font-semibold text-[#2B174C] transition hover:text-[#5B2FC6]"
                             >

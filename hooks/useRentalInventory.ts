@@ -61,7 +61,7 @@ export function calculateCostBasedRentalRate(
 
 export type RentalActivityType =
     | "received" | "rented_out" | "returned" | "maintenance_started"
-    | "maintenance_completed" | "missing_reported" | "missing_resolved"
+    | "maintenance_completed" | "missing_reported" | "missing_resolved" | "missing_replaced"
     | "adjustment";
 
 export type RentalActivity = {
@@ -114,7 +114,7 @@ export type RentalPendingInspection = {
 };
 export type RentalMaintenanceHistory = {
     id:number; equipmentId:number; equipmentName:string;
-    type:'maintenance_completed'|'missing_resolved'; quantity:number;
+    type:'maintenance_completed'|'missing_resolved'|'missing_replaced'; quantity:number;
     occurredAt:string; referenceNumber:string; actorName:string;
     notes:string|null; bookingReference:string|null;
 };
@@ -286,7 +286,7 @@ function normalizeEquipment(value: unknown): RentalEquipment | null {
 
 const ACTIVITY_TYPES: RentalActivityType[] = [
     "received", "rented_out", "returned", "maintenance_started", "maintenance_completed",
-    "missing_reported", "missing_resolved", "adjustment",
+    "missing_reported", "missing_resolved", "missing_replaced", "adjustment",
 ];
 function normalizeActivity(value: unknown): RentalActivity | null {
     if (!value || typeof value !== "object") return null;
@@ -442,7 +442,7 @@ export function useRentalInventory(branchId?: number) {
                     (result.maintenanceHistory as RentalMaintenanceHistory[]).filter(row=>
                         row && Number.isSafeInteger(Number(row.id)) && Number(row.id)>0 &&
                         Number.isSafeInteger(Number(row.quantity)) && Number(row.quantity)>0 &&
-                        ['maintenance_completed','missing_resolved'].includes(row.type) &&
+                        ['maintenance_completed','missing_resolved','missing_replaced'].includes(row.type) &&
                         Number.isFinite(Date.parse(String(row.occurredAt)))) : []);
                 setPendingInspections(Array.isArray(result.pendingInspections) ?
                     (result.pendingInspections as RentalPendingInspection[]).filter(row=>
@@ -572,7 +572,9 @@ export type StaffRentalStockAction =
     | { action:"staff_complete_routine_maintenance"; maintenanceId:number; quantity:number; notes:string }
     | { action:"staff_mark_repaired_ready"; maintenanceId:number; quantity:number; notes:string; safetyChecked:true }
     | { action:"staff_mark_missing_recovered"; reportId:number; quantity:number; damagedUnits:number;
-    notes:string; conditionChecked:true };
+    notes:string; conditionChecked:true }
+    | { action:"staff_mark_missing_replaced"; reportId:number; quantity:number;
+    notes:string; conditionChecked:true; replacementNotPreviouslyReceived:true };
 export type StaffRentalBookingAction =
     | {action:"release_rental_booking"; bookingReference:string}
     | {action:"return_rental_booking"; bookingReference:string;

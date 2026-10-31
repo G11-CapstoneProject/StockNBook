@@ -37,10 +37,6 @@ function unauthorized(headers, message) {
     return jsonResponse(401, headers, { error: message });
 }
 
-function notFound(headers, message) {
-    return jsonResponse(404, headers, { error: message });
-}
-
 function serverError(headers, error) {
     console.error("POS Lambda error:", error);
 
@@ -99,175 +95,6 @@ function toSafeString(value, max = 255) {
     return String(value ?? "").trim().slice(0, max);
 }
 
-
-function normalizeCreditContact(value) {
-    let digits = String(value ?? "").replace(/\D/g, "");
-
-    if (digits.startsWith("63") && digits.length === 12) {
-        digits = `0${digits.slice(2)}`;
-    } else if (digits.length === 10 && digits.startsWith("9")) {
-        digits = `0${digits}`;
-    }
-
-    return digits;
-}
-
-function isValidCreditContact(value) {
-    const raw = String(value ?? "").trim();
-
-    // Reject letters and unrelated symbols before normalization.
-    if (!raw || !/^[+\d\s()-]+$/.test(raw)) {
-        return false;
-    }
-
-    const normalized = normalizeCreditContact(raw);
-
-    // Philippine mobile number: 09XXXXXXXXX after normalization.
-    return /^09\d{9}$/.test(normalized);
-}
-
-function isPlaceholderCreditValue(value) {
-    const normalized = String(value || "").trim().toLowerCase();
-
-    return [
-        "",
-        "walk-in",
-        "walk in",
-        "customer",
-        "n/a",
-        "na",
-        "none",
-        "-",
-    ].includes(normalized);
-}
-
-async function getOutstandingCreditForContact(
-    connection,
-    storeId,
-    contactNumber
-) {
-    const normalizedContact = normalizeCreditContact(contactNumber);
-
-    if (!normalizedContact) {
-        return {
-            matchedOrders: 0,
-            outstandingBalance: 0,
-            overdueBalance: 0,
-            openOrders: 0,
-            oldestDueDate: null,
-        };
-    }
-
-    const internationalContact = normalizedContact.startsWith("0")
-        ? `63${normalizedContact.slice(1)}`
-        : normalizedContact;
-
-    /*
-     * Filter by the normalized contact in SQL so a credit check does not load
-     * every credit transaction for a growing store into Node memory.
-     * Existing data may be stored as 09..., +63..., or with spaces/dashes.
-     */
-    const normalizedContactSql = `
-        REPLACE(
-            REPLACE(
-                REPLACE(
-                    REPLACE(
-                        REPLACE(
-                            REPLACE(COALESCE(cd.customer_contact_number, ''), ' ', ''),
-                            '+', ''
-                        ),
-                        '-', ''
-                    ),
-                    '(', ''
-                ),
-                ')', ''
-            ),
-            '.', ''
-        )
-    `;
-
-    const [rows] = await connection.execute(
-        `SELECT
-             o.order_id,
-             o.control_number,
-             cd.customer_contact_number,
-             o.total,
-             o.customer_payment,
-             cd.credit_due_date,
-             COALESCE(SUM(cc.amount), 0) AS collected
-         FROM orders AS o
-                  INNER JOIN pos_credit_details AS cd
-                             ON cd.order_id = o.order_id AND cd.store_id = o.store_id
-                  LEFT JOIN credit_collections AS cc
-                            ON cc.store_id = o.store_id
-                                AND cc.order_id = o.order_id
-         WHERE o.store_id = ?
-           AND UPPER(COALESCE(o.payment_mode, '')) = 'CREDIT'
-           AND cd.customer_contact_number IS NOT NULL
-           AND ${normalizedContactSql} IN (?, ?)
-           AND LOWER(TRIM(${POS_ORDER_STATUS_SQL})) NOT IN
-               ('void', 'voided', 'cancelled', 'canceled', 'refunded')
-         GROUP BY
-             o.order_id,
-             o.control_number,
-             cd.customer_contact_number,
-             o.total,
-             o.customer_payment,
-             cd.credit_due_date`,
-        [storeId, normalizedContact, internationalContact]
-    );
-
-    const todayISO = getManilaISODate();
-
-    let outstandingBalance = 0;
-    let overdueBalance = 0;
-    let openOrders = 0;
-    let oldestDueDate = null;
-
-    for (const row of rows) {
-        const totalPaid = roundMoney(
-            Number(row.customer_payment || 0) +
-            Number(row.collected || 0)
-        );
-
-        const balance = roundMoney(
-            Math.max(
-                0,
-                Number(row.total || 0) - totalPaid
-            )
-        );
-
-        if (balance <= 0) {
-            continue;
-        }
-
-        openOrders += 1;
-        outstandingBalance = roundMoney(
-            outstandingBalance + balance
-        );
-
-        const dueDate = row.credit_due_date
-            ? toISODate(row.credit_due_date)
-            : null;
-        if (dueDate && (!oldestDueDate || dueDate < oldestDueDate)) {
-            oldestDueDate = dueDate;
-        }
-
-        if (dueDate && dueDate < todayISO) {
-            overdueBalance = roundMoney(
-                overdueBalance + balance
-            );
-        }
-    }
-
-    return {
-        matchedOrders: rows.length,
-        outstandingBalance,
-        overdueBalance,
-        openOrders,
-        oldestDueDate,
-    };
-}
 
 function toNumber(value) {
     const number = Number(value);
@@ -333,14 +160,6 @@ function getOwnerDashboardPeriodStarts(referenceDate) {
     };
 }
 
-// Details that do not belong in the core orders sale header are normalized.
-// A missing exception means a normal completed POS sale.
-const POS_ORDER_STATUS_SQL = `COALESCE((SELECT ex.order_status
-    FROM pos_order_exceptions ex
-    WHERE ex.order_id = o.order_id AND ex.store_id = o.store_id LIMIT 1), 'COMPLETED')`;
-const POS_ORDER_STATUS_IO_SQL = `COALESCE((SELECT ex.order_status
-    FROM pos_order_exceptions ex
-    WHERE ex.order_id = io.order_id AND ex.store_id = io.store_id LIMIT 1), 'COMPLETED')`;
 const POS_CASHIER_NAME_SQL = `(SELECT ea.employee_name FROM employee_actions ea
     WHERE ea.store_id = o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
       AND ea.action = 'Completed POS transaction'
@@ -356,20 +175,11 @@ const POS_WALKIN_ORDER_FILTER_SQL = `(
     OR o.control_number LIKE 'INV-%'
 )`;
 
-const OWNER_DASHBOARD_EXCLUDED_STATUSES_SQL = `
-    LOWER(TRIM(${POS_ORDER_STATUS_SQL})) NOT IN (
-        'pending',
-        'pending payment',
-        'unpaid',
-        'cancelled',
-        'canceled',
-        'refunded',
-        'void',
-        'voided',
-        'draft',
-        'failed'
-    )
-    AND ${POS_WALKIN_ORDER_FILTER_SQL}
+// All POS sales are paid at checkout and stored in orders/order_items.
+// Extra POS status and credit tables are not used by this module.
+const POS_SALE_FILTER_SQL = `
+    ${POS_WALKIN_ORDER_FILTER_SQL}
+    AND UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')
 `;
 
 function normalizeDashboardNumber(value) {
@@ -401,225 +211,6 @@ function nextMonthStartFromISODate(value) {
     const [year, month] = monthStart.split("-").map(Number);
     return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
 }
-
-// Dashboard summary tables turn large historical POS scans into small,
-// incrementally-maintained aggregates. The migration in Data/ creates and
-// backfills them. If it has not been run yet, the API safely falls back to the
-// original live aggregation queries instead of breaking POS functionality.
-let posSummaryTableAvailability = {
-    checkedAt: 0,
-    available: false,
-};
-
-async function hasPosDashboardSummaryTables(connection) {
-    const now = Date.now();
-
-    if (now - posSummaryTableAvailability.checkedAt < 30_000) {
-        return posSummaryTableAvailability.available;
-    }
-
-    try {
-        const [rows] = await connection.execute(
-            `SELECT COUNT(DISTINCT table_name) AS tableCount
-             FROM information_schema.tables
-             WHERE table_schema = DATABASE()
-               AND table_name IN ('pos_daily_summary', 'pos_product_monthly_summary')`
-        );
-
-        posSummaryTableAvailability = {
-            checkedAt: now,
-            available: Number(rows[0]?.tableCount || 0) === 2,
-        };
-    } catch (error) {
-        console.warn(
-            "Unable to check POS dashboard summary tables; using live aggregation fallback:",
-            error?.message || error
-        );
-        posSummaryTableAvailability = {
-            checkedAt: now,
-            available: false,
-        };
-    }
-
-    return posSummaryTableAvailability.available;
-}
-
-function aggregateSummaryItems(items) {
-    const byProduct = new Map();
-
-    for (const rawItem of Array.isArray(items) ? items : []) {
-        const productId = toPositiveInteger(rawItem?.productId);
-        if (!productId) continue;
-
-        const key = String(productId);
-        const existing = byProduct.get(key) || {
-            productId,
-            productName: toSafeString(rawItem?.productName, 255) || `Product #${productId}`,
-            units: 0,
-            sales: 0,
-        };
-
-        existing.units += Number(rawItem?.quantity || 0);
-        existing.sales = roundMoney(existing.sales + Number(rawItem?.lineTotal || 0));
-        byProduct.set(key, existing);
-    }
-
-    return Array.from(byProduct.values());
-}
-
-async function upsertPosDashboardSummary(
-    connection,
-    { storeId, branchId, orderDate, sales, cost, items }
-) {
-    if (!(await hasPosDashboardSummaryTables(connection))) return;
-
-    await connection.execute(
-        `INSERT INTO pos_daily_summary
-         (store_id, branch_id, summary_date, gross_sales, cost_of_sales, transaction_count)
-         VALUES (?, ?, ?, ?, ?, 1)
-             ON DUPLICATE KEY UPDATE
-                                  gross_sales = gross_sales + VALUES(gross_sales),
-                                  cost_of_sales = cost_of_sales + VALUES(cost_of_sales),
-                                  transaction_count = transaction_count + 1,
-                                  updated_at = CURRENT_TIMESTAMP`,
-        [storeId, branchId, orderDate, roundMoney(sales), roundMoney(cost)]
-    );
-
-    const productRows = aggregateSummaryItems(items);
-    if (productRows.length === 0) return;
-
-    const placeholders = productRows.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(",");
-    const values = [];
-    const monthStart = monthStartFromISODate(orderDate);
-
-    for (const row of productRows) {
-        values.push(
-            storeId,
-            branchId,
-            monthStart,
-            row.productId,
-            row.productName,
-            Math.max(0, Number(row.units || 0)),
-            roundMoney(row.sales)
-        );
-    }
-
-    await connection.execute(
-        `INSERT INTO pos_product_monthly_summary
-         (store_id, branch_id, month_start, product_id, product_name, units_sold, sales_amount)
-         VALUES ${placeholders}
-             ON DUPLICATE KEY UPDATE
-                                  product_name = VALUES(product_name),
-                                  units_sold = units_sold + VALUES(units_sold),
-                                  sales_amount = sales_amount + VALUES(sales_amount),
-                                  updated_at = CURRENT_TIMESTAMP`,
-        values
-    );
-}
-
-async function rebuildPosDashboardSummaryForDay(
-    connection,
-    storeId,
-    branchId,
-    summaryDate
-) {
-    if (!(await hasPosDashboardSummaryTables(connection))) return;
-
-    await connection.execute(
-        `DELETE FROM pos_daily_summary
-         WHERE store_id = ? AND branch_id = ? AND summary_date = ?`,
-        [storeId, branchId, summaryDate]
-    );
-
-    await connection.execute(
-        `DELETE FROM pos_product_monthly_summary
-         WHERE store_id = ? AND branch_id = ? AND month_start = ?`,
-        [storeId, branchId, monthStartFromISODate(summaryDate)]
-    );
-
-    await connection.execute(
-        `INSERT INTO pos_daily_summary
-         (store_id, branch_id, summary_date, gross_sales, cost_of_sales, transaction_count)
-         SELECT
-             o.store_id,
-             o.branch_id,
-             o.order_date,
-             SUM(o.total) AS gross_sales,
-             SUM(COALESCE(item_cost.cost, o.total)) AS cost_of_sales,
-             COUNT(*) AS transaction_count
-         FROM orders o
-                  LEFT JOIN (
-             SELECT
-                 oi.store_id,
-                 oi.order_id,
-                 SUM(
-                         COALESCE(
-                                 oi.cost_price_at_sale,
-                                 CASE
-                                     WHEN oi.variant_id IS NOT NULL
-                                         THEN COALESCE(pv.original_price, p.original_price, 0)
-                                     ELSE COALESCE(p.original_price, 0)
-                                     END,
-                                 0
-                         ) * oi.quantity
-                 ) AS cost
-             FROM order_items oi
-                      INNER JOIN orders io
-                                 ON io.store_id = oi.store_id
-                                     AND io.order_id = oi.order_id
-                      LEFT JOIN products p
-                                ON p.id = oi.product_id
-                                    AND p.store_id = oi.store_id
-                      LEFT JOIN product_variants pv
-                                ON pv.id = oi.variant_id
-                                    AND pv.product_id = oi.product_id
-             WHERE io.store_id = ?
-               AND io.branch_id = ?
-               AND io.order_date = ?
-               AND LOWER(TRIM(${POS_ORDER_STATUS_IO_SQL})) NOT IN (
-                                                                   'pending', 'pending payment', 'unpaid', 'cancelled', 'canceled',
-                                                                   'refunded', 'void', 'voided', 'draft', 'failed'
-                 )
-             GROUP BY oi.store_id, oi.order_id
-         ) item_cost
-                            ON item_cost.store_id = o.store_id
-                                AND item_cost.order_id = o.order_id
-         WHERE o.store_id = ?
-           AND o.branch_id = ?
-           AND o.order_date = ?
-           AND ${OWNER_DASHBOARD_EXCLUDED_STATUSES_SQL}
-         GROUP BY o.store_id, o.branch_id, o.order_date`,
-        [storeId, branchId, summaryDate, storeId, branchId, summaryDate]
-    );
-
-    const monthStart = monthStartFromISODate(summaryDate);
-    const nextMonthStart = nextMonthStartFromISODate(summaryDate);
-
-    await connection.execute(
-        `INSERT INTO pos_product_monthly_summary
-         (store_id, branch_id, month_start, product_id, product_name, units_sold, sales_amount)
-         SELECT
-             o.store_id,
-             o.branch_id,
-             ?,
-             oi.product_id,
-             MAX(oi.product_name) AS product_name,
-             SUM(oi.quantity) AS units_sold,
-             SUM(oi.line_total) AS sales_amount
-         FROM orders o
-                  INNER JOIN order_items oi
-                             ON oi.store_id = o.store_id
-                                 AND oi.order_id = o.order_id
-         WHERE o.store_id = ?
-           AND o.branch_id = ?
-           AND o.order_date >= ?
-           AND o.order_date < ?
-           AND ${OWNER_DASHBOARD_EXCLUDED_STATUSES_SQL}
-         GROUP BY o.store_id, o.branch_id, oi.product_id`,
-        [monthStart, storeId, branchId, monthStart, nextMonthStart]
-    );
-}
-
 
 async function getNextAvailablePosOrderId(
     connection,
@@ -1497,200 +1088,6 @@ async function decreaseStockForOrder(
     }
 }
 
-async function restoreV2Batches(connection, inventoryRow, quantity, orderId) {
-    let remaining = Math.max(0, Number(quantity || 0));
-    if (remaining <= 0) return;
-
-    /*
-     * POS sales consume batches in FEFO order. A void restores quantity into
-     * existing batch capacity (received_quantity - remaining_quantity) first,
-     * preserving each batch's original expiry instead of inventing a fresh lot.
-     */
-    const [batches] = await connection.execute(
-        `SELECT id, received_quantity, remaining_quantity, expiration_date
-         FROM inventory_batches
-         WHERE branch_inventory_id = ?
-         ORDER BY (expiration_date IS NULL) ASC,
-                  expiration_date ASC,
-                  received_at ASC,
-                  id ASC
-             FOR UPDATE`,
-        [inventoryRow.id]
-    );
-
-    for (const batch of batches) {
-        if (remaining <= 0) break;
-
-        const received = Math.max(0, Number(batch.received_quantity || 0));
-        const current = Math.max(0, Number(batch.remaining_quantity || 0));
-        const restorable = Math.max(0, received - current);
-        const restore = Math.min(restorable, remaining);
-
-        if (restore <= 0) continue;
-
-        await connection.execute(
-            `UPDATE inventory_batches
-             SET remaining_quantity = remaining_quantity + ?,
-                 status = CASE
-                              WHEN expiration_date IS NOT NULL
-                                  AND expiration_date < DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00'))
-                 THEN 'expired'
-                 ELSE 'active'
-            END,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?`,
-            [restore, batch.id]
-        );
-
-        remaining -= restore;
-    }
-
-    if (remaining > 0) {
-        /*
-         * Fallback only for older/inconsistent demo data where the original
-         * batch capacity is unavailable. The reconciliation batch keeps V2
-         * quantity totals consistent and is clearly identifiable for audits.
-         */
-        const batchCode = `V2-POS-VOID-RECON-${orderId}-${inventoryRow.id}`.slice(0, 100);
-        await connection.execute(
-            `INSERT INTO inventory_batches
-             (store_id, branch_id, branch_inventory_id, batch_code,
-              received_quantity, remaining_quantity, unit_cost, received_at,
-              expiration_date, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, 'active')`,
-            [
-                inventoryRow.store_id,
-                inventoryRow.branch_id,
-                inventoryRow.id,
-                batchCode,
-                remaining,
-                remaining,
-                Number(inventoryRow.cost_price || 0),
-            ]
-        );
-    }
-}
-
-async function restoreStockForVoidedOrder(
-    connection,
-    storeId,
-    branchId,
-    orderId,
-    actor
-) {
-    const [lines] = await connection.execute(
-        `SELECT
-             oi.product_id AS productId,
-             oi.variant_id AS variantId,
-             MAX(oi.product_name) AS productName,
-             SUM(oi.quantity) AS quantity
-         FROM order_items oi
-         WHERE oi.store_id = ?
-           AND oi.branch_id = ?
-           AND oi.order_id = ?
-         GROUP BY oi.product_id, oi.variant_id`,
-        [storeId, branchId, orderId]
-    );
-
-    if (lines.length === 0) {
-        throw new Error(
-            "This POS transaction has no item-level inventory records, so it cannot be safely voided automatically."
-        );
-    }
-
-    for (const line of lines) {
-        const productId = toPositiveInteger(line.productId);
-        const variantId = toPositiveInteger(line.variantId);
-        const quantity = Math.max(0, Number(line.quantity || 0));
-        const productName = toSafeString(line.productName, 255) || `Product #${productId}`;
-
-        if (!productId || quantity <= 0) continue;
-
-        if (variantId) {
-            const [legacyResult] = await connection.execute(
-                `UPDATE product_variants pv
-                     INNER JOIN products p ON p.id = pv.product_id
-                     SET pv.stock = pv.stock + ?,
-                         p.stock = p.stock + ?
-                 WHERE pv.id = ?
-                   AND p.id = ?
-                   AND p.store_id = ?
-                   AND p.branch_id = ?`,
-                [quantity, quantity, variantId, productId, storeId, branchId]
-            );
-
-            if (legacyResult.affectedRows === 0) {
-                throw new Error(`Unable to restore stock for "${productName}".`);
-            }
-
-        } else {
-            const [legacyResult] = await connection.execute(
-                `UPDATE products
-                 SET stock = stock + ?
-                 WHERE id = ? AND store_id = ? AND branch_id = ?`,
-                [quantity, productId, storeId, branchId]
-            );
-
-            if (legacyResult.affectedRows === 0) {
-                throw new Error(`Unable to restore stock for "${productName}".`);
-            }
-
-        }
-
-        const inventoryRow = await getV2InventoryForUpdate(
-            connection,
-            storeId,
-            branchId,
-            productId,
-            variantId
-        );
-
-        if (!inventoryRow) {
-            throw new Error(
-                `Database V2 inventory row is missing while voiding "${productName}".`
-            );
-        }
-
-        const before = Number(inventoryRow.quantity_on_hand || 0);
-        const after = before + quantity;
-
-        await restoreV2Batches(
-            connection,
-            inventoryRow,
-            quantity,
-            orderId
-        );
-
-        await connection.execute(
-            `UPDATE branch_inventory
-             SET quantity_on_hand = ?, updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?`,
-            [after, inventoryRow.id]
-        );
-
-        await connection.execute(
-            `INSERT INTO inventory_movements
-             (store_id, branch_id, branch_inventory_id, movement_type,
-              quantity_delta, quantity_before, quantity_after,
-              reference_type, reference_id, actor_id, actor_role, actor_name, notes)
-             VALUES (?, ?, ?, 'POS_VOID', ?, ?, ?, 'POS_VOID', ?, ?, ?, ?, ?)`,
-            [
-                storeId,
-                branchId,
-                inventoryRow.id,
-                quantity,
-                before,
-                after,
-                String(orderId),
-                actor?.id ?? null,
-                actor?.role || null,
-                actor?.name || null,
-                `POS void stock restoration: ${productName} x${quantity}`,
-            ]
-        );
-    }
-}
-
 /*
  * The JWT issued at login only carries ids (store_id / manager_id /
  * staff_id) and an email — never a display name. To log a real,
@@ -1847,9 +1244,6 @@ exports.handler = async (event) => {
         update_stock: "decrease_stock",
         decrement_stock: "decrease_stock",
 
-        // Legacy clients that still send delete_order are converted to a
-        // non-destructive void so completed POS history is never erased.
-        delete_order: "void_order",
     };
 
     const action =
@@ -1943,7 +1337,7 @@ exports.handler = async (event) => {
             return jsonResponse(403, headers, { error: "POS access is not permitted for this account." });
         }
         const posReadActions = new Set([
-            "get_orders", "get_collection_history", "get_owner_dashboard_summary", "get_tax_registration",
+            "get_orders", "get_owner_dashboard_summary", "get_tax_registration",
         ]);
         if (posAccess !== "full" && !posReadActions.has(action)) {
             return jsonResponse(403, headers, { error: "Full POS access is required for this action." });
@@ -2009,52 +1403,6 @@ exports.handler = async (event) => {
             });
         }
 
-        if (action === "check_customer_credit") {
-            if (tokenRole !== "manager" || !tokenBranchId) {
-                return badRequest(
-                    headers,
-                    "Only an assigned Manager can verify customer credit eligibility."
-                );
-            }
-
-            const contactNumber = toSafeString(
-                body.customer_contact_number ?? body.customerContactNumber,
-                40
-            );
-
-            if (!isValidCreditContact(contactNumber)) {
-                return badRequest(
-                    headers,
-                    "A valid Philippine mobile number is required for the credit check."
-                );
-            }
-
-            const credit = await getOutstandingCreditForContact(
-                connection,
-                storeId,
-                contactNumber
-            );
-
-            const status =
-                credit.overdueBalance > 0
-                    ? "OVERDUE"
-                    : credit.outstandingBalance > 0
-                        ? "OUTSTANDING"
-                        : credit.matchedOrders > 0
-                            ? "CLEARED"
-                            : "NEW";
-
-            return jsonResponse(200, headers, {
-                status,
-                restricted: credit.outstandingBalance > 0,
-                matchedOrders: credit.matchedOrders,
-                openOrders: credit.openOrders,
-                outstandingBalance: credit.outstandingBalance,
-                overdueBalance: credit.overdueBalance,
-                oldestDueDate: credit.oldestDueDate,
-            });
-        }
-
         if (action === "create_order") {
             const requestedOrderId = toSafeString(body.order_id, 255);
             const paymentMode =
@@ -2083,7 +1431,7 @@ exports.handler = async (event) => {
             }
 
             // This checkout accepts walk-in sales only. Customer names, addresses,
-            // contact information, credit terms, and due dates are not collected.
+            // no personal customer information or deferred payments are collected.
             if (customerPayment < 0) {
                 return badRequest(headers, "Customer payment cannot be negative.");
             }
@@ -2168,8 +1516,8 @@ exports.handler = async (event) => {
                         decodedToken
                     );
 
-                    // One order header. Product details belong in order_items.
-                    // Credit/void metadata is kept separately, only when applicable.
+                    // One completed sales header and itemized product lines.
+                    // Record checkout in the shared employee_actions audit log.
                     await connection.execute(
                         `INSERT INTO orders
                          (
@@ -2219,15 +1567,6 @@ exports.handler = async (event) => {
                         }
                     );
 
-                    await upsertPosDashboardSummary(connection, {
-                        storeId,
-                        branchId: tokenBranchId,
-                        orderDate,
-                        sales: total,
-                        cost: orderItemSummary.totalCost,
-                        items: orderItemSummary.items,
-                    });
-
                     await logEmployeeAction(connection, {
                         storeId,
                         branchId: tokenBranchId,
@@ -2257,7 +1596,6 @@ exports.handler = async (event) => {
                              NULL AS creditTerm,
                              NULL AS creditDueDate,
                              'PAID' AS collectionStatus,
-                             'COMPLETED' AS status,
                              o.tax_type AS taxType,
                              o.vatable_sales AS vatableSales,
                              o.vat_amount AS vatAmount,
@@ -2413,194 +1751,6 @@ exports.handler = async (event) => {
             const timings = {};
 
             /*
-             * Fast path: query the incrementally-maintained summary tables.
-             * Each query is independent, so it uses the pool concurrently.
-             * This makes dashboard cost depend on the number of days/products
-             * shown, not on the total lifetime number of POS transactions.
-             */
-            if (await hasPosDashboardSummaryTables(connection)) {
-                const runTimedQuery = async (key, sql, params) => {
-                    const startedAt = Date.now();
-                    const [rows] = await dbPool.execute(sql, params);
-                    timings[key] = Date.now() - startedAt;
-                    return rows;
-                };
-
-                const [
-                    dailyRows,
-                    branchRows,
-                    monthProductRows,
-                    quarterProductRows,
-                    yearProductRows,
-                ] = await Promise.all([
-                    runTimedQuery(
-                        "daily",
-                        `SELECT
-                             DATE_FORMAT(summary_date, '%Y-%m-%d') AS date,
-                             SUM(gross_sales) AS sales,
-                             SUM(cost_of_sales) AS cost
-                         FROM pos_daily_summary
-                         WHERE store_id = ?
-                           AND summary_date >= ?
-                           AND summary_date <= ?
-                         GROUP BY summary_date
-                         ORDER BY summary_date ASC`,
-                        [storeId, requestedDateFrom, requestedDateTo]
-                    ),
-                    runTimedQuery(
-                        "branches",
-                        `SELECT
-                             s.branch_id AS branchId,
-                             COALESCE(
-                                     NULLIF(TRIM(b.branch_name), ''),
-                                     CONCAT('Branch ', s.branch_id)
-                             ) AS name,
-                             SUM(CASE WHEN s.summary_date >= ? THEN s.gross_sales ELSE 0 END) AS monthSales,
-                             SUM(CASE WHEN s.summary_date >= ? THEN s.gross_sales ELSE 0 END) AS quarterSales,
-                             SUM(CASE WHEN s.summary_date >= ? THEN s.gross_sales ELSE 0 END) AS yearSales
-                         FROM pos_daily_summary s
-                                  LEFT JOIN branches b
-                                            ON b.id = s.branch_id
-                                                AND b.store_id = s.store_id
-                         WHERE s.store_id = ?
-                           AND s.summary_date >= ?
-                           AND s.summary_date <= ?
-                         GROUP BY s.branch_id, b.branch_name`,
-                        [
-                            periodStarts.month,
-                            periodStarts.quarter,
-                            periodStarts.year,
-                            storeId,
-                            periodStarts.year,
-                            requestedDateTo,
-                        ]
-                    ),
-                    runTimedQuery(
-                        "topMonth",
-                        `SELECT
-                             product_id AS productId,
-                             MAX(product_name) AS name,
-                             SUM(sales_amount) AS sales,
-                             SUM(units_sold) AS units
-                         FROM pos_product_monthly_summary
-                         WHERE store_id = ?
-                           AND month_start >= ?
-                           AND month_start <= ?
-                         GROUP BY product_id
-                         ORDER BY sales DESC
-                             LIMIT 8`,
-                        [storeId, periodStarts.month, requestedDateTo]
-                    ),
-                    runTimedQuery(
-                        "topQuarter",
-                        `SELECT
-                             product_id AS productId,
-                             MAX(product_name) AS name,
-                             SUM(sales_amount) AS sales,
-                             SUM(units_sold) AS units
-                         FROM pos_product_monthly_summary
-                         WHERE store_id = ?
-                           AND month_start >= ?
-                           AND month_start <= ?
-                         GROUP BY product_id
-                         ORDER BY sales DESC
-                             LIMIT 8`,
-                        [storeId, periodStarts.quarter, requestedDateTo]
-                    ),
-                    runTimedQuery(
-                        "topYear",
-                        `SELECT
-                             product_id AS productId,
-                             MAX(product_name) AS name,
-                             SUM(sales_amount) AS sales,
-                             SUM(units_sold) AS units
-                         FROM pos_product_monthly_summary
-                         WHERE store_id = ?
-                           AND month_start >= ?
-                           AND month_start <= ?
-                         GROUP BY product_id
-                         ORDER BY sales DESC
-                             LIMIT 8`,
-                        [storeId, periodStarts.year, requestedDateTo]
-                    ),
-                ]);
-
-                const normalizedBranches = branchRows.map((row) => ({
-                    key:
-                        row.branchId === null || row.branchId === undefined
-                            ? "unassigned"
-                            : String(row.branchId),
-                    name: String(row.name || "Unassigned"),
-                    month: normalizeDashboardNumber(row.monthSales),
-                    quarter: normalizeDashboardNumber(row.quarterSales),
-                    year: normalizeDashboardNumber(row.yearSales),
-                }));
-
-                const toTopRows = (rows) =>
-                    rows.map((row) => ({
-                        key: `product:${String(row.productId ?? row.name ?? "").trim().toLowerCase()}`,
-                        name: String(row.name || "Unnamed Product").trim() || "Unnamed Product",
-                        sales: normalizeDashboardNumber(row.sales),
-                        units: normalizeDashboardNumber(row.units),
-                    }));
-
-                const summary = {
-                    dateRange: {
-                        startDate: requestedDateFrom,
-                        endDate: requestedDateTo,
-                    },
-                    daily: dailyRows.map((row) => ({
-                        date: String(row.date || ""),
-                        sales: normalizeDashboardNumber(row.sales),
-                        cost: normalizeDashboardNumber(row.cost),
-                    })),
-                    branchPerformance: {
-                        month: normalizedBranches
-                            .map((row) => ({ key: row.key, name: row.name, amount: row.month }))
-                            .filter((row) => row.amount > 0)
-                            .sort((a, b) => b.amount - a.amount),
-                        quarter: normalizedBranches
-                            .map((row) => ({ key: row.key, name: row.name, amount: row.quarter }))
-                            .filter((row) => row.amount > 0)
-                            .sort((a, b) => b.amount - a.amount),
-                        year: normalizedBranches
-                            .map((row) => ({ key: row.key, name: row.name, amount: row.year }))
-                            .filter((row) => row.amount > 0)
-                            .sort((a, b) => b.amount - a.amount),
-                    },
-                    topProducts: {
-                        month: toTopRows(monthProductRows),
-                        quarter: toTopRows(quarterProductRows),
-                        year: toTopRows(yearProductRows),
-                    },
-                };
-
-                timings.total = Date.now() - requestStartedAt;
-
-                console.info("Owner POS dashboard summary timings:", {
-                    mode: "summary_tables",
-                    storeId,
-                    dateFrom: requestedDateFrom,
-                    dateTo: requestedDateTo,
-                    ...timings,
-                    dailyRows: summary.daily.length,
-                    productGroups:
-                        monthProductRows.length +
-                        quarterProductRows.length +
-                        yearProductRows.length,
-                });
-
-                return jsonResponse(200, headers, {
-                    success: true,
-                    summary,
-                    meta: {
-                        mode: "summary_tables",
-                        queryTimingsMs: timings,
-                    },
-                });
-            }
-
-            /*
              * Dashboard-only POS summary.
              *
              * The former Owner dashboard called get_orders with order items for
@@ -2624,38 +1774,15 @@ exports.handler = async (event) => {
                      o.order_id,
                      o.order_date,
                      o.total AS sales,
-                     COALESCE(
-                     SUM(
-                     CASE
-                     WHEN oi.id IS NULL THEN NULL
-                     ELSE
-                     COALESCE(
-                     oi.cost_price_at_sale,
-                     CASE
-                     WHEN oi.variant_id IS NOT NULL
-                     THEN pv.original_price
-                     ELSE p.original_price
-                     END,
-                     0
-                     ) * COALESCE(oi.quantity, 0)
-                     END
-                     ),
-                     o.total
-                     ) AS cost
+                     COALESCE(SUM(COALESCE(oi.cost_price_at_sale,0) * COALESCE(oi.quantity,0)),0) AS cost
                      FROM orders o
                      LEFT JOIN order_items oi
                      ON oi.order_id = o.order_id
                      AND oi.store_id = o.store_id
-                     LEFT JOIN products p
-                     ON p.id = oi.product_id
-                     AND p.store_id = oi.store_id
-                     LEFT JOIN product_variants pv
-                     ON pv.id = oi.variant_id
-                     AND pv.product_id = oi.product_id
                      WHERE o.store_id = ?
                      AND o.order_date >= ?
                      AND o.order_date <= ?
-                     AND ${OWNER_DASHBOARD_EXCLUDED_STATUSES_SQL}
+                     AND ${POS_SALE_FILTER_SQL}
                      GROUP BY
                      o.order_id,
                      o.order_date,
@@ -2686,7 +1813,7 @@ exports.handler = async (event) => {
                  WHERE o.store_id = ?
                    AND o.order_date >= ?
                    AND o.order_date <= ?
-                   AND ${OWNER_DASHBOARD_EXCLUDED_STATUSES_SQL}
+                   AND ${POS_SALE_FILTER_SQL}
                  GROUP BY o.branch_id, b.branch_name`,
                 [
                     periodStarts.month,
@@ -2716,7 +1843,7 @@ exports.handler = async (event) => {
                  WHERE o.store_id = ?
                    AND o.order_date >= ?
                    AND o.order_date <= ?
-                   AND ${OWNER_DASHBOARD_EXCLUDED_STATUSES_SQL}
+                   AND ${POS_SALE_FILTER_SQL}
                  GROUP BY oi.product_name`,
                 [
                     periodStarts.month,
@@ -2823,493 +1950,113 @@ exports.handler = async (event) => {
         }
 
         if (action === "get_orders") {
-            const requestedDateFrom = toISODate(
-                body.date_from ?? body.dateFrom ?? body.start_date ?? body.startDate
-            );
-            const requestedDateTo = toISODate(
-                body.date_to ?? body.dateTo ?? body.end_date ?? body.endDate
-            );
-
-            if (requestedDateFrom && requestedDateTo && requestedDateFrom > requestedDateTo) {
+            const dateFrom = toISODate(body.date_from ?? body.dateFrom ?? body.start_date ?? body.startDate);
+            const dateTo = toISODate(body.date_to ?? body.dateTo ?? body.end_date ?? body.endDate);
+            if (dateFrom && dateTo && dateFrom > dateTo) {
                 return badRequest(headers, "date_from cannot be later than date_to.");
             }
-
-            const includeFinancialMetrics = tokenRole === "owner";
-            const requestedSearch = toSafeString(
-                body.search ?? body.query ?? body.order_search ?? body.orderSearch,
-                120
-            );
-            const paginationEnabled = body.paginate === true || tokenRole === "owner";
-            const page = paginationEnabled
-                ? Math.max(1, toPositiveInteger(body.page) || 1)
-                : 1;
-            const pageSize = paginationEnabled
-                ? Math.min(100, Math.max(10, toPositiveInteger(body.page_size ?? body.pageSize) || 50))
-                : null;
-            const offset = paginationEnabled ? (page - 1) * pageSize : 0;
-
-            // The POS register is strictly for walk-in POS sales, not bookings.
-            const whereClauses = ["o.store_id = ?", POS_WALKIN_ORDER_FILTER_SQL];
-            const scopeParams = [storeId];
-
-            if (isBranchUser && tokenBranchId) {
-                whereClauses.push("o.branch_id = ?");
-                scopeParams.push(tokenBranchId);
-            } else if (tokenRole === "owner" && requestedBranchId) {
-                whereClauses.push("o.branch_id = ?");
-                scopeParams.push(requestedBranchId);
-            }
-
-            if (requestedDateFrom) {
-                whereClauses.push("o.order_date >= ?");
-                scopeParams.push(requestedDateFrom);
-            }
-
-            if (requestedDateTo) {
-                whereClauses.push("o.order_date <= ?");
-                scopeParams.push(requestedDateTo);
-            }
-
-            if (requestedSearch) {
-                const like = `%${requestedSearch}%`;
-                whereClauses.push(
-                    "(o.order_id LIKE ? OR o.control_number LIKE ? OR EXISTS (SELECT 1 FROM pos_credit_details q WHERE q.order_id=o.order_id AND q.store_id=o.store_id AND q.customer_name LIKE ?))"
-                );
-                scopeParams.push(like, like, like);
-            }
-
-            const creditOpenOnly =
-                (body.credit_open_only === true || body.creditOpenOnly === true) &&
-                tokenRole === "manager";
-
-            if (creditOpenOnly) {
-                whereClauses.push("UPPER(COALESCE(o.payment_mode, '')) = 'CREDIT'");
-                whereClauses.push(
-                    `LOWER(TRIM(${POS_ORDER_STATUS_SQL})) NOT IN ('void','voided','cancelled','canceled','refunded')`
-                );
-                whereClauses.push(`
-                    o.total - (
-                        COALESCE(o.customer_payment, 0) +
-                        COALESCE(
-                            (SELECT SUM(cc_open.amount)
-                             FROM credit_collections cc_open
-                             WHERE cc_open.store_id = o.store_id
-                               AND cc_open.order_id = o.order_id),
-                            0
-                        )
-                    ) > 0
-                `);
-            }
-
-            const whereSql = whereClauses.join(" AND ");
-
-            const financialMetricsSelect = includeFinancialMetrics
-                ? `
-                    COALESCE(
-                        SUM(
-                            CASE
-                                WHEN oi.id IS NULL THEN NULL
-                                ELSE COALESCE(
-                                    oi.cost_price_at_sale,
-                                    CASE WHEN oi.variant_id IS NOT NULL
-                                        THEN pv.original_price ELSE p.original_price END,
-                                    0
-                                ) * COALESCE(oi.quantity, 0)
-                            END
-                        ),
-                        o.total
-                    ) AS totalCost,
-                    (
-                        o.total - COALESCE(o.vat_amount, 0) - COALESCE(
-                            SUM(
-                                CASE
-                                    WHEN oi.id IS NULL THEN NULL
-                                    ELSE COALESCE(
-                                        oi.cost_price_at_sale,
-                                        CASE WHEN oi.variant_id IS NOT NULL
-                                            THEN pv.original_price ELSE p.original_price END,
-                                        0
-                                    ) * COALESCE(oi.quantity, 0)
-                                END
-                            ),
-                            o.total
-                        )
-                    ) AS profit,`
-                : `NULL AS totalCost, NULL AS profit,`;
-
-            const financialJoins = includeFinancialMetrics
-                ? `
-                    LEFT JOIN order_items oi
-                      ON oi.order_id = o.order_id AND oi.store_id = o.store_id
-                    LEFT JOIN products p
-                      ON p.id = oi.product_id AND p.store_id = oi.store_id
-                    LEFT JOIN product_variants pv
-                      ON pv.id = oi.variant_id AND pv.product_id = oi.product_id
-                  `
-                : "";
-
-            let query = `
-                SELECT
-                    o.order_id AS orderId,
-                    o.store_id AS storeId,
-                    o.branch_id AS branchId,
-                    COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branchName,
-                    COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branch,
-                    o.control_number AS controlNumber,
-                    COALESCE(cd.customer_name, 'Walk-in') AS customerName,
-                    o.customer_type AS customerType,
-                    cd.customer_address AS customerAddress,
-                    cd.customer_contact_number AS customerContactNumber,
-                    o.payment_mode AS paymentMode,
-                    cd.credit_term AS creditTerm,
-                    DATE_FORMAT(cd.credit_due_date, '%Y-%m-%d') AS creditDueDate,
-                    o.tax_type AS taxType,
-                    o.vatable_sales AS vatableSales,
-                    o.vat_amount AS vatAmount,
-                    o.customer_payment AS customerPayment,
-                    (
-                        COALESCE(o.customer_payment, 0) +
-                        COALESCE((SELECT SUM(cc.amount)
-                                  FROM credit_collections cc
-                                  WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
-                        ) AS totalPaid,
-                    GREATEST(
-                            0,
-                            o.total - (
-                                COALESCE(o.customer_payment, 0) +
-                                COALESCE((SELECT SUM(cc.amount)
-                                          FROM credit_collections cc
-                                          WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
-                                )
-                    ) AS balance,
-                    CASE
-                        WHEN LOWER(TRIM(${POS_ORDER_STATUS_SQL})) IN ('void', 'voided', 'cancelled', 'canceled', 'refunded')
-                            THEN 'VOIDED'
-                        WHEN UPPER(o.payment_mode) <> 'CREDIT' THEN 'PAID'
-                        WHEN o.total - (
-                            COALESCE(o.customer_payment, 0) +
-                            COALESCE((SELECT SUM(cc.amount)
-                                      FROM credit_collections cc
-                                      WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
-                            ) <= 0 THEN 'PAID'
-                        WHEN cd.credit_due_date IS NOT NULL AND DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')) > cd.credit_due_date THEN 'OVERDUE'
-                    WHEN (
-                    COALESCE(o.customer_payment, 0) +
-                    COALESCE((SELECT SUM(cc.amount)
-                    FROM credit_collections cc
-                    WHERE cc.store_id = o.store_id AND cc.order_id = o.order_id), 0)
-                    ) > 0 THEN 'PARTIAL'
-                    ELSE 'PENDING'
-                END AS collectionStatus,
-                    o.change_due AS changeDue,
-                    o.cashier_id AS cashierId,
-                ${POS_CASHIER_NAME_SQL} AS cashierName,
-                ${POS_CASHIER_ROLE_SQL} AS cashierRole,
-                ${POS_ORDER_STATUS_SQL} AS status,
-                o.item,
-                o.total,
-                o.total AS grandTotal,
-                CASE WHEN UPPER(o.tax_type) = 'VAT' THEN 'VAT_REGISTERED' WHEN UPPER(o.tax_type) = 'NON_VAT' THEN 'NON_VAT' ELSE NULL END AS taxRegistration,
-                ${financialMetricsSelect}
-                DATE_FORMAT(o.order_date, '%Y-%m-%d') AS orderDate,
-                DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS createdAt
-                FROM orders o
-                LEFT JOIN branches b
-                ON b.id = o.branch_id AND b.store_id = o.store_id
-                LEFT JOIN pos_credit_details cd
-                ON cd.order_id = o.order_id AND cd.store_id = o.store_id
-                ${financialJoins}
-                WHERE ${whereSql}
-            `;
-
-            if (includeFinancialMetrics) {
-                query += `
-                    GROUP BY
-                        o.order_id, o.store_id, o.branch_id, b.branch_name,
-                        o.control_number, o.customer_type, o.payment_mode, o.tax_type,
-                        cd.customer_name, cd.customer_address, cd.customer_contact_number,
-                        cd.credit_term, cd.credit_due_date,
-                        o.vatable_sales, o.vat_amount, o.customer_payment, o.change_due,
-                        o.cashier_id, o.item, o.total, o.order_date,
-                        o.created_at
-                `;
-            }
-
-            query += ` ORDER BY o.created_at DESC, o.order_id DESC`;
-            const queryParams = [...scopeParams];
-
-            if (paginationEnabled) {
-                // mysql2 prepared statements can reject numeric LIMIT/OFFSET bind values
-                // with ER_WRONG_ARGUMENTS on MySQL 8. Ensure both are safe integers
-                // before appending them as SQL numeric literals (not user text).
-                if (!Number.isSafeInteger(pageSize) || pageSize <= 0 ||
-                    !Number.isSafeInteger(offset) || offset < 0) {
-                    return badRequest(headers, "Invalid pagination parameters.");
-                }
-                query += ` LIMIT ${pageSize} OFFSET ${offset}`;
-            }
-
-            const [rows] = await connection.execute(query, queryParams);
-
-            const includeOrderItems =
-                body.include_order_items === true || body.includeOrderItems === true ||
-                tokenRole === "manager" || tokenRole === "staff";
-            let orders = rows;
-
-            if (includeOrderItems && rows.length > 0) {
-                const orderItemsById = await loadOrderItemsForOrders(
-                    connection,
-                    storeId,
-                    rows.map((row) => row.orderId)
-                );
-                orders = rows.map((row) => ({
-                    ...row,
-                    orderItems: orderItemsById.get(String(row.orderId)) || [],
-                }));
-            }
-
-            let pagination = null;
-            let summary = null;
-
-            if (paginationEnabled) {
-                const [countRows] = await connection.execute(
-                    `SELECT COUNT(*) AS total FROM orders o WHERE ${whereSql}`,
-                    scopeParams
-                );
-                const total = Number(countRows[0]?.total || 0);
-                const totalPages = Math.max(1, Math.ceil(total / pageSize));
-                pagination = {
-                    page,
-                    pageSize,
-                    total,
-                    totalPages,
-                    hasPrevious: page > 1,
-                    hasMore: page < totalPages,
-                };
-            }
-
-            if (includeFinancialMetrics) {
-                const realizedStatusFilter = `LOWER(TRIM(${POS_ORDER_STATUS_SQL})) NOT IN
-                    ('pending','pending payment','unpaid','cancelled','canceled','refunded','void','voided','draft','failed')`;
-
-                const [summaryRows] = await connection.execute(
-                    `SELECT
-                         COUNT(*) AS transactions,
-                         COALESCE(SUM(o.total), 0) AS sales,
-                         COALESCE(SUM(COALESCE(costs.totalCost, o.total)), 0) AS cost,
-                         COALESCE(SUM(o.total - COALESCE(o.vat_amount, 0) - COALESCE(costs.totalCost, o.total)), 0) AS profit
-                     FROM orders o
-                              LEFT JOIN (
-                         SELECT
-                             oi.store_id,
-                             oi.order_id,
-                             SUM(
-                                     COALESCE(
-                                             oi.cost_price_at_sale,
-                                             CASE WHEN oi.variant_id IS NOT NULL
-                                                      THEN COALESCE(pv.original_price, p.original_price, 0)
-                                                  ELSE COALESCE(p.original_price, 0)
-                                                 END,
-                                             0
-                                     ) * COALESCE(oi.quantity, 0)
-                             ) AS totalCost
-                         FROM order_items oi
-                                  LEFT JOIN products p
-                                            ON p.id = oi.product_id AND p.store_id = oi.store_id
-                                  LEFT JOIN product_variants pv
-                                            ON pv.id = oi.variant_id AND pv.product_id = oi.product_id
-                         WHERE oi.store_id = ?
-                         GROUP BY oi.store_id, oi.order_id
-                     ) costs
-                                        ON costs.store_id = o.store_id AND costs.order_id = o.order_id
-                     WHERE ${whereSql} AND ${realizedStatusFilter}`,
-                    [storeId, ...scopeParams]
-                );
-
-                summary = {
-                    transactions: Number(summaryRows[0]?.transactions || 0),
-                    sales: roundMoney(summaryRows[0]?.sales || 0),
-                    cost: roundMoney(summaryRows[0]?.cost || 0),
-                    profit: roundMoney(summaryRows[0]?.profit || 0),
-                };
-            }
-
-            const storeTaxType = await getStoreTaxType(connection, storeId);
-
-            return jsonResponse(200, headers, {
-                success: true,
-                orders,
-                taxType: storeTaxType,
-                taxRegistration: storeTaxType === "VAT" ? "VAT_REGISTERED" : "NON_VAT",
-                pagination,
-                summary,
-            });
-        }
-
-        if (action === "record_collection") {
-            const orderId = toSafeString(body.order_id ?? body.orderId, 255);
-            const amount = roundMoney(toNumber(body.amount) ?? 0);
-            const paymentMethod =
-                toSafeString(body.payment_method ?? body.paymentMethod, 40).toUpperCase() || "CASH";
-            const referenceNumber =
-                toSafeString(body.reference_number ?? body.referenceNumber, 120);
-
-            if (tokenRole !== "manager" || !tokenBranchId) {
-                return badRequest(headers, "Only an assigned Manager can record credit collections.");
-            }
-
-            if (!orderId || amount <= 0) {
-                return badRequest(headers, "A valid order and collection amount are required.");
-            }
-
-            await connection.beginTransaction();
-
-            try {
-                const [orderRows] = await connection.execute(
-                    `SELECT o.order_id, o.control_number, o.branch_id, cd.customer_name,
-                            o.payment_mode, o.total, o.customer_payment, cd.credit_due_date
-                     FROM orders o
-                              INNER JOIN pos_credit_details cd
-                                         ON cd.order_id = o.order_id AND cd.store_id = o.store_id
-                     WHERE o.order_id = ?
-                       AND o.store_id = ?
-                       AND o.branch_id = ?
-                         LIMIT 1
-                     FOR UPDATE`,
-                    [orderId, storeId, tokenBranchId]
-                );
-
-                if (orderRows.length === 0) {
-                    await connection.rollback();
-                    return notFound(headers, "Credit sale not found.");
-                }
-
-                const order = orderRows[0];
-                if (String(order.payment_mode || "").toUpperCase() !== "CREDIT") {
-                    await connection.rollback();
-                    return badRequest(headers, "Only credit sales can receive collection payments.");
-                }
-
-                const [collectionRows] = await connection.execute(
-                    `SELECT COALESCE(SUM(amount), 0) AS collected
-                     FROM credit_collections
-                     WHERE store_id = ? AND order_id = ?`,
-                    [storeId, orderId]
-                );
-
-                const alreadyPaid = roundMoney(
-                    Number(order.customer_payment || 0) +
-                    Number(collectionRows[0]?.collected || 0)
-                );
-                const remainingBalance = roundMoney(
-                    Math.max(0, Number(order.total || 0) - alreadyPaid)
-                );
-
-                if (amount > remainingBalance) {
-                    await connection.rollback();
-                    return badRequest(headers, "Collection amount cannot exceed the remaining balance.");
-                }
-
-                const actingEmployee = await getActingEmployee(connection, decodedToken);
-
-                await connection.execute(
-                    `INSERT INTO credit_collections
-                     (store_id, branch_id, order_id, amount, payment_method,
-                      reference_number, received_by_id, received_by_name, received_by_role, payment_date)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')))`,
-                    [
-                        storeId,
-                        tokenBranchId,
-                        orderId,
-                        amount,
-                        paymentMethod,
-                        referenceNumber || null,
-                        actingEmployee.id,
-                        actingEmployee.name,
-                        actingEmployee.role,
-                    ]
-                );
-
-                const newTotalPaid = roundMoney(alreadyPaid + amount);
-                const newBalance = roundMoney(Math.max(0, Number(order.total || 0) - newTotalPaid));
-                const dueDate = order.credit_due_date
-                    ? toISODate(order.credit_due_date)
-                    : null;
-                const overdue = Boolean(
-                    dueDate && dueDate < getManilaISODate()
-                );
-                const collectionStatus =
-                    newBalance <= 0 ? "PAID" : overdue ? "OVERDUE" : "PARTIAL";
-
-                await connection.execute(
-                    `UPDATE pos_credit_details
-                     SET collection_status = ?
-                     WHERE order_id = ? AND store_id = ?`,
-                    [collectionStatus, orderId, storeId]
-                );
-
-                await logEmployeeAction(connection, {
-                    storeId,
-                    branchId: tokenBranchId,
-                    employee: actingEmployee,
-                    module: "Sales / POS",
-                    referenceNumber: order.control_number || orderId,
-                    action: "Recorded credit collection",
-                    referenceId: orderId,
-                    details: `Collected ₱${amount} via ${paymentMethod} — Remaining balance ₱${newBalance}`,
-                });
-
-                await connection.commit();
-
-                return jsonResponse(200, headers, {
-                    success: true,
-                    totalPaid: newTotalPaid,
-                    balance: newBalance,
-                    collectionStatus,
-                });
-            } catch (error) {
-                await connection.rollback();
-                throw error;
-            }
-        }
-
-        if (action === "get_collection_history") {
-            const orderId = toSafeString(body.order_id ?? body.orderId, 255);
-
-            if (!orderId) {
-                return badRequest(headers, "Invalid order_id.");
-            }
-
-            let query = `
-                SELECT
-                    cc.id,
-                    cc.order_id AS orderId,
-                    cc.amount,
-                    cc.payment_method AS paymentMethod,
-                    cc.reference_number AS referenceNumber,
-                    DATE_FORMAT(cc.payment_date, '%Y-%m-%d') AS paymentDate,
-                    cc.received_by_name AS receivedByName,
-                    cc.received_by_role AS receivedByRole
-                FROM credit_collections cc
-                WHERE cc.store_id = ?
-                  AND cc.order_id = ?
-            `;
-            const params = [storeId, orderId];
-
-            if (tokenRole === "manager" && tokenBranchId) {
-                query += " AND cc.branch_id = ?";
+            // Exclude historical credit rows; POS only supports immediate payments.
+            const where = ["o.store_id = ?", POS_WALKIN_ORDER_FILTER_SQL,
+                "UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')"];
+            const params = [storeId];
+            if (isBranchUser) {
+                where.push("o.branch_id = ?");
                 params.push(tokenBranchId);
-            } else if (tokenRole !== "owner") {
-                return badRequest(headers, "Only Managers and Owners can view collection history.");
+            } else if (requestedBranchId) {
+                where.push("o.branch_id = ?");
+                params.push(requestedBranchId);
             }
+            if (dateFrom) { where.push("o.order_date >= ?"); params.push(dateFrom); }
+            if (dateTo) { where.push("o.order_date <= ?"); params.push(dateTo); }
+            const search = toSafeString(body.search ?? body.query ?? body.order_search ?? body.orderSearch, 120);
+            if (search) {
+                where.push("(o.order_id LIKE ? OR o.control_number LIKE ?)");
+                params.push(`%${search}%`, `%${search}%`);
+            }
+            const whereSql = where.join(' AND ');
+            const includeFinancials = tokenRole === 'owner';
+            const paginate = body.paginate === true || includeFinancials;
+            const page = Math.max(1, toPositiveInteger(body.page) || 1);
+            const pageSize = paginate ? Math.min(100, Math.max(10, toPositiveInteger(body.page_size ?? body.pageSize) || 50)) : null;
+            const offset = paginate ? (page - 1) * pageSize : 0;
 
-            query += " ORDER BY cc.payment_date DESC, cc.id DESC";
+            // Cost & profit are only visible to Owner; cost snapshot is stored in order_items.
+            const metrics = includeFinancials ? `
+                COALESCE(item_cost.cost, 0) AS totalCost,
+                (o.total - COALESCE(o.vat_amount, 0) - COALESCE(item_cost.cost, 0)) AS profit,`
+                : 'NULL AS totalCost, NULL AS profit,';
+            const joinMetrics = includeFinancials ? `LEFT JOIN (
+                SELECT store_id, order_id,
+                    SUM(COALESCE(cost_price_at_sale,0) * quantity) AS cost
+                FROM order_items GROUP BY store_id, order_id
+            ) AS item_cost ON item_cost.order_id = o.order_id AND item_cost.store_id = o.store_id` : '';
+            let query = `SELECT
+                             o.order_id AS orderId, o.store_id AS storeId, o.branch_id AS branchId,
+                             COALESCE(NULLIF(TRIM(b.branch_name),''), CONCAT('Branch ', o.branch_id)) AS branchName,
+                             o.control_number AS controlNumber, 'Walk-in' AS customerName,
+                             o.customer_type AS customerType, o.payment_mode AS paymentMode,
+                             o.tax_type AS taxType, o.vatable_sales AS vatableSales,
+                             o.vat_amount AS vatAmount, o.customer_payment AS customerPayment,
+                             o.customer_payment AS totalPaid, GREATEST(0,o.total-COALESCE(o.customer_payment,0)) AS balance,
+                             'PAID' AS collectionStatus, o.change_due AS changeDue,
+                             o.cashier_id AS cashierId,
+                             ${POS_CASHIER_NAME_SQL} AS cashierName,
+                             ${POS_CASHIER_ROLE_SQL} AS cashierRole,
+                             o.item, o.total, o.total AS grandTotal,
+                             CASE WHEN UPPER(o.tax_type)='VAT' THEN 'VAT_REGISTERED' ELSE 'NON_VAT' END AS taxRegistration,
+                             ${metrics}
+                                 DATE_FORMAT(o.order_date,'%Y-%m-%d') AS orderDate,
+                             DATE_FORMAT(o.created_at,'%Y-%m-%d %H:%i:%s') AS createdAt
+                         FROM orders o
+                                  LEFT JOIN branches b ON b.id=o.branch_id AND b.store_id=o.store_id
+                             ${joinMetrics}
+                         WHERE ${whereSql}
+                         ORDER BY o.created_at DESC, o.order_id DESC`;
+            if (paginate) query += ` LIMIT ${pageSize} OFFSET ${offset}`;
             const [rows] = await connection.execute(query, params);
-
-            return jsonResponse(200, headers, {
-                success: true,
-                collections: rows,
-            });
+            const includeItems = body.include_order_items === true || body.includeOrderItems === true || isBranchUser;
+            let orders = rows;
+            if (includeItems && rows.length) {
+                const byId = await loadOrderItemsForOrders(connection, storeId, rows.map(r => r.orderId));
+                orders = rows.map(r => ({...r, orderItems: byId.get(String(r.orderId)) || []}));
+            }
+            let pagination = null;
+            if (paginate) {
+                const [[count]] = await connection.execute(`SELECT COUNT(*) AS total FROM orders o WHERE ${whereSql}`,params);
+                const total = Number(count.total || 0), totalPages = Math.max(1,Math.ceil(total/pageSize));
+                pagination = {page,pageSize,total,totalPages,hasPrevious:page>1,hasMore:page<totalPages};
+            }
+            let summary = null;
+            if (tokenRole === 'manager') {
+                // Server-scoped totals for all matching branch transactions,
+                // not just the 50 rows on the current page. Never expose cost.
+                const [[totals]] = await connection.execute(`SELECT
+                                                                 COUNT(*) AS transactions,
+                                                                 COALESCE(SUM(o.total), 0) AS sales,
+                                                                 COALESCE(SUM(o.vat_amount), 0) AS vat
+                                                             FROM orders o WHERE ${whereSql} AND ${POS_SALE_FILTER_SQL}`, params);
+                summary = {
+                    transactions: Number(totals.transactions || 0),
+                    sales: roundMoney(totals.sales),
+                    vat: roundMoney(totals.vat),
+                };
+            }
+            if (includeFinancials) {
+                const [[totals]] = await connection.execute(`SELECT
+                                                                 COUNT(*) AS transactions, COALESCE(SUM(o.total),0) AS sales,
+                                                                 COALESCE(SUM(COALESCE(c.cost,0)),0) AS cost,
+                                                                 COALESCE(SUM(o.total-COALESCE(o.vat_amount,0)-COALESCE(c.cost,0)),0) AS profit
+                                                             FROM orders o LEFT JOIN (
+                                                                 SELECT store_id,order_id,SUM(COALESCE(cost_price_at_sale,0)*quantity) AS cost
+                                                                 FROM order_items GROUP BY store_id,order_id
+                                                             ) c ON c.order_id=o.order_id AND c.store_id=o.store_id
+                                                             WHERE ${whereSql} AND ${POS_SALE_FILTER_SQL}`,params);
+                summary = {transactions:Number(totals.transactions||0),sales:roundMoney(totals.sales),
+                    cost:roundMoney(totals.cost), profit:roundMoney(totals.profit)};
+            }
+            const taxType = await getStoreTaxType(connection,storeId);
+            return jsonResponse(200,headers,{success:true,orders,pagination,summary,
+                taxType,taxRegistration:taxType==='VAT'?'VAT_REGISTERED':'NON_VAT'});
         }
 
         if (action === "update_tax_registration") {
@@ -3356,131 +2103,12 @@ exports.handler = async (event) => {
             });
         }
 
-        if (action === "update_order") {
-            return badRequest(
-                headers,
-                "Completed POS transactions are immutable. Void the original transaction and create a corrected sale instead."
-            );
+        if (["check_customer_credit", "record_collection", "get_collection_history"].includes(action)) {
+            return badRequest(headers, "Customer credit is not supported by StockNBook POS.");
         }
 
-        if (action === "void_order") {
-            const orderId = toSafeString(body.order_id ?? body.orderId, 255);
-            const reason = toSafeString(body.reason ?? body.void_reason ?? body.voidReason, 500);
-
-            if (!orderId) {
-                return badRequest(headers, "Invalid order_id.");
-            }
-
-            if (tokenRole !== "manager" || !tokenBranchId) {
-                return badRequest(headers, "Only an assigned Manager can void POS transactions.");
-            }
-
-            if (reason.length < 5) {
-                return badRequest(headers, "A clear void reason of at least 5 characters is required.");
-            }
-
-            await connection.beginTransaction();
-
-            try {
-                const [orderRows] = await connection.execute(
-                    `SELECT
-                         order_id, control_number, item, total, branch_id, order_date,
-                         payment_mode, customer_payment,
-                         (SELECT ex.order_status FROM pos_order_exceptions ex
-                          WHERE ex.order_id = orders.order_id AND ex.store_id = orders.store_id
-                             LIMIT 1) AS status
-                     FROM orders
-                     WHERE order_id = ?
-                       AND store_id = ?
-                       AND branch_id = ?
-                         LIMIT 1
-                         FOR UPDATE`,
-                    [orderId, storeId, tokenBranchId]
-                );
-
-                if (orderRows.length === 0) {
-                    await connection.rollback();
-                    return notFound(headers, "Order not found.");
-                }
-
-                const order = orderRows[0];
-                const currentStatus = String(order.status || "COMPLETED").trim().toUpperCase();
-
-                if (["VOID", "VOIDED", "CANCELLED", "CANCELED", "REFUNDED"].includes(currentStatus)) {
-                    await connection.rollback();
-                    return badRequest(headers, "This transaction has already been voided or cancelled.");
-                }
-
-                if (String(order.payment_mode || "").toUpperCase() === "CREDIT") {
-                    const [collectionRows] = await connection.execute(
-                        `SELECT COALESCE(SUM(amount), 0) AS collected
-                         FROM credit_collections
-                         WHERE store_id = ? AND order_id = ?`,
-                        [storeId, orderId]
-                    );
-                    const totalPaid = roundMoney(
-                        Number(order.customer_payment || 0) + Number(collectionRows[0]?.collected || 0)
-                    );
-
-                    if (totalPaid > 0) {
-                        await connection.rollback();
-                        return badRequest(
-                            headers,
-                            "This credit sale already has recorded payment. Resolve/refund the payment before voiding the transaction."
-                        );
-                    }
-                }
-
-                const actingEmployee = await getActingEmployee(connection, decodedToken);
-
-                await restoreStockForVoidedOrder(
-                    connection,
-                    storeId,
-                    tokenBranchId,
-                    orderId,
-                    actingEmployee
-                );
-
-                await connection.execute(
-                    `INSERT INTO pos_order_exceptions
-                     (order_id, store_id, branch_id, order_status,
-                      reason, actor_id, actor_role, occurred_at)
-                     VALUES (?, ?, ?, 'VOIDED', ?, ?, ?, CURRENT_TIMESTAMP)`,
-                    [orderId, storeId, tokenBranchId, reason.slice(0, 255),
-                        actingEmployee.id, actingEmployee.role]
-                );
-
-                await rebuildPosDashboardSummaryForDay(
-                    connection,
-                    storeId,
-                    Number(order.branch_id),
-                    toISODate(order.order_date)
-                );
-
-                await logEmployeeAction(connection, {
-                    storeId,
-                    branchId: tokenBranchId,
-                    employee: actingEmployee,
-                    module: "Sales / POS",
-                    referenceNumber: order.control_number || orderId,
-                    action: "Voided POS transaction",
-                    referenceId: orderId,
-                    details: `${order.item || "Order"} — Total ₱${order.total ?? 0} — Reason: ${reason}`,
-                });
-
-                await connection.commit();
-
-                return jsonResponse(200, headers, {
-                    success: true,
-                    orderId,
-                    status: "VOIDED",
-                });
-            } catch (error) {
-                await connection.rollback();
-                throw error;
-            }
-        }
-
+        // Unsupported operations, including legacy transaction mutations,
+        // are rejected here. Completed POS sales are read-only.
         return badRequest(
             headers,
             "Invalid action."

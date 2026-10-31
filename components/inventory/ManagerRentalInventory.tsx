@@ -361,7 +361,10 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                             <td className="px-2 py-3 text-center font-semibold">{item.totalUnits}</td>
                                             <td className="px-2 py-3 text-center font-semibold" title={appliedDates ? "Available units for the selected date range" : "Available today after confirmed reservations; physically ready units are tracked separately"}>{appliedDates ? (datesAvailability?.get(item.id) ?? "—") : item.bookableToday}</td>
                                             <td className="px-2 py-3 text-center">{item.rentedOutUnits}</td>
-                                            <td className="px-2 py-3 text-center">{item.maintenanceUnits}</td>
+                                            <td className="px-2 py-3 text-center" title={`On hold for inspection, care, or repair: ${item.maintenanceUnits}. Unrecovered missing units: ${item.missingUnits}.`}>
+                                                <span>{item.maintenanceUnits}</span>
+                                                {item.missingUnits > 0 && <span className="mt-1 block whitespace-nowrap text-[10px] font-semibold text-[#B45309]">Missing: {item.missingUnits}</span>}
+                                            </td>
                                             <td className="px-2 py-3 text-center"><IssueBadge issue={equipmentDisplayStatus(item, true, appliedDates ? datesAvailability?.get(item.id) : item.bookableToday)} /></td>
                                             <td className="px-3 py-3 text-center">
                                                 <div className="flex flex-wrap items-center justify-center gap-1.5">
@@ -478,7 +481,7 @@ function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:
     for(const record of records){
         active.push({kind:"maintenance",key:`maintenance-${record.id}`,equipmentName:record.equipmentName,
             units:record.units,title:record.status==='Routine'?'Routine care':record.status==='For Inspection'?'Safety inspection':'Repair / safety check',
-            status:record.status==='Routine'?'Needs Care':record.status==='For Inspection'?'On Hold / Inspection':'On Hold / Repair',
+            status:record.status==='Routine'?'Routine Care':'Damaged',
             notes:record.reason,reportedAt:record.dateReported,reference:`MNT-${String(record.id).padStart(6,'0')}`,
             bookingReference:record.bookingReference||null});
     }
@@ -486,7 +489,7 @@ function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:
         const units=Number(report.remainingUnits??report.quantity);
         if(!Number.isSafeInteger(units)||units<=0)continue;
         active.push({kind:"missing",key:`missing-${report.id}`,equipmentName:report.equipmentName,
-            units,title:"Missing equipment",status:"Missing / Unrecovered",notes:report.reason,
+            units,title:"Missing equipment",status:"Missing",notes:report.reason,
             reportedAt:report.reportedAt,reference:`MISS-${String(report.id).padStart(6,'0')}`,
             bookingReference:report.bookingReference||null});
     }
@@ -494,7 +497,7 @@ function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:
         active.push({kind:"inspection",key:`inspection-${inspection.allocationId}`,
             equipmentName:inspection.equipmentName,units:inspection.units,
             title:inspection.observedDamageUnits>0?`Return inspection (${inspection.observedDamageUnits} suspected damaged)`:'Previous return inspection',
-            status:"Pending Staff Inspection",notes:inspection.notes||'Awaiting Staff condition verification.',
+            status:inspection.observedDamageUnits>0?"Damaged":"Pending Inspection",notes:inspection.notes||'Awaiting Staff condition verification.',
             reportedAt:inspection.reportedAt,reference:`Allocation #${inspection.allocationId}`,
             bookingReference:inspection.bookingReference||null});
     }
@@ -507,19 +510,20 @@ function ManagerConditionDate({value}:{value:string|null|undefined}) {
     return <>{Number.isNaN(parsed.getTime())?'—':parsed.toLocaleDateString('en-PH',{timeZone:'Asia/Manila',month:'short',day:'numeric',year:'numeric'})}</>;
 }
 function ManagerConditionIssueTable({issues,onView}:{issues:ManagerConditionIssue[];onView:(value:ManagerConditionIssue)=>void}){
-    return <div className="min-h-0 flex-1 overflow-auto overscroll-contain" role="region" aria-label="Active equipment issues" tabIndex={0}>
-        <table className="w-full min-w-[550px] text-left text-[11px]">
+    return <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Active equipment issues" tabIndex={0}>
+        <table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+            <colgroup><col className="w-[22%]"/><col className="w-[29%]"/><col className="w-[8%]"/><col className="w-[17%]"/><col className="w-[24%]"/></colgroup>
             <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr className="border-b border-[#E9E1EE]">
-                <th className="px-3 py-3 font-semibold">Equipment</th><th className="px-3 py-3 font-semibold">Issue / Ref.</th>
-                <th className="px-2 py-3 font-semibold">Status</th><th className="px-3 py-3 text-center font-semibold">Action</th>
+                {['Equipment','Work Item / Reference','Units','Status','Action'].map(label=><th key={label} className="px-2 py-3 text-left font-semibold">{label}</th>)}
             </tr></thead>
-            <tbody>{issues.map(issue=><tr key={issue.key} className="border-b border-[#EFE8F2] align-top last:border-0">
-                <td className="px-3 py-3"><p className="font-semibold text-[#2B174C]">{issue.equipmentName}</p>
-                    <p className="mt-1 text-[#86778F]">{issue.units} {issue.units===1?'unit':'units'}</p></td>
-                <td className="px-3 py-3"><p className="font-medium text-[#49345A]">{issue.title}</p>
-                    <p className="mt-1 break-all text-[10px] text-[#86778F]">{issue.reference}</p></td>
-                <td className="px-2 py-3"><span className={`inline-flex rounded-md px-2 py-1 text-[10px] font-semibold ${issue.kind==='missing'?'bg-[#FFF0F0] text-[#B02733]':'bg-[#FFF2D7] text-[#956000]'}`}>{issue.status}</span></td>
-                <td className="px-3 py-3 text-center"><button type="button" onClick={()=>onView(issue)}
+            <tbody>{issues.map(issue=><tr key={issue.key} className="border-b border-[#EFE8F2] align-top last:border-0 text-[#2B174C]">
+                <td className="px-2 py-2 font-medium">{issue.equipmentName}</td>
+                <td className="px-2 py-2"><p className="font-medium">{issue.title}</p>
+                    <p className="mt-1 break-all text-[10px] text-[#86778F]">{issue.reference}</p>
+                    {issue.notes&&<p className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]" title={issue.notes}>{issue.notes}</p>}</td>
+                <td className="px-2 py-2 font-semibold tabular-nums">{issue.units}</td>
+                <td className={`px-2 py-2 text-[10px] font-semibold ${issue.status==='Missing'||issue.status==='Damaged'?'text-[#A43D48]':'text-[#C27416]'}`}>{issue.status}</td>
+                <td className="px-2 py-2 text-center"><button type="button" onClick={()=>onView(issue)}
                                                               className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3]">View Details</button></td>
             </tr>)}</tbody>
         </table>
@@ -535,7 +539,7 @@ function ManagerConditionHistoryTable({records,onView}:{records:RentalMaintenanc
             <tbody>{records.map(record=><tr key={`history-${record.id}`} className="border-b border-[#EFE8F2] align-top last:border-0">
                 <td className="px-3 py-3"><p className="font-semibold text-[#2B174C]">{record.equipmentName}</p>
                     <p className="mt-1 text-[#86778F]">{record.quantity} {record.quantity===1?'unit':'units'}</p></td>
-                <td className="px-3 py-3"><p className="font-medium text-[#49345A]">{record.type==='maintenance_completed'?'Repair Completed':'Recovery Recorded'}</p>
+                <td className="px-3 py-3"><p className="font-medium text-[#49345A]">{record.type==='maintenance_completed'?'Repair Completed':record.type==='missing_replaced'?'Replacement Recorded':'Recovery Recorded'}</p>
                     <p className="mt-1 text-[10px] text-[#86778F]"><ManagerConditionDate value={record.occurredAt}/></p></td>
                 <td className="px-2 py-3 text-[#5F4E75]">{record.actorName||'Not recorded'}</td>
                 <td className="px-3 py-3 text-center"><button type="button" onClick={()=>onView(record)}
@@ -555,7 +559,7 @@ function ManagerConditionDetails({entry,onClose}:{entry:ManagerConditionIssue|Re
                  onClick={event=>event.stopPropagation()} className="w-full max-w-lg rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
             <div className="flex items-start justify-between gap-3"><div>
                 <h3 className="text-base font-bold text-[#21132E]">{entry.equipmentName}</h3>
-                <p className="mt-1 text-xs text-[#806A8C]">{issue?entry.status:entry.type==='maintenance_completed'?'Repair completed':'Recovery recorded'}</p>
+                <p className="mt-1 text-xs text-[#806A8C]">{issue?entry.status:entry.type==='maintenance_completed'?'Repair completed':entry.type==='missing_replaced'?'Replacement recorded':'Recovery recorded'}</p>
             </div><button type="button" onClick={onClose} aria-label="Close details" className="rounded-lg border border-[#E6DDF0] p-2 text-[#2B174C] hover:bg-[#F7F1FF]"><X size={17}/></button></div>
             <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
                 <div><dt className="text-[#86778F]">Recorded quantity</dt><dd className="mt-1 font-semibold text-[#21132E]">{issue?entry.units:entry.quantity} unit(s)</dd></div>
@@ -658,10 +662,10 @@ function RentalMetric({label,value,description,icon,tone,loading}: {
 const activityNames:Record<RentalActivity["type"],string> = {
     received:"Stock Received",rented_out:"Rented Out",returned:"Returned",
     maintenance_started:"Maintenance",maintenance_completed:"Repair Completed",
-    missing_reported:"Missing",missing_resolved:"Found",adjustment:"Stock Adjustment",
+    missing_reported:"Missing",missing_resolved:"Found",missing_replaced:"Replaced",adjustment:"Stock Adjustment",
 };
 function ActivityRow({item}:{item:RentalActivity}) {
-    const isPositive = ["received", "returned", "maintenance_completed", "missing_resolved"].includes(item.type) ||
+    const isPositive = ["received", "returned", "maintenance_completed", "missing_resolved", "missing_replaced"].includes(item.type) ||
         (item.type === "adjustment" && /^Physical stock correction \+/.test(item.description || ""));
     const when = new Date(item.occurredAt);
     return <tr className="border-b border-[#EFE8F2] last:border-0">

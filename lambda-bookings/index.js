@@ -2993,7 +2993,7 @@ exports.handler = async (event) => {
                                                                  COALESCE(e.name,CONCAT('Equipment #',m.equipment_id)) AS equipmentName,
                                                                  GREATEST(0,m.quantity-COALESCE((SELECT SUM(mv.quantity) FROM rental_stock_movements mv
                                                                                                  WHERE mv.store_id=m.store_id AND mv.branch_id=m.branch_id
-                                                                                                   AND mv.equipment_id=m.equipment_id AND mv.type='missing_resolved'
+                                                                                                   AND mv.equipment_id=m.equipment_id AND mv.type IN ('missing_resolved','missing_replaced')
                                                                                                    AND mv.reference_number=CONCAT('MISS-',LPAD(m.id,6,'0'))),0)) AS quantity,
                                                                  m.reason,m.status,c.status AS decisionStatus
                                                           FROM rental_missing_unit_reports m LEFT JOIN booking_customer_claims c
@@ -3112,7 +3112,7 @@ exports.handler = async (event) => {
                         if(sourceType==='missing'){
                             const [recoveries]=await connection.execute(`SELECT COALESCE(SUM(quantity),0) AS recovered
                                                                          FROM rental_stock_movements WHERE store_id=? AND branch_id=? AND equipment_id=?
-                                                                                                       AND type='missing_resolved' AND reference_number=?`,
+                                                                                                       AND type IN ('missing_resolved','missing_replaced') AND reference_number=?`,
                                 [store_id,branchId,sources[0].equipment_id,`MISS-${String(sourceId).padStart(6,'0')}`]);
                             const remaining=Number(sources[0].quantity)-Number(recoveries[0].recovered);
                             if(!Number.isSafeInteger(remaining)||remaining<1)
@@ -3197,7 +3197,7 @@ exports.handler = async (event) => {
                         const [missingSources]=await connection.execute(`SELECT m.id,m.equipment_id AS equipmentId,
                                                                                 GREATEST(0,m.quantity-COALESCE((SELECT SUM(mv.quantity) FROM rental_stock_movements mv
                                                                                                                 WHERE mv.store_id=m.store_id AND mv.branch_id=m.branch_id
-                                                                                                                  AND mv.equipment_id=m.equipment_id AND mv.type='missing_resolved'
+                                                                                                                  AND mv.equipment_id=m.equipment_id AND mv.type IN ('missing_resolved','missing_replaced')
                                                                                                                   AND mv.reference_number=CONCAT('MISS-',LPAD(m.id,6,'0'))),0)) AS quantity,
                                                                                 m.status AS issueState,COALESCE(e.name,CONCAT('Equipment #',m.equipment_id)) AS equipmentName
                                                                          FROM rental_missing_unit_reports m
@@ -3365,7 +3365,7 @@ exports.handler = async (event) => {
                 if(source==='missing'){
                     const [recoveries]=await connection.execute(`SELECT COALESCE(SUM(quantity),0) AS recovered
                                                                  FROM rental_stock_movements WHERE store_id=? AND branch_id=? AND equipment_id=?
-                                                                                               AND type='missing_resolved' AND reference_number=?`,
+                                                                                               AND type IN ('missing_resolved','missing_replaced') AND reference_number=?`,
                         [store_id,book.branch_id,sources[0].equipment_id,`MISS-${String(sourceId).padStart(6,'0')}`]);
                     sources[0].quantity=Number(sources[0].quantity)-Number(recoveries[0].recovered);
                     if(!Number.isSafeInteger(sources[0].quantity)||sources[0].quantity<1)

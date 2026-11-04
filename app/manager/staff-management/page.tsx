@@ -66,6 +66,7 @@ type StaffInviteDelivery = {
 
 type StaffMember = {
     id: number | string;
+    employeeCode: string;
     name: string;
     email: string;
     status: "Accepted" | "Inactive";
@@ -156,6 +157,13 @@ export default function ManagerStaffManagementPage() {
     const [requestDecisionError, setRequestDecisionError] = useState("");
     const [savingDecision, setSavingDecision] = useState(false);
     const [canApproveRequests, setCanApproveRequests] = useState(false);
+    // Staff attendance recorded from staff dashboards, returned by the same
+    // manager-staff-overview request (branch-scoped on the server).
+    const [teamAttendance, setTeamAttendance] = useState<SMAttendanceRow[]>([]);
+    const [attendanceSummary, setAttendanceSummary] = useState<SMAttendanceSummary | null>(null);
+    const [attendancePeriod, setAttendancePeriod] = useState("today");
+    const [attendanceStatusFilter, setAttendanceStatusFilter] = useState("all");
+    const [attendanceError, setAttendanceError] = useState("");
     const [staffList, setStaffList] = useState<StaffMember[]>([]);
     const [staffSearch, setStaffSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState<StaffStatusFilter>("all");
@@ -290,10 +298,15 @@ export default function ManagerStaffManagementPage() {
             const data = await res.json().catch(() => ({}));
             if (!res.ok || data.success !== true) throw new Error(data.error || "Unable to load employee requests.");
             setEmployeeRequests(Array.isArray(data.leaves) ? data.leaves : []);
+            setTeamAttendance(Array.isArray(data.teamAttendance) ? data.teamAttendance : []);
+            setAttendanceSummary(data.attendanceSummary && typeof data.attendanceSummary === "object"
+                ? data.attendanceSummary as SMAttendanceSummary : null);
             setCanApproveRequests(data.mayReviewLeave === true);
             setRequestError("");
+            setAttendanceError("");
         } catch (error) {
             setRequestError(error instanceof Error ? error.message : "Employee requests unavailable.");
+            setAttendanceError(error instanceof Error ? error.message : "Staff attendance unavailable.");
         } finally { setRequestLoading(false); }
     }, []);
 
@@ -330,6 +343,52 @@ export default function ManagerStaffManagementPage() {
             }, { storeName: sessionStorage.getItem("store_name") || "StockNBook", branch: branchName,
                 dateRange: "All requests" }, "manager_employee_requests"))
             .catch(() => setRequestError("PDF export could not be completed."));
+    };
+
+    // Same presentation rule as the Manager Dashboard Team Attendance panel: show only
+    // recorded attendance plus approved leave days. Never invent absence or clock records.
+    const attendanceToday = currentDateTime ? smManilaDay(currentDateTime) : "";
+    const staffAttendanceRows = useMemo(() => {
+        const rows: SMAttendanceRow[] = [...teamAttendance];
+        if (!attendanceToday) return rows;
+        const recorded = new Set(rows.map(row => `${row.employeeId}:${row.date}`));
+        const earliest = smShiftDay(attendanceToday, -90);
+        for (const leave of employeeRequests) {
+            if (leave.approvalStatus !== "Approved") continue;
+            const start = leave.leaveDate;
+            const end = leave.leaveEndDate && leave.leaveEndDate >= start ? leave.leaveEndDate : start;
+            if (end < earliest || start > attendanceToday) continue;
+            let day = start < earliest ? earliest : start;
+            const last = end > attendanceToday ? attendanceToday : end;
+            for (let index = 0; day <= last && index < 91; index++) {
+                const key = `${leave.employeeId}:${day}`;
+                if (!recorded.has(key)) {
+                    rows.push({ id: -(leave.id * 100 + index + 1), employeeId: leave.employeeId,
+                        employeeCode: leave.employeeNumber || null,
+                        employeeName: leave.employeeName, date: day, timeIn: null, timeOut: null,
+                        hoursWorked: null, status: "On Leave" });
+                    recorded.add(key);
+                }
+                day = smAddDay(day);
+            }
+        }
+        return rows.sort((a, b) => b.date.localeCompare(a.date) || a.employeeName.localeCompare(b.employeeName));
+    }, [teamAttendance, employeeRequests, attendanceToday]);
+    const visibleStaffAttendance = staffAttendanceRows.filter(row =>
+        smInPeriod(row.date, attendancePeriod, attendanceToday) &&
+        (attendanceStatusFilter === "all" || row.status === attendanceStatusFilter));
+    const attendancePeriodLabel = { today: "Today", month: "This Month", previous: "Last Month", all: "Last 90 Days" }[attendancePeriod] || "Today";
+    const exportStaffAttendanceAsPdf = () => {
+        void import("@/components/dashboard/_shared")
+            .then(module => module.exportTableAsPdf({
+                title: "Staff Attendance",
+                headers: ["Employee ID", "Staff Name", "Date", "Time In", "Time Out", "Hours Worked", "Status"],
+                rows: visibleStaffAttendance.map(row => [row.employeeCode || "—", row.employeeName,
+                    smFormatDate(row.date), smClockTime(row.timeIn), smClockTime(row.timeOut),
+                    smHours(row.hoursWorked), row.status]),
+            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook", branch: branchName,
+                dateRange: attendancePeriodLabel }, "manager_staff_attendance"))
+            .catch(() => setAttendanceError("PDF export could not be completed."));
     };
 
     useEffect(() => {
@@ -392,7 +451,7 @@ export default function ManagerStaffManagementPage() {
         return staffList.filter((staff) => {
             const mappedStatus = staff.status === "Accepted" ? "active" : "inactive";
             const matchesStatus = statusFilter === "all" ? true : mappedStatus === statusFilter;
-            const searchText = `${staff.name} ${staff.email} ${branchName} ${formatRoleSummary(staff.permissions)}`.toLowerCase();
+            const searchText = `${staff.employeeCode} ${staff.name} ${staff.email} ${branchName} ${formatRoleSummary(staff.permissions)}`.toLowerCase();
             const matchesSearch = query ? searchText.includes(query) : true;
             return matchesStatus && matchesSearch;
         });
@@ -957,6 +1016,7 @@ export default function ManagerStaffManagementPage() {
                                         <table className="w-full min-w-[900px] border-collapse font-sans">
                                             <thead className="bg-[#FBF8FF]">
                                             <tr className="border-b border-[#E6DDF0]">
+                                                <TableHeader>Employee ID</TableHeader>
                                                 <TableHeader>Staff</TableHeader>
                                                 <TableHeader>Access</TableHeader>
                                                 <TableHeader>Status</TableHeader>
@@ -972,6 +1032,10 @@ export default function ManagerStaffManagementPage() {
                                                     key={staff.id}
                                                     className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
                                                 >
+                                                    <td className="whitespace-nowrap px-5 py-3 text-sm font-semibold text-[#4E2C66]">
+                                                        {staff.employeeCode || "—"}
+                                                    </td>
+
                                                     <td className="px-5 py-3">
                                                         <div className="min-w-0">
                                                             <p className="truncate text-sm font-bold text-[#1A1220]">
@@ -1055,6 +1119,39 @@ export default function ManagerStaffManagementPage() {
                                     </div>
                                 </div>
                             )}
+                        </section>
+
+                        <section id="staff-attendance" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                <div className="flex items-center gap-3"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span>
+                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Staff Attendance</h2><p className="text-xs text-[#7A6A84]">Time In and Time Out recorded by staff of {branchName} from their dashboards.</p></div>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <select aria-label="Filter staff attendance by period" value={attendancePeriod} onChange={e => setAttendancePeriod(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]"><option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Last 90 Days</option></select>
+                                    <select aria-label="Filter staff attendance by status" value={attendanceStatusFilter} onChange={e => setAttendanceStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]"><option value="all">All Statuses</option><option value="On Duty">On Duty</option><option value="Completed">Completed</option><option value="On Leave">On Leave</option><option value="Absent">Absent</option></select>
+                                    <button type="button" onClick={exportStaffAttendanceAsPdf} title="Export staff attendance to PDF" aria-label="Export staff attendance to PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                </div>
+                            </div>
+                            {attendanceSummary && <div className="flex flex-wrap items-center gap-2 border-b border-[#EEE7F2] bg-[#FFFCF7] px-5 py-2.5 text-xs">
+                                <span className="mr-1 font-semibold text-[#5F4E75]">Today · {attendanceSummary.total} {attendanceSummary.total === 1 ? "staff member" : "staff members"}</span>
+                                <SMAttendanceCount label="Present" value={attendanceSummary.present} tone="green"/>
+                                <SMAttendanceCount label="On Leave" value={attendanceSummary.onLeave} tone="gold"/>
+                                <SMAttendanceCount label="Absent" value={attendanceSummary.absent} tone="red"/>
+                                <SMAttendanceCount label="Not Recorded" value={attendanceSummary.notRecorded} tone="gray"/>
+                            </div>}
+                            {attendanceError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{attendanceError}</p>}
+                            <div className="max-h-[360px] overflow-auto"><table className="w-full min-w-[860px] text-left text-xs"><thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee ID", "Staff Name", "Date", "Time In", "Time Out", "Hours Worked", "Status"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
+                                <tbody>{visibleStaffAttendance.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={`${row.employeeId}-${row.id}-${row.date}`}>
+                                    <td className="whitespace-nowrap px-4 py-3 font-semibold text-[#4E2C66]">{row.employeeCode || "—"}</td>
+                                    <td className="px-4 py-3 font-semibold text-[#2B174C]">{row.employeeName}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{smFormatDate(row.date)}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{smClockTime(row.timeIn)}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{smClockTime(row.timeOut)}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{smHours(row.hoursWorked)}</td>
+                                    <td className="px-4 py-3"><SMAttendanceBadge status={row.status}/></td>
+                                </tr>)}{visibleStaffAttendance.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-[#8A7D92]">{requestLoading && teamAttendance.length === 0 ? "Loading staff attendance..." : attendanceStatusFilter !== "all" ? "No attendance records match the selected status." : attendancePeriod === "today" ? "No staff attendance recorded today yet. Time In records from staff dashboards will appear here." : "No staff attendance or approved leave for this period."}</td></tr>}</tbody>
+                            </table></div>
+                            <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {visibleStaffAttendance.length} {visibleStaffAttendance.length === 1 ? "record" : "records"} · Hours are shown after Time Out</div>
                         </section>
 
                         <section id="employee-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
@@ -1542,6 +1639,7 @@ export default function ManagerStaffManagementPage() {
 function normalizeStaffMember(item: any): StaffMember {
     return {
         id: item.id || item.staff_id || item.user_id || item.email,
+        employeeCode: String(item.employee_code || item.employeeCode || ""),
         name: item.name || item.staff_name || item.full_name || "Unnamed staff",
         email: item.email || item.staff_email || "",
         status: item.status === "Inactive" || item.status === "inactive" ? "Inactive" : "Accepted",
@@ -1914,4 +2012,54 @@ function smFormatDate(date: string) {
 }
 function smDatesLabel(req: SMLeaveGroup) {
     return req.start === req.end ? smFormatDate(req.start) : `${smFormatDate(req.start)} – ${smFormatDate(req.end)}`;
+}
+
+// Staff attendance rows come from stocknbook_staff_attendance via manager-staff-overview.
+// hoursWorked is calculated by the server (same SQL as the staff Attendance Log).
+type SMAttendanceRow = { id: number; employeeId: number; employeeCode?: string | null; employeeName: string; date: string;
+    timeIn: string | null; timeOut: string | null; hoursWorked: number | string | null; status: string };
+type SMAttendanceSummary = { total: number; present: number; onLeave: number; absent: number; notRecorded: number };
+function smManilaDay(date: Date) {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+    const part = (name: string) => parts.find(item => item.type === name)?.value || "";
+    return `${part("year")}-${part("month")}-${part("day")}`;
+}
+function smShiftDay(value: string, days: number) {
+    const date = new Date(value + "T00:00:00Z"); date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+}
+function smInPeriod(day: string, period: string, today: string) {
+    if (!today) return false;
+    if (period === "all") return true;
+    if (period === "today") return day === today;
+    if (period === "month") return day.slice(0, 7) === today.slice(0, 7);
+    if (period === "previous") {
+        const [year, month] = today.slice(0, 7).split("-").map(Number);
+        return day.slice(0, 7) === new Date(Date.UTC(year, month - 2, 1)).toISOString().slice(0, 7);
+    }
+    return false;
+}
+function smClockTime(value?: string | null) {
+    const match = value?.match(/T(\d{2}):(\d{2})/);
+    if (!match) return "—";
+    const hour = Number(match[1]);
+    return `${hour % 12 || 12}:${match[2]} ${hour < 12 ? "AM" : "PM"}`;
+}
+function smHours(value?: number | string | null) {
+    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return "—";
+    const minutes = Math.max(0, Math.round(Number(value) * 60));
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+function SMAttendanceBadge({ status }: { status: string }) {
+    const label = String(status || "Not Recorded");
+    const classes = label === "On Duty" || label === "Completed" || label === "Present"
+        ? "bg-[#E6F7EE] text-[#16834A]"
+        : label === "On Leave" ? "bg-[#FFF3D8] text-[#A56607]"
+            : label === "Absent" ? "bg-[#FFF0F0] text-[#D52B2B]" : "bg-[#F2EFF5] text-[#806A8C]";
+    return <span className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-bold ${classes}`}>{label}</span>;
+}
+function SMAttendanceCount({ label, value, tone }: { label: string; value: number; tone: "green" | "gold" | "red" | "gray" }) {
+    const classes = { green: "bg-[#E6F7EE] text-[#16834A]", gold: "bg-[#FFF3D8] text-[#A56607]",
+        red: "bg-[#FFF0F0] text-[#D52B2B]", gray: "bg-[#F2EFF5] text-[#806A8C]" }[tone];
+    return <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-semibold ${classes}`}>{label}<span className="font-bold">{Number(value) || 0}</span></span>;
 }

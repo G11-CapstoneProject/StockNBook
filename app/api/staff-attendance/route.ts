@@ -178,6 +178,19 @@ const PH_NOW = "CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')";
 const PH_TODAY = `DATE(${PH_NOW})`;
 
 // Do not cache private employee data.
+// Employee IDs live in managers/staff.employee_code (added automatically by the
+// app). Until that column exists, Employee ID is shown as empty.
+let employeeCodeCheck: Promise<boolean> | null = null;
+function hasEmployeeCodes(db: Pool): Promise<boolean> {
+    employeeCodeCheck ||= Promise.all(["managers", "staff"].map(table => db.query<RowDataPacket[]>(
+        `SELECT 1 AS x FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`, [table, "employee_code"])))
+        .then(results => results.every(([rows]) => rows.length > 0))
+        .catch(() => false)
+        .then(ready => { if (!ready) employeeCodeCheck = null; return ready; });
+    return employeeCodeCheck;
+}
+
 export async function GET(request: NextRequest) {
     try {
         const principal = await verifyStaffPrincipal(request);
@@ -190,9 +203,14 @@ export async function GET(request: NextRequest) {
         const endDate = readDay(url.get("endDate")) || localDay;
         if (startDate > endDate) return invalid("Start date must be before end date.");
         const db = getPool();
+        // Employee ID shown on the staff member's own attendance exports: the permanent
+        // STORE-BRANCH-EMP-XXXX from the staff record (falls back to the internal ID).
+        const employeeNumber = (await hasEmployeeCodes(db))
+            ? "COALESCE((SELECT st.employee_code FROM staff st WHERE st.id = employee_id LIMIT 1), CAST(employee_id AS CHAR))"
+            : "CAST(employee_id AS CHAR)";
         const [attendanceRows] = await db.query<RowDataPacket[]>(`
             SELECT CONCAT('A-',id) AS id, store_name AS storeName, branch_name AS branchName,
-                   employee_name AS employeeName, CAST(employee_id AS CHAR) AS employeeNumber,
+                   employee_name AS employeeName, ${employeeNumber} AS employeeNumber,
                    DATE_FORMAT(attendance_date, '%Y-%m-%d') AS date,
                 DATE_FORMAT(time_in, '%Y-%m-%dT%H:%i:%s') AS timeIn,
                 DATE_FORMAT(time_out, '%Y-%m-%dT%H:%i:%s') AS timeOut,
@@ -216,7 +234,7 @@ export async function GET(request: NextRequest) {
             : [principal.employeeId, principal.storeId, principal.branchId];
         const [leaveRows] = await db.query<RowDataPacket[]>(`
             SELECT CONCAT('L-',id) AS id, store_name AS storeName, branch_name AS branchName,
-                   employee_name AS employeeName, CAST(employee_id AS CHAR) AS employeeNumber,
+                   employee_name AS employeeName, ${employeeNumber} AS employeeNumber,
                    DATE_FORMAT(leave_date, '%Y-%m-%d') AS date,
                 DATE_FORMAT(COALESCE(leave_end_date, leave_date), '%Y-%m-%d') AS endDate,
                 NULL AS timeIn, NULL AS timeOut, NULL AS hoursWorked,

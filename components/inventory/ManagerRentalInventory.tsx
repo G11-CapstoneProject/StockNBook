@@ -34,6 +34,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         item: RentalEquipment | null;
     } | null>(null);
     const [retireItem,setRetireItem] = React.useState<RentalEquipment|null>(null);
+    const [unitListItem,setUnitListItem] = React.useState<RentalEquipment|null>(null);
     const [notice, setNotice] = React.useState("");
     const [importOpen, setImportOpen] = React.useState(false);
     const [conditionTab,setConditionTab] = React.useState<"active"|"history">("active");
@@ -63,7 +64,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         // Retired equipment stays in history but not the default active catalog.
         if(!item.active && status!=="Archived")return false;
         const query = search.trim().toLowerCase();
-        const found = !query || [item.name, item.category, item.equipmentNumber, item.lastSupplier || ""]
+        const found = !query || [item.name, item.category, item.equipmentNumber, item.lastSupplier || "", ...item.unitNumbers]
             .some(value => value.toLowerCase().includes(query));
         const availability = appliedDates ? datesAvailability?.get(item.id) : item.bookableToday;
         return found && (category === "All Categories" || item.category === category) &&
@@ -314,7 +315,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     <label className="relative min-w-0">
                         <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
                         <input value={search} onChange={e=>setSearch(e.target.value)}
-                               placeholder="Search equipment no., rental products, or categories..." aria-label="Search rental equipment"
+                               placeholder="Search product no., equipment no., rental products, or categories..." aria-label="Search rental equipment"
                                className="h-11 w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-3 text-sm text-[#2B174C] outline-none placeholder:text-[#9B8AAA] focus:border-[#5A35A5]"/>
                     </label>
                     <button type="button" disabled={!canManage} onClick={()=>setImportOpen(true)} className="flex h-11 items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-4 text-sm font-semibold text-[#5330B6] hover:bg-[#ECE3FF]">
@@ -338,7 +339,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     <table className="w-full min-w-[1090px] text-left text-[11px]">
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                         <tr className="border-b border-[#E9E1EE]">
-                            <th className="px-4 py-3 font-semibold">Equipment No.</th>
+                            <th className="px-4 py-3 font-semibold">Product No.</th>
                             <th className="px-3 py-3 font-semibold">Rental Product</th>
                             <th className="px-3 py-3 font-semibold">Category</th>
                             <th className="px-2 py-3 text-center font-semibold">Total Units</th>
@@ -355,7 +356,13 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                 filtered.length === 0 ? <tr><td colSpan={9} className="px-5 py-12 text-center text-sm text-[#86778F]">No matching rental equipment.</td></tr> :
                                     filtered.map(item => (
                                         <tr key={item.id} className="border-b border-[#EFE8F2] last:border-0">
-                                            <td className="px-4 py-3 text-[#4E2C66]">{item.equipmentNumber || "—"}</td>
+                                            <td className="px-4 py-3 text-[#4E2C66]">
+                                                <span className="block whitespace-nowrap">{item.equipmentNumber || "—"}</span>
+                                                {item.unitNumbers.length>0&&<button type="button" onClick={()=>setUnitListItem(item)}
+                                                                                    className="mt-1 text-[10px] font-semibold text-[#6D35D4] underline-offset-2 hover:underline">
+                                                    View {item.unitNumbers.length} equipment no{item.unitNumbers.length===1?"":"s"}.
+                                                </button>}
+                                            </td>
                                             <td className="px-3 py-3 font-semibold text-[#2B174C]">{item.name}</td>
                                             <td className="px-3 py-3 text-[#5F4E75]">{item.category}</td>
                                             <td className="px-2 py-3 text-center font-semibold">{item.totalUnits}</td>
@@ -394,6 +401,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                         categories={categories}
                                         onSave={async (mutation) => { await onSaved(mutation); setDialog(null); }}/>
             }
+            {unitListItem&&<EquipmentUnitNumbersDialog item={unitListItem} close={()=>setUnitListItem(null)}/>}
             {retireItem&&<RetireEquipmentDialog item={retireItem} saving={rental.saving}
                                                 close={()=>setRetireItem(null)} onSave={async (mutation)=>{await onSaved(mutation);setRetireItem(null);}}/>}
             {importOpen && <RentalImportDialog close={()=>setImportOpen(false)} onSave={async (rows,purchase)=>{
@@ -814,7 +822,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                 <button type="button" onClick={close} disabled={submitting} aria-label="Close" className="text-[#9B8AAA] hover:text-[#1A1220]"><X size={20}/></button>
             </div>
             <form onSubmit={prepare} className="min-h-0 space-y-5 overflow-y-auto p-5 sm:p-6">
-                {item&&<div className="rounded-xl bg-[#F7F1FF] px-3 py-2 text-xs font-semibold text-[#4E2C66]">Equipment No.: {item.equipmentNumber} · {item.name}</div>}
+                {item&&<div className="rounded-xl bg-[#F7F1FF] px-3 py-2 text-xs font-semibold text-[#4E2C66]">Product No.: {item.equipmentNumber} · {item.name}</div>}
                 {mode==="review"&&item&&<>
                     <h3 className="text-sm font-bold text-[#1A1220]">Rental Equipment Summary</h3>
                     <div className="grid gap-3 rounded-xl border border-[#E6DDF0] bg-[#FFFCF7] p-4 sm:grid-cols-3">
@@ -961,8 +969,26 @@ function peso(value:number|null|undefined) {
 type RentalExportFilters = {
     category:string;status:string;appliedDates:{from:string;to:string}|null;
 };
+// Read-only list of the Equipment No. of every physical unit of one rental product.
+function EquipmentUnitNumbersDialog({item,close}:{item:RentalEquipment;close:()=>void}) {
+    return <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 px-3 py-4 backdrop-blur-sm" role="presentation"
+                onMouseDown={event=>{if(event.target===event.currentTarget)close();}}>
+        <div role="dialog" aria-modal="true" aria-label={`Equipment numbers for ${item.name}`} className="flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-[#E6DDF0] px-5 py-4">
+                <div>
+                    <h2 className="text-[18px] font-bold text-[#1A1220]">Equipment Nos.</h2>
+                    <p className="text-xs text-[#7A6A84]">{item.name} · Product No. {item.equipmentNumber} · {item.unitNumbers.length} unit{item.unitNumbers.length===1?"":"s"}</p>
+                </div>
+                <button type="button" onClick={close} aria-label="Close" className="text-[#9B8AAA] hover:text-[#1A1220]"><X size={20}/></button>
+            </div>
+            <div className="grid min-h-0 grid-cols-2 gap-2 overflow-y-auto p-5 sm:grid-cols-3">
+                {item.unitNumbers.map(number=><span key={number} className="rounded-lg border border-[#E6DDF0] bg-[#FBF8FF] px-2.5 py-1.5 text-center text-xs font-semibold text-[#4E2C66]">{number}</span>)}
+            </div>
+        </div>
+    </div>;
+}
 function rentalReportRows(items:RentalEquipment[],filters:RentalExportFilters,availability:Map<number,number>|null) {
-    const headings = ["Equipment No.","Rental Product","Category","Last Supplier","Avg. Unit Cost (PHP)",
+    const headings = ["Product No.","Rental Product","Category","Last Supplier","Avg. Unit Cost (PHP)",
         "Rental Rate / Day (PHP)","Total Units","Available Now",
         ...(filters.appliedDates?["Available in Selected Dates"]:[]),
         "Rented Out","Maintenance","Missing","Availability","Condition / Alert"];

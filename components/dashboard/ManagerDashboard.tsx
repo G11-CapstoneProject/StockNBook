@@ -1274,6 +1274,7 @@ export default function ManagerDashboard() {
     const [mayReviewLeave, setMayReviewLeave] = useState(false);
     const [staffRecords, setStaffRecords] = useState<MDStaffAttendance[]>([]);
     const [managerAttendance, setManagerAttendance] = useState<MDManagerAttendance[]>([]);
+    const [managerEmployeeCode, setManagerEmployeeCode] = useState("");
     const [selectedManagerLeave, setSelectedManagerLeave] = useState<MDManagerAttendance | null>(null);
     const [teamAttendance, setTeamAttendance] = useState<MDTeamAttendance[]>([]);
     const [myLogsOpen, setMyLogsOpen] = useState(false);
@@ -1420,6 +1421,7 @@ export default function ManagerDashboard() {
                     setManagerAttendance(Array.isArray(payload.managerAttendance)
                         ? payload.managerAttendance.map(mdEnrichManagerAttendance) : []);
                     setTeamAttendance(Array.isArray(payload.teamAttendance) ? payload.teamAttendance : []);
+                    setManagerEmployeeCode(String(payload.managerEmployeeCode || ""));
                     setManagerClockToday(payload.managerAttendanceToday || null);
                     setManagerClockError("");
                     setLeaveRows(Array.isArray(payload.leaves) ? payload.leaves : []);
@@ -1657,7 +1659,7 @@ export default function ManagerDashboard() {
     };
     const exportTeamAttendance = () => mdExportRows(
         "Team Attendance Log", ["Employee", "Employee ID", "Date", "Time In", "Time Out", "Hours", "Status"],
-        visibleTeamAttendance.map(row => [row.employeeName, String(row.employeeId), mdDisplayDate(row.date),
+        visibleTeamAttendance.map(row => [row.employeeName, row.employeeCode || String(row.employeeId), mdDisplayDate(row.date),
             mdClockTime(row.timeIn), mdClockTime(row.timeOut), mdHours(row.hoursWorked), row.status]),
         "manager_team_attendance", assignedBranchName, today);
     const exportMyLeaveRequests = () => mdExportRows(
@@ -1670,13 +1672,13 @@ export default function ManagerDashboard() {
     const exportMyAttendance = (rows: MDManagerAttendance[] = visibleMyAttendance) => mdExportRows(
         "My Manager Attendance", ["Employee ID", "Date", "Time In", "Time Out", "Hours Worked", "Status"],
         rows.map(row => [
-            String(getUserValue(user, "manager_id") || getUserValue(user, "id") || getSavedItem("manager_id")),
+            managerEmployeeCode || String(getUserValue(user, "manager_id") || getUserValue(user, "id") || getSavedItem("manager_id")),
             mdDisplayDate(row.date), mdClockTime(row.timeIn), mdClockTime(row.timeOut),
             mdHours(row.hoursWorked), row.status]),
         "manager_my_attendance", assignedBranchName, today);
     const exportStaffAttendance = () => {
         const rows = staffRecords.map(record => [
-            String(record.employeeId), record.employeeName, record.status,
+            record.employeeCode || String(record.employeeId), record.employeeName, record.status,
             record.timeIn || "—", record.timeOut || "—",
         ]);
         mdExportRows("Employee Attendance", ["Employee ID", "Employee Name", "Status", "Time In", "Time Out"], rows,
@@ -1962,12 +1964,12 @@ export default function ManagerDashboard() {
 
 /* Dashboard overview panels and staff leave workflow. Manager Inventory is unchanged. */
 type MDStaffSummary = { total: number; present: number; absent: number; onLeave: number; notRecorded: number };
-type MDStaffAttendance = { employeeId: number; employeeName: string; status: string; timeIn: string | null; timeOut: string | null };
+type MDStaffAttendance = { employeeId: number; employeeCode?: string | null; employeeName: string; status: string; timeIn: string | null; timeOut: string | null };
 type MDManagerAttendance = { id: number; date: string; timeIn: string | null; timeOut: string | null; hoursWorked: number | null;
     status: string; leaveType?: string; approvalStatus?: string; reason?: string;
     requestCreatedAt?: string | null; leaveEndDate?: string | null; decisionReason?: string | null;
     reviewedAt?: string | null };
-type MDTeamAttendance = MDManagerAttendance & { employeeId: number; employeeName: string };
+type MDTeamAttendance = MDManagerAttendance & { employeeId: number; employeeCode?: string | null; employeeName: string };
 function mdClockTime(value?: string | null): string {
     if (!value) return "—";
     const match = value.match(/T(\d{2}):(\d{2})/);

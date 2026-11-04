@@ -129,6 +129,19 @@ function handleError(error: unknown, context: string) {
     return response({ success: false, error: "Unable to process manager staff records. Check the server log." }, 500);
 }
 
+// Employee IDs live in managers/staff.employee_code (added automatically by the
+// app). Until that column exists, Employee ID is shown as empty.
+let employeeCodeCheck: Promise<boolean> | null = null;
+function hasEmployeeCodes(db: Pool): Promise<boolean> {
+    employeeCodeCheck ||= Promise.all(["managers", "staff"].map(table => db.query<RowDataPacket[]>(
+        `SELECT 1 AS x FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`, [table, "employee_code"])))
+        .then(results => results.every(([rows]) => rows.length > 0))
+        .catch(() => false)
+        .then(ready => { if (!ready) employeeCodeCheck = null; return ready; });
+    return employeeCodeCheck;
+}
+
 export async function GET(request: NextRequest) {
     try {
         const db = database();
@@ -139,35 +152,46 @@ export async function GET(request: NextRequest) {
         const date = request.nextUrl.searchParams.get("date") || phToday;
         if (!isDay(date)) throw new ApiError(400, "Choose a valid attendance date (YYYY-MM-DD).");
         const scope = [manager.storeId, manager.branchId];
+        // Permanent Employee IDs (STORE-BRANCH-EMP-XXXX) come from the staff/manager
+        // records; attendance and leave rows only reference the employee.
+        const codesReady = await hasEmployeeCodes(db);
+        const staffCode = codesReady ? "st.employee_code" : "NULL";
         const [staffRows] = await db.query<RowDataPacket[]>(
             "SELECT id, staff_name AS name, status FROM staff WHERE store_id = ? AND branch_id = ?",
             scope,
         );
         const activeStaff = staffRows.filter(row => !["inactive", "disabled", "deleted", "revoked"].includes(String(row.status || "").toLowerCase()));
         const [attendance] = await db.query<RowDataPacket[]>(
-            `SELECT employee_id AS employeeId, employee_name AS employeeName, attendance_status AS status,
-                    DATE_FORMAT(time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
-                    DATE_FORMAT(time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut
-             FROM stocknbook_staff_attendance
-             WHERE store_id=? AND branch_id=? AND employee_role='staff' AND attendance_date=?`,
+            `SELECT a.employee_id AS employeeId, ${staffCode} AS employeeCode,
+                    a.employee_name AS employeeName, a.attendance_status AS status,
+                    DATE_FORMAT(a.time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
+                    DATE_FORMAT(a.time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut
+             FROM stocknbook_staff_attendance a
+                      LEFT JOIN staff st ON st.id = a.employee_id AND st.store_id = a.store_id
+             WHERE a.store_id=? AND a.branch_id=? AND a.employee_role='staff' AND a.attendance_date=?`,
             [...scope, date],
         );
+        // Staff leave is stored as one row per request (leave_date..leave_end_date),
+        // so a multi-day approved leave must count on every day it covers.
         const [approved] = await db.query<RowDataPacket[]>(
             `SELECT DISTINCT employee_id AS employeeId FROM stocknbook_staff_leave_requests
              WHERE store_id=? AND branch_id=? AND employee_role='staff'
-               AND leave_date=? AND approval_status='Approved'`, [...scope, date],
+               AND leave_date<=? AND COALESCE(leave_end_date, leave_date)>=?
+               AND approval_status='Approved'`, [...scope, date, date],
         );
         const [leaves] = await db.query<RowDataPacket[]>(
-            `SELECT id, employee_id AS employeeId, employee_name AS employeeName,
-                    employee_number AS employeeNumber,
-                    DATE_FORMAT(leave_date,'%Y-%m-%d') AS leaveDate,
-                    leave_type AS leaveType, reason, approval_status AS approvalStatus,
-                    decision_reason AS decisionReason, approved_by AS reviewedBy,
-                    DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s') AS createdAt,
-                    DATE_FORMAT(reviewed_at,'%Y-%m-%d %H:%i:%s') AS reviewedAt
-             FROM stocknbook_staff_leave_requests
-             WHERE store_id=? AND branch_id=? AND employee_role='staff'
-             ORDER BY (approval_status='Pending') DESC, created_at DESC, leave_date ASC LIMIT 800`, scope,
+            `SELECT l.id, l.employee_id AS employeeId, l.employee_name AS employeeName,
+                    COALESCE(${staffCode}, l.employee_number) AS employeeNumber,
+                    DATE_FORMAT(l.leave_date,'%Y-%m-%d') AS leaveDate,
+                    DATE_FORMAT(COALESCE(l.leave_end_date, l.leave_date),'%Y-%m-%d') AS leaveEndDate,
+                    l.leave_type AS leaveType, l.reason, l.approval_status AS approvalStatus,
+                    l.decision_reason AS decisionReason, l.approved_by AS reviewedBy,
+                    DATE_FORMAT(l.created_at,'%Y-%m-%d %H:%i:%s') AS createdAt,
+                    DATE_FORMAT(l.reviewed_at,'%Y-%m-%d %H:%i:%s') AS reviewedAt
+             FROM stocknbook_staff_leave_requests l
+                      LEFT JOIN staff st ON st.id = l.employee_id AND st.store_id = l.store_id
+             WHERE l.store_id=? AND l.branch_id=? AND l.employee_role='staff'
+             ORDER BY (l.approval_status='Pending') DESC, l.created_at DESC, l.leave_date ASC LIMIT 800`, scope,
         );
         const presentIds = new Set(attendance.filter(row => row.status === "Present").map(row => Number(row.employeeId)));
         const absentIds = new Set(attendance.filter(row => row.status === "Absent").map(row => Number(row.employeeId)));
@@ -223,23 +247,33 @@ export async function GET(request: NextRequest) {
 
         // Existing Team Attendance panel needs the branch's recent staff history.
         const [teamAttendance] = await db.query<RowDataPacket[]>(`
-                    SELECT id, employee_id AS employeeId, employee_name AS employeeName,
-                           DATE_FORMAT(attendance_date,'%Y-%m-%d') AS date,
-                   DATE_FORMAT(time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
-                   DATE_FORMAT(time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut,
-                   CASE WHEN time_in IS NOT NULL AND time_out IS NOT NULL
-                        THEN ROUND(TIMESTAMPDIFF(MINUTE,time_in,time_out)/60,2) ELSE NULL END AS hoursWorked,
-                   CASE WHEN attendance_status='Present' AND time_out IS NULL THEN 'On Duty'
-                        WHEN attendance_status='Present' THEN 'Completed'
-                        ELSE attendance_status END AS status
-            FROM stocknbook_staff_attendance
-            WHERE store_id=? AND branch_id=? AND employee_role='staff'
-              AND attendance_date >= DATE_SUB(${PH_TODAY}, INTERVAL 90 DAY)
-                    ORDER BY attendance_date DESC, id DESC LIMIT 800`,
+                    SELECT a.id, a.employee_id AS employeeId, ${staffCode} AS employeeCode,
+                           a.employee_name AS employeeName,
+                           DATE_FORMAT(a.attendance_date,'%Y-%m-%d') AS date,
+                   DATE_FORMAT(a.time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
+                   DATE_FORMAT(a.time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut,
+                   CASE WHEN a.time_in IS NOT NULL AND a.time_out IS NOT NULL
+                        THEN ROUND(TIMESTAMPDIFF(MINUTE,a.time_in,a.time_out)/60,2) ELSE NULL END AS hoursWorked,
+                   CASE WHEN a.attendance_status='Present' AND a.time_out IS NULL THEN 'On Duty'
+                        WHEN a.attendance_status='Present' THEN 'Completed'
+                        ELSE a.attendance_status END AS status
+            FROM stocknbook_staff_attendance a
+                     LEFT JOIN staff st ON st.id = a.employee_id AND st.store_id = a.store_id
+            WHERE a.store_id=? AND a.branch_id=? AND a.employee_role='staff'
+              AND a.attendance_date >= DATE_SUB(${PH_TODAY}, INTERVAL 90 DAY)
+                    ORDER BY a.attendance_date DESC, a.id DESC LIMIT 800`,
             scope);
+        // The signed-in manager's own permanent Employee ID (for their attendance exports).
+        let managerEmployeeCode: string | null = null;
+        if (codesReady) {
+            const [codeRows] = await db.query<RowDataPacket[]>(
+                "SELECT employee_code AS employeeCode FROM managers WHERE id=? AND store_id=? LIMIT 1",
+                [manager.id, manager.storeId]);
+            managerEmployeeCode = codeRows[0]?.employeeCode ? String(codeRows[0].employeeCode) : null;
+        }
         return response({ success: true, date, mayReviewLeave: manager.mayReviewLeave,
             attendanceSummary: counts, attendance, leaves,
-            managerAttendance, managerAttendanceToday, teamAttendance });
+            managerAttendance, managerAttendanceToday, teamAttendance, managerEmployeeCode });
     } catch (error) { return handleError(error, "Manager staff overview GET failed:"); }
 }
 
@@ -393,4 +427,3 @@ export async function POST(request: NextRequest) {
         return handleError(error, "Manager staff leave review POST failed:");
     } finally { connection?.release(); }
 }
-

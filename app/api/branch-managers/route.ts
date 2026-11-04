@@ -112,8 +112,10 @@ async function listManagerRequests(req: NextRequest) {
     try {
         const db = ownerDatabase();
         const storeId = await verifyOwner(req, db);
+        const employeeCode = (await hasEmployeeCodes(db)) ? "m.employee_code" : "NULL";
         const [rows] = await db.query<RowDataPacket[]>(`
             SELECT l.id, l.employee_id AS managerId,
+                   ${employeeCode} AS employeeCode,
                    COALESCE(m.manager_name, l.employee_name) AS managerName,
                    COALESCE(b.branch_name, l.branch_name) AS branchName,
                    l.branch_id AS branchId,
@@ -129,6 +131,54 @@ async function listManagerRequests(req: NextRequest) {
             ORDER BY (l.approval_status='Pending') DESC, l.created_at DESC, l.leave_date ASC
                 LIMIT 1500`, [storeId]);
         return NextResponse.json({ success: true, requests: rows },
+            { headers: { "Cache-Control": "private, no-store" } });
+    } catch (error) { return handleOwnerError(error); }
+}
+
+// Employee IDs live in managers/staff.employee_code (added automatically by the
+// app). Until that column exists, Employee ID is shown as empty.
+let employeeCodeCheck: Promise<boolean> | null = null;
+function hasEmployeeCodes(db: Pool): Promise<boolean> {
+    employeeCodeCheck ||= Promise.all(["managers", "staff"].map(table => db.query<RowDataPacket[]>(
+        `SELECT 1 AS x FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`, [table, "employee_code"])))
+        .then(results => results.every(([rows]) => rows.length > 0))
+        .catch(() => false)
+        .then(ready => { if (!ready) employeeCodeCheck = null; return ready; });
+    return employeeCodeCheck;
+}
+
+// Owner-only, read-only view of the attendance managers record from their own
+// dashboards (stocknbook_staff_attendance, employee_role='manager'). Scoped to the
+// verified owner's store across all branches. Hours and status use the same SQL
+// as the manager's own Attendance Log, so both views always agree.
+async function listManagerAttendance(req: NextRequest) {
+    try {
+        const db = ownerDatabase();
+        const storeId = await verifyOwner(req, db);
+        const employeeCode = (await hasEmployeeCodes(db)) ? "m.employee_code" : "NULL";
+        const [rows] = await db.query<RowDataPacket[]>(`
+            SELECT a.id, a.employee_id AS managerId,
+                   ${employeeCode} AS employeeCode,
+                   COALESCE(m.manager_name, a.employee_name) AS managerName,
+                   a.branch_id AS branchId,
+                   COALESCE(b.branch_name, a.branch_name) AS branchName,
+                   DATE_FORMAT(a.attendance_date,'%Y-%m-%d') AS date,
+                   DATE_FORMAT(a.time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
+                   DATE_FORMAT(a.time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut,
+                   CASE WHEN a.time_in IS NOT NULL AND a.time_out IS NOT NULL
+                        THEN ROUND(TIMESTAMPDIFF(MINUTE,a.time_in,a.time_out)/60,2) ELSE NULL END AS hoursWorked,
+                   CASE WHEN a.attendance_status='Present' AND a.time_out IS NULL THEN 'On Duty'
+                        WHEN a.attendance_status='Present' THEN 'Completed'
+                        ELSE a.attendance_status END AS status
+            FROM stocknbook_staff_attendance a
+                     JOIN managers m ON m.id = a.employee_id AND m.store_id = a.store_id
+                     LEFT JOIN branches b ON b.id = a.branch_id AND b.store_id = a.store_id
+            WHERE a.store_id=? AND a.employee_role='manager'
+              AND a.attendance_date >= DATE_SUB(DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+08:00')), INTERVAL 90 DAY)
+            ORDER BY a.attendance_date DESC, a.id DESC
+                LIMIT 1500`, [storeId]);
+        return NextResponse.json({ success: true, attendance: rows },
             { headers: { "Cache-Control": "private, no-store" } });
     } catch (error) { return handleOwnerError(error); }
 }
@@ -212,6 +262,9 @@ async function setManagerAccess(req: NextRequest, body: Record<string, unknown>,
 export async function GET(req: NextRequest) {
     if (req.nextUrl.searchParams.get("view") === "manager_requests") {
         return listManagerRequests(req);
+    }
+    if (req.nextUrl.searchParams.get("view") === "manager_attendance") {
+        return listManagerAttendance(req);
     }
     try {
         return await callLocalAuth(req, "get_branch_managers");

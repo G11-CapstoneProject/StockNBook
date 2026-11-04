@@ -1,6 +1,574 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
+// ===== BEGIN StockNBook identification numbers (identical in lambda-auth, lambda-pos, lambda-products, lambda-rental-inventory) =====
+const identifiers = (() => {
+    /*
+     * StockNBook standardized identification numbers.
+     *
+     *   Order      STORE-BRANCH-MMDDYY-XXXX   e.g. SPS-B4-110326-0001
+     *   Product    STORE-BRANCH-PRD-XXXX      e.g. SPS-B4-PRD-0001  (one per product type)
+     *   Equipment  STORE-BRANCH-EQP-XXXX      e.g. SPS-B4-EQP-0001  (one per physical rental unit)
+     *   Employee   STORE-BRANCH-EMP-XXXX      e.g. SPS-B4-EMP-0001  (managers and staff share one sequence)
+     *
+     * This block is pasted, unchanged, into lambda-auth, lambda-pos, lambda-products
+     * and lambda-rental-inventory (each Lambda package stays self-contained).
+     * Keep all four copies identical.
+     *
+     * Existing records are never modified: old Order IDs, Product Nos., equipment
+     * numbers, store codes and branch codes stay exactly as they are. Only records
+     * created from now on receive these formats.
+     *
+     * Sequences are at least four digits. They are never truncated: after 9999 the
+     * next number is 10000, so an identifier can never repeat.
+     */
+
+    const CODE_PATTERN = /^[A-Z0-9]{2,8}$/;
+    const SEQUENCE_DIGITS = 4;
+
+    const PATTERNS = Object.freeze({
+        order: /^([A-Z0-9]{2,8})-([A-Z0-9]{2,8})-(\d{6})-(\d{4,})$/,
+        product: /^([A-Z0-9]{2,8})-([A-Z0-9]{2,8})-PRD-(\d{4,})$/,
+        equipment: /^([A-Z0-9]{2,8})-([A-Z0-9]{2,8})-EQP-(\d{4,})$/,
+        employee: /^([A-Z0-9]{2,8})-([A-Z0-9]{2,8})-EMP-(\d{4,})$/,
+        // Product Nos. created before standardization, e.g. SPS-IMS-001.
+        legacyProduct: /^([A-Za-z0-9]{2,8})-([A-Za-z0-9]{2,8})-(\d{3,})$/,
+    });
+
+    /* ------------------------------------------------------------------ */
+    /* Store initials (unchanged StockNBook rule, e.g. Sparkling Party     */
+    /* Supplies - Antipolo City = SPS). Existing store codes are kept.    */
+    /* ------------------------------------------------------------------ */
+
+    const STORE_CODE_STOP_WORDS = new Set([
+        "THE", "AND", "OF", "STORE", "SHOP", "ENTERPRISE", "ENTERPRISES",
+        "TRADING", "COMPANY", "CO", "INC", "CORP", "CORPORATION", "CITY",
+    ]);
+
+    function normalizeCodeWords(value) {
+        return String(value || "")
+            .normalize("NFKD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .toUpperCase()
+            .replace(/[^A-Z0-9]+/g, " ")
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean);
+    }
+
+    function compactAlpha(value) {
+        return normalizeCodeWords(value).join("").replace(/[^A-Z]/g, "");
+    }
+
+    function codeFromSingleWord(word) {
+        const clean = String(word || "").replace(/[^A-Z]/g, "");
+        if (!clean) return "XXX";
+        const first = clean.charAt(0);
+        const consonants = clean.slice(1).replace(/[AEIOU]/g, "");
+        let code = `${first}${consonants}`.slice(0, 3);
+        if (code.length < 3) code = `${code}${clean.slice(1)}`.slice(0, 3);
+        return code.padEnd(3, "X");
+    }
+
+    function buildReadableCode(value, stopWords, fallback = "XXX") {
+        const words = normalizeCodeWords(value).filter((word) => !stopWords.has(word));
+        if (words.length >= 3) return words.slice(0, 3).map((word) => word.charAt(0)).join("");
+        if (words.length === 2) return `${words[0].charAt(0)}${codeFromSingleWord(words[1]).slice(0, 2)}`;
+        if (words.length === 1) return codeFromSingleWord(words[0]);
+        return codeFromSingleWord(normalizeCodeWords(fallback)[0] || "XXX");
+    }
+
+    function storeCodeCandidates(storeName, slug, storeId) {
+        const source = storeName || slug || `Store ${storeId}`;
+        const base = buildReadableCode(source, STORE_CODE_STOP_WORDS, "STR");
+        const compact = compactAlpha(source);
+        const candidates = [base];
+        for (let length = 4; length <= 7; length += 1) {
+            const candidate = `${base}${compact.slice(0, Math.max(0, length - 3))}`.slice(0, length);
+            if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
+        }
+        for (let suffix = 0; suffix < 26; suffix += 1) candidates.push(`${base}${String.fromCharCode(65 + suffix)}`);
+        return candidates;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Branch initials, taken from the branch name:                       */
+    /*   Moon Walk Branch       -> MW   (initials of the words)           */
+    /*   Moonwalk Branch        -> MW   (first letter + next syllable)    */
+    /*   Branch 4 Retail Branch -> B4   (numbered branch)                 */
+    /*   Main Retail Branch     -> MAIN (one-syllable word kept whole)    */
+    /* Generic words such as Branch/Retail/Store are ignored. Initials are */
+    /* saved in identifier_prefixes the first time a branch needs an ID   */
+    /* and never change afterwards, even if the branch is renamed.        */
+    /* ------------------------------------------------------------------ */
+
+    const BRANCH_INITIAL_STOP_WORDS = new Set([
+        "THE", "AND", "OF", "BRANCH", "BRANCHES", "BR", "RETAIL", "OUTLET",
+        "LOCATION", "STORE", "SHOP",
+    ]);
+    const VOWELS = new Set(["A", "E", "I", "O", "U"]);
+    const CONSONANT_DIGRAPHS = new Set(["CH", "SH", "TH", "PH", "WH", "CK", "GH"]);
+
+    function isVowelAt(word, index) {
+        const letter = word.charAt(index);
+        if (VOWELS.has(letter)) return true;
+        // Y acts as a vowel after a consonant (e.g. "Lyceum").
+        return letter === "Y" && index > 0 && !VOWELS.has(word.charAt(index - 1));
+    }
+
+    // First letter of the word's second syllable, or "" for one-syllable words.
+    function secondSyllableInitial(rawWord) {
+        const word = String(rawWord || "").replace(/[^A-Z]/g, "");
+        let index = 0;
+        while (index < word.length && !isVowelAt(word, index)) index += 1;
+        if (index >= word.length) return "";
+        while (index < word.length && isVowelAt(word, index)) index += 1;
+        const clusterStart = index;
+        while (index < word.length && !isVowelAt(word, index)) index += 1;
+        if (index >= word.length) return "";
+        const cluster = word.slice(clusterStart, index);
+        if (cluster.length <= 1) return cluster;
+        // Two or more consonants split after the first consonant (moon|walk),
+        // keeping common digraphs together (south|west).
+        const firstUnit = CONSONANT_DIGRAPHS.has(cluster.slice(0, 2)) ? 2 : 1;
+        return cluster.length > firstUnit ? cluster.charAt(firstUnit) : cluster.charAt(0);
+    }
+
+    function branchInitials(branchName) {
+        const words = normalizeCodeWords(branchName).filter((word) => !BRANCH_INITIAL_STOP_WORDS.has(word));
+        const numbers = words.filter((word) => /^\d+$/.test(word)).join("");
+        const named = words.filter((word) => !/^\d+$/.test(word));
+        let base;
+        if (named.length === 0) {
+            base = numbers ? `B${numbers}` : "BR";
+        } else if (named.length >= 2) {
+            base = `${named.map((word) => word.charAt(0)).join("")}${numbers}`;
+        } else {
+            const word = named[0];
+            const next = secondSyllableInitial(word);
+            base = `${next ? `${word.charAt(0)}${next}` : word}${numbers}`;
+        }
+        base = base.replace(/[^A-Z0-9]/g, "").slice(0, 8);
+        return base.length >= 2 ? base : `${base}BR`.slice(0, 2);
+    }
+
+    // Deterministic fallbacks when two branches of the same store share initials:
+    // MW, MW2, MW3 ... or, for codes ending in a digit, B4A, B4B ...
+    function branchCodeCandidates(branchName) {
+        const base = branchInitials(branchName);
+        const candidates = [base];
+        const suffixes = /\d$/.test(base)
+            ? Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i))
+            : Array.from({ length: 98 }, (_, i) => String(i + 2));
+        for (const suffix of suffixes) {
+            const candidate = `${base.slice(0, 8 - suffix.length)}${suffix}`;
+            if (!candidates.includes(candidate)) candidates.push(candidate);
+        }
+        return candidates;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Formatting                                                          */
+    /* ------------------------------------------------------------------ */
+
+    function formatSequence(sequence) {
+        const value = Number(sequence);
+        if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid identification sequence.");
+        return String(value).padStart(SEQUENCE_DIGITS, "0"); // never truncates (10000 stays 10000)
+    }
+
+    function orderDatePart(orderDate) {
+        const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(orderDate || ""));
+        if (!match) throw new Error("A valid order date (YYYY-MM-DD) is required for the Order ID.");
+        return `${match[2]}${match[3]}${match[1].slice(2)}`; // MMDDYY
+    }
+
+    function assertCodes(storeCode, branchCode) {
+        if (!CODE_PATTERN.test(String(storeCode || "")) || !CODE_PATTERN.test(String(branchCode || ""))) {
+            throw new Error("Store/branch initials are missing or invalid for identification numbers.");
+        }
+    }
+
+    function buildOrderId(storeCode, branchCode, orderDate, sequence) {
+        assertCodes(storeCode, branchCode);
+        return `${storeCode}-${branchCode}-${orderDatePart(orderDate)}-${formatSequence(sequence)}`;
+    }
+    function buildProductNumber(storeCode, branchCode, sequence) {
+        assertCodes(storeCode, branchCode);
+        return `${storeCode}-${branchCode}-PRD-${formatSequence(sequence)}`;
+    }
+    function buildEquipmentNumber(storeCode, branchCode, sequence) {
+        assertCodes(storeCode, branchCode);
+        return `${storeCode}-${branchCode}-EQP-${formatSequence(sequence)}`;
+    }
+    function buildEmployeeCode(storeCode, branchCode, sequence) {
+        assertCodes(storeCode, branchCode);
+        return `${storeCode}-${branchCode}-EMP-${formatSequence(sequence)}`;
+    }
+
+    function trailingSequence(value) {
+        const match = /-(\d+)$/.exec(String(value || ""));
+        return match ? Number(match[1]) : 0;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Schema (also created by the migration). Runs outside transactions. */
+    /* ------------------------------------------------------------------ */
+
+    const SCHEMA_STEPS = [
+        {
+            table: "id_number_sequences",
+            create: `CREATE TABLE IF NOT EXISTS id_number_sequences (
+                store_id BIGINT NOT NULL,
+                branch_id BIGINT NOT NULL,
+                entity_type VARCHAR(10) NOT NULL,
+                scope_key VARCHAR(10) NOT NULL DEFAULT '',
+                last_sequence INT UNSIGNED NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (store_id, branch_id, entity_type, scope_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        },
+        {
+            table: "identifier_prefixes",
+            create: `CREATE TABLE IF NOT EXISTS identifier_prefixes (
+                branch_id BIGINT NOT NULL,
+                store_id BIGINT NOT NULL,
+                store_initials VARCHAR(8) NOT NULL,
+                branch_initials VARCHAR(8) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (branch_id),
+                UNIQUE KEY uq_identifier_prefixes_initials (store_id, branch_initials)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        },
+        {
+            table: "rental_equipment_units",
+            create: `CREATE TABLE IF NOT EXISTS rental_equipment_units (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                store_id BIGINT NOT NULL,
+                branch_id BIGINT NOT NULL,
+                equipment_id BIGINT NOT NULL,
+                equipment_number VARCHAR(40) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                retired_at DATETIME NULL DEFAULT NULL,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_rental_equipment_units_number (equipment_number),
+                KEY idx_rental_equipment_units_equipment (equipment_id, retired_at),
+                KEY idx_rental_equipment_units_branch (store_id, branch_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        },
+        {
+            table: "managers", column: "employee_code",
+            add: "ALTER TABLE managers ADD COLUMN employee_code VARCHAR(40) NULL",
+            index: "ALTER TABLE managers ADD UNIQUE INDEX uq_managers_employee_code (employee_code)",
+        },
+        {
+            table: "staff", column: "employee_code",
+            add: "ALTER TABLE staff ADD COLUMN employee_code VARCHAR(40) NULL",
+            index: "ALTER TABLE staff ADD UNIQUE INDEX uq_staff_employee_code (employee_code)",
+        },
+    ];
+
+    const schemaState = { ready: false, pending: null };
+    const IGNORABLE_DDL_ERRORS = new Set(["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME", "ER_TABLE_EXISTS_ERROR"]);
+
+    async function probe(connection, sql) {
+        try {
+            await connection.execute(sql);
+            return true;
+        } catch (error) {
+            if (["ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"].includes(error?.code)) return false;
+            throw error;
+        }
+    }
+
+    async function runDdl(connection, sql) {
+        try {
+            await connection.query(sql);
+        } catch (error) {
+            if (!IGNORABLE_DDL_ERRORS.has(error?.code)) throw error;
+        }
+    }
+
+    // Idempotent. Never call inside an open transaction: MySQL DDL commits implicitly.
+    async function ensureIdentifierSchema(connection) {
+        if (schemaState.ready) return true;
+        if (!schemaState.pending) {
+            schemaState.pending = (async () => {
+                for (const step of SCHEMA_STEPS) {
+                    if (step.create) {
+                        if (!(await probe(connection, `SELECT 1 FROM ${step.table} LIMIT 0`))) await runDdl(connection, step.create);
+                    } else if (!(await probe(connection, `SELECT ${step.column} FROM ${step.table} LIMIT 0`))) {
+                        await runDdl(connection, step.add);
+                        await runDdl(connection, step.index);
+                    }
+                }
+                schemaState.ready = true;
+                return true;
+            })().catch((error) => {
+                console.error("StockNBook identifier schema check failed:", error?.message || error);
+                return false;
+            }).finally(() => { schemaState.pending = null; });
+        }
+        return schemaState.pending;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Codes and sequences                                                 */
+    /* ------------------------------------------------------------------ */
+
+    // Store + branch initials for a branch. Decided once (first ID for that branch),
+    // saved in identifier_prefixes, and reused forever. stores/branches are only read.
+    async function getIdentifierCodes(connection, storeId, branchId) {
+        const readSaved = async () => {
+            const [rows] = await connection.execute(
+                "SELECT store_initials AS storeCode, branch_initials AS branchCode FROM identifier_prefixes WHERE branch_id = ? AND store_id = ? LIMIT 1",
+                [branchId, storeId]
+            );
+            return rows[0] || null;
+        };
+        let saved = await readSaved();
+        if (!saved) {
+            const [rows] = await connection.execute(
+                `SELECT s.store_code AS storeCode, s.store_name AS storeName, s.slug, b.branch_name AS branchName
+                 FROM branches b
+                          JOIN stores s ON s.id = b.store_id
+                 WHERE b.id = ? AND b.store_id = ?
+                 LIMIT 1`,
+                [branchId, storeId]
+            );
+            if (!rows.length) throw new Error("The branch does not belong to this store.");
+            const info = rows[0];
+            // Store initials: this store's saved initials, else its existing store code
+            // (e.g. SPS), else derived from the name without writing to the store record.
+            const [storeRows] = await connection.execute(
+                "SELECT store_initials AS code FROM identifier_prefixes WHERE store_id = ? LIMIT 1", [storeId]);
+            let storeCode = String(storeRows[0]?.code || info.storeCode || "").trim().toUpperCase();
+            if (!CODE_PATTERN.test(storeCode)) {
+                const [usedRows] = await connection.execute(
+                    `SELECT store_code AS code FROM stores WHERE id <> ? AND store_code IS NOT NULL
+                     UNION SELECT store_initials AS code FROM identifier_prefixes WHERE store_id <> ?`,
+                    [storeId, storeId]
+                );
+                const used = new Set(usedRows.map((row) => String(row.code || "").toUpperCase()));
+                storeCode = storeCodeCandidates(info.storeName, info.slug, storeId).find((code) => !used.has(code));
+            }
+            // INSERT IGNORE + the unique key settles races: when another branch of this
+            // store already holds the initials, the next candidate (MW2, MW3 ...) is tried.
+            for (const candidate of branchCodeCandidates(info.branchName)) {
+                await connection.execute(
+                    "INSERT IGNORE INTO identifier_prefixes (branch_id, store_id, store_initials, branch_initials) VALUES (?, ?, ?, ?)",
+                    [branchId, storeId, storeCode, candidate]
+                );
+                saved = await readSaved();
+                if (saved) break;
+            }
+            if (!saved) throw new Error("Unable to allocate unique branch initials.");
+        }
+        const storeCode = String(saved.storeCode || "").trim().toUpperCase();
+        const branchCode = String(saved.branchCode || "").trim().toUpperCase();
+        assertCodes(storeCode, branchCode);
+        return { storeCode, branchCode };
+    }
+
+    async function maxSequenceFrom(connection, sql, params, pattern) {
+        const [rows] = await connection.execute(sql, params);
+        return rows.reduce((max, row) => {
+            const value = String(row.value || "");
+            return pattern && !pattern.test(value) ? max : Math.max(max, trailingSequence(value));
+        }, 0);
+    }
+
+    /*
+     * Reserves `count` consecutive numbers atomically. The UPDATE row-locks the
+     * sequence row and LAST_INSERT_ID(expr) hands the new value back on this
+     * connection only, so concurrent requests can never receive the same number
+     * (with or without an open transaction). `floor` self-heals the sequence from
+     * identifiers already stored.
+     */
+    async function reserveSequenceBlock(connection, { storeId, branchId, entityType, scopeKey = "", count = 1, floor = 0 }) {
+        const size = Number(count);
+        if (!Number.isSafeInteger(size) || size < 1) throw new Error("Invalid identification sequence request.");
+        await connection.execute(
+            `INSERT INTO id_number_sequences (store_id, branch_id, entity_type, scope_key, last_sequence)
+             VALUES (?, ?, ?, ?, 0)
+             ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
+            [storeId, branchId, entityType, scopeKey]
+        );
+        await connection.execute(
+            `UPDATE id_number_sequences
+             SET last_sequence = LAST_INSERT_ID(GREATEST(last_sequence, ?) + ?)
+             WHERE store_id = ? AND branch_id = ? AND entity_type = ? AND scope_key = ?`,
+            [Number(floor) || 0, size, storeId, branchId, entityType, scopeKey]
+        );
+        const [rows] = await connection.execute("SELECT LAST_INSERT_ID() AS lastSequence");
+        const last = Number(rows[0]?.lastSequence);
+        if (!Number.isSafeInteger(last) || last < size) throw new Error("Identification sequence could not be reserved.");
+        return { first: last - size + 1, last };
+    }
+
+    async function generateOrderId(connection, { storeId, branchId, orderDate }) {
+        const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
+        const datePart = orderDatePart(orderDate);
+        const prefix = `${storeCode}-${branchCode}-${datePart}-`;
+        const floor = await maxSequenceFrom(connection,
+            "SELECT order_id AS value FROM orders WHERE order_id LIKE ?", [`${prefix}%`], PATTERNS.order);
+        const { last } = await reserveSequenceBlock(connection,
+            { storeId, branchId, entityType: "ORDER", scopeKey: datePart, floor });
+        return buildOrderId(storeCode, branchCode, orderDate, last);
+    }
+
+    // Managers and staff share ONE sequence per branch, so their IDs never overlap.
+    async function generateEmployeeCode(connection, { storeId, branchId }) {
+        const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
+        const prefix = `${storeCode}-${branchCode}-EMP-`;
+        const floor = await maxSequenceFrom(connection,
+            `SELECT employee_code AS value FROM managers WHERE employee_code LIKE ?
+             UNION ALL
+             SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
+            [`${prefix}%`, `${prefix}%`], PATTERNS.employee);
+        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, entityType: "EMP", floor });
+        return buildEmployeeCode(storeCode, branchCode, last);
+    }
+
+    // Highest Product No. already issued with this exact prefix (products or rental types).
+    async function maxProductPrefixSequence(connection, storeCode, branchCode) {
+        const prefix = `${storeCode}-${branchCode}-PRD-%`;
+        const fromProducts = await maxSequenceFrom(connection,
+            "SELECT product_number AS value FROM products WHERE product_number LIKE ?", [prefix], PATTERNS.product);
+        let fromRental = 0;
+        try {
+            fromRental = await maxSequenceFrom(connection,
+                "SELECT equipment_number AS value FROM rental_equipment WHERE equipment_number LIKE ?", [prefix], PATTERNS.product);
+        } catch (error) {
+            if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
+        }
+        return Math.max(fromProducts, fromRental);
+    }
+
+    /*
+     * Product Nos. for sales products and rental product types share
+     * product_number_sequences, so a rental type can never reuse a sales product's
+     * number. Caller must be inside a transaction; the branch row lock serializes
+     * allocation exactly like lambda-products create_product.
+     */
+    async function allocateProductNumber(connection, { storeId, branchId }) {
+        await connection.execute("SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE", [branchId, storeId]);
+        const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
+        const [sequenceRows] = await connection.execute(
+            "SELECT last_sequence AS lastSequence FROM product_number_sequences WHERE store_id = ? AND branch_id = ? FOR UPDATE",
+            [storeId, branchId]
+        );
+        const fromProducts = await maxSequenceFrom(connection,
+            "SELECT product_number AS value FROM products WHERE store_id = ? AND branch_id = ? AND product_number IS NOT NULL",
+            [storeId, branchId]);
+        const fromRental = await maxSequenceFrom(connection,
+            "SELECT equipment_number AS value FROM rental_equipment WHERE store_id = ? AND branch_id = ? AND equipment_number LIKE '%-PRD-%'",
+            [storeId, branchId], PATTERNS.product);
+        const fromPrefix = await maxProductPrefixSequence(connection, storeCode, branchCode);
+        const next = Math.max(Number(sequenceRows[0]?.lastSequence || 0), fromProducts, fromRental, fromPrefix) + 1;
+        await connection.execute(
+            `INSERT INTO product_number_sequences (store_id, branch_id, last_sequence)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
+            [storeId, branchId, next]
+        );
+        return buildProductNumber(storeCode, branchCode, next);
+    }
+
+    /*
+     * One Equipment No. per physical rental unit ADDED from now on (units that existed
+     * before are left exactly as they are). Rental workflows stay quantity-based:
+     * delta > 0 issues new numbers; delta < 0 (correction, write-off, retirement)
+     * retires the most recently numbered units still active. Numbers are never reused.
+     * delta = -Infinity retires all of a rental product's numbers.
+     */
+    async function adjustEquipmentUnits(connection, { storeId, branchId, equipmentId, delta }) {
+        const change = Number(delta);
+        if (!change) return { issued: [], retired: 0 };
+        if (change < 0) {
+            const [active] = await connection.execute(
+                "SELECT id FROM rental_equipment_units WHERE equipment_id = ? AND retired_at IS NULL ORDER BY id DESC",
+                [equipmentId]
+            );
+            const count = Number.isFinite(change) ? Math.min(active.length, -change) : active.length;
+            const ids = active.slice(0, count).map((row) => Number(row.id));
+            for (let i = 0; i < ids.length; i += 500) {
+                const chunk = ids.slice(i, i + 500);
+                await connection.execute(
+                    `UPDATE rental_equipment_units SET retired_at = CURRENT_TIMESTAMP WHERE id IN (${chunk.map(() => "?").join(",")})`,
+                    chunk
+                );
+            }
+            return { issued: [], retired: ids.length };
+        }
+        const needed = Math.trunc(change);
+        const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
+        const prefix = `${storeCode}-${branchCode}-EQP-`;
+        const floor = await maxSequenceFrom(connection,
+            "SELECT equipment_number AS value FROM rental_equipment_units WHERE equipment_number LIKE ?",
+            [`${prefix}%`], PATTERNS.equipment);
+        const { first } = await reserveSequenceBlock(connection,
+            { storeId, branchId, entityType: "EQP", count: needed, floor });
+        const issued = Array.from({ length: needed }, (_, i) => buildEquipmentNumber(storeCode, branchCode, first + i));
+        for (let i = 0; i < issued.length; i += 500) {
+            const chunk = issued.slice(i, i + 500);
+            await connection.execute(
+                `INSERT INTO rental_equipment_units (store_id, branch_id, equipment_id, equipment_number)
+                 VALUES ${chunk.map(() => "(?, ?, ?, ?)").join(", ")}`,
+                chunk.flatMap((number) => [storeId, branchId, equipmentId, number])
+            );
+        }
+        return { issued, retired: 0 };
+    }
+
+    // Active Equipment Nos. for a branch, grouped by rental product type.
+    async function listEquipmentUnitNumbers(connection, { storeId, branchId }) {
+        const grouped = new Map();
+        try {
+            const [rows] = await connection.execute(
+                `SELECT equipment_id AS equipmentId, equipment_number AS equipmentNumber
+                 FROM rental_equipment_units
+                 WHERE store_id = ? AND branch_id = ? AND retired_at IS NULL
+                 ORDER BY equipment_id, equipment_number`,
+                [storeId, branchId]
+            );
+            for (const row of rows) {
+                const key = Number(row.equipmentId);
+                if (!grouped.has(key)) grouped.set(key, []);
+                grouped.get(key).push(String(row.equipmentNumber));
+            }
+        } catch (error) {
+            if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
+        }
+        return grouped;
+    }
+
+    return {
+        PATTERNS,
+        CODE_PATTERN,
+        branchInitials,
+        branchCodeCandidates,
+        secondSyllableInitial,
+        storeCodeCandidates,
+        formatSequence,
+        orderDatePart,
+        buildOrderId,
+        buildProductNumber,
+        buildEquipmentNumber,
+        buildEmployeeCode,
+        trailingSequence,
+        ensureIdentifierSchema,
+        getIdentifierCodes,
+        reserveSequenceBlock,
+        generateOrderId,
+        generateEmployeeCode,
+        allocateProductNumber,
+        adjustEquipmentUnits,
+        maxProductPrefixSequence,
+        listEquipmentUnitNumbers,
+    };
+})();
+// ===== END StockNBook identification numbers =====
 
 const JWT_SECRET = "stocknbook-secret-key";
 
@@ -210,83 +778,6 @@ function nextMonthStartFromISODate(value) {
     if (!monthStart) return null;
     const [year, month] = monthStart.split("-").map(Number);
     return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
-}
-
-async function getNextAvailablePosOrderId(
-    connection,
-    storeId,
-    orderDate,
-    requestedOrderId
-) {
-    const requested = toSafeString(requestedOrderId, 255);
-
-    if (!requested) {
-        return "";
-    }
-
-    /*
-     * Frontend IDs normally look like:
-     * HAPPY-POS-20260819-01
-     *
-     * The frontend may only have one branch's orders loaded, while order_id
-     * is the PRIMARY KEY for the entire orders table. Therefore the backend
-     * must choose the final sequence using ALL orders for this store/date.
-     */
-    const sequenceMatch = requested.match(/^(.*)-(\d+)$/);
-
-    const baseId = sequenceMatch
-        ? sequenceMatch[1]
-        : requested;
-
-    const requestedSequence =
-        sequenceMatch && Number.isFinite(Number(sequenceMatch[2]))
-            ? Math.max(1, Number(sequenceMatch[2]))
-            : 1;
-
-    const [rows] = await connection.execute(
-        `SELECT order_id AS orderId
-         FROM orders
-         WHERE store_id = ?
-           AND order_date = ?`,
-        [storeId, orderDate]
-    );
-
-    const escapedBase = baseId.replace(
-        /[.*+?^${}()|[\]\\]/g,
-        "\\$&"
-    );
-
-    const sequencePattern = new RegExp(
-        `^${escapedBase}-(\\d+)$`,
-        "i"
-    );
-
-    let maxSequence = 0;
-
-    for (const row of rows) {
-        const existingId = String(row.orderId || "").trim();
-        const match = existingId.match(sequencePattern);
-
-        if (!match) {
-            continue;
-        }
-
-        const sequence = Number(match[1]);
-
-        if (
-            Number.isFinite(sequence) &&
-            sequence > maxSequence
-        ) {
-            maxSequence = sequence;
-        }
-    }
-
-    const nextSequence = Math.max(
-        requestedSequence,
-        maxSequence + 1
-    );
-
-    return `${baseId}-${String(nextSequence).padStart(2, "0")}`;
 }
 
 async function getNextAvailableControlNumber(connection, orderDate) {
@@ -1404,7 +1895,8 @@ exports.handler = async (event) => {
         }
 
         if (action === "create_order") {
-            const requestedOrderId = toSafeString(body.order_id, 255);
+            // Order IDs are generated by the server (STORE-BRANCH-MMDDYY-XXXX).
+            // Any order_id sent by the browser is ignored.
             const paymentMode =
                 toSafeString(body.payment_mode, 20).toUpperCase() || "CASH";
             const orderDate =
@@ -1413,10 +1905,6 @@ exports.handler = async (event) => {
             const customerPayment = roundMoney(
                 toNumber(body.customer_payment) ?? 0
             );
-
-            if (!requestedOrderId) {
-                return badRequest(headers, "order_id is required.");
-            }
 
             if (tokenRole !== "staff" || !tokenBranchId) {
                 return jsonResponse(403, headers, { error: "Only assigned Staff can create POS transactions." });
@@ -1436,13 +1924,13 @@ exports.handler = async (event) => {
                 return badRequest(headers, "Customer payment cannot be negative.");
             }
 
-            let orderId = await getNextAvailablePosOrderId(
-                connection,
-                storeId,
-                orderDate,
-                requestedOrderId
-            );
+            // Creates the sequence table/columns if the migration has not run yet.
+            // Must run before the transaction (MySQL DDL commits implicitly).
+            if (!(await identifiers.ensureIdentifierSchema(connection))) {
+                throw new Error("Order ID numbering is not set up. Run scripts/standardize-identifiers.js.");
+            }
 
+            let orderId = "";
             const MAX_ORDER_ID_ATTEMPTS = 5;
 
             for (
@@ -1453,6 +1941,14 @@ exports.handler = async (event) => {
                 await connection.beginTransaction();
 
                 try {
+                    // Reserved inside this transaction from a locked per-branch, per-day
+                    // sequence. A rollback releases nothing that another sale could reuse.
+                    orderId = await identifiers.generateOrderId(connection, {
+                        storeId,
+                        branchId: tokenBranchId,
+                        orderDate,
+                    });
+
                     // Lock tax registration for the sale; owner edits wait until checkout commits.
                     const taxType = await getStoreTaxType(connection, storeId, true);
                     /*
@@ -1643,12 +2139,7 @@ exports.handler = async (event) => {
                         error?.code === "ER_DUP_ENTRY" &&
                         attempt < MAX_ORDER_ID_ATTEMPTS - 1
                     ) {
-                        orderId = await getNextAvailablePosOrderId(
-                            connection,
-                            storeId,
-                            orderDate,
-                            requestedOrderId
-                        );
+                        // The next attempt reserves a fresh Order ID in its own transaction.
                         continue;
                     }
 

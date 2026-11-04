@@ -398,7 +398,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         }
     };
     const rentalProductNames=[...new Set(rental.equipment.map(e=>e.name))].sort();
-    const visibleEquipment=rental.equipment.filter(e=>[e.name,e.category,e.equipmentNumber].join(" ").toLowerCase().includes(search.trim().toLowerCase())&&(rentalProductFilter==="all"||e.name===rentalProductFilter));
+    const visibleEquipment=rental.equipment.filter(e=>[e.name,e.category,e.equipmentNumber,...(e.unitNumbers||[])].join(" ").toLowerCase().includes(search.trim().toLowerCase())&&(rentalProductFilter==="all"||e.name===rentalProductFilter));
     const selectedEquipment=rental.equipment.find(e=>e.id===viewEquipment);
     const openRentalAction=(item:StaffRentalAllocation)=>{
         if(taskType(item)==="release"||taskType(item)==="return")return;
@@ -707,7 +707,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                 <table className="w-full min-w-[900px] text-left text-[11px]">
                     <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                     <tr className="border-b border-[#E9E1EE]">
-                        <th className="px-1.5 py-3 font-semibold">Equipment No.</th>
+                        <th className="px-1.5 py-3 font-semibold">Product No.</th>
                         <th className="px-1.5 py-3 font-semibold">Rental Product</th>
                         <th className="px-1.5 py-3 text-center font-semibold">Total Units</th>
                         <th className="px-1.5 py-3 text-center font-semibold">Available Today</th>
@@ -1003,7 +1003,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                   value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Condition, missing accessories, handover notes..."/></label>}
                     {submitError&&<p role="alert" className="rounded-xl bg-red-50 p-3 text-xs text-red-700">{submitError}</p>}
                     <div className="flex justify-end gap-2"><button className={action} disabled={rental.saving} onClick={()=>setSelected(null)}>Cancel</button>{taskType(selected)!=="damage"&&<button className={primary} disabled={rental.saving} onClick={()=>void perform()}>{rental.saving?"Saving...":taskType(selected)==="prepare"?"Confirm Preparation":"Confirm "+taskLabel[taskType(selected)||"prepare"]}</button>}</div>
-                </div>:selectedEquipment&&<div className="mt-4 space-y-2 text-sm"><p>Equipment No.: {selectedEquipment.equipmentNumber}</p><p>Total units: {selectedEquipment.totalUnits}</p><p>Out: {selectedEquipment.rentedOutUnits}</p><p>On Hold: <strong>{selectedEquipment.maintenanceUnits}</strong></p>
+                </div>:selectedEquipment&&<div className="mt-4 space-y-2 text-sm"><p>Product No.: {selectedEquipment.equipmentNumber}</p>{(selectedEquipment.unitNumbers?.length||0)>0&&<div><p>Equipment Nos. ({selectedEquipment.unitNumbers!.length} units):</p><div className="mt-1 flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">{selectedEquipment.unitNumbers!.map(number=><span key={number} className="rounded-md border border-[#E6DDF0] bg-[#FBF8FF] px-2 py-0.5 text-[11px] font-semibold text-[#4E2C66]">{number}</span>)}</div></div>}<p>Total units: {selectedEquipment.totalUnits}</p><p>Out: {selectedEquipment.rentedOutUnits}</p><p>On Hold: <strong>{selectedEquipment.maintenanceUnits}</strong></p>
                     {(()=>{
                         const h=holdBreakdown.get(selectedEquipment.id)||{inspection:0,cleaning:0,routine:0,repairs:0};
                         const known=h.inspection+h.cleaning+h.routine+h.repairs;

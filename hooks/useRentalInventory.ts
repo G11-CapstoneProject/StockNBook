@@ -8,7 +8,10 @@ import * as React from "react";
 
 export type RentalEquipment = {
     id: number;
+    // Product No. of the rental product type (STORE-BRANCH-PRD-XXXX).
     equipmentNumber: string;
+    // Equipment No. of every physical unit currently in the fleet (STORE-BRANCH-EQP-XXXX).
+    unitNumbers: string[];
     name: string;
     category: string;
     totalUnits: number;
@@ -263,6 +266,7 @@ function normalizeEquipment(value: unknown): RentalEquipment | null {
     return {
         id,
         equipmentNumber: String(raw.equipmentNumber ?? "").trim(),
+        unitNumbers: Array.isArray(raw.unitNumbers) ? raw.unitNumbers.map(value => String(value)) : [],
         name: String(raw.name).trim(),
         category: String(raw.category ?? "Uncategorized").trim() || "Uncategorized",
         totalUnits: nonnegativeInteger(raw.totalUnits),
@@ -538,7 +542,7 @@ export function useRentalInventory(branchId?: number) {
 // The staff API projection is restricted server-side; never expose manager costs.
 // ---------------------------------------------------------------------------
 export type StaffRentalEquipment = {
-    id: number; equipmentNumber: string; name: string; category: string;
+    id: number; equipmentNumber: string; unitNumbers?: string[]; name: string; category: string;
     totalUnits: number; rentedOutUnits: number; maintenanceUnits: number;
     missingUnits: number; alertLevel: number; bookableToday: number;
 };

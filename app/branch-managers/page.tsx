@@ -14,6 +14,7 @@ import { useRouter } from "next/navigation";
 import {
     Building2,
     Bell,
+    CalendarDays,
     Clock3,
     Download,
     CheckCircle2,
@@ -37,6 +38,7 @@ type ManagerStatus = "active" | "inactive" | "pending";
 
 type BranchManager = {
     id: number;
+    employeeCode: string;
     name: string;
     email: string;
     branch: string;
@@ -46,6 +48,7 @@ type BranchManager = {
 type ManagerLeaveRow = {
     id: number;
     managerId: number;
+    employeeCode?: string | null;
     managerName: string;
     branchName: string;
     branchId: number;
@@ -60,6 +63,7 @@ type ManagerLeaveGroup = {
     key: string;
     ids: number[];
     managerId: number;
+    employeeCode: string;
     managerName: string;
     branchName: string;
     leaveType: string;
@@ -87,6 +91,7 @@ function groupManagerLeaves(rows: ManagerLeaveRow[]): ManagerLeaveGroup[] {
             last.ids.push(row.id);
             last.end = row.leaveDate;
         } else groups.push({ key: String(row.id), ids: [row.id], managerId: row.managerId,
+            employeeCode: String(row.employeeCode || ""),
             managerName: row.managerName, branchName: row.branchName,
             leaveType: row.leaveType, reason: row.reason, status: row.approvalStatus,
             decisionReason: row.decisionReason, createdAt: row.createdAt,
@@ -103,6 +108,64 @@ function managerDateLabel(value: string) {
 function managerRangeLabel(group: ManagerLeaveGroup) {
     return group.start === group.end ? managerDateLabel(group.start) :
         `${managerDateLabel(group.start)} – ${managerDateLabel(group.end)}`;
+}
+
+// Manager attendance recorded from manager dashboards (stocknbook_staff_attendance,
+// employee_role='manager'). hoursWorked is calculated by the server with the same
+// SQL as the manager's own Attendance Log.
+type ManagerAttendanceRow = {
+    id: number;
+    managerId: number;
+    employeeCode?: string | null;
+    managerName: string;
+    branchId: number;
+    branchName: string;
+    date: string;
+    timeIn: string | null;
+    timeOut: string | null;
+    hoursWorked: number | string | null;
+    status: string;
+};
+function manilaDay(date: Date) {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Manila",
+        year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+    const part = (name: string) => parts.find(item => item.type === name)?.value || "";
+    return `${part("year")}-${part("month")}-${part("day")}`;
+}
+function attendanceInPeriod(day: string, period: string, today: string) {
+    if (!today) return false;
+    if (period === "all") return true;
+    if (period === "today") return day === today;
+    if (period === "month") return day.slice(0, 7) === today.slice(0, 7);
+    if (period === "previous") {
+        const [year, month] = today.slice(0, 7).split("-").map(Number);
+        return day.slice(0, 7) === new Date(Date.UTC(year, month - 2, 1)).toISOString().slice(0, 7);
+    }
+    return false;
+}
+function attendanceClockTime(value?: string | null) {
+    const match = value?.match(/T(\d{2}):(\d{2})/);
+    if (!match) return "—";
+    const hour = Number(match[1]);
+    return `${hour % 12 || 12}:${match[2]} ${hour < 12 ? "AM" : "PM"}`;
+}
+function attendanceHours(value?: number | string | null) {
+    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return "—";
+    const minutes = Math.max(0, Math.round(Number(value) * 60));
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+function AttendanceBadge({ status }: { status: string }) {
+    const label = String(status || "Not Recorded");
+    const classes = label === "On Duty" || label === "Completed" || label === "Present"
+        ? "bg-[#E6F7EE] text-[#16834A]"
+        : label === "On Leave" ? "bg-[#FFF3D8] text-[#A56607]"
+            : label === "Absent" ? "bg-[#FFF0F0] text-[#D52B2B]" : "bg-[#F2EFF5] text-[#806A8C]";
+    return <span className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-bold ${classes}`}>{label}</span>;
+}
+function AttendanceCount({ label, value, tone }: { label: string; value: number; tone: "green" | "gold" | "red" | "gray" }) {
+    const classes = { green: "bg-[#E6F7EE] text-[#16834A]", gold: "bg-[#FFF3D8] text-[#A56607]",
+        red: "bg-[#FFF0F0] text-[#D52B2B]", gray: "bg-[#F2EFF5] text-[#806A8C]" }[tone];
+    return <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-semibold ${classes}`}>{label}<span className="font-bold">{value}</span></span>;
 }
 
 type ManagerPermissions = {
@@ -176,6 +239,9 @@ function normalizeManager(value: unknown): BranchManager {
             manager.user_id ??
             manager.userId
         ),
+        employeeCode:
+            asText(manager.employee_code) ||
+            asText(manager.employeeCode),
         name:
             asText(manager.name) ||
             asText(manager.manager_name) ||
@@ -340,6 +406,12 @@ export default function BranchManagersPage() {
     const [requestsStatusFilter, setRequestsStatusFilter] = useState("all");
     const [requestsTypeFilter, setRequestsTypeFilter] = useState("all");
     const [requestsBranchFilter, setRequestsBranchFilter] = useState("all");
+    const [managerAttendance, setManagerAttendance] = useState<ManagerAttendanceRow[]>([]);
+    const [attendanceLoading, setAttendanceLoading] = useState(false);
+    const [attendanceError, setAttendanceError] = useState("");
+    const [attendancePeriod, setAttendancePeriod] = useState("today");
+    const [attendanceBranchFilter, setAttendanceBranchFilter] = useState("all");
+    const [attendanceStatusFilter, setAttendanceStatusFilter] = useState("all");
     const [reviewingManagerRequest, setReviewingManagerRequest] = useState<ManagerLeaveGroup | null>(null);
     const [reviewReason, setReviewReason] = useState("");
     const [reviewError, setReviewError] = useState("");
@@ -517,6 +589,28 @@ export default function BranchManagersPage() {
         void loadManagerRequests();
     }, [loadManagerRequests]);
 
+    const loadManagerAttendance = useCallback(async () => {
+        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+        if (!token) return;
+        setAttendanceLoading(true);
+        try {
+            const res = await fetch("/api/branch-managers?view=manager_attendance", {
+                method: "GET", cache: "no-store",
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.success !== true) throw new Error(data.error || "Could not load manager attendance.");
+            setManagerAttendance(Array.isArray(data.attendance) ? data.attendance : []);
+            setAttendanceError("");
+        } catch (error) {
+            setAttendanceError(error instanceof Error ? error.message : "Could not load manager attendance.");
+        } finally { setAttendanceLoading(false); }
+    }, []);
+
+    useEffect(() => {
+        void loadManagerAttendance();
+    }, [loadManagerAttendance]);
+
     useEffect(() => {
         setSubscriptionPlan(getStoredSubscriptionPlan());
         void loadSubscriptionPlan();
@@ -565,7 +659,7 @@ export default function BranchManagersPage() {
         return managers.filter((manager) => {
             const matchesSearch =
                 !query ||
-                `${manager.name} ${manager.email} ${manager.branch} ${getStatusLabel(
+                `${manager.employeeCode} ${manager.name} ${manager.email} ${manager.branch} ${getStatusLabel(
                     manager.status
                 )}`
                     .toLowerCase()
@@ -591,6 +685,74 @@ export default function BranchManagersPage() {
         (requestsStatusFilter === "all" || item.status.toLowerCase() === requestsStatusFilter) &&
         (requestsTypeFilter === "all" || item.leaveType === requestsTypeFilter) &&
         (requestsBranchFilter === "all" || item.branchName === requestsBranchFilter));
+
+    // Recorded manager attendance plus approved manager leave days (from the already
+    // loaded Manager Requests). Absence is never invented for missing records.
+    const attendanceToday = currentDateTime ? manilaDay(currentDateTime) : "";
+    const managerAttendanceRows = useMemo(() => {
+        const rows: ManagerAttendanceRow[] = [...managerAttendance];
+        if (!attendanceToday) return rows;
+        const recorded = new Set(rows.map(row => `${row.managerId}:${row.date}`));
+        const earliest = new Date(attendanceToday + "T00:00:00Z");
+        earliest.setUTCDate(earliest.getUTCDate() - 90);
+        const earliestDay = earliest.toISOString().slice(0, 10);
+        for (const leave of managerRequests) {
+            const day = leave.leaveDate;
+            if (leave.approvalStatus !== "Approved" || day < earliestDay || day > attendanceToday) continue;
+            const key = `${leave.managerId}:${day}`;
+            if (recorded.has(key)) continue;
+            rows.push({ id: -leave.id, managerId: leave.managerId, employeeCode: leave.employeeCode || null,
+                managerName: leave.managerName,
+                branchId: leave.branchId, branchName: leave.branchName, date: day,
+                timeIn: null, timeOut: null, hoursWorked: null, status: "On Leave" });
+            recorded.add(key);
+        }
+        return rows.sort((a, b) => b.date.localeCompare(a.date) ||
+            a.branchName.localeCompare(b.branchName) || a.managerName.localeCompare(b.managerName));
+    }, [managerAttendance, managerRequests, attendanceToday]);
+    const attendanceBranches = [...new Set([
+        ...managerAttendanceRows.map(row => row.branchName),
+        ...managers.filter(manager => manager.status !== "pending").map(manager => manager.branch),
+    ].filter(Boolean))].sort();
+    const visibleManagerAttendance = managerAttendanceRows.filter(row =>
+        attendanceInPeriod(row.date, attendancePeriod, attendanceToday) &&
+        (attendanceBranchFilter === "all" || row.branchName === attendanceBranchFilter) &&
+        (attendanceStatusFilter === "all" || row.status === attendanceStatusFilter));
+    // Today's roll call for active managers, with the same precedence the manager
+    // dashboard uses for staff: Present, then On Leave, then Absent, else Not Recorded.
+    const managerAttendanceToday = useMemo(() => {
+        const activeIds = managers.filter(manager => manager.status === "active").map(manager => manager.id);
+        const todayRows = managerAttendanceRows.filter(row => row.date === attendanceToday);
+        const idsWith = (statuses: string[]) => new Set(todayRows
+            .filter(row => statuses.includes(row.status)).map(row => Number(row.managerId)));
+        const present = idsWith(["On Duty", "Completed", "Present"]);
+        const onLeave = idsWith(["On Leave"]);
+        const absent = idsWith(["Absent"]);
+        const counts = {
+            total: activeIds.length,
+            present: activeIds.filter(id => present.has(id)).length,
+            onLeave: activeIds.filter(id => !present.has(id) && onLeave.has(id)).length,
+            absent: activeIds.filter(id => !present.has(id) && !onLeave.has(id) && absent.has(id)).length,
+            notRecorded: 0,
+        };
+        counts.notRecorded = Math.max(0, counts.total - counts.present - counts.onLeave - counts.absent);
+        return counts;
+    }, [managers, managerAttendanceRows, attendanceToday]);
+    const attendancePeriodLabel = { today: "Today", month: "This Month", previous: "Last Month", all: "Last 90 Days" }[attendancePeriod] || "Today";
+
+    const exportManagerAttendance = () => {
+        void import("@/components/dashboard/_shared")
+            .then(module => module.exportTableAsPdf({
+                title: "Manager Attendance",
+                headers: ["Employee ID", "Manager Name", "Branch", "Date", "Time In", "Time Out", "Hours Worked", "Status"],
+                rows: visibleManagerAttendance.map(row => [row.employeeCode || "—", row.managerName, row.branchName,
+                    managerDateLabel(row.date), attendanceClockTime(row.timeIn), attendanceClockTime(row.timeOut),
+                    attendanceHours(row.hoursWorked), row.status]),
+            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
+                branch: attendanceBranchFilter === "all" ? "All branches" : attendanceBranchFilter,
+                dateRange: attendancePeriodLabel }, "owner_manager_attendance"))
+            .catch(() => setNotice({ title: "Export unavailable", message: "Could not export manager attendance.", kind: "error" }));
+    };
 
     const reviewManagerLeave = async (decision: "Approved" | "Rejected") => {
         if (!reviewingManagerRequest || reviewSaving) return;
@@ -621,8 +783,8 @@ export default function BranchManagersPage() {
         void import("@/components/dashboard/_shared")
             .then(module => module.exportTableAsPdf({
                 title: "Manager Leave Requests",
-                headers: ["Manager", "Branch", "Leave Type", "Date / Range", "Status", "Reason"],
-                rows: filteredManagerRequests.map(item => [item.managerName, item.branchName,
+                headers: ["Manager", "Employee ID", "Branch", "Leave Type", "Date / Range", "Status", "Reason"],
+                rows: filteredManagerRequests.map(item => [item.managerName, item.employeeCode || "—", item.branchName,
                     item.leaveType, managerRangeLabel(item), item.status, item.reason]),
             }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
                 branch: "All branches", dateRange: "All requests" }, "owner_manager_requests"))
@@ -1022,6 +1184,7 @@ export default function BranchManagersPage() {
                                         void loadSubscriptionPlan();
                                         void loadManagers();
                                         void loadManagerRequests();
+                                        void loadManagerAttendance();
                                     }}
                                     disabled={loading}
                                     aria-label="Refresh branch managers"
@@ -1276,6 +1439,9 @@ export default function BranchManagersPage() {
                                             <thead className="bg-[#FBF8FF]">
                                             <tr className="border-b border-[#E6DDF0]">
                                                 <TableHeader>
+                                                    Employee ID
+                                                </TableHeader>
+                                                <TableHeader>
                                                     Manager
                                                 </TableHeader>
                                                 <TableHeader>
@@ -1299,6 +1465,10 @@ export default function BranchManagersPage() {
                                                         key={manager.id}
                                                         className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
                                                     >
+                                                        <td className="whitespace-nowrap px-5 py-3 text-sm font-semibold text-[#4E2C66]">
+                                                            {manager.employeeCode || "—"}
+                                                        </td>
+
                                                         <td className="px-5 py-3">
                                                             <div className="min-w-0">
                                                                 <p className="truncate text-sm font-bold text-[#1A1220]">
@@ -1348,6 +1518,55 @@ export default function BranchManagersPage() {
                             )}
                         </section>
 
+                        <section id="manager-attendance" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                <div className="flex items-center gap-3">
+                                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span>
+                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Manager Attendance</h2>
+                                        <p className="mt-0.5 text-xs text-[#7A6A84]">Time In and Time Out recorded by branch managers from their dashboards.</p></div>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <select aria-label="Filter manager attendance by period" value={attendancePeriod} onChange={e => setAttendancePeriod(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                        <option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Last 90 Days</option>
+                                    </select>
+                                    <select aria-label="Filter manager attendance by branch" value={attendanceBranchFilter} onChange={e => setAttendanceBranchFilter(e.target.value)} className="h-9 max-w-40 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                        <option value="all">All Branches</option>{attendanceBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
+                                    </select>
+                                    <select aria-label="Filter manager attendance by status" value={attendanceStatusFilter} onChange={e => setAttendanceStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                        <option value="all">All Statuses</option><option value="On Duty">On Duty</option><option value="Completed">Completed</option><option value="On Leave">On Leave</option><option value="Absent">Absent</option>
+                                    </select>
+                                    <button type="button" onClick={exportManagerAttendance} title="Export manager attendance to PDF" aria-label="Export manager attendance" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                </div>
+                            </div>
+                            {attendanceToday && !(loading && managers.length === 0) && <div className="flex flex-wrap items-center gap-2 border-b border-[#EEE7F2] bg-[#FFFCF7] px-5 py-2.5 text-xs">
+                                <span className="mr-1 font-semibold text-[#5F4E75]">Today · {managerAttendanceToday.total} active {managerAttendanceToday.total === 1 ? "manager" : "managers"}</span>
+                                <AttendanceCount label="Present" value={managerAttendanceToday.present} tone="green"/>
+                                <AttendanceCount label="On Leave" value={managerAttendanceToday.onLeave} tone="gold"/>
+                                <AttendanceCount label="Absent" value={managerAttendanceToday.absent} tone="red"/>
+                                <AttendanceCount label="Not Recorded" value={managerAttendanceToday.notRecorded} tone="gray"/>
+                            </div>}
+                            {attendanceError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{attendanceError}</p>}
+                            <div className="max-h-[360px] overflow-auto">
+                                <table className="w-full min-w-[980px] text-left text-xs">
+                                    <thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee ID", "Manager Name", "Branch", "Date", "Time In", "Time Out", "Hours Worked", "Status"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
+                                    <tbody>
+                                    {visibleManagerAttendance.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={`${row.managerId}-${row.id}-${row.date}`}>
+                                        <td className="whitespace-nowrap px-4 py-3 font-semibold text-[#4E2C66]">{row.employeeCode || "—"}</td>
+                                        <td className="px-4 py-3 font-semibold text-[#2B174C]">{row.managerName}</td>
+                                        <td className="px-4 py-3">{row.branchName}</td>
+                                        <td className="whitespace-nowrap px-4 py-3">{managerDateLabel(row.date)}</td>
+                                        <td className="whitespace-nowrap px-4 py-3">{attendanceClockTime(row.timeIn)}</td>
+                                        <td className="whitespace-nowrap px-4 py-3">{attendanceClockTime(row.timeOut)}</td>
+                                        <td className="whitespace-nowrap px-4 py-3">{attendanceHours(row.hoursWorked)}</td>
+                                        <td className="px-4 py-3"><AttendanceBadge status={row.status}/></td>
+                                    </tr>)}
+                                    {visibleManagerAttendance.length === 0 && <tr><td colSpan={8} className="px-4 py-10 text-center text-[#8A7D92]">{attendanceLoading && managerAttendance.length === 0 ? "Loading manager attendance..." : attendanceError ? "Manager attendance unavailable." : attendanceStatusFilter !== "all" || attendanceBranchFilter !== "all" ? "No attendance records match the selected filters." : attendancePeriod === "today" ? "No manager attendance recorded today yet. Time In records from manager dashboards will appear here." : "No manager attendance or approved leave for this period."}</td></tr>}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {visibleManagerAttendance.length} {visibleManagerAttendance.length === 1 ? "record" : "records"} · Hours are shown after Time Out</div>
+                        </section>
+
                         <section id="manager-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
                             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
                                 <div className="flex items-center gap-3">
@@ -1372,12 +1591,12 @@ export default function BranchManagersPage() {
                             {requestsError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestsError}</p>}
                             <div className="max-h-[360px] overflow-auto">
                                 <table className="w-full min-w-[870px] text-left text-xs">
-                                    <thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Manager", "Branch", "Manager ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
+                                    <thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Manager", "Branch", "Employee ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
                                     <tbody>
                                     {filteredManagerRequests.map(item => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={item.key}>
                                         <td className="px-4 py-3 font-semibold text-[#2B174C]">{item.managerName}</td>
                                         <td className="px-4 py-3">{item.branchName}</td>
-                                        <td className="px-4 py-3">{item.managerId}</td>
+                                        <td className="whitespace-nowrap px-4 py-3">{item.employeeCode || "—"}</td>
                                         <td className="px-4 py-3">{item.leaveType}</td>
                                         <td className="px-4 py-3">{managerRangeLabel(item)}</td>
                                         <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${item.status === "Approved" ? "bg-green-50 text-green-700" : item.status === "Rejected" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{item.status}</span></td>

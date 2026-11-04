@@ -609,7 +609,9 @@ function getOrderRevenueSource(
     if (
         normalizedOrderId.startsWith("POS-") ||
         normalizedOrderId.includes("-POS-") ||
-        normalizedOrderId.includes("_POS_")
+        normalizedOrderId.includes("_POS_") ||
+        // Standardized POS Order ID: STORE-BRANCH-MMDDYY-XXXX (e.g. SPS-B4-110326-0001)
+        /^[A-Z0-9]{2,8}-[A-Z0-9]{2,8}-\d{6}-\d{4,}$/.test(normalizedOrderId)
     ) {
         return "pos";
     }

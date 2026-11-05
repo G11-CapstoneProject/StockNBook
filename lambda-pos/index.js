@@ -219,42 +219,42 @@ const identifiers = (() => {
         {
             table: "id_number_sequences",
             create: `CREATE TABLE IF NOT EXISTS id_number_sequences (
-                store_id BIGINT NOT NULL,
-                branch_id BIGINT NOT NULL,
-                entity_type VARCHAR(10) NOT NULL,
+                                                                        store_id BIGINT NOT NULL,
+                                                                        branch_id BIGINT NOT NULL,
+                                                                        entity_type VARCHAR(10) NOT NULL,
                 scope_key VARCHAR(10) NOT NULL DEFAULT '',
                 last_sequence INT UNSIGNED NOT NULL DEFAULT 0,
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (store_id, branch_id, entity_type, scope_key)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         },
         {
             table: "identifier_prefixes",
             create: `CREATE TABLE IF NOT EXISTS identifier_prefixes (
-                branch_id BIGINT NOT NULL,
-                store_id BIGINT NOT NULL,
-                store_initials VARCHAR(8) NOT NULL,
+                                                                        branch_id BIGINT NOT NULL,
+                                                                        store_id BIGINT NOT NULL,
+                                                                        store_initials VARCHAR(8) NOT NULL,
                 branch_initials VARCHAR(8) NOT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (branch_id),
                 UNIQUE KEY uq_identifier_prefixes_initials (store_id, branch_initials)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         },
         {
             table: "rental_equipment_units",
             create: `CREATE TABLE IF NOT EXISTS rental_equipment_units (
-                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                store_id BIGINT NOT NULL,
-                branch_id BIGINT NOT NULL,
-                equipment_id BIGINT NOT NULL,
-                equipment_number VARCHAR(40) NOT NULL,
+                                                                           id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                                                                           store_id BIGINT NOT NULL,
+                                                                           branch_id BIGINT NOT NULL,
+                                                                           equipment_id BIGINT NOT NULL,
+                                                                           equipment_number VARCHAR(40) NOT NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 retired_at DATETIME NULL DEFAULT NULL,
                 PRIMARY KEY (id),
                 UNIQUE KEY uq_rental_equipment_units_number (equipment_number),
                 KEY idx_rental_equipment_units_equipment (equipment_id, retired_at),
                 KEY idx_rental_equipment_units_branch (store_id, branch_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         },
         {
             table: "managers", column: "employee_code",
@@ -333,7 +333,7 @@ const identifiers = (() => {
                  FROM branches b
                           JOIN stores s ON s.id = b.store_id
                  WHERE b.id = ? AND b.store_id = ?
-                 LIMIT 1`,
+                     LIMIT 1`,
                 [branchId, storeId]
             );
             if (!rows.length) throw new Error("The branch does not belong to this store.");
@@ -391,7 +391,7 @@ const identifiers = (() => {
         await connection.execute(
             `INSERT INTO id_number_sequences (store_id, branch_id, entity_type, scope_key, last_sequence)
              VALUES (?, ?, ?, ?, 0)
-             ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
+                 ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
             [storeId, branchId, entityType, scopeKey]
         );
         await connection.execute(
@@ -424,7 +424,7 @@ const identifiers = (() => {
         const floor = await maxSequenceFrom(connection,
             `SELECT employee_code AS value FROM managers WHERE employee_code LIKE ?
              UNION ALL
-             SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
+            SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
             [`${prefix}%`, `${prefix}%`], PATTERNS.employee);
         const { last } = await reserveSequenceBlock(connection, { storeId, branchId, entityType: "EMP", floor });
         return buildEmployeeCode(storeCode, branchCode, last);
@@ -469,7 +469,7 @@ const identifiers = (() => {
         await connection.execute(
             `INSERT INTO product_number_sequences (store_id, branch_id, last_sequence)
              VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
+                 ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
             [storeId, branchId, next]
         );
         return buildProductNumber(storeCode, branchCode, next);
@@ -728,6 +728,351 @@ function getOwnerDashboardPeriodStarts(referenceDate) {
     };
 }
 
+/* Owner-only read-only reporting functions; kept inside the existing Lambda file. */
+const getOwnerSalesReport = (() => {
+    /*
+     * Owner Sales & Revenue, read-only reporting adapter.
+     * Does not write, migrate, or create any database records.
+     * Booking rows are included ONLY when the existing bookings schema provides:
+     *  - a store / branch association,
+     *  - a fulfillment/completion timestamp,
+     *  - a status verified as COMPLETED or FULFILLED,
+     *  - a recorded booking value.
+     * Unknown costs/tax are NULL, never invented as 0.
+     * A missing/incompatible booking schema makes consolidated KPIs unavailable,
+     * rather than incorrectly labelling POS revenue as combined revenue.
+     */
+    const ALLOWED_SOURCES = new Set(['ALL', 'BOOKING', 'WALK_IN']);
+    const SORT_DIRECTIONS = new Set(['NEWEST', 'OLDEST']);
+    const id = (name) => {
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) throw new Error('Invalid database column.');
+        return `\`${name}\``;
+    };
+    const findColumn = (set, candidates) => candidates.find((value) => set.has(value)) || null;
+    const expr = (alias, column, fallback = 'NULL') => column ? `${alias}.${id(column)}` : fallback;
+    const money = (value) => Number(Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100);
+
+    async function listColumns(db, table) {
+        const [rows] = await db.execute(
+            'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+            [table]
+        );
+        return new Set(rows.map((row) => String(row.name).toLowerCase()));
+    }
+
+    async function detectBookingSchema(db) {
+        const candidateTables = ['bookings', 'event_bookings', 'customer_bookings'];
+        for (const table of candidateTables) {
+            const cols = await listColumns(db, table);
+            if (!cols.size) continue;
+            const fields = {
+                storeId: findColumn(cols, ['store_id']),
+                branchId: findColumn(cols, ['branch_id']),
+                status: findColumn(cols, ['fulfillment_status', 'service_status', 'rental_status', 'status', 'booking_status']),
+                completedAt: findColumn(cols, ['fulfilled_at', 'service_completed_at', 'completed_at', 'date_fulfilled', 'date_completed']),
+                reference: findColumn(cols, ['booking_number', 'booking_no', 'booking_reference', 'booking_id', 'order_id', 'id']),
+                value: findColumn(cols, ['earned_revenue', 'recognized_revenue', 'revenue_amount', 'grand_total', 'total_amount', 'total_price', 'booking_total', 'final_amount', 'total']),
+                cost: findColumn(cols, ['direct_cost', 'total_cost', 'cost_of_sales', 'cost_of_goods_sold', 'fulfillment_cost', 'direct_rental_cost', 'actual_cost']),
+                vat: findColumn(cols, ['vat_amount', 'tax_amount', 'total_vat']),
+                taxType: findColumn(cols, ['tax_type', 'tax_registration']),
+                customer: findColumn(cols, ['customer_name', 'client_name', 'full_name']),
+                customerContact: findColumn(cols, ['customer_contact_number', 'contact_number', 'customer_phone']),
+                posLinkedOrderId: findColumn(cols, ['pos_order_id', 'pos_transaction_id', 'checkout_order_id', 'pos_order_reference']),
+                payment: findColumn(cols, ['payment_mode', 'payment_method']),
+                processedBy: findColumn(cols, ['processed_by_name', 'fulfilled_by_name', 'completed_by_name', 'staff_name']),
+            };
+            const refundableDeposit = findColumn(cols, ['refundable_deposit', 'security_deposit']);
+            // Some booking grand totals include refundable deposits, which are liabilities, not sales.
+            // Without an explicit recognized-revenue column, counting that grand total is unsafe.
+            if (refundableDeposit && !['earned_revenue','recognized_revenue','revenue_amount'].includes(fields.value || '')) {
+                return { available: false, reason: `${table} has a refundable/security deposit, but no verified earned-revenue field.` };
+            }
+            if (!fields.storeId || !fields.branchId || !fields.status || !fields.completedAt || !fields.reference || !fields.value) {
+                return { available: false, reason: `${table} is present, but its booking completion, identifier, revenue, or branch fields have not been verified.` };
+            }
+            return { available: true, table, fields, hasCostSnapshot: Boolean(fields.cost), hasTaxData: Boolean(fields.vat || fields.taxType) };
+        }
+        return { available: false, reason: 'The booking sales table/schema was not supplied or could not be found.' };
+    }
+
+    function posSql({ storeId, branchId, dateFrom, dateTo, orderColumns, bookingSchema }) {
+        const where = ["o.store_id = ?", "UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')",
+            "(UPPER(TRIM(COALESCE(o.customer_type, ''))) = 'WALK_IN' OR (TRIM(COALESCE(o.customer_type, '')) = '' AND o.order_id LIKE '%-POS-%'))"];
+        // One store-specific cost aggregation, avoiding a full cross-tenant GROUP BY.
+        // Bind order: item-cost subquery first, followed by orders WHERE predicates.
+        const params = [storeId, storeId];
+        // A POS payment tied to an existing booking is not a second sale.
+        for (const column of ['booking_id', 'booking_reference', 'related_booking_id']) {
+            if (orderColumns.has(column)) where.push(`o.${id(column)} IS NULL`);
+        }
+        if (bookingSchema.available && bookingSchema.fields.posLinkedOrderId) {
+            const f = bookingSchema.fields;
+            where.push(`NOT EXISTS (SELECT 1 FROM ${id(bookingSchema.table)} booked
+           WHERE booked.${id(f.storeId)} = o.store_id
+             AND booked.${id(f.posLinkedOrderId)} = o.order_id)`);
+        }
+        if (branchId) { where.push('o.branch_id = ?'); params.push(branchId); }
+        if (dateFrom) { where.push('o.order_date >= ?'); params.push(dateFrom); }
+        if (dateTo) { where.push('o.order_date <= ?'); params.push(dateTo); }
+        const sql = `SELECT
+                         o.order_id AS orderId, o.branch_id AS branchId,
+                         COALESCE(NULLIF(TRIM(br.branch_name),''), CONCAT('Branch ',o.branch_id)) AS branchName,
+                         'Walk-in' AS customerName, NULL AS customerContactNumber, 'WALK_IN' AS salesSource,
+                         o.payment_mode AS paymentMode, o.tax_type AS taxType,
+                         o.total AS total, o.vat_amount AS vatAmount,
+                         CASE WHEN ic.rowCount > 0 AND ic.missingCount = 0 THEN ic.cost ELSE NULL END AS totalCost,
+                         CASE WHEN ic.rowCount > 0 AND ic.missingCount = 0
+                                  THEN o.total - COALESCE(o.vat_amount,0) - ic.cost ELSE NULL END AS profit,
+                         o.item AS item,
+                         o.cashier_id AS cashierId,
+                         (SELECT ea.employee_name FROM employee_actions ea
+                          WHERE ea.store_id=o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
+                            AND ea.action = 'Completed POS transaction' ORDER BY ea.id DESC LIMIT 1) AS cashierName,
+        (SELECT ea.employee_role FROM employee_actions ea
+         WHERE ea.store_id=o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
+         AND ea.action = 'Completed POS transaction' ORDER BY ea.id DESC LIMIT 1) AS cashierRole,
+        DATE_FORMAT(o.order_date, '%Y-%m-%d') AS reportDate,
+        DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS transactionAt
+                     FROM orders o
+                         LEFT JOIN branches br ON br.store_id=o.store_id AND br.id=o.branch_id
+                         LEFT JOIN (
+                         SELECT store_id, order_id, COUNT(*) AS rowCount,
+                         SUM(CASE WHEN cost_price_at_sale IS NULL THEN 1 ELSE 0 END) AS missingCount,
+                         SUM(cost_price_at_sale * quantity) AS cost
+                         FROM order_items WHERE store_id = ? GROUP BY store_id, order_id
+                         ) ic ON ic.store_id=o.store_id AND ic.order_id=o.order_id
+                     WHERE ${where.join(' AND ')}`;
+        return { sql, params };
+    }
+
+    function bookingSql(schema, { storeId, branchId, dateFrom, dateTo }) {
+        const f = schema.fields;
+        const ref = expr('bk', f.reference);
+        const value = expr('bk', f.value);
+        const cost = expr('bk', f.cost);
+        const vat = f.vat ? expr('bk', f.vat) : f.taxType
+            ? `CASE WHEN UPPER(${expr('bk', f.taxType)}) IN ('NON_VAT','NON_VAT_REGISTERED') THEN 0 ELSE NULL END`
+            : 'NULL';
+        const profit = `CASE WHEN ${cost} IS NOT NULL AND ${vat} IS NOT NULL THEN (${value}) - (${cost}) - (${vat}) ELSE NULL END`;
+        const completed = expr('bk', f.completedAt);
+        const where = [`bk.${id(f.storeId)} = ?`, `UPPER(TRIM(COALESCE(${expr('bk',f.status)},''))) IN ('COMPLETED','FULFILLED')`,
+            `${completed} IS NOT NULL`, `${value} IS NOT NULL`];
+        const params = [storeId];
+        if (branchId) { where.push(`bk.${id(f.branchId)} = ?`); params.push(branchId); }
+        if (dateFrom) { where.push(`DATE(${completed}) >= ?`); params.push(dateFrom); }
+        if (dateTo) { where.push(`DATE(${completed}) <= ?`); params.push(dateTo); }
+        // The original booking reference/PK is used; no new booking order is generated.
+        const sql = `SELECT CAST(${ref} AS CHAR) AS orderId, bk.${id(f.branchId)} AS branchId,
+                            COALESCE(NULLIF(TRIM(br.branch_name),''), CONCAT('Branch ',bk.${id(f.branchId)})) AS branchName,
+                            ${expr('bk',f.customer)} AS customerName, ${expr('bk',f.customerContact)} AS customerContactNumber, 'BOOKING' AS salesSource,
+                            ${expr('bk',f.payment)} AS paymentMode, ${expr('bk',f.taxType)} AS taxType,
+                            ${value} AS total, ${vat} AS vatAmount,
+                            ${cost} AS totalCost, ${profit} AS profit,
+                            NULL AS item, NULL AS cashierId, ${expr('bk',f.processedBy)} AS cashierName,
+                            NULL AS cashierRole, DATE_FORMAT(${completed}, '%Y-%m-%d') AS reportDate,
+                            DATE_FORMAT(${completed}, '%Y-%m-%d %H:%i:%s') AS transactionAt
+                     FROM ${id(schema.table)} bk
+                              LEFT JOIN branches br ON br.store_id=bk.${id(f.storeId)} AND br.id=bk.${id(f.branchId)}
+                     WHERE ${where.join(' AND ')}`;
+        return { sql, params };
+    }
+
+    async function getOwnerSalesReport(db, storeId, branchId, body) {
+        const dateFrom = String(body.date_from || body.dateFrom || '').slice(0,10);
+        const dateTo = String(body.date_to || body.dateTo || '').slice(0,10);
+        if ((dateFrom && !/^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) || (dateTo && !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) ||
+            (dateFrom && dateTo && dateFrom > dateTo)) {
+            const error = new Error('Invalid report date range.'); error.statusCode = 400; throw error;
+        }
+        const source = String(body.sales_source || 'ALL').toUpperCase();
+        const sort = String(body.sort || 'NEWEST').toUpperCase();
+        if (!ALLOWED_SOURCES.has(source) || !SORT_DIRECTIONS.has(sort)) {
+            const error = new Error('Invalid sales source or sorting option.'); error.statusCode = 400; throw error;
+        }
+        const page = Math.max(1, Math.min(100000, Math.floor(Number(body.page) || 1)));
+        const pageSize = Math.max(10, Math.min(100, Math.floor(Number(body.page_size) || 50)));
+        const search = String(body.search || '').trim().slice(0,120);
+        const payment = String(body.payment_method || '').trim().toUpperCase().slice(0,50);
+        const bookingSchema = await detectBookingSchema(db);
+        const orderColumns = await listColumns(db,'orders');
+        const walk = posSql({ storeId, branchId, dateFrom, dateTo, orderColumns, bookingSchema });
+        const sources = [walk];
+        if (bookingSchema.available) sources.push(bookingSql(bookingSchema, {storeId,branchId,dateFrom,dateTo}));
+        const unionSql = sources.map((s) => `(${s.sql})`).join(' UNION ALL ');
+        const unionParams = sources.flatMap((s) => s.params);
+
+        // Only the persisted store registration determines whether the Owner VAT
+        // panel is shown. Historical order VAT snapshots are never recomputed.
+        const [registrationRows] = await db.execute(
+            'SELECT tax_registration AS taxRegistration FROM stores WHERE id = ? LIMIT 1', [storeId]
+        );
+        const registration = String(registrationRows[0]?.taxRegistration || '').trim().toUpperCase();
+        const vatRegistered = registration === 'VAT_REGISTERED' || registration === 'VAT';
+        const taxRegistration = vatRegistered ? 'VAT_REGISTERED' : (
+            registration === 'NON_VAT' || registration === 'NON_VAT_REGISTERED' ? 'NON_VAT' : 'UNKNOWN'
+        );
+
+        // VAT figures follow branch, dates and Sales Source; they cover every
+        // matching transaction, not only the paginated Orders table.
+        const vatSourceWhere = source === 'ALL' ? '' : 'WHERE v.salesSource = ?';
+        const vatParams = source === 'ALL' ? unionParams : [...unionParams, source];
+        const taxSql = "UPPER(TRIM(COALESCE(v.taxType,'')))";
+        const vatEligibleSql = `(${taxSql} IN ('VAT','VAT_REGISTERED') OR
+        (${taxSql} = '' AND v.vatAmount > 0))`;
+        const nonVatSql = `(${taxSql} IN ('NON_VAT','NON_VAT_REGISTERED') AND
+        (v.vatAmount IS NULL OR v.vatAmount = 0))`;
+        const vatVerifiedSql = `(${vatEligibleSql} AND v.vatAmount IS NOT NULL)`;
+        const vatUnverifiedSql = `(NOT ${vatVerifiedSql} AND NOT ${nonVatSql})`;
+        let vatSummary = null;
+        if (vatRegistered) {
+            const [[vatTotals]] = await db.execute(`
+                SELECT
+                    COALESCE(SUM(CASE WHEN ${vatVerifiedSql} THEN v.total - v.vatAmount ELSE 0 END),0) AS vatableSales,
+                    COALESCE(SUM(CASE WHEN ${vatVerifiedSql} THEN v.vatAmount ELSE 0 END),0) AS outputVat,
+                    COALESCE(SUM(CASE WHEN ${vatVerifiedSql} THEN v.total ELSE 0 END),0) AS customerTotal,
+                    SUM(CASE WHEN ${vatUnverifiedSql} THEN 1 ELSE 0 END) AS unverifiedRecords,
+                    COUNT(*) AS transactionCount
+                FROM (${unionSql}) v ${vatSourceWhere}`, vatParams);
+            const unverifiedRecords = Number(vatTotals.unverifiedRecords || 0);
+            const complete = (source === 'WALK_IN' || bookingSchema.available) && unverifiedRecords === 0;
+            vatSummary = {
+                vatableSales: money(vatTotals.vatableSales),
+                outputVat: money(vatTotals.outputVat),
+                customerTotal: money(vatTotals.customerTotal),
+                transactionCount: Number(vatTotals.transactionCount || 0),
+                unverifiedRecords,
+                complete,
+                // Verified amounts may be PARTIAL when booking data is unavailable.
+                // Never silently substitute them for a full store-wide tax declaration.
+                coverage: complete ? 'COMPLETE' : 'PARTIAL',
+                coverageReason: !complete
+                    ? (!bookingSchema.available && source !== 'WALK_IN'
+                        ? 'Booking VAT records could not be verified; only known transactions are included.'
+                        : `${unverifiedRecords} transaction(s) have missing or inconsistent VAT records.`)
+                    : null,
+            };
+        }
+
+        if (body.vat_export === true) {
+            if (!vatRegistered) {
+                const error = new Error('VAT download is available only for VAT-registered stores.');
+                error.statusCode = 400; throw error;
+            }
+            // Return a complete filtered extract, never a silently truncated file.
+            // Limit JSON response size; owners can narrow the date range if needed.
+            const MAX_EXPORT_ROWS = 5000;
+            const [vatRows] = await db.execute(`
+                SELECT v.orderId, v.branchName, v.reportDate, v.transactionAt,
+                       v.salesSource, v.paymentMode, v.taxType, v.total, v.vatAmount
+                FROM (${unionSql}) v ${vatSourceWhere}
+                ORDER BY v.transactionAt DESC, v.orderId DESC
+                    LIMIT ${MAX_EXPORT_ROWS + 1}`, vatParams);
+            if (vatRows.length > MAX_EXPORT_ROWS) {
+                const error = new Error('VAT export exceeds 5,000 transactions. Select a shorter date range and download again.');
+                error.statusCode = 400; throw error;
+            }
+            const normalizeVatRow = (row) => {
+                const rowTax = String(row.taxType || '').trim().toUpperCase();
+                const vatNumber = row.vatAmount == null ? null : Number(row.vatAmount);
+                const amount = Number(row.total || 0);
+                const vatType = rowTax === 'VAT' || rowTax === 'VAT_REGISTERED' || (!rowTax && vatNumber != null && vatNumber > 0);
+                const nonVatType = (rowTax === 'NON_VAT' || rowTax === 'NON_VAT_REGISTERED') &&
+                    (vatNumber == null || vatNumber === 0);
+                const status = vatType && vatNumber != null && Number.isFinite(vatNumber)
+                    ? 'VAT_RECORDED' : nonVatType ? 'NON_VAT' : 'UNVERIFIED';
+                const reportDate = row.reportDate instanceof Date
+                    ? row.reportDate.toISOString().slice(0,10) : String(row.reportDate || '').slice(0,10);
+                return {
+                    orderId: String(row.orderId || ''),
+                    branchName: String(row.branchName || ''),
+                    salesSource: row.salesSource === 'BOOKING' ? 'Booking' : 'Walk-in',
+                    date: reportDate,
+                    paymentMode: String(row.paymentMode || ''),
+                    taxType: rowTax,
+                    totalInclusive: money(amount),
+                    vatableSales: status === 'VAT_RECORDED' ? money(amount - vatNumber) : null,
+                    outputVat: status === 'VAT_RECORDED' ? money(vatNumber) : null,
+                    vatStatus: status,
+                };
+            };
+            return {
+                export: true,
+                taxRegistration,
+                vatSummary,
+                scope: { branchId: branchId || null, dateFrom, dateTo, salesSource: source },
+                bookingIntegration: {
+                    available: bookingSchema.available,
+                    reason: bookingSchema.available ? null : bookingSchema.reason,
+                },
+                rows: vatRows.map(normalizeVatRow),
+            };
+        }
+
+        const [totals] = await db.execute(`SELECT salesSource, COUNT(*) AS transactions, COALESCE(SUM(total),0) AS sales,
+                                                  SUM(CASE WHEN profit IS NULL THEN 1 ELSE 0 END) AS unknownProfitRows,
+                                                  SUM(profit) AS grossProfit FROM (${unionSql}) totals GROUP BY salesSource`, unionParams);
+        const bySource = new Map(totals.map((r) => [r.salesSource,r]));
+        const walkSales = money(bySource.get('WALK_IN')?.sales);
+        const bookingSales = money(bySource.get('BOOKING')?.sales);
+        const missingCosts = totals.reduce((sum,r) => sum+Number(r.unknownProfitRows||0),0);
+        const grossProfit = totals.reduce((sum,r) => sum+Number(r.grossProfit||0),0);
+        // If bookings are missing, never present walk-in totals as a complete combined total.
+        const summary = {
+            walkInSales: walkSales,
+            bookingSales: bookingSchema.available ? bookingSales : null,
+            totalSales: bookingSchema.available ? money(walkSales+bookingSales) : null,
+            grossProfit: bookingSchema.available && missingCosts === 0 ? money(grossProfit) : null,
+            missingCostRecords: missingCosts,
+            transactionCount: totals.reduce((sum,r) => sum+Number(r.transactions||0),0)
+        };
+
+        // Table filters combine consistently on the already branch/date-scoped source.
+        const outerWhere = [];
+        const outerParams = [];
+        if (source !== 'ALL') { outerWhere.push('r.salesSource = ?'); outerParams.push(source); }
+        if (payment) { outerWhere.push('UPPER(COALESCE(r.paymentMode,\'\')) = ?'); outerParams.push(payment); }
+        if (search) { outerWhere.push('(r.orderId LIKE ? OR r.customerName LIKE ?)'); outerParams.push(`%${search}%`,`%${search}%`); }
+        const filterSql = outerWhere.length ? `WHERE ${outerWhere.join(' AND ')}` : '';
+        const [[count]] = await db.execute(`SELECT COUNT(*) AS total FROM (${unionSql}) r ${filterSql}`, [...unionParams,...outerParams]);
+        const total = Number(count.total || 0);
+        const totalPages = Math.max(1,Math.ceil(total/pageSize));
+        const sortOrder = sort==='OLDEST' ? 'ASC' : 'DESC';
+        const offset=(page-1)*pageSize;
+        const [rows] = await db.execute(`SELECT r.* FROM (${unionSql}) r ${filterSql}
+                                         ORDER BY r.transactionAt ${sortOrder}, r.orderId ${sortOrder}
+                                             LIMIT ${pageSize} OFFSET ${offset}`, [...unionParams,...outerParams]);
+        const [methods] = await db.execute(`SELECT DISTINCT r.paymentMode AS method FROM (${unionSql}) r
+                                            WHERE r.paymentMode IS NOT NULL AND TRIM(r.paymentMode) <> '' ORDER BY method`,unionParams);
+        return {
+            orders: rows.map(r=>({
+                orderId: String(r.orderId), branchId: r.branchId, branchName: r.branchName,
+                customerName: r.customerName || (r.salesSource === 'WALK_IN' ? 'Walk-in' : null),
+                customerContactNumber: r.customerContactNumber || null,
+                salesSource: r.salesSource, customerType: r.salesSource,
+                paymentMode: r.paymentMode || null, taxType: r.taxType || null,
+                total: r.total, totalCost: r.totalCost, profit: r.profit,
+                vatAmount: r.vatAmount, item: r.item, cashierId: r.cashierId,
+                cashierName: r.cashierName, cashierRole: r.cashierRole,
+                orderDate: r.reportDate instanceof Date ? r.reportDate.toISOString().slice(0,10) : String(r.reportDate || '').slice(0,10),
+                createdAt: r.transactionAt instanceof Date ?
+                    `${r.transactionAt.getFullYear()}-${String(r.transactionAt.getMonth()+1).padStart(2,'0')}-${String(r.transactionAt.getDate()).padStart(2,'0')} ${String(r.transactionAt.getHours()).padStart(2,'0')}:${String(r.transactionAt.getMinutes()).padStart(2,'0')}:${String(r.transactionAt.getSeconds()).padStart(2,'0')}` : String(r.transactionAt || ''),
+            })),
+            pagination: {page,pageSize,total,totalPages,hasPrevious:page>1,hasMore:page<totalPages},
+            summary, paymentMethods: methods.map(m=>String(m.method)),
+            taxRegistration, vatSummary,
+            bookingIntegration: {
+                available: bookingSchema.available,
+                reason: bookingSchema.available ? null : bookingSchema.reason,
+                costComplete: bookingSchema.available && missingCosts===0,
+                revenueRecognition: 'Only COMPLETED/FULFILLED bookings with a fulfillment timestamp; booking payments are not added as sales.'
+            }
+        };
+    }
+
+    return getOwnerSalesReport;
+
+})();
+
 const POS_CASHIER_NAME_SQL = `(SELECT ea.employee_name FROM employee_actions ea
     WHERE ea.store_id = o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
       AND ea.action = 'Completed POS transaction'
@@ -737,10 +1082,11 @@ const POS_CASHIER_ROLE_SQL = `(SELECT ea.employee_role FROM employee_actions ea
       AND ea.action = 'Completed POS transaction'
     ORDER BY ea.id DESC LIMIT 1)`;
 
+// Older POS rows with a legacy -POS- Order ID remain visible. The SQL migration
+// marks older INV-only sales as WALK_IN before dropping orders.control_number.
 const POS_WALKIN_ORDER_FILTER_SQL = `(
     UPPER(TRIM(COALESCE(o.customer_type, ''))) = 'WALK_IN'
     OR o.order_id LIKE '%-POS-%'
-    OR o.control_number LIKE 'INV-%'
 )`;
 
 // All POS sales are paid at checkout and stored in orders/order_items.
@@ -778,37 +1124,6 @@ function nextMonthStartFromISODate(value) {
     if (!monthStart) return null;
     const [year, month] = monthStart.split("-").map(Number);
     return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
-}
-
-async function getNextAvailableControlNumber(connection, orderDate) {
-    const compactDate = String(orderDate || "")
-        .replace(/[^0-9]/g, "")
-        .slice(0, 8);
-
-    const prefix = `INV-${compactDate}-`;
-
-    const [rows] = await connection.execute(
-        `SELECT control_number AS controlNumber
-         FROM orders
-         WHERE control_number LIKE ?`,
-        [`${prefix}%`]
-    );
-
-    let maxSequence = 0;
-
-    for (const row of rows) {
-        const value = String(row.controlNumber || "").trim();
-        const match = value.match(new RegExp(`^${prefix}(\\d+)$`, "i"));
-
-        if (!match) continue;
-
-        const sequence = Number(match[1]);
-        if (Number.isFinite(sequence)) {
-            maxSequence = Math.max(maxSequence, sequence);
-        }
-    }
-
-    return `${prefix}${String(maxSequence + 1).padStart(5, "0")}`;
 }
 
 function roundMoney(value) {
@@ -1828,7 +2143,7 @@ exports.handler = async (event) => {
             return jsonResponse(403, headers, { error: "POS access is not permitted for this account." });
         }
         const posReadActions = new Set([
-            "get_orders", "get_owner_dashboard_summary", "get_tax_registration",
+            "get_orders", "get_owner_dashboard_summary", "get_owner_sales_report", "get_tax_registration",
         ]);
         if (posAccess !== "full" && !posReadActions.has(action)) {
             return jsonResponse(403, headers, { error: "Full POS access is required for this action." });
@@ -2001,11 +2316,6 @@ exports.handler = async (event) => {
                         formatOrderItems(orderLines),
                         255
                     );
-                    const controlNumber = await getNextAvailableControlNumber(
-                        connection,
-                        orderDate
-                    );
-
                     // Record the cashier once when creating the sales header.
                     const actingEmployee = await getActingEmployee(
                         connection,
@@ -2017,15 +2327,14 @@ exports.handler = async (event) => {
                     await connection.execute(
                         `INSERT INTO orders
                          (
-                             order_id, control_number, store_id, branch_id,
+                             order_id, store_id, branch_id,
                              cashier_id, customer_type, payment_mode, tax_type,
                              vatable_sales, vat_amount, customer_payment, change_due,
                              item, total, order_date
                          )
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                         [
                             orderId,
-                            controlNumber,
                             storeId,
                             tokenBranchId,
                             actingEmployee.id,
@@ -2068,7 +2377,7 @@ exports.handler = async (event) => {
                         branchId: tokenBranchId,
                         employee: actingEmployee,
                         module: "Sales / POS",
-                        referenceNumber: controlNumber,
+                        referenceNumber: orderId,
                         action: "Completed POS transaction",
                         referenceId: orderId,
                         details: `${item} — Grand Total ₱${total} — ${paymentMode} — ${taxType} — VATable ₱${vatableSales} — VAT ₱${vatAmount}`,
@@ -2083,7 +2392,6 @@ exports.handler = async (event) => {
                              o.branch_id AS branchId,
                              COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branchName,
                              COALESCE(NULLIF(TRIM(b.branch_name), ''), CONCAT('Branch ', o.branch_id), 'Unassigned') AS branch,
-                             o.control_number AS controlNumber,
                              'Walk-in' AS customerName,
                              o.customer_type AS customerType,
                              NULL AS customerAddress,
@@ -2148,7 +2456,7 @@ exports.handler = async (event) => {
             }
 
             throw new Error(
-                "Unable to generate a unique POS order ID and control number."
+                "Unable to generate a unique POS Order ID."
             );
         }
 
@@ -2201,6 +2509,19 @@ exports.handler = async (event) => {
                 );
             } catch (error) {
                 await connection.rollback();
+                throw error;
+            }
+        }
+
+        if (action === "get_owner_sales_report") {
+            if (tokenRole !== "owner") {
+                return jsonResponse(403, headers, { error: "Only the store owner may access consolidated revenue." });
+            }
+            try {
+                const report = await getOwnerSalesReport(connection, storeId, requestedBranchId, body);
+                return jsonResponse(200, headers, { success: true, ...report });
+            } catch (error) {
+                if (error?.statusCode === 400) return badRequest(headers, error.message);
                 throw error;
             }
         }
@@ -2461,8 +2782,8 @@ exports.handler = async (event) => {
             if (dateTo) { where.push("o.order_date <= ?"); params.push(dateTo); }
             const search = toSafeString(body.search ?? body.query ?? body.order_search ?? body.orderSearch, 120);
             if (search) {
-                where.push("(o.order_id LIKE ? OR o.control_number LIKE ?)");
-                params.push(`%${search}%`, `%${search}%`);
+                where.push("o.order_id LIKE ?");
+                params.push(`%${search}%`);
             }
             const whereSql = where.join(' AND ');
             const includeFinancials = tokenRole === 'owner';
@@ -2484,7 +2805,7 @@ exports.handler = async (event) => {
             let query = `SELECT
                              o.order_id AS orderId, o.store_id AS storeId, o.branch_id AS branchId,
                              COALESCE(NULLIF(TRIM(b.branch_name),''), CONCAT('Branch ', o.branch_id)) AS branchName,
-                             o.control_number AS controlNumber, 'Walk-in' AS customerName,
+                             'Walk-in' AS customerName,
                              o.customer_type AS customerType, o.payment_mode AS paymentMode,
                              o.tax_type AS taxType, o.vatable_sales AS vatableSales,
                              o.vat_amount AS vatAmount, o.customer_payment AS customerPayment,

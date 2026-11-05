@@ -3366,13 +3366,20 @@ async function permanentlyDeleteProduct(
  * Important: no demo quantities, no purchase-cost-based revenue, no stock writes.
  * Priority: equipment on hold -> expiring/expired -> low availability -> slow -> healthy.
  */
-// Keep inventory's recorded POS definition consistent with lambda-pos/index.js.
-// orders contains paid checkout records; it does not have a status column.
-const OWNER_RECORDED_POS_FILTER_SQL = `(
-    UPPER(TRIM(COALESCE(o.customer_type,''))) = 'WALK_IN'
-    OR o.order_id LIKE '%-POS-%'
-    OR o.control_number LIKE 'INV-%'
-) AND UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')`;
+// Keep inventory's paid-POS filter aligned with lambda-pos/index.js, but do
+// not reference optional order columns that may be absent in an older schema.
+// The mandatory payment_mode column identifies completed checkout payments.
+function ownerRecordedPosFilterSql({hasCustomerType = false, hasControlNumber = false} = {}) {
+    const indicators = [];
+    if (hasCustomerType) indicators.push("UPPER(TRIM(COALESCE(o.customer_type,''))) = 'WALK_IN'");
+    indicators.push("o.order_id LIKE '%-POS-%'");
+    if (hasControlNumber) indicators.push("o.control_number LIKE 'INV-%'");
+    // With neither optional identifier, this database's orders table is the
+    // POS checkout ledger; use the existing settled-payment filter alone.
+    const identity = hasCustomerType || hasControlNumber
+        ? `(${indicators.join(' OR ')}) AND ` : '';
+    return `${identity}UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')`;
+}
 
 async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}) {
     const cutoff = new Date(`${asOfDate}T00:00:00Z`);
@@ -3396,7 +3403,7 @@ async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}
                                                         p.alert_level AS alertLevel,DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS expiresAt,p.has_variants AS hasVariants,
                                                         DATE_FORMAT(p.created_at,'%Y-%m-%d') AS createdDate,
                                                         ${hasVariants ? "v.id AS variantId,v.stock AS variantStock,v.alert_level AS variantAlert,DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS variantExpiry" :
-            'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
+                                                                'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
                                                  FROM products p ${hasVariants ? 'LEFT JOIN product_variants v ON v.product_id=p.id AND v.deleted_at IS NULL' : ''}
                                                  WHERE p.store_id=? AND p.deleted_at IS NULL ${branchId ? 'AND p.branch_id=?' : ''}
                                                  ORDER BY p.id`, args);
@@ -3408,12 +3415,17 @@ async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}
         }
         const recentlySold = new Set();
         if (await present('orders') && await present('order_items') &&
-            await tableHasColumn(connection,'order_items','product_id')) {
+            await tableHasColumn(connection,'order_items','product_id') &&
+            await tableHasColumn(connection,'orders','payment_mode')) {
             productHistory = true;
+            const recordedPosFilter = ownerRecordedPosFilterSql({
+                hasCustomerType: await tableHasColumn(connection,'orders','customer_type'),
+                hasControlNumber: await tableHasColumn(connection,'orders','control_number'),
+            });
             const [sales] = await connection.execute(`SELECT DISTINCT oi.product_id AS productId
                                                       FROM orders o JOIN order_items oi ON oi.order_id=o.order_id AND oi.store_id=o.store_id
                                                       WHERE o.store_id=? ${branchId ? 'AND o.branch_id=?' : ''} AND o.order_date>=?
-                AND ${OWNER_RECORDED_POS_FILTER_SQL}`,
+                AND ${recordedPosFilter}`,
                 [...args,slowStart]);
             sales.forEach(row=>recentlySold.add(Number(row.productId)));
         }
@@ -3705,10 +3717,14 @@ async function loadOwnerInventoryPerformance(connection, {storeId, branchId, dat
     const columns = new Set(schemaRows.map(row => `${row.tableName}.${row.columnName}`));
     const hasColumns = (table, names) => names.every(name => columns.has(`${table}.${name}`));
     const posAvailable = hasColumns("orders", ["order_id", "store_id", "branch_id", "order_date", "total",
-        "customer_type", "control_number", "payment_mode"]);
+        "payment_mode"]);
     const itemsAvailable = hasColumns("order_items", ["id", "order_id", "store_id", "quantity", "line_total"]);
     let rows = [];
     if (posAvailable) {
+        const recordedPosFilter = ownerRecordedPosFilterSql({
+            hasCustomerType: columns.has("orders.customer_type"),
+            hasControlNumber: columns.has("orders.control_number"),
+        });
         const optionalItem = (column, alias) => itemsAvailable && columns.has(`order_items.${column}`)
             ? `oi.${column} AS ${alias}` : `NULL AS ${alias}`;
         const [salesRows] = await connection.execute(
@@ -3720,7 +3736,7 @@ async function loadOwnerInventoryPerformance(connection, {storeId, branchId, dat
              FROM orders o LEFT JOIN branches b ON b.id=o.branch_id AND b.store_id=o.store_id
                  ${itemsAvailable ? "LEFT JOIN order_items oi ON oi.order_id=o.order_id AND oi.store_id=o.store_id" : ""}
              WHERE o.store_id=? AND o.order_date>=? AND o.order_date<=?${branchId ? " AND o.branch_id=?" : ""}
-               AND ${OWNER_RECORDED_POS_FILTER_SQL}
+               AND ${recordedPosFilter}
              ORDER BY o.order_date,o.order_id${itemsAvailable ? ",oi.id" : ""} LIMIT 100001`,
             [storeId, dateFrom, dateTo, ...(branchId ? [branchId] : [])]);
         if (salesRows.length > 100000) {
@@ -5107,11 +5123,11 @@ exports.handler = async (event) => {
                 `SELECT m.id, m.created_at AS recordedAt, p.name AS productName,
                         pv.variant_values AS variantValues, m.quantity_delta AS quantity
                  FROM inventory_movements m
-                 JOIN branch_inventory bi ON bi.id = m.branch_inventory_id
-                       AND bi.store_id = m.store_id AND bi.branch_id = m.branch_id
-                 JOIN products p ON p.id = bi.product_id AND p.store_id = bi.store_id
-                       AND p.branch_id = bi.branch_id
-                 LEFT JOIN product_variants pv ON pv.id = bi.variant_id AND pv.product_id = p.id
+                          JOIN branch_inventory bi ON bi.id = m.branch_inventory_id
+                     AND bi.store_id = m.store_id AND bi.branch_id = m.branch_id
+                          JOIN products p ON p.id = bi.product_id AND p.store_id = bi.store_id
+                     AND p.branch_id = bi.branch_id
+                          LEFT JOIN product_variants pv ON pv.id = bi.variant_id AND pv.product_id = p.id
                  WHERE m.store_id = ? AND m.branch_id = ?
                    AND m.movement_type = 'EXPIRED_DISPOSAL'
                    AND m.created_at >= FROM_UNIXTIME(?)

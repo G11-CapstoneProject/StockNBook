@@ -34,7 +34,6 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         item: RentalEquipment | null;
     } | null>(null);
     const [retireItem,setRetireItem] = React.useState<RentalEquipment|null>(null);
-    const [unitListItem,setUnitListItem] = React.useState<RentalEquipment|null>(null);
     const [notice, setNotice] = React.useState("");
     const [importOpen, setImportOpen] = React.useState(false);
     const [conditionTab,setConditionTab] = React.useState<"active"|"history">("active");
@@ -358,10 +357,6 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                         <tr key={item.id} className="border-b border-[#EFE8F2] last:border-0">
                                             <td className="px-4 py-3 text-[#4E2C66]">
                                                 <span className="block whitespace-nowrap">{item.equipmentNumber || "—"}</span>
-                                                {item.unitNumbers.length>0&&<button type="button" onClick={()=>setUnitListItem(item)}
-                                                                                    className="mt-1 text-[10px] font-semibold text-[#6D35D4] underline-offset-2 hover:underline">
-                                                    View {item.unitNumbers.length} equipment no{item.unitNumbers.length===1?"":"s"}.
-                                                </button>}
                                             </td>
                                             <td className="px-3 py-3 font-semibold text-[#2B174C]">{item.name}</td>
                                             <td className="px-3 py-3 text-[#5F4E75]">{item.category}</td>
@@ -401,7 +396,6 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                         categories={categories}
                                         onSave={async (mutation) => { await onSaved(mutation); setDialog(null); }}/>
             }
-            {unitListItem&&<EquipmentUnitNumbersDialog item={unitListItem} close={()=>setUnitListItem(null)}/>}
             {retireItem&&<RetireEquipmentDialog item={retireItem} saving={rental.saving}
                                                 close={()=>setRetireItem(null)} onSave={async (mutation)=>{await onSaved(mutation);setRetireItem(null);}}/>}
             {importOpen && <RentalImportDialog close={()=>setImportOpen(false)} onSave={async (rows,purchase)=>{
@@ -969,24 +963,6 @@ function peso(value:number|null|undefined) {
 type RentalExportFilters = {
     category:string;status:string;appliedDates:{from:string;to:string}|null;
 };
-// Read-only list of the Equipment No. of every physical unit of one rental product.
-function EquipmentUnitNumbersDialog({item,close}:{item:RentalEquipment;close:()=>void}) {
-    return <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 px-3 py-4 backdrop-blur-sm" role="presentation"
-                onMouseDown={event=>{if(event.target===event.currentTarget)close();}}>
-        <div role="dialog" aria-modal="true" aria-label={`Equipment numbers for ${item.name}`} className="flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-[#E6DDF0] px-5 py-4">
-                <div>
-                    <h2 className="text-[18px] font-bold text-[#1A1220]">Equipment Nos.</h2>
-                    <p className="text-xs text-[#7A6A84]">{item.name} · Product No. {item.equipmentNumber} · {item.unitNumbers.length} unit{item.unitNumbers.length===1?"":"s"}</p>
-                </div>
-                <button type="button" onClick={close} aria-label="Close" className="text-[#9B8AAA] hover:text-[#1A1220]"><X size={20}/></button>
-            </div>
-            <div className="grid min-h-0 grid-cols-2 gap-2 overflow-y-auto p-5 sm:grid-cols-3">
-                {item.unitNumbers.map(number=><span key={number} className="rounded-lg border border-[#E6DDF0] bg-[#FBF8FF] px-2.5 py-1.5 text-center text-xs font-semibold text-[#4E2C66]">{number}</span>)}
-            </div>
-        </div>
-    </div>;
-}
 function rentalReportRows(items:RentalEquipment[],filters:RentalExportFilters,availability:Map<number,number>|null) {
     const headings = ["Product No.","Rental Product","Category","Last Supplier","Avg. Unit Cost (PHP)",
         "Rental Rate / Day (PHP)","Total Units","Available Now",
@@ -1128,43 +1104,23 @@ function exportRentalPdf(items:RentalEquipment[],filters:RentalExportFilters,ava
 /* SAME SALES WORKFLOW: select XLSX → preview → confirm. One purchase per
  * workbook, not one purchase per equipment row. No variants / reorder point. */
 const RENTAL_EQUIPMENT_HEADERS = ["Equipment Name","Category","Stock","Unit Purchase Cost (₱)","Rental Rate Per Day (₱)"];
+// The no-Product-No. template mirrors Add Rental Equipment. The backend
+// assigns a unique Product No. to every created rental product during import.
+const RENTAL_FORM_REQUIRED = ["Rental Product","Category","Total Units","Cost Price (₱ / unit)","Final Daily Rental Rate (₱ for one item)"];
+// Continue accepting the previous extended and original five-column imports.
+const RENTAL_IMPORT_REQUIRED = ["Rental Product","Category","Total Units","Unit Purchase Cost (₱)","Rental Rate Per Day (₱)"];
 const RENTAL_PRICING_HEADERS = ["Pricing Method","Target Paid Rental Days to Recover Cost","Residual Value (₱)","Operating Cost / Paid Day (₱)","Target Margin (%)"];
 const LEGACY_PRICING_HEADERS = ["Pricing Method","Useful Life (Years)","Paid Rental Days / Year","Residual Value (₱)","Operating Cost / Paid Day (₱)","Target Margin (%)"];
 const RENTAL_PURCHASE_HEADERS = ["Supplier","Supplier Invoice Number (Optional)","Purchase Date","Payment Method","Amount Paid (₱)","Payment Due Date"];
 type ParsedRentalImport = {rows:RentalImportRow[];purchase:RentalBulkPurchase;purchaseTotal:number;outstandingBalance:number};
 function downloadRentalTemplate() {
-    const workbook=XLSX.utils.book_new();
-    const lines=XLSX.utils.aoa_to_sheet([[...RENTAL_EQUIPMENT_HEADERS,...RENTAL_PRICING_HEADERS],
-        ["Folding Chair","Chairs",50,300,"","Cost-Based",30,0,4,30],
-        ["Round Table","Tables",10,1800,"","Cost-Based",45,200,12,30]]);
-    lines["!cols"]=[{wch:35},{wch:24},{wch:17},{wch:28},{wch:29},...RENTAL_PRICING_HEADERS.map(()=>({wch:25}))];
-    XLSX.utils.book_append_sheet(workbook,lines,"RENTAL EQUIPMENT");
-    const purchase=XLSX.utils.aoa_to_sheet([RENTAL_PURCHASE_HEADERS,
-        ["Example Supplier","INV-001",rentalToday(),"Cash","",""]]);
-    purchase["!cols"]=[{wch:30},{wch:35},{wch:20},{wch:22},{wch:21},{wch:22}];
-    XLSX.utils.book_append_sheet(workbook,purchase,"PURCHASE DETAILS");
-    const instructions=XLSX.utils.aoa_to_sheet([
-        ["StockNBook — Rental Inventory Import Format"],
-        ["1. One workbook is ONE supplier purchase (same as Sales Inventory)."],
-        ["2. Put each distinct equipment product on one row of RENTAL EQUIPMENT."],
-        ["3. Stock is the quantity physically received. All rows must have positive stock."],
-        ["4. Cost is what you paid PER UNIT. Rental Rate is the fee PER UNIT PER DAY."],
-        ["5. Provide only ONE supplier/payment row on PURCHASE DETAILS."],
-        ["6. Cash means fully paid; leave Amount Paid blank. Credit may be unpaid or partially paid."],
-        ["7. For an unpaid credit purchase, fill a payment due date."],
-        ["8. Dates: YYYY-MM-DD. Do not add variants or Reorder Point fields."],
-        ["9. Replace the sample rows with your own data; do not keep the examples."],
-        ["10. Use Add Rental Product for zero-stock catalogue entries."],
-        ["11. New rental equipment defaults to Cost-Based pricing. Manual remains available."],
-        ["11a. Legacy five-column XLSX files still use Manual pricing to preserve the prices entered in those files."],
-        ["11b. In this updated format, leave Pricing Method and Rental Rate blank to select Cost-Based pricing, but fill the recovery target and other required inputs."],
-        ["12. Manual requires Rental Rate Per Day. Cost-Based calculates that value automatically; leave rate blank."],
-        ["13. Cost-Based requires Target Paid Rental Days to Recover Cost (per item), Residual Value, Operating Cost/Day, and Target Margin %."],
-        ["14. The calculated rate is rounded UP to a whole peso; it is a cost-recovery suggestion only."],
-    ]);
-    instructions["!cols"]=[{wch:110}];
-    XLSX.utils.book_append_sheet(workbook,instructions,"INSTRUCTIONS");
-    XLSX.writeFile(workbook,"StockNBook_Rental_Bulk_Import_Format.xlsx");
+    // Keep the formatted in-app download identical to the accepted XLSX upload.
+    const link=document.createElement("a");
+    link.href="/templates/StockNBook_Rental_Bulk_Import_Format.xlsx";
+    link.download="StockNBook_Rental_Bulk_Import_Format.xlsx";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
 }
 function rentalWorkbookDate(value:unknown):string {
     if(value instanceof Date&&!Number.isNaN(value.getTime()))return [value.getFullYear(),String(value.getMonth()+1).padStart(2,"0"),String(value.getDate()).padStart(2,"0")].join("-");
@@ -1193,14 +1149,17 @@ function parseRentalImport(buffer:ArrayBuffer,existingEquipment:RentalEquipment[
     const equipSheet=workbook.Sheets["RENTAL EQUIPMENT"];
     const purchaseSheet=workbook.Sheets["PURCHASE DETAILS"];
     if(!equipSheet||!purchaseSheet)throw new Error('The XLSX file must include "RENTAL EQUIPMENT" and "PURCHASE DETAILS" sheets (one supplier purchase per file).');
-    const productCells=rentalWorkbookTable(equipSheet,"RENTAL EQUIPMENT",RENTAL_EQUIPMENT_HEADERS);
+    const rawEquip=XLSX.utils.sheet_to_json<unknown[]>(equipSheet,{header:1,raw:true,defval:""});
+    const headerKey=(v:unknown)=>String(v??"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    const hasFormHeaders=rawEquip.some(row=>RENTAL_FORM_REQUIRED.every(h=>row.some(v=>headerKey(v)===headerKey(h))));
+    const hasPreviousHeaders=!hasFormHeaders&&rawEquip.some(row=>RENTAL_IMPORT_REQUIRED.every(h=>row.some(v=>headerKey(v)===headerKey(h))));
+    const requiredHeaders=hasFormHeaders?RENTAL_FORM_REQUIRED:hasPreviousHeaders?RENTAL_IMPORT_REQUIRED:RENTAL_EQUIPMENT_HEADERS;
+    const productCells=rentalWorkbookTable(equipSheet,"RENTAL EQUIPMENT",requiredHeaders);
     if(productCells.length<1||productCells.length>500)throw new Error("Enter between 1 and 500 rental equipment rows.");
     const existing=new Set(existingEquipment.filter(item=>item.active).map(item=>item.name.toLowerCase().trim().replace(/\s+/g," ")));
     const seen=new Set<string>();
     // Optional extra columns are detected by header name. Legacy five-column XLSX files still work.
-    const rawEquip=XLSX.utils.sheet_to_json<unknown[]>(equipSheet,{header:1,raw:true,defval:""});
-    const headerKey=(v:unknown)=>String(v??"").toLowerCase().replace(/[^a-z0-9]/g,"");
-    const headerRow=rawEquip.findIndex(row=>RENTAL_EQUIPMENT_HEADERS.every(h=>row.some(v=>headerKey(v)===headerKey(h))));
+    const headerRow=rawEquip.findIndex(row=>requiredHeaders.every(h=>row.some(v=>headerKey(v)===headerKey(h))));
     const headerIndexes=new Map<string,number>();
     rawEquip[headerRow].forEach((value,index)=>headerIndexes.set(headerKey(value),index));
     const extra=(rowNumber:number,label:string)=>{

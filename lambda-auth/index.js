@@ -220,42 +220,42 @@ const identifiers = (() => {
         {
             table: "id_number_sequences",
             create: `CREATE TABLE IF NOT EXISTS id_number_sequences (
-                store_id BIGINT NOT NULL,
-                branch_id BIGINT NOT NULL,
-                entity_type VARCHAR(10) NOT NULL,
+                                                                        store_id BIGINT NOT NULL,
+                                                                        branch_id BIGINT NOT NULL,
+                                                                        entity_type VARCHAR(10) NOT NULL,
                 scope_key VARCHAR(10) NOT NULL DEFAULT '',
                 last_sequence INT UNSIGNED NOT NULL DEFAULT 0,
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (store_id, branch_id, entity_type, scope_key)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         },
         {
             table: "identifier_prefixes",
             create: `CREATE TABLE IF NOT EXISTS identifier_prefixes (
-                branch_id BIGINT NOT NULL,
-                store_id BIGINT NOT NULL,
-                store_initials VARCHAR(8) NOT NULL,
+                                                                        branch_id BIGINT NOT NULL,
+                                                                        store_id BIGINT NOT NULL,
+                                                                        store_initials VARCHAR(8) NOT NULL,
                 branch_initials VARCHAR(8) NOT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (branch_id),
                 UNIQUE KEY uq_identifier_prefixes_initials (store_id, branch_initials)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         },
         {
             table: "rental_equipment_units",
             create: `CREATE TABLE IF NOT EXISTS rental_equipment_units (
-                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                store_id BIGINT NOT NULL,
-                branch_id BIGINT NOT NULL,
-                equipment_id BIGINT NOT NULL,
-                equipment_number VARCHAR(40) NOT NULL,
+                                                                           id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                                                                           store_id BIGINT NOT NULL,
+                                                                           branch_id BIGINT NOT NULL,
+                                                                           equipment_id BIGINT NOT NULL,
+                                                                           equipment_number VARCHAR(40) NOT NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 retired_at DATETIME NULL DEFAULT NULL,
                 PRIMARY KEY (id),
                 UNIQUE KEY uq_rental_equipment_units_number (equipment_number),
                 KEY idx_rental_equipment_units_equipment (equipment_id, retired_at),
                 KEY idx_rental_equipment_units_branch (store_id, branch_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         },
         {
             table: "managers", column: "employee_code",
@@ -334,7 +334,7 @@ const identifiers = (() => {
                  FROM branches b
                           JOIN stores s ON s.id = b.store_id
                  WHERE b.id = ? AND b.store_id = ?
-                 LIMIT 1`,
+                     LIMIT 1`,
                 [branchId, storeId]
             );
             if (!rows.length) throw new Error("The branch does not belong to this store.");
@@ -392,7 +392,7 @@ const identifiers = (() => {
         await connection.execute(
             `INSERT INTO id_number_sequences (store_id, branch_id, entity_type, scope_key, last_sequence)
              VALUES (?, ?, ?, ?, 0)
-             ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
+                 ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
             [storeId, branchId, entityType, scopeKey]
         );
         await connection.execute(
@@ -425,7 +425,7 @@ const identifiers = (() => {
         const floor = await maxSequenceFrom(connection,
             `SELECT employee_code AS value FROM managers WHERE employee_code LIKE ?
              UNION ALL
-             SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
+            SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
             [`${prefix}%`, `${prefix}%`], PATTERNS.employee);
         const { last } = await reserveSequenceBlock(connection, { storeId, branchId, entityType: "EMP", floor });
         return buildEmployeeCode(storeCode, branchCode, last);
@@ -470,7 +470,7 @@ const identifiers = (() => {
         await connection.execute(
             `INSERT INTO product_number_sequences (store_id, branch_id, last_sequence)
              VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
+                 ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
             [storeId, branchId, next]
         );
         return buildProductNumber(storeCode, branchCode, next);

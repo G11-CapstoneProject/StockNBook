@@ -3,11 +3,11 @@
 import * as React from "react";
 import {
     AlertTriangle, ArrowLeftRight, CalendarDays, ChevronDown, ClipboardList,
-    Package, PackagePlus, RefreshCw, Search, ShoppingCart, X, CheckCircle2, CalendarClock, Truck,
+    Package, PackagePlus, RefreshCw, Search, ShoppingCart, X, CalendarClock, Truck,
 } from "lucide-react";
 import { useInventoryController } from "@/hooks/useInventory";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
-import type { Product } from "./_shared";
+import { SuccessToast, type Product } from "./_shared";
 import StaffRentalInventory from "./StaffRentalInventory";
 
 /* Staff inventory only: the existing product hook remains the authoritative
@@ -361,6 +361,7 @@ export default function StaffInventory() {
     const [salesQueueSaving,setSalesQueueSaving]=React.useState(false);
     const [salesQueueError,setSalesQueueError]=React.useState("");
     const [salesQueueNotice,setSalesQueueNotice]=React.useState("");
+    const closeStaffNotice = React.useCallback(() => {setSalesQueueNotice("");setActionNotice("");}, []);
     const [confirmSalesRelease,setConfirmSalesRelease]=React.useState(false);
     const [salesQueueKey,setSalesQueueKey]=React.useState(0);
     const [activityError, setActivityError] = React.useState<string | null>(null);
@@ -609,7 +610,7 @@ export default function StaffInventory() {
 
     const sendSalesBookingAction=async(actionName:"prepare_staff_sales_booking_item"|"release_staff_sales_booking",booking:SalesBooking,itemId?:number)=>{
         if(salesQueueSaving)return;
-        setSalesQueueSaving(true);setSalesQueueError("");setSalesQueueNotice("");
+        setSalesQueueSaving(true);setSalesQueueError("");setSalesQueueNotice("");setActionNotice("");
         try{
             const token=sessionStorage.getItem("token");
             if(!token)throw new Error("Your session has expired. Please sign in again.");
@@ -639,7 +640,7 @@ export default function StaffInventory() {
     };
     const submitShortage = async (line: StockLine) => {
         if (saving) return;
-        setSaving(true);setActionError("");setActionNotice("");
+        setSaving(true);setActionError("");setActionNotice("");setSalesQueueNotice("");
         try {
             await sendInventoryAction({action:"report_staff_stock_shortage",productId:line.product.id,
                 variantId:line.variantId,notes:reportNotes.trim()});
@@ -651,7 +652,7 @@ export default function StaffInventory() {
     const submitCondition = async (line: StockLine) => {
         if (saving || !conditionReportingSupported || conditionAlreadyReported(line, conditionIssueType)) return;
         if (conditionNotes.trim().length < 5) {setActionError("Provide at least 5 characters of notes.");return;}
-        setSaving(true);setActionError("");setActionNotice("");
+        setSaving(true);setActionError("");setActionNotice("");setSalesQueueNotice("");
         try {
             await sendInventoryAction({action:"report_staff_stock_condition",productId:line.product.id,
                 variantId:line.variantId,issueType:conditionIssueType,notes:conditionNotes.trim()});
@@ -675,7 +676,7 @@ export default function StaffInventory() {
             return;
         }
         if (!receiptRequestKey.current) receiptRequestKey.current = crypto.randomUUID();
-        setSaving(true);setActionError("");setActionNotice("");
+        setSaving(true);setActionError("");setActionNotice("");setSalesQueueNotice("");
         try {
             const result = await sendInventoryAction({action:"complete_staff_stock_receipt", taskId:task.id,
                 requestKey:receiptRequestKey.current,
@@ -998,8 +999,8 @@ export default function StaffInventory() {
                 <div className="flex justify-end border-t border-[#E9E1EE] px-5 py-3"><button type="button" className={`${outline} h-9 text-xs`} onClick={()=>setSelectedSalesBookingRef(null)}>Close</button></div>
             </section>
         </div>}
-        {confirmSalesRelease&&selectedSalesBooking&&!isRental&&<div role="presentation" className="fixed inset-0 z-[100] flex items-center justify-center bg-[#21132E]/65 p-4">
-            <section role="dialog" aria-modal="true" aria-label="Confirm Sales booking handover" className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-xl">
+        {confirmSalesRelease&&selectedSalesBooking&&!isRental&&<div role="presentation" className="fixed inset-0 z-[100] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4">
+            <section role="alertdialog" aria-modal="true" aria-label="Confirm Sales booking handover" className="max-h-[90dvh] w-full max-w-lg space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
                 <h3 className="text-lg font-bold text-[#21132E]">Release Sales Products</h3>
                 <p className="text-xs text-[#5A476A]">Confirm the physical handover of all {selectedSalesBooking.items.reduce((sum,item)=>sum+item.quantity,0)} Sales units under {selectedSalesBooking.reference}. This action does not deduct inventory a second time.</p>
                 {salesQueueError&&<p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{salesQueueError}</p>}
@@ -1009,7 +1010,7 @@ export default function StaffInventory() {
                         {salesQueueSaving?"Saving...":"Confirm Handover"}</button></div>
             </section>
         </div>}
-        {salesQueueNotice&&!isRental&&<p role="status" className="fixed bottom-5 right-5 z-[110] max-w-sm rounded-xl border border-green-200 bg-white p-4 text-xs text-green-800 shadow-lg">{salesQueueNotice}<button type="button" className="ml-2 underline" onClick={()=>setSalesQueueNotice("")}>Dismiss</button></p>}
+
         {showActivityHistory && !isRental && <div className="fixed inset-0 z-[95] flex items-center justify-center bg-[#21132E]/50 p-4"
                                                   onMouseDown={event=>{if(event.target===event.currentTarget)setShowActivityHistory(false);}}>
             <section role="dialog" aria-modal="true" aria-labelledby="staff-activity-title"
@@ -1061,7 +1062,10 @@ export default function StaffInventory() {
                 </div>
             </section>
         </div>}
-        {actionNotice && <p role="status" className="fixed bottom-5 right-5 z-[110] max-w-sm rounded-xl border border-green-200 bg-white p-4 text-sm text-green-800 shadow-lg"><CheckCircle2 size={16} className="mr-2 inline"/>{actionNotice}<button className="ml-2 underline" onClick={()=>setActionNotice("")}>Dismiss</button></p>}
+        {!isRental && <SuccessToast
+            toast={salesQueueNotice ? {title:"Sales queue updated", message:salesQueueNotice} : actionNotice ? {title:"Inventory task completed", message:actionNotice} : null}
+            onClose={closeStaffNotice}
+        />}
         {(details || showReceivingInfo) && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#21132E]/50 p-4" onMouseDown={event=>{if(event.target===event.currentTarget && !saving){setDetails(null);setShowReceivingInfo(false);setActionError("");}}}>
             <section role="dialog" aria-modal="true" aria-label={details ? "Stock review" : "Authorized stock receiving"} className="max-h-[90vh] w-full max-w-lg overflow-y-auto overflow-x-hidden rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
                 <div className="flex items-start justify-between gap-4"><h3 className="text-lg font-bold text-[#21132E]">{details ? "Stock Review" : "Record Stock In"}</h3>

@@ -16,6 +16,7 @@ import {
     type RentalBulkPurchase, type RentalPricingMethod,
     calculateCostBasedRentalRate,
 } from "@/hooks/useRentalInventory";
+import { SuccessToast } from "./_shared";
 
 // The manager manages physical equipment and maintenance, not checkout/return
 // transactions. Staff's booking workflow is the authority for rentals/returns.
@@ -35,6 +36,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     } | null>(null);
     const [retireItem,setRetireItem] = React.useState<RentalEquipment|null>(null);
     const [notice, setNotice] = React.useState("");
+    const [exportError, setExportError] = React.useState("");
+    const closeInventoryToast = React.useCallback(() => { setNotice(""); setExportError(""); }, []);
     const [importOpen, setImportOpen] = React.useState(false);
     const [conditionTab,setConditionTab] = React.useState<"active"|"history">("active");
     const [conditionDetail,setConditionDetail] = React.useState<ManagerConditionIssue|RentalMaintenanceHistory|null>(null);
@@ -147,8 +150,15 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const downloadExport = (format:"xlsx"|"pdf") => {
         setExportOpen(false);
         const details = {category,status,appliedDates};
-        if (format === "xlsx") exportRentalExcel(filtered, details, datesAvailability);
-        else exportRentalPdf(filtered, details, datesAvailability);
+        try {
+            if (format === "xlsx") exportRentalExcel(filtered, details, datesAvailability);
+            else exportRentalPdf(filtered, details, datesAvailability);
+            setExportError("");
+            setNotice(`${format === "xlsx" ? "Excel" : "PDF"} rental inventory export started. Check your browser downloads.`);
+        } catch (error) {
+            setNotice("");
+            setExportError(error instanceof Error ? error.message : "Unable to export rental inventory.");
+        }
     };
 
     return (
@@ -330,15 +340,11 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                 {appliedDates && <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-xs font-medium text-[#5330B6]">
                     Booking availability for {appliedDates.from} to {appliedDates.to} · The "Available" column and Availability badges refer to these dates.
                 </p>}
-                <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-[11px] text-[#786887]">
-                    {appliedDates ? "Availability accounts for confirmed reservations during the selected dates. Physical Rented Out and On Hold counts stay separate." : "Available Today excludes confirmed reservations overlapping today. Total Units and physically rented-out counts are unchanged by confirmation; check future dates using Date Availability."}
-                    {" "}Low Availability uses the equipment's configured alert level. Needs Review identifies missing units or stock discrepancies without hiding remaining availability.
-                </p>
                 <div className="max-h-[360px] w-full overflow-auto overscroll-contain border-t border-[#E9E1EE]" style={{ maxHeight: 360 }} role="region" aria-label="Branch rental equipment list" tabIndex={0}>
                     <table className="w-full min-w-[1090px] text-left text-[11px]">
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                         <tr className="border-b border-[#E9E1EE]">
-                            <th className="px-4 py-3 font-semibold">Product No.</th>
+                            <th className="px-4 py-3 font-semibold">Equipment No.</th>
                             <th className="px-3 py-3 font-semibold">Rental Product</th>
                             <th className="px-3 py-3 font-semibold">Category</th>
                             <th className="px-2 py-3 text-center font-semibold">Total Units</th>
@@ -387,9 +393,12 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             </section>
 
 
-            {notice && !notice.startsWith("Missing equipment") && !notice.startsWith("Permanent loss") && <div role="status" className="flex items-center justify-between rounded-xl border border-[#E2DCF2] bg-[#F5F0FF] px-4 py-3 text-xs font-semibold text-[#5330B6]">
-                {notice}<button type="button" onClick={() => setNotice("")} aria-label="Dismiss message"><X size={16}/></button>
-            </div>}
+            <SuccessToast
+                toast={exportError ? {title:"Rental inventory export failed",message:exportError,tone:"error"} :
+                    notice && !notice.startsWith("Missing equipment") && !notice.startsWith("Permanent loss")
+                        ? {title:"Rental inventory updated",message:notice} : null}
+                onClose={closeInventoryToast}
+            />
             {dialog && <EquipmentDialog key={`${dialog.mode}-${dialog.item?.id ?? "new"}`} mode={dialog.mode} item={dialog.item} saving={rental.saving}
                                         close={() => setDialog(null)}
                                         onNavigate={(mode) => setDialog({mode, item:dialog.item})}
@@ -403,7 +412,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             }} saving={rental.saving} existingEquipment={rental.equipment}/>}
             {supplierPaymentsOpen && <RentalSupplierPayablesDialog branchId={branchId} canManage={canManage} onClose={()=>setSupplierPaymentsOpen(false)}/>}
             {categoriesOpen && <RentalCategoriesDialog categories={categories} equipment={rental.equipment}
-                                                       saving={rental.saving} close={()=>setCategoriesOpen(false)} onSave={onSaved}/>}
+                                                       saving={rental.saving} close={()=>setCategoriesOpen(false)}
+                                                       onSave={async mutation => {await onSaved(mutation); setNotice("");}}/>}
         </div>
     );
 }
@@ -940,7 +950,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                 </div>
             </form>
         </div>
-        {pending&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/50 p-4" role="presentation">
+        {pending&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4" role="presentation">
             <div role="alertdialog" aria-modal="true" aria-label="Confirm rental inventory changes" className="w-full max-w-md space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
                 <h3 className="text-lg font-bold text-[#1A1220]">{mode==="add"?"Confirm Add Equipment":mode==="edit"?"Confirm Update":mode==="receive"?"Confirm Received Stock":mode==="correct"?"Confirm Stock Correction":"Confirm Maintenance"}</h3>
                 <p className="text-sm text-[#6A5D6F]">{mode==="add"?`Add ${name.trim()} to rental inventory${qty>0 ? ` with ${qty} physically received units` : ""}?`:mode==="edit"?`Save the changes to ${name.trim()}?`:mode==="receive"?`Confirm ${qty} unit(s) of ${item?.name} have been physically received? This immediately updates rental availability and today’s stock activity.`:mode==="correct"?`Change the verified physical total of ${item?.name} from ${item?.totalUnits} to ${qty} units? Confirmed reservations and held units are protected.`:`Record this maintenance action for ${item?.name}?`}</p>
@@ -1274,9 +1284,9 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
         finally{running.current=false;setSubmitting(false);}
     };
     const secondary="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]";
-    return <div role="presentation" className="fixed inset-0 z-[145] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+    return <div role="presentation" className="fixed inset-0 z-[145] flex items-center justify-center bg-[#21132E]/55 p-3 backdrop-blur-sm sm:p-4">
         <div role="dialog" aria-modal="true" aria-label={step==="select"?"Upload rental inventory file":"Confirm imported rental products"}
-             className={`flex max-h-[92vh] w-full flex-col overflow-hidden rounded-2xl bg-white shadow-xl ${step==="select"?"max-w-lg":"max-w-6xl"}`}>
+             className={`flex max-h-[90dvh] w-full flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-xl ${step==="select"?"max-w-lg":"max-w-6xl"}`}>
             {step==="select"?<>
                 <div className="p-5 sm:p-6">
                     <div className="mb-4 flex items-start justify-between gap-3"><div>
@@ -1335,18 +1345,18 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
     </div>;
 }
 type RentalCategoryMutation = Extract<RentalMutation,
-    { action: "create_rental_category" | "rename_rental_category" | "archive_rental_category" }>;
+    { action: "create_rental_category" | "rename_rental_category" | "delete_rental_category" }>;
 function RentalCategoriesDialog({categories,equipment,close,onSave,saving}:{
     categories:string[];equipment:RentalEquipment[];close:()=>void;onSave:(action:RentalMutation)=>Promise<void>;saving:boolean;
 }) {
     const [draft,setDraft]=React.useState("");
-    const [filter,setFilter]=React.useState("");
     const [editing,setEditing]=React.useState<string|null>(null);
     const [editDraft,setEditDraft]=React.useState("");
     const [confirmAction,setConfirmAction]=React.useState<RentalCategoryMutation|null>(null);
     const [blocked,setBlocked]=React.useState<string|null>(null);
     const [error,setError]=React.useState("");
     const [success,setSuccess]=React.useState("");
+    const closeCategoryToast = React.useCallback(() => setSuccess(""), []);
     const [working,setWorking]=React.useState(false);
     const inFlight=React.useRef(false);
     const matches=(name:string)=>categories.some(c=>c.toLowerCase().trim()===name.toLowerCase().trim());
@@ -1363,10 +1373,10 @@ function RentalCategoriesDialog({categories,equipment,close,onSave,saving}:{
         if(matches(name)){setError(`Category "${name}" already exists.`);return;}
         setEditing(null);setConfirmAction({action:"rename_rental_category",previousName:editing,name});
     };
-    const beginArchive=(name:string)=>{
-        const linked=equipment.filter(item=>item.active&&item.category===name).length;
+    const beginDelete=(name:string)=>{
+        const linked=equipment.filter(item=>item.category===name).length;
         setError("");if(linked>0){setBlocked(name);return;}
-        setConfirmAction({action:"archive_rental_category",name});
+        setConfirmAction({action:"delete_rental_category",name});
     };
     const confirm=async()=>{
         if(!confirmAction||working||saving||inFlight.current)return;
@@ -1377,19 +1387,19 @@ function RentalCategoriesDialog({categories,equipment,close,onSave,saving}:{
             if(action.action==="create_rental_category")setDraft("");
             setSuccess(action.action==="create_rental_category"?`“${action.name}” added successfully.`:
                 action.action==="rename_rental_category"?`“${action.previousName}” updated to “${action.name}”.`:
-                    `“${action.name}” archived successfully.`);
+                    `“${action.name}” deleted successfully.`);
             setConfirmAction(null);
         }catch(cause){setConfirmAction(null);setError(cause instanceof Error?cause.message:"Unable to save category.");}
         finally{inFlight.current=false;setWorking(false);}
     };
-    const shown=categories.filter(name=>name.toLowerCase().includes(filter.trim().toLowerCase()));
+    const shown=categories;
     const secondary="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]";
-    return <div role="presentation" className="fixed inset-0 z-[145] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-        <div role="dialog" aria-modal="true" aria-label="Manage rental categories" className="flex h-[560px] max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white p-5 shadow-xl sm:p-6">
+    return <div role="presentation" className="fixed inset-0 z-[145] flex items-center justify-center bg-[#21132E]/55 p-3 backdrop-blur-sm sm:p-4">
+        <div role="dialog" aria-modal="true" aria-label="Manage rental categories" className="flex h-[560px] max-h-[90dvh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl sm:p-6">
             <div className="mb-4 flex items-center justify-between"><h2 className="text-[18px] font-bold text-[#1A1220]">Manage Categories</h2>
                 <button type="button" disabled={working} aria-label="Close" onClick={close} className="text-[#9B8AAA] hover:text-[#1A1220]"><X size={20}/></button></div>
             {error&&<p role="alert" className="mb-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">{error}</p>}
-            {success&&<p role="status" className="mb-3 rounded-xl bg-[#E5F8EC] p-3 text-xs font-semibold text-[#23834A]">{success}</p>}
+            <SuccessToast toast={success ? {title:"Category change saved",message:success} : null} onClose={closeCategoryToast} />
             <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
                 <div className="flex min-h-0 flex-col rounded-2xl border border-[#E6DDF0] bg-[#FFFCF7] p-4">
                     <p className="text-sm font-semibold text-[#1A1220]">Add New Category</p>
@@ -1401,19 +1411,18 @@ function RentalCategoriesDialog({categories,equipment,close,onSave,saving}:{
                 <div className="flex min-h-0 flex-col rounded-2xl border border-[#E6DDF0] bg-white p-4">
                     <div className="mb-3 shrink-0"><p className="text-sm font-semibold text-[#1A1220]">Existing Categories</p>
                         <p className="text-xs text-[#9B8AAA]">{shown.length} shown</p></div>
-                    <input aria-label="Search rental categories" value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Search categories..." className={`${rentalFieldClass} mb-3`}/>
                     <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-2">
-                        {shown.length===0?<p className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFCF7] p-4 text-sm text-[#9B8AAA]">No matching categories.</p>:
+                        {shown.length===0?<p className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFCF7] p-4 text-sm text-[#9B8AAA]">No categories yet.</p>:
                             shown.map(name=><div key={name} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[#F8F2EA] p-2 text-[#1A1220]">
                                 <div><p className="text-sm font-medium">{name}</p><p className="text-[10px] text-[#86778F]">{equipment.filter(item=>item.active&&item.category===name).length} rental products</p></div>
                                 <div className="flex gap-2"><button type="button" disabled={working} onClick={()=>{setEditing(name);setEditDraft(name);setError("");}} className="text-xs font-semibold text-[#2B174C] hover:underline">Edit</button>
-                                    <button type="button" disabled={working} onClick={()=>beginArchive(name)} className="text-xs font-semibold text-red-500 hover:underline">Archive</button></div>
+                                    <button type="button" disabled={working} onClick={()=>beginDelete(name)} className="text-xs font-semibold text-red-500 hover:underline">Delete</button></div>
                             </div>)}
                     </div>
                 </div>
             </div>
-            {editing!==null&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/50 p-4" role="presentation">
-                <div role="dialog" aria-modal="true" aria-label="Edit category" className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5 shadow-2xl">
+            {editing!==null&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4" role="presentation">
+                <div role="dialog" aria-modal="true" aria-label="Edit category" className="max-h-[90dvh] w-full max-w-md space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
                     <div className="flex items-center justify-between"><h3 className="text-[18px] font-bold text-[#1A1220]">Edit Category</h3><button type="button" onClick={()=>setEditing(null)}><X size={18}/></button></div>
                     <p className="text-xs text-[#8A7A91]">Change the category name below.</p>
                     <div className="space-y-1"><label className={rentalLabelClass}>Category Name</label><input maxLength={100} className={rentalFieldClass} value={editDraft} onChange={e=>setEditDraft(e.target.value)}/></div>
@@ -1421,21 +1430,22 @@ function RentalCategoriesDialog({categories,equipment,close,onSave,saving}:{
                     {error&&<p role="alert" className="text-xs text-red-700">{error}</p>}
                 </div>
             </div>}
-            {blocked&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/50 p-4" role="presentation">
-                <div role="alertdialog" aria-modal="true" aria-label="Cannot archive category" className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5 shadow-2xl">
-                    <h3 className="text-lg font-bold text-[#1A1220]">Cannot Archive Category</h3>
-                    <p className="text-sm text-[#6A5D6F]">You cannot archive <strong>{blocked}</strong> because rental products still use it. Move those products to another category first.</p>
+            {blocked&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4" role="presentation">
+                <div role="alertdialog" aria-modal="true" aria-label="Cannot delete category" className="max-h-[90dvh] w-full max-w-md space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
+                    <h3 className="text-lg font-bold text-[#1A1220]">Cannot Delete Category</h3>
+                    <p className="text-sm text-[#6A5D6F]">You cannot delete <strong>{blocked}</strong> because rental equipment records still use it. Move or update those records before deleting.</p>
                     <div className="flex justify-end"><button type="button" onClick={()=>setBlocked(null)} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white">Okay</button></div>
                 </div>
             </div>}
-            {confirmAction&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/50 p-4" role="presentation">
-                <div role="alertdialog" aria-modal="true" aria-label="Confirm category change" className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5 shadow-2xl">
-                    <h3 className="text-[18px] font-bold text-[#1A1220]">{confirmAction.action==="create_rental_category"?"Add Category":confirmAction.action==="rename_rental_category"?"Confirm Category Update":"Archive Category"}</h3>
+            {confirmAction&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4" role="presentation">
+                <div role="alertdialog" aria-modal="true" aria-label="Confirm category change" className="max-h-[90dvh] w-full max-w-md space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
+                    <h3 className="text-[18px] font-bold text-[#1A1220]">{confirmAction.action==="create_rental_category"?"Add Category":confirmAction.action==="rename_rental_category"?"Confirm Category Update":"Delete Category"}</h3>
                     <p className="text-sm text-[#6A5D6F]">{confirmAction.action==="create_rental_category"?`Are you sure you want to add “${confirmAction.name}”?`:
                         confirmAction.action==="rename_rental_category"?`Change “${confirmAction.previousName}” to “${confirmAction.name}”?`:
-                            `Archive “${confirmAction.name}” from active rental categories?`}</p>
-                    <div className="flex justify-end gap-2"><button type="button" disabled={working} onClick={()=>{if(confirmAction.action==="rename_rental_category"){setEditing(confirmAction.previousName);setEditDraft(confirmAction.name);}setConfirmAction(null);}} className={secondary}>Back</button>
-                        <button type="button" disabled={working||saving} onClick={()=>void confirm()} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{working?"Saving...":"Confirm"}</button></div>
+                            `Are you sure you want to delete “${confirmAction.name}”? This action cannot be undone.`}</p>
+                    <div className="flex flex-wrap justify-end gap-2"><button type="button" disabled={working} onClick={()=>{if(confirmAction.action==="rename_rental_category"){setEditing(confirmAction.previousName);setEditDraft(confirmAction.name);}setConfirmAction(null);}} className={secondary}>Back</button>
+                        <button type="button" disabled={working} onClick={()=>setConfirmAction(null)} className={secondary}>Cancel</button>
+                        <button type="button" disabled={working||saving} onClick={()=>void confirm()} className={`rounded-xl px-4 py-2 text-sm font-semibold text-white disabled:opacity-40 ${confirmAction.action==="delete_rental_category" ? "bg-red-600 hover:bg-red-700" : "bg-[#2B174C] hover:bg-[#1B0D31]"}`}>{working?"Saving...":confirmAction.action==="rename_rental_category"?"Save Changes":confirmAction.action==="create_rental_category"?"Add Category":"Delete Category"}</button></div>
                 </div>
             </div>}
         </div>
@@ -1541,6 +1551,7 @@ function RentalSupplierPayablesDialog({
     const [saving, setSaving] = React.useState(false);
     const [error, setError] = React.useState("");
     const [notice, setNotice] = React.useState("");
+    const closePaymentToast = React.useCallback(() => setNotice(""), []);
     const [search, setSearch] = React.useState("");
     const [methodFilter, setMethodFilter] = React.useState<"all" | "cash" | "credit">("all");
     const [selectedPurchase, setSelectedPurchase] = React.useState<RentalSupplierPayable | null>(null);
@@ -1704,7 +1715,7 @@ function RentalSupplierPayablesDialog({
                         <option value="all">All Payments</option><option value="cash">Cash</option><option value="credit">Credit (Utang)</option>
                     </select>
                 </div>
-                {notice && <p role="status" className="rounded-lg bg-green-50 px-3 py-2 text-sm font-medium text-green-700">{notice}</p>}
+                <SuccessToast toast={notice ? {title:"Supplier payment updated",message:notice} : null} onClose={closePaymentToast} />
                 {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
                 {loading ? <div className="space-y-2" aria-label="Loading rental supplier purchases">{[0,1,2].map(n=><div key={n} className="h-11 animate-pulse rounded-xl bg-[#F4F0F8]"/>)}</div> :
                     filtered.length===0 ? <p className="rounded-lg bg-[#FCF9FF] p-4 text-sm text-[#806A8C]">{payables.length===0?"No rental supplier purchases recorded yet.":"No purchases match the selected filters."}</p> :

@@ -346,7 +346,7 @@ export type RentalMutation =
     | { action: "import_equipment"; importMode: "single_purchase"; rows: RentalImportRow[]; purchase: RentalBulkPurchase }
     | { action: "create_rental_category"; name: string }
     | { action: "rename_rental_category"; previousName: string; name: string }
-    | { action: "archive_rental_category"; name: string }
+    | { action: "delete_rental_category"; name: string }
     | { action: "archive_equipment"; equipmentId:number; confirmName:string; reason:string }
     | { action: "approve_maintenance_repair"; maintenanceId:number }
     | { action: "approve_repair_completion"; requestId:number }
@@ -544,7 +544,7 @@ export function useRentalInventory(branchId?: number) {
 export type StaffRentalEquipment = {
     id: number; equipmentNumber: string; unitNumbers?: string[]; name: string; category: string;
     totalUnits: number; rentedOutUnits: number; maintenanceUnits: number;
-    missingUnits: number; alertLevel: number; bookableToday: number;
+    missingUnits: number; alertLevel: number; bookableToday: number; lastStockReceivedDate?: string | null;
 };
 export type StaffRentalAllocation = {
     allocationId: number; bookingReference: string; equipmentId: number;
@@ -564,6 +564,10 @@ export type StaffRentalEquipmentSchedule = {
     bookedUnits:number; allocationCount:number; availableOnDate:number;
     bookings: Array<{allocationId:number;bookingReference:string;quantity:number;
         startDate:string;endDate:string;status:"reserved"|"checked_out"}>;
+};
+export type StaffRentalEquipmentCalendar = {
+    equipmentId: number; month: string;
+    days: Array<{ date: string; allocationCount: number; bookedUnits: number }>;
 };
 export type StaffRentalMovement = {
     id: number; equipmentId: number; equipmentName: string;
@@ -592,7 +596,7 @@ type ApiResult = {
     allocations?: StaffRentalAllocation[]; activity?: StaffRentalMovement[];
     pendingReceipts?: StaffRentalPendingReceipt[]; maintenanceTasks?: StaffRentalMaintenanceTask[];
     missingReports?: StaffRentalMissingReport[];
-    schedule?: StaffRentalEquipmentSchedule;
+    schedule?: StaffRentalEquipmentSchedule; calendar?: StaffRentalEquipmentCalendar;
 };
 
 async function rentalRequest(body: Record<string, unknown>, signal?: AbortSignal): Promise<ApiResult> {
@@ -721,6 +725,13 @@ export function useStaffRentalInventory() {
             return result;
         } finally {setSaving(false);}
     },[saving,refresh]);
+    // Calendar badges are server-derived from confirmed allocations in this staff member's branch.
+    const getEquipmentCalendar=React.useCallback(async(equipmentId:number,month:string,signal?:AbortSignal)=>{
+        const response=await rentalRequest({action:"get_staff_equipment_calendar",equipmentId,month},signal);
+        if(!response.calendar || response.calendar.equipmentId!==equipmentId || response.calendar.month!==month ||
+            !Array.isArray(response.calendar.days))throw new Error("Invalid rental calendar response.");
+        return response.calendar;
+    },[]);
     const getEquipmentSchedule=React.useCallback(async(equipmentId:number,date:string,signal?:AbortSignal)=>{
         const response=await rentalRequest({action:"get_staff_equipment_schedule",equipmentId,date},signal);
         if(!response.schedule || response.schedule.equipmentId!==equipmentId || response.schedule.date!==date ||
@@ -728,5 +739,5 @@ export function useStaffRentalInventory() {
         return response.schedule;
     },[]);
     return { equipment, allocations, activity, pendingReceipts, maintenanceTasks, missingReports,
-        loading, refreshing, saving, error, connected, refresh, act, actBooking, actStock, getEquipmentSchedule };
+        loading, refreshing, saving, error, connected, refresh, act, actBooking, actStock, getEquipmentSchedule, getEquipmentCalendar };
 }

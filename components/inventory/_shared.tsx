@@ -2156,17 +2156,18 @@ export function BranchInventoryView({
 }
 
 
-type SuccessToastMessage = {
+export type SuccessToastMessage = {
     title: string;
     message: string;
+    tone?: "success" | "error";
 };
 
 type ProductSuccessAction = "add" | "update";
 
-function SuccessToast({
-                          toast,
-                          onClose,
-                      }: {
+export function SuccessToast({
+                                 toast,
+                                 onClose,
+                             }: {
     toast: SuccessToastMessage | null;
     onClose: () => void;
 }) {
@@ -2192,25 +2193,28 @@ function SuccessToast({
             window.clearTimeout(fadeTimer);
             window.clearTimeout(closeTimer);
         };
-    }, [toast, onClose]);
+    }, [toast?.title, toast?.message, toast?.tone, onClose]);
 
     if (!toast) {
         return null;
     }
 
+    const isError = toast.tone === "error";
+
     return (
         <div
-            role="status"
-            aria-live="polite"
+            role={isError ? "alert" : "status"}
+            aria-live={isError ? "assertive" : "polite"}
             className={[
-                "fixed bottom-5 right-5 z-[140] flex w-[min(360px,calc(100vw-2.5rem))] items-start gap-3 rounded-2xl border border-[#BCE8CA] bg-white p-4 shadow-[0_18px_42px_rgba(43,23,76,0.22)] transition-all duration-700 ease-out",
+                "fixed bottom-4 right-4 z-[210] flex w-[min(360px,calc(100vw-2rem))] items-start gap-3 rounded-2xl border bg-white p-4 shadow-[0_18px_42px_rgba(43,23,76,0.22)] transition-all duration-700 ease-out sm:bottom-5 sm:right-5",
+                isError ? "border-[#F4BFC5]" : "border-[#BCE8CA]",
                 isFadingOut
                     ? "translate-y-3 opacity-0"
                     : "translate-y-0 opacity-100",
             ].join(" ")}
         >
-            <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#E5F8EC] text-[#23834A]">
-                <CheckCircle2 size={20} strokeWidth={2.4} />
+            <span className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${isError ? "bg-[#FFE7EA] text-[#D92C3F]" : "bg-[#E5F8EC] text-[#23834A]"}`}>
+                {isError ? <AlertTriangle size={20} strokeWidth={2.4} /> : <CheckCircle2 size={20} strokeWidth={2.4} />}
             </span>
 
             <div className="min-w-0 flex-1">
@@ -2842,12 +2846,12 @@ function CategoryForm({ inv }: { inv: InventoryController }) {
         const cleanValue = editCategoryDraft.trim();
 
         if (!cleanValue) {
-            alert("❌ Please enter a category name.");
+            setCategoryToast({title:"Category name required",message:"Please enter a category name before continuing.",tone:"error"});
             return;
         }
 
         if (cleanValue === categoryToEdit) {
-            alert("No changes made.");
+            setCategoryToast({title:"No changes made",message:"Enter a different category name to save your update.",tone:"error"});
             return;
         }
 
@@ -2864,7 +2868,7 @@ function CategoryForm({ inv }: { inv: InventoryController }) {
         const cleanValue = inv.category.trim();
 
         if (!cleanValue) {
-            alert("❌ Please enter a category name.");
+            setCategoryToast({title:"Category name required",message:"Please enter a category name before continuing.",tone:"error"});
             return;
         }
 

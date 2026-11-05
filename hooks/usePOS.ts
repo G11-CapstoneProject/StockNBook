@@ -190,6 +190,7 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
         controlNumber: o.controlNumber ?? null,
         customer: o.customerName,
         customerType: o.customerType ?? null,
+        salesSource: o.salesSource === "BOOKING" ? "BOOKING" : "WALK_IN",
         customerAddress: o.customerAddress ?? null,
         customerContactNumber: o.customerContactNumber ?? null,
         paymentMode: o.paymentMode ?? null,
@@ -254,24 +255,10 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
                 })
                 : [],
         total: Number(o.total || 0),
-        cost: Number(
-            o.totalCost ??
-            o.total_cost ??
-            o.total ??
-            0
-        ),
-        profit: Number(
-            o.profit ??
-            (
-                Number(o.total || 0) -
-                Number(
-                    o.totalCost ??
-                    o.total_cost ??
-                    o.total ??
-                    0
-                )
-            )
-        ),
+        // A missing historic cost snapshot is unknown, not a zero-cost sale.
+        cost: o.totalCost != null || o.total_cost != null
+            ? Number(o.totalCost ?? o.total_cost) : null,
+        profit: o.profit != null ? Number(o.profit) : null,
         date: formatISODateLong(orderDateISO),
         // Actual MySQL orders.created_at timestamp, not the browser's current time.
         // The backend returns YYYY-MM-DD HH:mm:ss in the store's local clock.
@@ -292,6 +279,30 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
         ).trim() || null,
     };
 }
+
+export type OwnerRevenueReport = {
+    summary: {
+        totalSales: number | null;
+        grossProfit: number | null;
+        bookingSales: number | null;
+        walkInSales: number;
+        transactionCount: number;
+        missingCostRecords: number;
+    };
+    paymentMethods: string[];
+    taxRegistration: "VAT_REGISTERED" | "NON_VAT" | "UNKNOWN";
+    vatSummary: {
+        vatableSales: number;
+        outputVat: number;
+        customerTotal: number;
+        transactionCount: number;
+        unverifiedRecords: number;
+        complete: boolean;
+        coverage: "COMPLETE" | "PARTIAL";
+        coverageReason: string | null;
+    } | null;
+    bookingIntegration: { available: boolean; reason: string | null; costComplete: boolean; revenueRecognition: string };
+};
 
 export function usePOS() {
     const [orders, setOrders] = useState<Order[]>(() =>
@@ -335,6 +346,21 @@ export function usePOS() {
         cost: 0,
         profit: 0,
     });
+
+    const [ownerRevenue, setOwnerRevenue] = useState<OwnerRevenueReport | null>(null);
+    const [ownerRevenueError, setOwnerRevenueError] = useState<string | null>(null);
+    const [ownerSalesSource, setOwnerSalesSourceState] = useState<"ALL" | "BOOKING" | "WALK_IN">("ALL");
+    const [ownerPaymentFilter, setOwnerPaymentFilterState] = useState("");
+    const [ownerDateSort, setOwnerDateSortState] = useState<"NEWEST" | "OLDEST">("NEWEST");
+    const setOwnerSalesSource = useCallback((value: "ALL" | "BOOKING" | "WALK_IN") => {
+        setOwnerSalesSourceState(value); setOwnerOrderPage(1);
+    }, []);
+    const setOwnerPaymentFilter = useCallback((value: string) => {
+        setOwnerPaymentFilterState(value); setOwnerOrderPage(1);
+    }, []);
+    const setOwnerDateSort = useCallback((value: "NEWEST" | "OLDEST") => {
+        setOwnerDateSortState(value); setOwnerOrderPage(1);
+    }, []);
 
     // Manager sees the complete history of their assigned branch, in pages.
     // Search and date filtering are performed by MySQL, not just on the current page.
@@ -470,7 +496,12 @@ export function usePOS() {
                     Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
-                    action: "get_orders",
+                    action: isCurrentOwner ? "get_owner_sales_report" : "get_orders",
+                    ...(isCurrentOwner ? {
+                        sales_source: ownerSalesSource,
+                        payment_method: ownerPaymentFilter,
+                        sort: ownerDateSort,
+                    } : {}),
                     ...(isCurrentOwner && selectedSalesBranchId
                         ? { branch_id: Number(selectedSalesBranchId) }
                         : {}),
@@ -518,8 +549,27 @@ export function usePOS() {
             const categoriesData = categoriesRes
                 ? await safeJson<CategoryApiResponse>(categoriesRes)
                 : null;
-            const ordersData = await safeJson<PosOrdersApiResponse>(ordersRes);
-            if (ordersRes.ok) {
+            const ordersData = await safeJson<PosOrdersApiResponse & OwnerRevenueReport>(ordersRes);
+            if (isCurrentOwner) {
+                if (ordersRes.ok && ordersData.summary && ordersData.bookingIntegration) {
+                    setOwnerRevenue({
+                        summary: ordersData.summary as OwnerRevenueReport["summary"],
+                        paymentMethods: Array.isArray(ordersData.paymentMethods) ? ordersData.paymentMethods : [],
+                        taxRegistration: ordersData.taxRegistration === "VAT_REGISTERED" ? "VAT_REGISTERED" :
+                            ordersData.taxRegistration === "NON_VAT" ? "NON_VAT" : "UNKNOWN",
+                        vatSummary: ordersData.vatSummary ?? null,
+                        bookingIntegration: ordersData.bookingIntegration,
+                    });
+                    setOwnerRevenueError(null);
+                } else {
+                    setOwnerRevenue(null);
+                    setOwnerRevenueError(ordersData.error || "Unable to load the consolidated revenue report.");
+                    setOrders([]);
+                    setOwnerOrderTotal(0);
+                    setOwnerOrderTotalPages(1);
+                }
+            }
+            if (ordersRes.ok && ordersData.taxType) {
                 const backendTaxType = String(ordersData.taxType || "").toUpperCase();
                 setTaxType(backendTaxType === "NON_VAT" ? "NON_VAT" : "VAT");
             }
@@ -578,14 +628,14 @@ export function usePOS() {
                         Math.max(1, Number(pagination?.totalPages ?? 1))
                     );
 
-                    if (ordersData.summary) {
-                        setOwnerOrderSummary({
-                            transactions: Number(ordersData.summary.transactions || 0),
-                            sales: Number(ordersData.summary.sales || 0),
-                            cost: Number(ordersData.summary.cost || 0),
-                            profit: Number(ordersData.summary.profit || 0),
-                        });
-                    }
+                    // Owner KPIs use the dedicated revenue report, not page-sized POS totals.
+                    const reportSummary = ordersData.summary as unknown as OwnerRevenueReport["summary"];
+                    setOwnerOrderSummary({
+                        transactions: Number(reportSummary?.transactionCount || 0),
+                        sales: Number(reportSummary?.walkInSales || 0),
+                        cost: 0,
+                        profit: 0,
+                    });
                 }
 
                 // Only Staff caches today's small dataset. Owner and Manager
@@ -603,6 +653,13 @@ export function usePOS() {
 
         } catch (err) {
             console.warn("POS loadData failed:", err);
+            if (isCurrentOwner) {
+                setOwnerRevenue(null);
+                setOwnerRevenueError("Unable to retrieve live sales records. Verify the POS API connection.");
+                setOrders([]);
+                setOwnerOrderTotal(0);
+                setOwnerOrderTotalPages(1);
+            }
         }
     }, [
         buildProductsPayload,
@@ -611,6 +668,9 @@ export function usePOS() {
         ownerOrderEndDate,
         ownerOrderSearch,
         ownerOrderPage,
+        ownerSalesSource,
+        ownerPaymentFilter,
+        ownerDateSort,
         managerOrderStartDate,
         managerOrderEndDate,
         managerOrderSearch,
@@ -1387,6 +1447,14 @@ export function usePOS() {
         ownerOrderTotal,
         ownerOrderTotalPages,
         ownerOrderSummary,
+        ownerRevenue,
+        ownerRevenueError,
+        ownerSalesSource,
+        setOwnerSalesSource,
+        ownerPaymentFilter,
+        setOwnerPaymentFilter,
+        ownerDateSort,
+        setOwnerDateSort,
 
         managerOrderStartDate,
         managerOrderEndDate,

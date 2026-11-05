@@ -172,6 +172,7 @@ export type Order = {
     controlNumber?: string | null;
     customer?: string;
     customerType?: string | null;
+    salesSource?: "BOOKING" | "WALK_IN" | null;
     customerAddress?: string | null;
     customerContactNumber?: string | null;
     items: OrderItem[];
@@ -195,8 +196,8 @@ export type Order = {
     cashierRole?: string | null;
 
     // Calculated by the POS backend from the exact order_items rows.
-    cost?: number;
-    profit?: number;
+    cost?: number | null;
+    profit?: number | null;
 };
 
 export type ApiOrder = {
@@ -204,6 +205,7 @@ export type ApiOrder = {
     controlNumber?: string | null;
     customerName?: string;
     customerType?: string | null;
+    salesSource?: "BOOKING" | "WALK_IN" | null;
     customerAddress?: string | null;
     customerContactNumber?: string | null;
     item?: string;

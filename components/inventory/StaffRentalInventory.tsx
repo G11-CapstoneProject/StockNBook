@@ -3,16 +3,26 @@
 import * as React from "react";
 import Link from "next/link";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { SuccessToast } from "./_shared";
 import {
     AlertTriangle, CalendarClock, ClipboardCheck, ClipboardList, Eye, CalendarDays,
-    PackageCheck, PackageSearch, RotateCcw, Search, Sparkles, Truck, X, RefreshCw,
+    PackageCheck, PackageSearch, RotateCcw, Search, Sparkles, Truck, X, RefreshCw, ChevronLeft, ChevronRight,
 } from "lucide-react";
-import { useStaffRentalInventory, type StaffRentalAllocation, type StaffRentalAction, type StaffRentalEquipmentSchedule } from "@/hooks/useRentalInventory";
+import { useStaffRentalInventory, type StaffRentalAllocation, type StaffRentalAction, type StaffRentalEquipmentSchedule, type StaffRentalEquipmentCalendar } from "@/hooks/useRentalInventory";
 
 const panel = "min-w-0 overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-sm";
 const action = "inline-flex h-[40px] items-center justify-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-4 text-xs font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50";
 const primary = "inline-flex h-[40px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-xs font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-50";
 const th = "px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]";
+// Match the Manager rental inventory's compact, colored table action buttons.
+const viewAction = "inline-flex min-h-8 items-center justify-center gap-1 rounded-lg bg-[#F1EBFF] px-2.5 py-1.5 text-[11px] font-semibold text-[#5330B6] hover:bg-[#EAE0FF] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5330B6]";
+const scheduleAction = "inline-flex min-h-8 items-center justify-center gap-1 rounded-lg bg-[#EAF1FF] px-2.5 py-1.5 text-[11px] font-semibold text-[#2D539D] hover:bg-[#DCE8FF] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2D539D]";
+const issueAction = "inline-flex min-h-8 items-center justify-center gap-1 rounded-lg bg-[#FFF0F0] px-2.5 py-1.5 text-[11px] font-semibold text-[#C52C45] hover:bg-[#FFE2E6] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#C52C45] disabled:cursor-not-allowed disabled:opacity-40";
+const weekDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+function shiftRentalMonth(month: string, offset: number) {
+    const [year,number]=month.split("-").map(Number);
+    return new Date(Date.UTC(year,number-1+offset,1)).toISOString().slice(0,7);
+}
 
 type TaskType = "prepare" | "release" | "return" | "inspect" | "clean" | "damage";
 
@@ -189,6 +199,10 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const [viewEquipment,setViewEquipment]=React.useState<number|null>(null);
     const [scheduleEquipmentId,setScheduleEquipmentId]=React.useState<number|null>(null);
     const [scheduleDate,setScheduleDate]=React.useState(manilaDate);
+    const [scheduleMonth,setScheduleMonth]=React.useState(()=>manilaDate().slice(0,7));
+    const [calendar,setCalendar]=React.useState<StaffRentalEquipmentCalendar|null>(null);
+    const [calendarLoading,setCalendarLoading]=React.useState(false);
+    const [calendarError,setCalendarError]=React.useState("");
     const [schedule,setSchedule]=React.useState<StaffRentalEquipmentSchedule|null>(null);
     const [scheduleError,setScheduleError]=React.useState("");
     const [scheduleLoading,setScheduleLoading]=React.useState(false);
@@ -196,6 +210,8 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const [notes,setNotes]=React.useState("");
     const [submitError,setSubmitError]=React.useState("");
     const [notice,setNotice]=React.useState("");
+    const closeStaffRentalToast = React.useCallback(() => setNotice(""), []);
+    const [confirmRecordedReturn,setConfirmRecordedReturn]=React.useState<StaffRentalAllocation|null>(null);
     const [stockTask,setStockTask]=React.useState<
         {kind:"issue";id:number;label:string;max:number;bookingReference?:string} |
         {kind:"complete";id:number;label:string;max:number} |
@@ -269,8 +285,26 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         return breakdown;
     },[rental.allocations,rental.maintenanceTasks]);
     const openSchedule=(equipmentId:number)=>{
-        setScheduleDate(today);setSchedule(null);setScheduleError("");setScheduleEquipmentId(equipmentId);
+        setScheduleDate(today);setScheduleMonth(today.slice(0,7));setSchedule(null);setScheduleError("");
+        setCalendar(null);setCalendarError("");setScheduleEquipmentId(equipmentId);
     };
+    const navigateScheduleMonth=(offset:number)=>{
+        const next=shiftRentalMonth(scheduleMonth,offset);
+        if(next<today.slice(0,7))return;
+        setScheduleMonth(next);
+        setScheduleDate(next===today.slice(0,7)?today:`${next}-01`);
+    };
+    const calendarCells=React.useMemo(()=>{
+        const [year,number]=scheduleMonth.split("-").map(Number);
+        const firstWeekday=new Date(Date.UTC(year,number-1,1)).getUTCDay();
+        const days=new Date(Date.UTC(year,number,0)).getUTCDate();
+        const slots=Math.ceil((firstWeekday+days)/7)*7;
+        return Array.from({length:slots},(_,index)=>{
+            const day=index-firstWeekday+1;
+            return day>=1&&day<=days?`${scheduleMonth}-${String(day).padStart(2,"0")}`:null;
+        });
+    },[scheduleMonth]);
+    const calendarMarked=React.useMemo(()=>new Map((calendar?.days||[]).map(day=>[day.date,day])),[calendar]);
     React.useEffect(()=>{
         if(scheduleEquipmentId===null)return;
         const abort=new AbortController();
@@ -282,6 +316,17 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         }).finally(()=>{if(!abort.signal.aborted)setScheduleLoading(false);});
         return ()=>abort.abort();
     },[scheduleEquipmentId,scheduleDate,rental.getEquipmentSchedule]);
+    React.useEffect(()=>{
+        if(scheduleEquipmentId===null)return;
+        const abort=new AbortController();
+        setCalendar(null);setCalendarError("");setCalendarLoading(true);
+        void rental.getEquipmentCalendar(scheduleEquipmentId,scheduleMonth,abort.signal).then(data=>{
+            if(!abort.signal.aborted)setCalendar(data);
+        }).catch(error=>{
+            if(!abort.signal.aborted)setCalendarError(error instanceof Error?error.message:"Unable to load calendar dates.");
+        }).finally(()=>{if(!abort.signal.aborted)setCalendarLoading(false);});
+        return ()=>abort.abort();
+    },[scheduleEquipmentId,scheduleMonth,rental.getEquipmentCalendar]);
     const cleaning=careTasks.filter(t=>t.kind==="cleaning").reduce((sum,t)=>sum+t.units,0);
     // Missing rows are report-scoped so replacement cannot accidentally change
     // a different booking's unresolved equipment or its customer claim.
@@ -410,15 +455,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     // only non-damaged units and creates at most one Manager damage case.
     const finalizeRecordedReturn=async(item:StaffRentalAllocation)=>{
         if(!canOperate||rental.saving||taskType(item)!=="inspect")return;
-        const received=item.returnedReceivedUnits??item.quantity;
-        const reported=Math.max(0,Number(item.damagedUnits||0));
-        const accepted=window.confirm(
-            `Finish the previously recorded return for ${item.equipmentName}?\n\n`+
-            `Physically returned: ${received}\nRecorded damaged: ${reported}\n\n`+
-            `Confirm you have checked these units, the recorded damage is accurate, and routine care is complete for all other returned units. `+
-            `A Manager will review damaged units. No customer charge is created automatically.`
-        );
-        if(!accepted)return;
+        setConfirmRecordedReturn(null);
         setSubmitError("");setNotice("");
         try{
             await rental.act("inspect_rental_allocation",item.allocationId,{useRecordedReturn:true});
@@ -625,7 +662,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                             <td className="px-2 py-2 align-top text-left">
                                 {task.kind==="inspection"?
                                     <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving}
-                                            onClick={()=>void finalizeRecordedReturn(task.allocation)}>Finalize Return</button>:
+                                            onClick={()=>setConfirmRecordedReturn(task.allocation)}>Finalize Return</button>:
                                     task.kind==="cleaning"?
                                         <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving}
                                                 onClick={()=>openRentalAction(task.allocation)}>Mark Cleaned</button>:
@@ -707,7 +744,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                 <table className="w-full min-w-[900px] text-left text-[11px]">
                     <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                     <tr className="border-b border-[#E9E1EE]">
-                        <th className="px-1.5 py-3 font-semibold">Product No.</th>
+                        <th className="px-1.5 py-3 font-semibold">Equipment No.</th>
                         <th className="px-1.5 py-3 font-semibold">Rental Product</th>
                         <th className="px-1.5 py-3 text-center font-semibold">Total Units</th>
                         <th className="px-1.5 py-3 text-center font-semibold">Available Today</th>
@@ -734,10 +771,10 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                             </td>
                             <td className="px-1.5 py-3 text-center"><span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${availabilityColor}`}>{availability}</span></td>
                             <td className="px-1.5 py-3 text-center"><div className="flex flex-wrap items-center justify-center gap-1.5">
-                                <button type="button" className={`${action} h-auto min-h-8 px-2 py-1 text-[10px]`} onClick={()=>setViewEquipment(e.id)}><Eye size={12}/> View</button>
-                                <button type="button" className={`${action} h-auto min-h-8 px-2 py-1 text-[10px]`} onClick={()=>openSchedule(e.id)}><CalendarDays size={12}/> View Schedule</button>
-                                <button type="button" className={`${action} h-auto min-h-8 px-2 py-1 text-[10px]`} disabled={!canOperate||readyNow<=0}
-                                        onClick={()=>startStockTask({kind:'issue',id:e.id,label:e.name,max:readyNow})}>Report Issue</button>
+                                <button type="button" className={viewAction} onClick={()=>setViewEquipment(e.id)}><Eye size={13}/> View</button>
+                                <button type="button" className={scheduleAction} onClick={()=>openSchedule(e.id)}><CalendarDays size={13}/> View Schedule</button>
+                                <button type="button" className={issueAction} disabled={!canOperate||readyNow<=0}
+                                        onClick={()=>startStockTask({kind:'issue',id:e.id,label:e.name,max:readyNow})}><AlertTriangle size={13}/> Report Issue</button>
                             </div></td>
                         </tr>;
                     })}</tbody>
@@ -799,7 +836,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                         <td className="px-2 py-3 text-center">
                                             {perItemAction?<button type="button" className={`${action} h-auto min-h-9 w-full break-words px-2 py-1.5 text-[11px]`}
                                                                    disabled={!canOperate||rental.saving} title={taskHelp[type||"prepare"]}
-                                                                   onClick={()=>type==="inspect"?void finalizeRecordedReturn(item):openRentalAction(item)}>{taskLabel[type||"prepare"]}</button>:
+                                                                   onClick={()=>type==="inspect"?setConfirmRecordedReturn(item):openRentalAction(item)}>{taskLabel[type||"prepare"]}</button>:
                                                 <span className="text-[11px] text-[#806A8C]">{nextLabel}</span>}
                                         </td>
                                     </tr>;
@@ -836,10 +873,10 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                 </div>
             </section>
         </div>}
-        {bookingOperation&&selectedQueueBooking&&<div role="presentation" className="fixed inset-0 z-[95] flex items-center justify-center bg-[#21132E]/65 p-4"
+        {bookingOperation&&selectedQueueBooking&&<div role="presentation" className="fixed inset-0 z-[95] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4"
                                                       onMouseDown={e=>{if(e.target===e.currentTarget&&!rental.saving)setBookingOperation(null);}}>
-            <section role="dialog" aria-modal="true" aria-label={bookingOperation==="release"?"Confirm complete booking release":"Receive complete booking return"}
-                     className="max-h-[88vh] w-full max-w-xl space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
+            <section role="alertdialog" aria-modal="true" aria-label={bookingOperation==="release"?"Confirm complete booking release":"Receive complete booking return"}
+                     className="max-h-[90dvh] w-full max-w-xl space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
                 <div className="flex items-center justify-between gap-2">
                     <div><h3 className="text-lg font-bold text-[#21132E]">{bookingOperation==="release"?"Release Booking":"Receive Booking Return"}</h3>
                         <p className="mt-1 break-all text-xs text-[#806A8C]">{selectedQueueBooking.reference}</p></div>
@@ -888,20 +925,50 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                 </div>
             </section>
         </div>}
-        {scheduleEquipmentId!==null&&<div role="presentation" className="fixed inset-0 z-[100] flex items-center justify-center bg-[#21132E]/50 p-4"
+        {scheduleEquipmentId!==null&&<div role="presentation" className="fixed inset-0 z-[100] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4"
                                           onMouseDown={e=>{if(e.target===e.currentTarget)setScheduleEquipmentId(null);}}>
             <section role="dialog" aria-modal="true" aria-label="Rental equipment booking schedule"
-                     className="max-h-[90vh] w-full max-w-xl space-y-4 overflow-y-auto rounded-2xl bg-white p-5 shadow-xl">
+                     className="max-h-[90dvh] w-full max-w-xl space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
                 <div className="flex items-center justify-between gap-2">
                     <div><h3 className="text-lg font-bold text-[#21132E]">View Equipment Schedule</h3>
                         <p className="text-xs text-[#86778F]">{equipmentById.get(scheduleEquipmentId)?.name||"Rental equipment"} · {branchName}</p></div>
                     <button type="button" aria-label="Close schedule" onClick={()=>setScheduleEquipmentId(null)}><X size={19}/></button>
                 </div>
-                <label className="block space-y-1 text-xs font-semibold text-[#5A476A]">Select booking date
-                    <input type="date" min={today} value={scheduleDate} onChange={e=>setScheduleDate(e.target.value)}
-                           className="w-full rounded-xl border border-[#E6DDF0] p-3 text-sm"/>
-                </label>
-                {scheduleLoading&&<p role="status" className="text-sm text-[#86778F]">Checking confirmed reservations for this date...</p>}
+                <div className="rounded-xl border border-[#E6DDF0] p-3 sm:p-4" aria-label="Booking calendar">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                        <button type="button" className={`${action} h-9 w-9 p-0`} aria-label="Previous month"
+                                disabled={scheduleMonth<=today.slice(0,7)} onClick={()=>navigateScheduleMonth(-1)}><ChevronLeft size={17}/></button>
+                        <h4 className="text-sm font-bold text-[#2B174C]">{new Date(`${scheduleMonth}-01T12:00:00+08:00`).toLocaleDateString("en-PH",{month:"long",year:"numeric",timeZone:"Asia/Manila"})}</h4>
+                        <button type="button" className={`${action} h-9 w-9 p-0`} aria-label="Next month"
+                                onClick={()=>navigateScheduleMonth(1)}><ChevronRight size={17}/></button>
+                    </div>
+                    <div className="grid grid-cols-7 gap-1 text-center text-[11px]">
+                        {weekDays.map(day=><span key={day} className="py-1 font-semibold text-[#806A8C]">{day}</span>)}
+                        {calendarCells.map((date,index)=>{
+                            if(!date)return <span key={`empty-${index}`} aria-hidden="true"/>;
+                            const marked=calendar?.month===scheduleMonth?calendarMarked.get(date):undefined;
+                            const isSelected=scheduleDate===date;
+                            const isPast=date<today;
+                            return <button type="button" key={date} disabled={isPast} onClick={()=>setScheduleDate(date)}
+                                           aria-label={`${queueScheduleDate(date)}${marked?`, ${marked.allocationCount} booked allocation(s)`:""}`}
+                                           aria-pressed={isSelected} title={marked?`${marked.allocationCount} booking allocation(s) · ${marked.bookedUnits} units`:"No confirmed allocation"}
+                                           className={`flex min-h-11 flex-col items-center justify-center rounded-lg border text-xs font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#5330B6] ${isSelected
+                                               ?"border-[#2B174C] bg-[#2B174C] text-white"
+                                               :marked?"border-[#CEB9F3] bg-[#F1EBFF] text-[#5330B6] hover:bg-[#E5D9FF]"
+                                                   :"border-transparent text-[#2B174C] hover:bg-[#F7F1FF]"} ${isPast?"cursor-not-allowed opacity-30":""}`}>
+                                {Number(date.slice(-2))}
+                                <span aria-hidden="true" className={`mt-1 h-1.5 w-1.5 rounded-full ${marked?(isSelected?"bg-white":"bg-[#7240CA]"):"bg-transparent"}`}/>
+                            </button>;
+                        })}
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#806A8C]">
+                        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-[#7240CA]"/> Confirmed rental allocation</span>
+                        <span>Click a date to view booking details below.</span>
+                    </div>
+                    {calendarLoading&&<p role="status" className="mt-2 text-xs text-[#806A8C]">Loading marked dates...</p>}
+                    {calendarError&&<p role="alert" className="mt-2 text-xs text-red-700">{calendarError}</p>}
+                </div>
+                {scheduleLoading&&<p role="status" className="text-sm text-[#86778F]">Loading booking details for the selected day...</p>}
                 {scheduleError&&<p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">{scheduleError}</p>}
                 {schedule&&!scheduleLoading&&<>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -918,7 +985,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                     </div>
                     <p className="text-xs text-[#86778F]">Date estimate = total owned − current holds − missing − overlapping confirmed allocations. Current and future quantities may change after returns or new bookings. Overdue checked-out equipment stays blocked for future bookings until physically returned. A confirmed booking does not mean equipment is physically checked out.</p>
                     <div className="rounded-xl border border-[#E6DDF0]">
-                        <div className="border-b border-[#E6DDF0] px-3 py-2 text-xs font-semibold">Confirmed allocations on {schedule.date} ({schedule.allocationCount})</div>
+                        <div className="border-b border-[#E6DDF0] px-3 py-2 text-xs font-semibold">Booking details · {queueScheduleDate(schedule.date)} ({schedule.allocationCount} allocations)</div>
                         {schedule.allocationCount>schedule.bookings.length&&<p className="px-3 pt-2 text-xs text-amber-800">Showing the first {schedule.bookings.length} bookings; availability includes all {schedule.allocationCount} allocations.</p>}
                         <div className="max-h-48 overflow-y-auto">
                             {schedule.bookings.length===0?<p className="p-3 text-xs text-[#86778F]">No confirmed allocations cover this date.</p>:
@@ -929,13 +996,13 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                 </div>)}
                         </div>
                     </div>
-                    <p className="text-xs text-[#806A8C]">Staff prepares and releases equipment through the Rental Operations Queue only. Booking confirmation and pricing remain in Booking Management.</p>
+                    <p className="text-xs text-[#806A8C]">Only operational booking references, dates, quantities and rental statuses are shown. Staff completes handovers and returns through the Rental Operations Queue.</p>
                 </>}
                 <div className="flex justify-end"><button type="button" className={action} onClick={()=>setScheduleEquipmentId(null)}>Close</button></div>
             </section>
         </div>}
         {stockTask&&<div role="presentation" className="fixed inset-0 z-[105] flex items-center justify-center bg-[#21132E]/50 p-4">
-            <section role="dialog" aria-modal="true" aria-label="Physical rental equipment task" className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-xl">
+            <section role="dialog" aria-modal="true" aria-label="Physical rental equipment task" className="max-h-[90dvh] w-full max-w-lg space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
                 <div className="flex items-center justify-between"><h3 className="text-lg font-bold text-[#21132E]">
                     {stockTask.kind==="issue"?"Report Equipment Issue":
                         stockTask.kind==="routine"?"Complete Routine Care":stockTask.kind==="replace"?"Mark Missing Equipment Replaced":"Mark Repaired & Ready"}
@@ -947,11 +1014,11 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                            className="w-full rounded-xl border border-[#E6DDF0] p-3 text-sm"/></label>
                 {stockTask.kind==="issue"&&<label className="block space-y-1 text-xs font-semibold text-[#5A476A]">Issue type
                     <select value={issueType} onChange={e=>setIssueType(e.target.value as typeof issueType)} className="w-full rounded-xl border border-[#E6DDF0] p-3 text-sm">
-                        <option value="routine">Routine Cleaning / Minor Upkeep (no safety issue)</option>
                         <option value="damage">Damaged / Needs Inspection</option><option value="missing">Missing Equipment</option>
+                        <option value="routine">Routine Cleaning / Minor Upkeep (no safety issue)</option>
                     </select></label>}
                 <label className="block space-y-1 text-xs font-semibold text-[#5A476A]">
-                    {stockTask.kind==="issue"?"Condition / care details":stockTask.kind==="routine"?"Completed routine work":stockTask.kind==="replace"?"Replacement source and condition":"Repair work and safety inspection"}
+                    {stockTask.kind==="issue"?"What happened? (required)":stockTask.kind==="routine"?"Completed routine work":stockTask.kind==="replace"?"Replacement source and condition":"Repair work and safety inspection"}
                     <textarea rows={3} maxLength={500} value={stockNotes} onChange={e=>setStockNotes(e.target.value)}
                               className="w-full rounded-xl border border-[#E6DDF0] p-3 text-sm" placeholder="Describe what was found or repaired..."/></label>
                 {(stockTask.kind==="complete"||stockTask.kind==="replace")&&<label className="flex items-start gap-2 rounded-xl border border-[#E6DDF0] bg-[#FBF9FE] p-3 text-xs text-[#5A476A]">
@@ -966,12 +1033,27 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                         "Verified repaired units return directly to Available without Manager approval. Customer charges remain separate."}</p>
                 {submitError&&<p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{submitError}</p>}
                 <div className="flex justify-end gap-2"><button type="button" className={action} onClick={()=>setStockTask(null)} disabled={rental.saving}>Cancel</button>
-                    <button type="button" className={primary} onClick={()=>void performStock()} disabled={rental.saving}>{rental.saving?"Saving...":"Confirm"}</button></div>
+                    <button type="button" className={primary} onClick={()=>void performStock()} disabled={rental.saving}>{rental.saving?"Saving...":stockTask.kind==="issue"?"Submit Issue Report":"Confirm"}</button></div>
             </section>
         </div>}
-        {notice&&<div role="status" className="fixed bottom-5 right-5 z-[110] max-w-sm rounded-xl border border-green-200 bg-white p-4 text-sm text-green-800 shadow-lg">{notice}<button onClick={()=>setNotice("")} className="ml-3 underline">Dismiss</button></div>}
+        <SuccessToast toast={notice ? {title:"Rental task completed",message:notice} : null} onClose={closeStaffRentalToast} />
+        {confirmRecordedReturn && <div role="presentation" className="fixed inset-0 z-[160] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4">
+            <section role="alertdialog" aria-modal="true" aria-label="Confirm recorded rental return" className="max-h-[90dvh] w-full max-w-md space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
+                <h3 className="text-lg font-bold text-[#21132E]">Finalize Recorded Return</h3>
+                <p className="text-sm text-[#6A5D6F]">Finish the previously recorded return for <strong>{confirmRecordedReturn.equipmentName}</strong>?</p>
+                <div className="rounded-xl bg-[#F7F1FF] p-3 text-xs text-[#5330B6]">
+                    <p>Physically returned: <strong>{confirmRecordedReturn.returnedReceivedUnits ?? confirmRecordedReturn.quantity}</strong></p>
+                    <p>Recorded damaged: <strong>{Math.max(0, Number(confirmRecordedReturn.damagedUnits || 0))}</strong></p>
+                </div>
+                <p className="text-xs leading-5 text-[#6A5D6F]">Confirm you checked these units, the damage record is accurate, and routine care is complete for the other returned units. A Manager reviews damaged units; no customer charge is created automatically.</p>
+                <div className="flex flex-wrap justify-end gap-2">
+                    <button type="button" className={action} disabled={rental.saving} onClick={()=>setConfirmRecordedReturn(null)}>Cancel</button>
+                    <button type="button" className={primary} disabled={rental.saving||!canOperate} onClick={()=>void finalizeRecordedReturn(confirmRecordedReturn)}>{rental.saving?"Saving...":"Confirm Return"}</button>
+                </div>
+            </section>
+        </div>}
         {(selected||selectedEquipment)&&<div role="presentation" className="fixed inset-0 z-[90] flex items-center justify-center bg-[#21132E]/50 p-4" onMouseDown={e=>{if(e.target===e.currentTarget&&!rental.saving){setSelected(null);setViewEquipment(null);}}}>
-            <section role="dialog" aria-modal="true" aria-label="Rental operation review" className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-5 shadow-xl">
+            <section role="dialog" aria-modal="true" aria-label="Rental operation review" className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
                 <div className="flex items-center justify-between gap-3"><h3 className="text-lg font-bold text-[#21132E]">{selected?taskLabel[taskType(selected)||"prepare"]:selectedEquipment?.name}</h3><button aria-label="Close dialog" disabled={rental.saving} onClick={()=>{setSelected(null);setViewEquipment(null);}}><X size={19}/></button></div>
                 {selected?<div className="mt-4 space-y-3 text-sm"><p className="font-semibold">{selected.equipmentName} · {selected.quantity} booked units</p><p>Confirmed booking: <strong>{selected.bookingReference}</strong></p><p>Rental period: {selected.startDate} – {selected.endDate}</p>
                     <p className="rounded-lg bg-[#F7F1FF] px-3 py-2 text-xs text-[#4D2B85]">Units for this action: <strong>{taskType(selected)==="inspect"?selected.returnedReceivedUnits:taskType(selected)==="clean"?selected.cleaningUnits:taskType(selected)==="damage"?selected.damagedUnits:selected.quantity}</strong></p>
@@ -1003,7 +1085,20 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                   value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Condition, missing accessories, handover notes..."/></label>}
                     {submitError&&<p role="alert" className="rounded-xl bg-red-50 p-3 text-xs text-red-700">{submitError}</p>}
                     <div className="flex justify-end gap-2"><button className={action} disabled={rental.saving} onClick={()=>setSelected(null)}>Cancel</button>{taskType(selected)!=="damage"&&<button className={primary} disabled={rental.saving} onClick={()=>void perform()}>{rental.saving?"Saving...":taskType(selected)==="prepare"?"Confirm Preparation":"Confirm "+taskLabel[taskType(selected)||"prepare"]}</button>}</div>
-                </div>:selectedEquipment&&<div className="mt-4 space-y-2 text-sm"><p>Product No.: {selectedEquipment.equipmentNumber}</p>{(selectedEquipment.unitNumbers?.length||0)>0&&<div><p>Equipment Nos. ({selectedEquipment.unitNumbers!.length} units):</p><div className="mt-1 flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">{selectedEquipment.unitNumbers!.map(number=><span key={number} className="rounded-md border border-[#E6DDF0] bg-[#FBF8FF] px-2 py-0.5 text-[11px] font-semibold text-[#4E2C66]">{number}</span>)}</div></div>}<p>Total units: {selectedEquipment.totalUnits}</p><p>Out: {selectedEquipment.rentedOutUnits}</p><p>On Hold: <strong>{selectedEquipment.maintenanceUnits}</strong></p>
+                </div>:selectedEquipment&&<div className="mt-4 space-y-3 text-sm">
+                    <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF9FE] p-3 text-xs">
+                        <p className="font-semibold text-[#2B174C]">Equipment No.: {selectedEquipment.equipmentNumber}</p>
+                        <p className="mt-2">Last stock received: <strong>{selectedEquipment.lastStockReceivedDate ? queueScheduleDate(selectedEquipment.lastStockReceivedDate) : "No stock receipt recorded"}</strong></p>
+                        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            {[{label:"Total Units",count:selectedEquipment.totalUnits},
+                                {label:"Out",count:selectedEquipment.rentedOutUnits},
+                                {label:"On Hold",count:selectedEquipment.maintenanceUnits},
+                                {label:"Missing",count:selectedEquipment.missingUnits}].map(item=><div key={item.label} className="rounded-lg border border-[#E6DDF0] bg-white p-2">
+                                <p className="text-[10px] text-[#806A8C]">{item.label}</p><p className="mt-1 text-base font-bold">{item.count}</p>
+                            </div>)}
+                        </div>
+                    </div>
+                    {(selectedEquipment.unitNumbers?.length||0)>0&&<div className="rounded-xl border border-[#E6DDF0] p-3"><p className="text-xs font-semibold text-[#2B174C]">Individual Equipment Nos. ({selectedEquipment.unitNumbers!.length} units):</p><div className="mt-1 flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">{selectedEquipment.unitNumbers!.map(number=><span key={number} className="rounded-md border border-[#E6DDF0] bg-[#FBF8FF] px-2 py-0.5 text-[11px] font-semibold text-[#4E2C66]">{number}</span>)}</div></div>}
                     {(()=>{
                         const h=holdBreakdown.get(selectedEquipment.id)||{inspection:0,cleaning:0,routine:0,repairs:0};
                         const known=h.inspection+h.cleaning+h.routine+h.repairs;
@@ -1028,7 +1123,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                 <span className="min-w-0 flex-1 text-[#5A476A]">{task.kind==="inspection"?"Previous return pending inspection":task.kind==="cleaning"?"Clean returned equipment":task.kind==="routine"?"Routine care":"Repair / safety review"} · {task.units} unit(s)</span>
                                 {task.kind==="inspection"?
                                     <button type="button" disabled={!canOperate||rental.saving} className={action}
-                                            onClick={()=>{setViewEquipment(null);void finalizeRecordedReturn(task.allocation);}}>Finalize Return</button>:
+                                            onClick={()=>{setViewEquipment(null);setConfirmRecordedReturn(task.allocation);}}>Finalize Return</button>:
                                     task.kind==="cleaning"?
                                         <button type="button" disabled={!canOperate||rental.saving} className={action}
                                                 onClick={()=>{setViewEquipment(null);openRentalAction(task.allocation);}}>Mark Cleaned</button>:
@@ -1039,8 +1134,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                                     onClick={()=>{setViewEquipment(null);startStockTask({kind:"complete",id:task.maintenance.id,label:task.equipmentName,max:task.units});}}>Mark Repaired</button>}
                             </div>)}
                         </div>}
-                    <p>Missing: {selectedEquipment.missingUnits}</p>
-                    <p className="font-semibold">Check: {selectedEquipment.totalUnits} owned = {Math.max(0,selectedEquipment.totalUnits-selectedEquipment.rentedOutUnits-selectedEquipment.maintenanceUnits-selectedEquipment.missingUnits)} available + {selectedEquipment.rentedOutUnits} out + {selectedEquipment.maintenanceUnits} held + {selectedEquipment.missingUnits} missing.</p><p className="rounded-lg bg-[#F7F3FC] p-3 text-xs">Product catalog and rental pricing are managed by the Manager.</p></div>}
+                    <p className="text-xs font-semibold text-[#5A476A]">Stock check: {selectedEquipment.totalUnits} owned = {Math.max(0,selectedEquipment.totalUnits-selectedEquipment.rentedOutUnits-selectedEquipment.maintenanceUnits-selectedEquipment.missingUnits)} available + {selectedEquipment.rentedOutUnits} out + {selectedEquipment.maintenanceUnits} held + {selectedEquipment.missingUnits} missing.</p><p className="rounded-lg bg-[#F7F3FC] p-3 text-xs">Product catalog and rental pricing are managed by the Manager.</p></div>}
             </section>
         </div>}
     </div>;

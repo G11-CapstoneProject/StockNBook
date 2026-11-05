@@ -4757,9 +4757,28 @@ function ManagerInventoryTable({
         {}
     );
     const [exportMenuOpen, setExportMenuOpen] = React.useState(false);
+    const [exportToast, setExportToast] = React.useState<SuccessToastMessage | null>(null);
+    const closeExportToast = React.useCallback(() => setExportToast(null), []);
+    const exportInventory = (format: "xlsx" | "pdf") => {
+        setExportMenuOpen(false);
+        const options = {
+            storeName, branchName,
+            categoryFilter: selectedCategory,
+            statusFilter,
+            generatedAt: new Date(),
+        };
+        try {
+            if (format === "xlsx") exportManagerInventoryExcel(products, lastStockInDates.productDates, options);
+            else exportManagerInventoryPdf(products, lastStockInDates.productDates, options);
+            setExportToast({title: "Inventory export started", message: `${format === "xlsx" ? "Excel" : "PDF"} report prepared. Check your browser downloads.`});
+        } catch (error) {
+            setExportToast({title: "Unable to export inventory", message: error instanceof Error ? error.message : "Please try again.", tone: "error"});
+        }
+    };
 
     return (
         <section className="overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+            <SuccessToast toast={exportToast} onClose={closeExportToast} />
             <div className="flex flex-col gap-3 px-4 py-3.5 xl:flex-row xl:items-center xl:justify-between">
                 <div className="flex items-start gap-3">
                     <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
@@ -4819,15 +4838,7 @@ function ManagerInventoryTable({
                                 <button
                                     type="button"
                                     role="menuitem"
-                                    onClick={() => {
-                                        setExportMenuOpen(false);
-                                        exportManagerInventoryExcel(products, lastStockInDates.productDates, {
-                                            storeName, branchName,
-                                            categoryFilter: selectedCategory,
-                                            statusFilter,
-                                            generatedAt: new Date(),
-                                        });
-                                    }}
+                                    onClick={() => exportInventory("xlsx")}
                                     className="block w-full px-4 py-2 text-left text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]"
                                 >
                                     Excel (.xlsx)
@@ -4835,15 +4846,7 @@ function ManagerInventoryTable({
                                 <button
                                     type="button"
                                     role="menuitem"
-                                    onClick={() => {
-                                        setExportMenuOpen(false);
-                                        exportManagerInventoryPdf(products, lastStockInDates.productDates, {
-                                            storeName, branchName,
-                                            categoryFilter: selectedCategory,
-                                            statusFilter,
-                                            generatedAt: new Date(),
-                                        });
-                                    }}
+                                    onClick={() => exportInventory("pdf")}
                                     className="block w-full px-4 py-2 text-left text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]"
                                 >
                                     PDF (.pdf)
@@ -5173,7 +5176,7 @@ function SuccessToast({
             window.clearTimeout(fadeTimer);
             window.clearTimeout(closeTimer);
         };
-    }, [toast, onClose]);
+    }, [toast?.title, toast?.message, toast?.tone, onClose]);
 
     if (!toast) {
         return null;
@@ -5183,10 +5186,10 @@ function SuccessToast({
 
     return (
         <div
-            role="status"
-            aria-live="polite"
+            role={isError ? "alert" : "status"}
+            aria-live={isError ? "assertive" : "polite"}
             className={[
-                "fixed bottom-5 right-5 z-[140] flex w-[min(360px,calc(100vw-2.5rem))] items-start gap-3 rounded-2xl border bg-white p-4 shadow-[0_18px_42px_rgba(43,23,76,0.22)] transition-all duration-700 ease-out",
+                "fixed bottom-4 right-4 z-[210] flex w-[min(360px,calc(100vw-2rem))] sm:bottom-5 sm:right-5 items-start gap-3 rounded-2xl border bg-white p-4 shadow-[0_18px_42px_rgba(43,23,76,0.22)] transition-all duration-700 ease-out",
                 isError ? "border-[#F4BFC5]" : "border-[#BCE8CA]",
                 isFadingOut
                     ? "translate-y-3 opacity-0"
@@ -6762,12 +6765,12 @@ function CategoryForm({ inv }: { inv: InventoryController }) {
         const cleanValue = editCategoryDraft.trim();
 
         if (!cleanValue) {
-            alert("❌ Please enter a category name.");
+            setCategoryToast({title:"Category name required",message:"Please enter a category name before continuing.",tone:"error"});
             return;
         }
 
         if (cleanValue === categoryToEdit) {
-            alert("No changes made.");
+            setCategoryToast({title:"No changes made",message:"Enter a different category name to save your update.",tone:"error"});
             return;
         }
 
@@ -6793,7 +6796,7 @@ function CategoryForm({ inv }: { inv: InventoryController }) {
         const cleanValue = inv.category.trim();
 
         if (!cleanValue) {
-            alert("❌ Please enter a category name.");
+            setCategoryToast({title:"Category name required",message:"Please enter a category name before continuing.",tone:"error"});
             return;
         }
 

@@ -795,7 +795,7 @@ const getOwnerSalesReport = (() => {
         return { available: false, reason: 'The booking sales table/schema was not supplied or could not be found.' };
     }
 
-    function posSql({ storeId, branchId, dateFrom, dateTo, orderColumns, bookingSchema }) {
+    function posSql({ storeId, branchId, dateFrom, dateTo, orderColumns, bookingSchema, exactOrderId }) {
         const where = ["o.store_id = ?", "UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')",
             "(UPPER(TRIM(COALESCE(o.customer_type, ''))) = 'WALK_IN' OR (TRIM(COALESCE(o.customer_type, '')) = '' AND o.order_id LIKE '%-POS-%'))"];
         // One store-specific cost aggregation, avoiding a full cross-tenant GROUP BY.
@@ -814,6 +814,7 @@ const getOwnerSalesReport = (() => {
         if (branchId) { where.push('o.branch_id = ?'); params.push(branchId); }
         if (dateFrom) { where.push('o.order_date >= ?'); params.push(dateFrom); }
         if (dateTo) { where.push('o.order_date <= ?'); params.push(dateTo); }
+        if (exactOrderId) { where.push('o.order_id = ?'); params.push(exactOrderId); }
         const sql = `SELECT
                          o.order_id AS orderId, o.branch_id AS branchId,
                          COALESCE(NULLIF(TRIM(br.branch_name),''), CONCAT('Branch ',o.branch_id)) AS branchName,
@@ -845,7 +846,7 @@ const getOwnerSalesReport = (() => {
         return { sql, params };
     }
 
-    function bookingSql(schema, { storeId, branchId, dateFrom, dateTo }) {
+    function bookingSql(schema, { storeId, branchId, dateFrom, dateTo, exactOrderId }) {
         const f = schema.fields;
         const ref = expr('bk', f.reference);
         const value = expr('bk', f.value);
@@ -861,6 +862,7 @@ const getOwnerSalesReport = (() => {
         if (branchId) { where.push(`bk.${id(f.branchId)} = ?`); params.push(branchId); }
         if (dateFrom) { where.push(`DATE(${completed}) >= ?`); params.push(dateFrom); }
         if (dateTo) { where.push(`DATE(${completed}) <= ?`); params.push(dateTo); }
+        if (exactOrderId) { where.push(`CAST(${ref} AS CHAR) = ?`); params.push(exactOrderId); }
         // The original booking reference/PK is used; no new booking order is generated.
         const sql = `SELECT CAST(${ref} AS CHAR) AS orderId, bk.${id(f.branchId)} AS branchId,
                             COALESCE(NULLIF(TRIM(br.branch_name),''), CONCAT('Branch ',bk.${id(f.branchId)})) AS branchName,
@@ -924,7 +926,7 @@ const getOwnerSalesReport = (() => {
         const vatVerifiedSql = `(${vatEligibleSql} AND v.vatAmount IS NOT NULL)`;
         const vatUnverifiedSql = `(NOT ${vatVerifiedSql} AND NOT ${nonVatSql})`;
         let vatSummary = null;
-        if (vatRegistered) {
+        if (vatRegistered && body.vat_export !== true) {
             const [[vatTotals]] = await db.execute(`
                 SELECT
                     COALESCE(SUM(CASE WHEN ${vatVerifiedSql} THEN v.total - v.vatAmount ELSE 0 END),0) AS vatableSales,
@@ -961,12 +963,27 @@ const getOwnerSalesReport = (() => {
             // Return a complete filtered extract, never a silently truncated file.
             // Limit JSON response size; owners can narrow the date range if needed.
             const MAX_EXPORT_ROWS = 5000;
+            // Match the Orders table filters. Branch and dates are already applied
+            // inside each source query; these remaining filters combine with them.
+            const exportWhere = [];
+            const exportParams = [...unionParams];
+            if (source !== 'ALL') {
+                exportWhere.push('v.salesSource = ?');
+                exportParams.push(source);
+            }
+            if (search) {
+                exportWhere.push('(v.orderId LIKE ? OR v.customerName LIKE ?)');
+                exportParams.push(`%${search}%`, `%${search}%`);
+            }
+            const exportWhereSql = exportWhere.length
+                ? `WHERE ${exportWhere.join(' AND ')}`
+                : '';
             const [vatRows] = await db.execute(`
                 SELECT v.orderId, v.branchName, v.reportDate, v.transactionAt,
                        v.salesSource, v.paymentMode, v.taxType, v.total, v.vatAmount
-                FROM (${unionSql}) v ${vatSourceWhere}
+                FROM (${unionSql}) v ${exportWhereSql}
                 ORDER BY v.transactionAt DESC, v.orderId DESC
-                    LIMIT ${MAX_EXPORT_ROWS + 1}`, vatParams);
+                    LIMIT ${MAX_EXPORT_ROWS + 1}`, exportParams);
             if (vatRows.length > MAX_EXPORT_ROWS) {
                 const error = new Error('VAT export exceeds 5,000 transactions. Select a shorter date range and download again.');
                 error.statusCode = 400; throw error;
@@ -995,16 +1012,38 @@ const getOwnerSalesReport = (() => {
                     vatStatus: status,
                 };
             };
+            const exportRows = vatRows.map(normalizeVatRow);
+            // Use the actual exported rows to calculate the PDF's displayed VAT totals;
+            // summary cards elsewhere on the page must remain unaffected by search.
+            const recorded = exportRows.filter((row) => row.vatStatus === 'VAT_RECORDED');
+            const unverifiedRecords = exportRows.filter((row) => row.vatStatus === 'UNVERIFIED').length;
+            const exportComplete = (source === 'WALK_IN' || bookingSchema.available) && unverifiedRecords === 0;
+            const sum = (key) => money(recorded.reduce(
+                (total, row) => total + Number(row[key] || 0), 0
+            ));
+            const exportVatSummary = {
+                vatableSales: sum('vatableSales'),
+                outputVat: sum('outputVat'),
+                customerTotal: sum('totalInclusive'),
+                transactionCount: exportRows.length,
+                unverifiedRecords,
+                complete: exportComplete,
+                coverage: exportComplete ? 'COMPLETE' : 'PARTIAL',
+                coverageReason: exportComplete ? null :
+                    (!bookingSchema.available && source !== 'WALK_IN'
+                        ? 'Booking VAT records could not be verified; only known transactions are included.'
+                        : `${unverifiedRecords} transaction(s) have missing or inconsistent VAT records.`),
+            };
             return {
                 export: true,
                 taxRegistration,
-                vatSummary,
-                scope: { branchId: branchId || null, dateFrom, dateTo, salesSource: source },
+                vatSummary: exportVatSummary,
+                scope: { branchId: branchId || null, dateFrom, dateTo, salesSource: source, search },
                 bookingIntegration: {
                     available: bookingSchema.available,
                     reason: bookingSchema.available ? null : bookingSchema.reason,
                 },
-                rows: vatRows.map(normalizeVatRow),
+                rows: exportRows,
             };
         }
 
@@ -1069,6 +1108,164 @@ const getOwnerSalesReport = (() => {
         };
     }
 
+    /**
+     * Fetch one owner-visible transaction with its historical line items.
+     * Read only. Uses the same walk-in / fulfilled-booking eligibility as the
+     * owner report. Never fabricates item names, unit prices or invoice numbers.
+     */
+    async function getOwnerOrderDetail(db, storeId, body) {
+        const orderId = String(body.order_id ?? body.orderId ?? '').trim();
+        const source = String(body.sales_source ?? body.salesSource ?? '').trim().toUpperCase();
+        if (!orderId || orderId.length > 100 || !['WALK_IN', 'BOOKING'].includes(source)) {
+            const error = new Error('A valid Order ID and Sales Source are required.');
+            error.statusCode = 400;
+            throw error;
+        }
+
+        const bookingSchema = await detectBookingSchema(db);
+        if (source === 'BOOKING' && !bookingSchema.available) {
+            const error = new Error('Verified booking transaction details are unavailable.');
+            error.statusCode = 404;
+            throw error;
+        }
+        const query = source === 'BOOKING'
+            ? bookingSql(bookingSchema, { storeId, exactOrderId: orderId })
+            : posSql({
+                storeId,
+                orderColumns: await listColumns(db, 'orders'),
+                bookingSchema,
+                exactOrderId: orderId,
+            });
+        const [matchingRows] = await db.execute(
+            `SELECT r.* FROM (${query.sql}) r LIMIT 2`, query.params
+        );
+        if (matchingRows.length !== 1) {
+            const error = new Error(matchingRows.length > 1
+                ? 'This order reference is not unique; details cannot be issued safely.'
+                : 'The transaction was not found in this store.');
+            error.statusCode = matchingRows.length > 1 ? 409 : 404;
+            throw error;
+        }
+        const row = matchingRows[0];
+        const [storeRows] = await db.execute(
+            'SELECT store_name AS storeName FROM stores WHERE id = ? LIMIT 1',
+            [storeId]
+        );
+        let items = [];
+        let itemsAvailable = false;
+        let detailNotice = null;
+
+        if (source === 'WALK_IN') {
+            // Use the immutable order_items snapshots, not current catalog prices.
+            // Preserve missing prices as NULL rather than silently converting to 0.
+            const [stored] = await db.execute(
+                `SELECT product_name AS name, quantity, unit_price AS unitPrice,
+                        line_total AS lineTotal
+                 FROM order_items WHERE store_id = ? AND order_id = ?
+                 ORDER BY id ASC LIMIT 501`,
+                [storeId, orderId]
+            );
+            items = stored.slice(0, 500).map((line) => ({
+                name: String(line.name || ''),
+                quantity: Number(line.quantity),
+                unitPrice: line.unitPrice == null ? null : Number(line.unitPrice),
+                lineTotal: line.lineTotal == null ? null : Number(line.lineTotal),
+            }));
+            itemsAvailable = stored.length <= 500 && items.length > 0 && items.every((line) =>
+                line.name.trim() && line.quantity > 0 &&
+                line.unitPrice != null && Number.isFinite(line.unitPrice) &&
+                line.lineTotal != null && Number.isFinite(line.lineTotal)
+            );
+            if (!itemsAvailable) {
+                detailNotice = 'Historical POS item details are incomplete or unavailable.';
+            }
+        } else {
+            // Only match booking item rows using a verifiable parent primary key.
+            // Do not infer rental/package items or costs from today's inventory.
+            const f = bookingSchema.fields;
+            const parentColumns = await listColumns(db, bookingSchema.table);
+            let bookingKey = null;
+            if (parentColumns.has('id')) {
+                const [parentRows] = await db.execute(
+                    `SELECT id FROM ${id(bookingSchema.table)}
+                     WHERE ${id(f.storeId)} = ? AND CAST(${id(f.reference)} AS CHAR) = ? LIMIT 2`,
+                    [storeId, orderId]
+                );
+                if (parentRows.length === 1) bookingKey = parentRows[0].id;
+            }
+            if (bookingKey != null) {
+                for (const table of ['booking_items', 'booking_order_items', 'booking_services']) {
+                    const cols = await listColumns(db, table);
+                    const fk = findColumn(cols, ['booking_id']);
+                    const name = findColumn(cols, ['item_name', 'product_name', 'service_name', 'equipment_name', 'name', 'description']);
+                    const qty = findColumn(cols, ['quantity', 'qty']);
+                    const unitPrice = findColumn(cols, ['unit_price', 'price_per_unit', 'unit_amount', 'rate']);
+                    const lineTotal = findColumn(cols, ['line_total', 'total_price', 'total_amount', 'amount']);
+                    if (!fk || !name || !qty || (!unitPrice && !lineTotal)) continue;
+                    const where = [`bi.${id(fk)} = ?`];
+                    const args = [bookingKey];
+                    if (cols.has('store_id')) { where.push('bi.store_id = ?'); args.push(storeId); }
+                    const [lines] = await db.execute(
+                        `SELECT ${id(name)} AS itemName, ${id(qty)} AS quantity,
+                         ${expr('bi', unitPrice)} AS unitPrice,
+                         ${expr('bi', lineTotal)} AS lineTotal
+                         FROM ${id(table)} bi WHERE ${where.join(' AND ')} LIMIT 501`, args
+                    );
+                    if (!lines.length) continue;
+                    if (lines.length > 500) {
+                        detailNotice = 'Too many booking items to verify safely.';
+                        break;
+                    }
+                    items = lines.map((line) => {
+                        const quantity = Number(line.quantity);
+                        const storedUnit = line.unitPrice == null ? null : Number(line.unitPrice);
+                        const storedTotal = line.lineTotal == null ? null : Number(line.lineTotal);
+                        const computedTotal = storedTotal ?? (storedUnit != null ? money(storedUnit * quantity) : null);
+                        const computedUnit = storedUnit ?? (computedTotal != null && quantity > 0
+                            ? money(computedTotal / quantity) : null);
+                        return {
+                            name: String(line.itemName || ''), quantity,
+                            unitPrice: computedUnit, lineTotal: computedTotal,
+                        };
+                    });
+                    itemsAvailable = items.length > 0 && items.every((line) =>
+                        line.name.trim() && line.quantity > 0 &&
+                        line.unitPrice != null && Number.isFinite(line.unitPrice) &&
+                        line.lineTotal != null && Number.isFinite(line.lineTotal)
+                    );
+                    break;
+                }
+            }
+            if (!itemsAvailable && !detailNotice) {
+                detailNotice = 'Itemized booking products/services could not be verified from the existing booking records.';
+            }
+        }
+
+        const valueOrNull = (value) => value == null || !Number.isFinite(Number(value))
+            ? null : money(Number(value));
+        const dateStr = (value) => value instanceof Date
+            ? value.toISOString().replace('T', ' ').slice(0, 19) : String(value || '');
+        return {
+            orderId: String(row.orderId),
+            storeName: String(storeRows[0]?.storeName || 'StockNBook Store'),
+            branchName: String(row.branchName || ''),
+            salesSource: source,
+            customerName: String(row.customerName || 'Walk-in'),
+            date: dateStr(row.reportDate).slice(0, 10),
+            createdAt: dateStr(row.transactionAt),
+            paymentMode: String(row.paymentMode || ''),
+            taxType: row.taxType == null ? null : String(row.taxType),
+            vatAmount: valueOrNull(row.vatAmount),
+            total: valueOrNull(row.total),
+            items,
+            itemsAvailable,
+            detailNotice,
+            // These are order details for the owner, not a BIR-registered invoice.
+            officialInvoiceNumber: null,
+        };
+    }
+
+    getOwnerSalesReport.getOrderDetail = getOwnerOrderDetail;
     return getOwnerSalesReport;
 
 })();
@@ -2143,7 +2340,7 @@ exports.handler = async (event) => {
             return jsonResponse(403, headers, { error: "POS access is not permitted for this account." });
         }
         const posReadActions = new Set([
-            "get_orders", "get_owner_dashboard_summary", "get_owner_sales_report", "get_tax_registration",
+            "get_orders", "get_owner_dashboard_summary", "get_owner_sales_report", "get_owner_order_detail", "get_tax_registration",
         ]);
         if (posAccess !== "full" && !posReadActions.has(action)) {
             return jsonResponse(403, headers, { error: "Full POS access is required for this action." });
@@ -2509,6 +2706,21 @@ exports.handler = async (event) => {
                 );
             } catch (error) {
                 await connection.rollback();
+                throw error;
+            }
+        }
+
+        if (action === "get_owner_order_detail") {
+            if (tokenRole !== "owner") {
+                return jsonResponse(403, headers, { error: "Only the store owner may view owner order details." });
+            }
+            try {
+                const detail = await getOwnerSalesReport.getOrderDetail(connection, storeId, body);
+                return jsonResponse(200, headers, { success: true, detail });
+            } catch (error) {
+                if ([400, 404, 409].includes(error?.statusCode)) {
+                    return jsonResponse(error.statusCode, headers, { error: error.message });
+                }
                 throw error;
             }
         }

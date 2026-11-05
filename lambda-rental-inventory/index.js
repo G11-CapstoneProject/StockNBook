@@ -220,42 +220,42 @@ const identifiers = (() => {
         {
             table: "id_number_sequences",
             create: `CREATE TABLE IF NOT EXISTS id_number_sequences (
-                store_id BIGINT NOT NULL,
-                branch_id BIGINT NOT NULL,
-                entity_type VARCHAR(10) NOT NULL,
+                                                                        store_id BIGINT NOT NULL,
+                                                                        branch_id BIGINT NOT NULL,
+                                                                        entity_type VARCHAR(10) NOT NULL,
                 scope_key VARCHAR(10) NOT NULL DEFAULT '',
                 last_sequence INT UNSIGNED NOT NULL DEFAULT 0,
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (store_id, branch_id, entity_type, scope_key)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         },
         {
             table: "identifier_prefixes",
             create: `CREATE TABLE IF NOT EXISTS identifier_prefixes (
-                branch_id BIGINT NOT NULL,
-                store_id BIGINT NOT NULL,
-                store_initials VARCHAR(8) NOT NULL,
+                                                                        branch_id BIGINT NOT NULL,
+                                                                        store_id BIGINT NOT NULL,
+                                                                        store_initials VARCHAR(8) NOT NULL,
                 branch_initials VARCHAR(8) NOT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (branch_id),
                 UNIQUE KEY uq_identifier_prefixes_initials (store_id, branch_initials)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         },
         {
             table: "rental_equipment_units",
             create: `CREATE TABLE IF NOT EXISTS rental_equipment_units (
-                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                store_id BIGINT NOT NULL,
-                branch_id BIGINT NOT NULL,
-                equipment_id BIGINT NOT NULL,
-                equipment_number VARCHAR(40) NOT NULL,
+                                                                           id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                                                                           store_id BIGINT NOT NULL,
+                                                                           branch_id BIGINT NOT NULL,
+                                                                           equipment_id BIGINT NOT NULL,
+                                                                           equipment_number VARCHAR(40) NOT NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 retired_at DATETIME NULL DEFAULT NULL,
                 PRIMARY KEY (id),
                 UNIQUE KEY uq_rental_equipment_units_number (equipment_number),
                 KEY idx_rental_equipment_units_equipment (equipment_id, retired_at),
                 KEY idx_rental_equipment_units_branch (store_id, branch_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         },
         {
             table: "managers", column: "employee_code",
@@ -334,7 +334,7 @@ const identifiers = (() => {
                  FROM branches b
                           JOIN stores s ON s.id = b.store_id
                  WHERE b.id = ? AND b.store_id = ?
-                 LIMIT 1`,
+                     LIMIT 1`,
                 [branchId, storeId]
             );
             if (!rows.length) throw new Error("The branch does not belong to this store.");
@@ -392,7 +392,7 @@ const identifiers = (() => {
         await connection.execute(
             `INSERT INTO id_number_sequences (store_id, branch_id, entity_type, scope_key, last_sequence)
              VALUES (?, ?, ?, ?, 0)
-             ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
+                 ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
             [storeId, branchId, entityType, scopeKey]
         );
         await connection.execute(
@@ -425,7 +425,7 @@ const identifiers = (() => {
         const floor = await maxSequenceFrom(connection,
             `SELECT employee_code AS value FROM managers WHERE employee_code LIKE ?
              UNION ALL
-             SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
+            SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
             [`${prefix}%`, `${prefix}%`], PATTERNS.employee);
         const { last } = await reserveSequenceBlock(connection, { storeId, branchId, entityType: "EMP", floor });
         return buildEmployeeCode(storeCode, branchCode, last);
@@ -470,7 +470,7 @@ const identifiers = (() => {
         await connection.execute(
             `INSERT INTO product_number_sequences (store_id, branch_id, last_sequence)
              VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
+                 ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
             [storeId, branchId, next]
         );
         return buildProductNumber(storeCode, branchCode, next);
@@ -1106,14 +1106,14 @@ async function mutate(db,scope,body) {
             await db.execute("UPDATE rental_categories SET name=?,category_key=? WHERE id=?",[updated,key(updated),found[0].id]);
             return {categoryId:found[0].id,referenceNumber:""};
         }
-        case "archive_rental_category": {
+        case "delete_rental_category": {
             const name=requiredText(body.name,100,"Category name");
             const [found]=await db.execute(`SELECT id FROM rental_categories WHERE store_id=? AND branch_id=? AND category_key=? AND archived_at IS NULL FOR UPDATE`,
                 [scope.storeId,scope.branchId,key(name)]);
             if(!found.length)fail(404,"Rental category not found.");
             const [inUse]=await db.execute("SELECT id FROM rental_equipment WHERE category_id=? LIMIT 1",[found[0].id]);
-            if(inUse.length)fail(409,"This category has equipment or historical records; rename it instead of archiving.");
-            await db.execute("UPDATE rental_categories SET archived_at=NOW() WHERE id=?",[found[0].id]);
+            if(inUse.length)fail(409,"Cannot delete a category with equipment or historical records. Move or update those records first.");
+            await db.execute("DELETE FROM rental_categories WHERE id=? AND store_id=? AND branch_id=?",[found[0].id,scope.storeId,scope.branchId]);
             return {referenceNumber:""};
         }
         case "pay_rental_supplier_purchase": {
@@ -1415,13 +1415,61 @@ async function staffEquipmentSchedule(db,scope,body) {
                 quantity:Number(b.quantity),startDate:b.startDate,endDate:b.endDate,status:b.status}))}};
 }
 
+// Read-only month markers for Staff: no customer identity, contact information,
+// financial fields, or cross-branch bookings are returned. Day details use the
+// existing branch-scoped get_staff_equipment_schedule request.
+async function staffEquipmentCalendar(db,scope,body) {
+    const equipmentId=id(body.equipmentId,'Equipment');
+    const month=String(body.month||'');
+    if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(month))fail(400,'Select a valid calendar month.');
+    const today=todayPh();
+    if(month<today.slice(0,7))fail(400,'Past calendar months are not available in the staff schedule.');
+    const [year,monthNumber]=month.split('-').map(Number);
+    const daysInMonth=new Date(Date.UTC(year,monthNumber,0)).getUTCDate();
+    const lastDate=`${month}-${String(daysInMonth).padStart(2,'0')}`;
+    const firstDate=month===today.slice(0,7)?today:`${month}-01`;
+    const [found]=await db.execute(`SELECT id FROM rental_equipment
+                                    WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL LIMIT 1`,
+        [equipmentId,scope.storeId,scope.branchId]);
+    if(!found.length)fail(404,'Equipment not found in this branch.');
+    const [rows]=await db.execute(`SELECT a.id AS allocationId,a.quantity,
+                                          DATE_FORMAT(a.start_date,'%Y-%m-%d') AS startDate,
+                                          DATE_FORMAT(a.end_date,'%Y-%m-%d') AS endDate,a.status
+                                   FROM rental_booking_allocations a
+                                            JOIN bookings b ON b.booking_reference=a.booking_reference COLLATE utf8mb4_unicode_ci
+                                       AND b.store_id=a.store_id AND b.branch_id=a.branch_id
+                                       AND LOWER(b.status) IN ('confirmed','preparing','released','return inspection','pending settlement','approved','completed')
+                                   WHERE a.store_id=? AND a.branch_id=? AND a.equipment_id=?
+                                     AND a.status IN ('reserved','checked_out') AND a.start_date<=?
+                                     AND (a.end_date>=? OR (a.status='checked_out' AND a.end_date<?))`,
+        [scope.storeId,scope.branchId,equipmentId,lastDate,firstDate,today]);
+    const days=[];
+    for(let day=1;day<=daysInMonth;day++) {
+        const date=`${month}-${String(day).padStart(2,'0')}`;
+        if(date<today)continue;
+        let bookedUnits=0,allocationCount=0;
+        for(const row of rows) {
+            if(String(row.startDate)>date)continue;
+            if(String(row.endDate)<date && !(row.status==='checked_out' && String(row.endDate)<today))continue;
+            bookedUnits+=Number(row.quantity||0);
+            allocationCount+=1;
+        }
+        if(allocationCount)days.push({date,allocationCount,bookedUnits});
+    }
+    return {success:true,calendar:{equipmentId,month,days}};
+}
+
 // Staff operations consume existing booking allocations; there is no equipment/catalog write access.
 // Bookings must already be confirmed by the existing booking workflow.
 async function staffRentalWorkspace(db, scope) {
     const bookedToday=await rentalBookableToday(db,scope);
     const [equipment] = await db.execute(`SELECT e.id,e.equipment_number AS equipmentNumber,e.name,c.name AS category,
                                                  e.total_units AS totalUnits,e.rented_out_units AS rentedOutUnits,e.maintenance_units AS maintenanceUnits,
-                                                 e.missing_units AS missingUnits,e.alert_level AS alertLevel
+                                                 e.missing_units AS missingUnits,e.alert_level AS alertLevel,
+                                                 (SELECT DATE_FORMAT(MAX(m.occurred_at),'%Y-%m-%d')
+                                                  FROM rental_stock_movements m
+                                                  WHERE m.store_id=e.store_id AND m.branch_id=e.branch_id
+                                                    AND m.equipment_id=e.id AND m.type='received') AS lastStockReceivedDate
                                           FROM rental_equipment e JOIN rental_categories c ON c.id=e.category_id
                                           WHERE e.store_id=? AND e.branch_id=? AND e.archived_at IS NULL ORDER BY e.name LIMIT 300`,
         [scope.storeId, scope.branchId]);
@@ -2189,7 +2237,7 @@ function rentalInventoryPermission(permissions, role) {
 }
 
 const READ_ACTIONS = new Set(["get_manager_inventory","check_availability","get_rental_supplier_payables","get_rental_purchase_items","get_owner_supplier_payables"]);
-const STAFF_READ_ACTIONS = new Set(["get_staff_rental_workspace","get_staff_equipment_schedule"]);
+const STAFF_READ_ACTIONS = new Set(["get_staff_rental_workspace","get_staff_equipment_schedule","get_staff_equipment_calendar"]);
 const STAFF_WRITE_ACTIONS = new Set(["prepare_rental_allocation","release_rental_allocation",
     "return_rental_allocation","inspect_rental_allocation","clean_rental_allocation",
     "release_rental_booking","return_rental_booking",
@@ -2198,7 +2246,7 @@ const STAFF_WRITE_ACTIONS = new Set(["prepare_rental_allocation","release_rental
 const WRITE_ACTIONS = new Set(["create_equipment","import_equipment","update_equipment","correct_equipment_stock","receive_equipment",
     "approve_maintenance_repair","approve_repair_completion","resolve_missing_equipment","archive_equipment",
     "create_rental_category","rename_rental_category",
-    "archive_rental_category","pay_rental_supplier_purchase"]);
+    "delete_rental_category","pay_rental_supplier_purchase"]);
 
 exports.handler = async (event) => {
     if((event?.requestContext?.http?.method||event?.httpMethod)==="OPTIONS")return reply(204,{});
@@ -2292,6 +2340,7 @@ exports.handler = async (event) => {
         scope.branchName=branches[0].branchName;
         if(action==="get_staff_rental_workspace")return reply(200,await staffRentalWorkspace(db,scope));
         if(action==="get_staff_equipment_schedule")return reply(200,await staffEquipmentSchedule(db,scope,body));
+        if(action==="get_staff_equipment_calendar")return reply(200,await staffEquipmentCalendar(db,scope,body));
         if(action==="get_manager_inventory")return reply(200,await getInventory(db,scope));
         if(action==="check_availability")return reply(200,await checkAvailability(db,scope,body));
         if(action==="get_rental_supplier_payables")return reply(200,await getPayables(db,scope));

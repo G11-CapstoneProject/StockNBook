@@ -6,6 +6,7 @@ export type CurrentUser = {
     role: "owner" | "manager" | "staff";
     store_id?: number | string;
     store_name?: string;
+    store_slug?: string;
     owner_name?: string;
     branch_id?: number | string;
     branch_name?: string;
@@ -62,6 +63,7 @@ function getSessionUser(): CurrentUser | null {
         role,
         store_id: sessionStorage.getItem("store_id") || "",
         store_name: sessionStorage.getItem("store_name") || "",
+        store_slug: sessionStorage.getItem("store_slug") || "",
         owner_name: sessionStorage.getItem("owner_name") || "",
         branch_id: sessionStorage.getItem("branch_id") || "",
         branch_name: sessionStorage.getItem("branch_name") || "",
@@ -79,7 +81,15 @@ function syncUserToSession(user: CurrentUser) {
     sessionStorage.setItem("role", user.role || "");
 
     if (user.store_id) sessionStorage.setItem("store_id", String(user.store_id));
-    if (user.store_name) sessionStorage.setItem("store_name", user.store_name);
+    if (user.store_name) {
+        sessionStorage.setItem("store_name", user.store_name);
+        sessionStorage.setItem("stocknbook_store_name", user.store_name);
+        sessionStorage.setItem("business_name", user.store_name);
+    }
+    if (user.store_slug) {
+        sessionStorage.setItem("store_slug", user.store_slug);
+        sessionStorage.setItem("slug", user.store_slug);
+    }
     if (user.owner_name) sessionStorage.setItem("owner_name", user.owner_name);
 
     if (user.branch_id) sessionStorage.setItem("branch_id", String(user.branch_id));
@@ -121,7 +131,7 @@ async function requestCurrentUser(
     sharedRequestToken = token;
 
     const request = (async () => {
-        const res = await fetch("/api/current-user", {
+        const res = await fetch(force ? "/api/current-user?refresh=1" : "/api/current-user", {
             method: "GET",
             headers: {
                 Authorization: `Bearer ${token}`,
@@ -279,11 +289,13 @@ export function useCurrentUser() {
         const interval = window.setInterval(refreshSilently, REFRESH_INTERVAL);
 
         window.addEventListener("stocknbook-permissions-updated", refreshPermissions);
+        window.addEventListener("stocknbook-business-updated", refreshPermissions);
         window.addEventListener("focus", refreshSilently);
 
         return () => {
             window.clearInterval(interval);
             window.removeEventListener("stocknbook-permissions-updated", refreshPermissions);
+            window.removeEventListener("stocknbook-business-updated", refreshPermissions);
             window.removeEventListener("focus", refreshSilently);
         };
     }, [loadUser]);

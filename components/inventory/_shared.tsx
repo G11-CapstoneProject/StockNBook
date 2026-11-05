@@ -967,7 +967,7 @@ function StockAlertsDialog({
                 </div>
 
                 <div className="max-h-[420px] overflow-y-auto rounded-xl border border-[#E6DDF0]">
-                    <table className="w-full table-fixed text-sm">
+                    <table className="w-full table-fixed text-sm min-w-0 [&_th]:align-middle [&_td]:align-middle [&_th]:px-1.5 [&_td]:px-1.5 [&_th]:py-1.5 [&_td]:py-2 [&_th]:leading-tight [&_td]:leading-snug [&_th]:tracking-normal [&_th]:[overflow-wrap:anywhere] [&_td]:[overflow-wrap:anywhere]">
                         <colgroup>
                             <col className="w-[34%]" />
                             <col className="w-[30%]" />
@@ -1249,7 +1249,7 @@ function ExpirationAlertsDialog({
                 </div>
 
                 <div className="min-h-0 flex-1 overflow-auto">
-                    <table className="w-full min-w-[680px] table-fixed text-sm">
+                    <table className="w-full table-fixed text-sm min-w-0 [&_th]:align-middle [&_td]:align-middle [&_th]:px-1.5 [&_td]:px-1.5 [&_th]:py-1.5 [&_td]:py-2 [&_th]:leading-tight [&_td]:leading-snug [&_th]:tracking-normal [&_th]:[overflow-wrap:anywhere] [&_td]:[overflow-wrap:anywhere]">
                         <colgroup>
                             <col className="w-[34%]" />
                             <col className="w-[28%]" />
@@ -1314,10 +1314,10 @@ function ExpirationAlertsDialog({
                                         <td className="px-4 py-3 text-center">
                                             <div className="inline-flex flex-col items-center gap-1">
                                                 <span
-                                                    className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                                                    className={`inline-block text-xs font-semibold ${
                                                         isExpired
-                                                            ? "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]"
-                                                            : "border-[#D8C5F3] bg-[#F7F1FF] text-[#6D35D4]"
+                                                            ? "text-[#C32F2F]"
+                                                            : "text-[#6D35D4]"
                                                     }`}
                                                 >
                                                     {item.status}
@@ -1745,7 +1745,7 @@ export function ProductTable({
             const status = getStatus(product);
 
             return (
-                <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${status.style}`}>
+                <span className={`text-[11px] font-semibold ${status.style.replace(/bg-\[[^\]]+\]/g, "")}`}>
                     {status.label}
                 </span>
             );
@@ -1755,7 +1755,7 @@ export function ProductTable({
 
         if (lowStock === 0 && outStock === 0) {
             return (
-                <span className="rounded-full bg-[#E6F6EA] px-2.5 py-1 text-[11px] font-semibold text-[#226B36]">
+                <span className="text-[11px] font-semibold text-[#226B36]">
                     In Stock
                 </span>
             );
@@ -1764,13 +1764,13 @@ export function ProductTable({
         return (
             <div className="flex flex-col items-center gap-1">
                 {lowStock > 0 && (
-                    <span className="rounded-full bg-[#FFF4D8] px-2.5 py-1 text-[11px] font-semibold text-[#8A5A00]">
+                    <span className="text-[11px] font-semibold text-[#8A5A00]">
                         {lowStock} low stock
                     </span>
                 )}
 
                 {outStock > 0 && (
-                    <span className="rounded-full bg-[#FFE5E5] px-2.5 py-1 text-[11px] font-semibold text-[#9A2424]">
+                    <span className="text-[11px] font-semibold text-[#9A2424]">
                         {outStock} out of stock
                     </span>
                 )}
@@ -1779,8 +1779,8 @@ export function ProductTable({
     };
 
     return (
-        <div className="w-full overflow-x-auto">
-            <table className="w-full min-w-[1040px] table-fixed text-[14px]">
+        <div className="w-full overflow-x-hidden">
+            <table className="w-full table-fixed text-[14px] min-w-0 [&_th]:align-middle [&_td]:align-middle [&_th]:px-1.5 [&_td]:px-1.5 [&_th]:py-1.5 [&_td]:py-2 [&_th]:leading-tight [&_td]:leading-snug [&_th]:tracking-normal [&_th]:[overflow-wrap:anywhere] [&_td]:[overflow-wrap:anywhere]">
                 <colgroup>
                     <col className={isOwner ? "w-[18%]" : "w-[22%]"} />
                     {isOwner ? <col className="w-[11%]" /> : null}
@@ -1872,7 +1872,7 @@ export function ProductTable({
                                                 </p>
 
                                                 {isProductExpired && (
-                                                    <span className="inline-flex rounded-full border border-[#F2C4C4] bg-[#FFF0F0] px-2 py-0.5 text-[10px] font-semibold text-[#C32F2F]">
+                                                    <span className="inline-block text-[10px] font-semibold text-[#C32F2F]">
                                                         Expired
                                                     </span>
                                                 )}
@@ -2036,7 +2036,7 @@ export function ProductTable({
                                         </td>
 
                                         <td className="px-2 py-3 text-center">
-                                            <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${variantStatus.style}`}>
+                                            <span className={`text-[11px] font-semibold ${variantStatus.style.replace(/bg-\[[^\]]+\]/g, "")}`}>
                                                 {variantStatus.label}
                                             </span>
                                         </td>
@@ -2593,7 +2593,8 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                         </div>
 
                         <div className="overflow-x-auto rounded-xl border border-[#E6DDF0]">
-                            <table className="w-full min-w-245 text-sm">
+                            <table className="w-full text-sm table-fixed min-w-0 [&_th]:align-middle [&_td]:align-middle [&_th]:px-1.5 [&_td]:px-1.5 [&_th]:py-1.5 [&_td]:py-2 [&_th]:leading-tight [&_td]:leading-snug [&_th]:tracking-normal [&_th]:[overflow-wrap:anywhere] [&_td]:[overflow-wrap:anywhere]">
+                                <colgroup><col className="w-[24%]"/><col className="w-[16%]"/><col className="w-[9%]"/><col className="w-[9%]"/><col className="w-[15%]"/><col className="w-[15%]"/><col className="w-[12%]"/></colgroup>
                                 <thead>
                                 <tr className="border-b border-[#E6DDF0] bg-[#FFFCF7]">
                                     {[
@@ -2653,7 +2654,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                                                 </td>
 
                                                 <td className="px-3 py-4 text-center">
-                                                    <span className="rounded-full bg-[#F7F1FF] px-3 py-1 text-xs font-semibold text-[#4E2C66]">
+                                                    <span className="text-xs font-semibold text-[#4E2C66]">
                                                         {product.hasVariants ? "With Variants" : "Regular"}
                                                     </span>
                                                 </td>
@@ -2698,7 +2699,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                                                         </td>
 
                                                         <td className="px-3 py-3 text-center">
-                                                            <span className="rounded-full bg-[#F7F1FF] px-3 py-1 text-xs font-semibold text-[#4E2C66]">
+                                                            <span className="text-xs font-semibold text-[#4E2C66]">
                                                                 Variant
                                                             </span>
                                                         </td>

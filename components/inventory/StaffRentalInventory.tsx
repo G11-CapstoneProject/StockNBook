@@ -1,19 +1,18 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { SuccessToast } from "./_shared";
 import {
     AlertTriangle, CalendarClock, ClipboardCheck, ClipboardList, Eye, CalendarDays,
-    PackageCheck, PackageSearch, RotateCcw, Search, Sparkles, Truck, X, RefreshCw, ChevronLeft, ChevronRight,
+    PackageCheck, PackageSearch, Search, Sparkles, Truck, X, ChevronLeft, ChevronRight,
 } from "lucide-react";
 import { useStaffRentalInventory, type StaffRentalAllocation, type StaffRentalAction, type StaffRentalEquipmentSchedule, type StaffRentalEquipmentCalendar } from "@/hooks/useRentalInventory";
 
 const panel = "min-w-0 overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-sm";
 const action = "inline-flex h-[40px] items-center justify-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-4 text-xs font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50";
 const primary = "inline-flex h-[40px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-xs font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-50";
-const th = "px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]";
+const th = "truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]";
 // Match the Manager rental inventory's compact, colored table action buttons.
 const viewAction = "inline-flex min-h-8 items-center justify-center gap-1 rounded-lg bg-[#F1EBFF] px-2.5 py-1.5 text-[11px] font-semibold text-[#5330B6] hover:bg-[#EAE0FF] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5330B6]";
 const scheduleAction = "inline-flex min-h-8 items-center justify-center gap-1 rounded-lg bg-[#EAF1FF] px-2.5 py-1.5 text-[11px] font-semibold text-[#2D539D] hover:bg-[#DCE8FF] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2D539D]";
@@ -134,15 +133,15 @@ function queueBookingStatus(value?: string | null) {
     }
 }
 const queueBookingStatusStyles: Record<string,string> = {
-    "Pending Review": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
-    "Approved": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
-    "Confirmed": "border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]",
-    "Preparing": "border-[#D8CBE7] bg-[#F7F1FF] text-[#4E2C66]",
-    "Released": "border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]",
-    "Return Inspection": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
-    "Pending Settlement": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
-    "Completed": "border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]",
-    "Cancelled": "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]",
+    "Pending Review": "text-[#A56607]",
+    "Approved": "text-[#A56607]",
+    "Confirmed": "text-[#1D4ED8]",
+    "Preparing": "text-[#4E2C66]",
+    "Released": "text-[#1D4ED8]",
+    "Return Inspection": "text-[#A56607]",
+    "Pending Settlement": "text-[#A56607]",
+    "Completed": "text-[#138342]",
+    "Cancelled": "text-[#C32F2F]",
 };
 // Match the existing local timestamp display when checking whether a movement happened today.
 function rentalActivityManilaDate(value: string): string {
@@ -225,10 +224,6 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const todayRentalActivity=rental.activity.filter(event=>rentalActivityManilaDate(event.occurredAt)===today);
     const equipmentById=React.useMemo(()=>new Map(rental.equipment.map(e=>[e.id,e])),[rental.equipment]);
     const allTasks=React.useMemo(()=>rental.allocations.map(a=>({item:a,type:taskType(a)})).filter(x=>x.type!==null),[rental.allocations]);
-    const returnTasks=allTasks.filter(x=>x.type==="return"&&x.item.endDate<=today);
-    const forReturn=returnTasks.length;
-    const readyTasks=allTasks.filter(x=>x.type==="release"&&x.item.startDate<=today);
-    const ready=readyTasks.length;
     const inspectionTasks=allTasks.filter(x=>x.type==="inspect");
     const inspection=inspectionTasks.length;
     const inspectionUnits=inspectionTasks.reduce((sum,x)=>sum+(x.item.returnedReceivedUnits??x.item.quantity),0);
@@ -327,7 +322,10 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         }).finally(()=>{if(!abort.signal.aborted)setCalendarLoading(false);});
         return ()=>abort.abort();
     },[scheduleEquipmentId,scheduleMonth,rental.getEquipmentCalendar]);
-    const cleaning=careTasks.filter(t=>t.kind==="cleaning").reduce((sum,t)=>sum+t.units,0);
+    // Count the Equipment Care rows (like Previous Returns); units are shown in the caption.
+    const cleaningTasks=careTasks.filter(t=>t.kind==="cleaning");
+    const cleaning=cleaningTasks.length;
+    const cleaningUnits=cleaningTasks.reduce((sum,t)=>sum+t.units,0);
     // Missing rows are report-scoped so replacement cannot accidentally change
     // a different booking's unresolved equipment or its customer claim.
     const missingCareTasks=rental.missingReports.map(report=>({
@@ -362,6 +360,16 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         return Array.from(groups.values()).sort((left,right)=>
             compareQueueEventDates(left.scheduleDate,right.scheduleDate,today) || left.reference.localeCompare(right.reference));
     },[bookingTasks,today]);
+    // Release and return are booking-wide, so these KPIs count the same booking rows as the queue.
+    // Ready = every equipment line prepared and the rental start date reached.
+    const readyBookings=bookingGroups.filter(group=>group.tasks.length>0&&
+        group.tasks.every(x=>x.type==="release"&&x.item.startDate<=today));
+    const ready=readyBookings.length;
+    const readyUnits=readyBookings.reduce((sum,group)=>sum+group.tasks.reduce((s,x)=>s+x.item.quantity,0),0);
+    const dueReturnTasks=(group:BookingQueueGroup)=>group.tasks.filter(x=>x.type==="return"&&x.item.endDate<=today);
+    const returnBookings=bookingGroups.filter(group=>dueReturnTasks(group).length>0);
+    const forReturn=returnBookings.length;
+    const returnUnits=returnBookings.reduce((sum,group)=>sum+dueReturnTasks(group).reduce((s,x)=>s+x.item.quantity,0),0);
     // Filter booking rows by their matching individual task; the selected checklist
     // still shows ALL currently actionable equipment for that booking.
     const queueQuery=search.trim().toLowerCase();
@@ -530,19 +538,27 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     return <div className="space-y-4" aria-label="Staff Rental Inventory">
         {!canOperate&&<p role="status" className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3 text-xs text-[#5330B6]">View-only Inventory access: equipment activity is visible, but receiving, rental handover, returns, and condition changes require Full access.</p>}
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[
-            {title:"Ready for Release",num:ready,caption:`${readyTasks.reduce((s,x)=>s+x.item.quantity,0)} units prepared for handover`,icon:<Truck size={19}/>},
-            {title:"For Return Today / Overdue",num:forReturn,caption:`${returnTasks.reduce((s,x)=>s+x.item.quantity,0)} units due · count shows tasks`,icon:<CalendarClock size={19}/>},
+            {title:"Ready for Release",num:ready,caption:`${readyUnits} units prepared for handover`,icon:<Truck size={19}/>},
+            {title:"For Return Today / Overdue",num:forReturn,caption:`${returnUnits} units due back`,icon:<CalendarClock size={19}/>},
             {title:"Previous Returns To Finalize",num:inspection,caption:`${inspectionUnits} previously returned units on hold`,icon:<ClipboardCheck size={19}/>},
-            {title:"Needs Cleaning",num:cleaning,caption:"Equipment held until cleaning is recorded",icon:<Sparkles size={19}/>},
+            {title:"Needs Cleaning",num:cleaning,caption:`${cleaningUnits} units held until cleaning is recorded`,icon:<Sparkles size={19}/>},
         ].map(c=>(
             <div key={c.title} aria-busy={rental.loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
-                <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-[#5A35A5]" aria-hidden="true">{c.icon}</span>
-                <span className="min-w-0 flex-1">
-                    <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{c.title}</span>
-                    {rental.loading ? <span className="mt-1 block h-7 w-24 max-w-full animate-pulse rounded-md bg-[#F1EBF8]" role="status" aria-label={`Loading ${c.title}`}/> :
-                        <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{rental.connected ? c.num.toLocaleString("en-PH") : "—"}</span>}
-                    <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{c.caption}</span>
-                </span>
+                {rental.loading ? <>
+                    <span className="h-14 w-14 shrink-0 animate-pulse rounded-full bg-[#EEE8F3]" aria-hidden="true"/>
+                    <span className="min-w-0 flex-1 space-y-2.5" role="status" aria-label={`Loading ${c.title}`}>
+                        <span className="block h-3.5 w-32 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                        <span className="block h-7 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                        <span className="block h-2.5 w-40 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                    </span>
+                </> : <>
+                    <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-[#5A35A5]" aria-hidden="true">{c.icon}</span>
+                    <span className="min-w-0 flex-1">
+                        <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{c.title}</span>
+                        <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{rental.connected ? c.num.toLocaleString("en-PH") : "—"}</span>
+                        <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{rental.connected ? c.caption : "Rental data unavailable"}</span>
+                    </span>
+                </>}
             </div>
         ))}</div>
         <section className={`${panel} flex h-[340px] min-h-0 flex-col`}>
@@ -566,34 +582,34 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Rental operations bookings" tabIndex={0}>
-                <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                    <colgroup><col className="w-[27%]"/><col className="w-[16%]"/><col className="w-[19%]"/><col className="w-[22%]"/><col className="w-[16%]"/></colgroup>
-                    <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>{["Client / Booking Ref","Schedule","Booking Type","Status","Action"].map(h=><th className={`${th} !px-2`} key={h}>{h}</th>)}</tr></thead>
+                <table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                    <colgroup><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/></colgroup>
+                    <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>{["Client / Booking Ref","Schedule","Booking Type","Status","Action"].map(h=><th className={th} key={h}>{h}</th>)}</tr></thead>
                     <tbody>{visibleBookingGroups.slice(0,50).map(group=>{
                         const active=selectedQueueReference===group.reference;
                         const open=()=>setSelectedQueueReference(group.reference);
                         return <tr key={group.reference} tabIndex={0} aria-selected={active}
                                    onClick={open} onKeyDown={e=>{if(e.target===e.currentTarget&&(e.key==="Enter"||e.key===" ")){e.preventDefault();open();}}}
                                    className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"":"hover:bg-[#FCF9FF]"}`}>
-                            <td className={`px-2 py-2 align-top ${active?"border-l-4 border-[#6F3FD3] pl-2":""}`}>
+                            <td className={`py-2 text-left align-middle ${active?"border-l-4 border-[#6F3FD3] px-3":"px-4"}`}>
                                 <span className="block break-words font-semibold">{group.clientName}</span>
                                 <span className="mt-1 block break-all text-[10px] text-[#806A8C]">{group.reference}</span>
                             </td>
-                            <td className="px-2 py-2 align-top">
+                            <td className="px-2 py-2 text-center align-middle">
                                 <span className="block font-medium">{queueScheduleDate(group.scheduleDate)}</span>
                                 {group.eventTime&&<span className="mt-1 block text-[10px] text-[#806A8C]">{group.eventTime}</span>}
                                 {group.returnDate!==group.scheduleDate&&<span className="mt-1 block text-[10px] text-[#806A8C]">Return: {queueScheduleDate(group.returnDate)}</span>}
                             </td>
-                            <td className="px-2 py-2 align-top">
+                            <td className="px-2 py-2 text-center align-middle">
                                 <span className="block break-words font-medium">{group.bookingType}</span>
                                 <span className="mt-1 block text-[10px] text-[#806A8C]">{group.tasks.length} equipment {group.tasks.length===1?"line":"lines"}</span>
                             </td>
-                            <td className="px-2 py-2 align-top">
-                                    <span className={`inline-flex max-w-full items-center justify-center rounded-full border px-2 py-1 text-center text-[10px] font-semibold leading-4 break-words ${queueBookingStatusStyles[queueBookingStatus(group.bookingStatus)]||"border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>
+                            <td className="px-2 py-2 text-center align-middle">
+                                    <span className={`inline-block max-w-full text-center text-[10px] font-semibold leading-4 break-words ${queueBookingStatusStyles[queueBookingStatus(group.bookingStatus)]||"text-[#2B174C]"}`}>
                                         {queueBookingStatus(group.bookingStatus)}
                                     </span>
                             </td>
-                            <td className="px-2 py-2 align-top text-left">
+                            <td className="px-2 py-2 align-middle text-center">
                                 <button type="button" aria-haspopup="dialog"
                                         onClick={e=>{e.stopPropagation();open();}}
                                         className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] cursor-pointer">
@@ -631,19 +647,19 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                     </select>
                 </div>
                 <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Equipment care and maintenance tasks" tabIndex={0}>
-                    <table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[22%]"/><col className="w-[29%]"/><col className="w-[8%]"/><col className="w-[17%]"/><col className="w-[24%]"/></colgroup>
-                        <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>
-                            {['Equipment','Work Item / Reference','Units','Status','Action'].map(h=><th key={h} className={`${th} !px-2`}>{h}</th>)}
+                    <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                        <colgroup><col className="w-[24%]"/><col className="w-[31%]"/><col className="w-[9%]"/><col className="w-[17%]"/><col className="w-[19%]"/></colgroup>
+                        <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>
+                            {['Equipment','Work Item / Reference','Units','Status','Action'].map(h=><th key={h} className={th}>{h}</th>)}
                         </tr></thead>
                         <tbody>{visibleCareTasks.map(task=><tr key={task.key} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                            <td className="px-2 py-2 align-top font-medium">{task.equipmentName}</td>
-                            <td className="px-2 py-2 align-top">
+                            <td className="py-2 align-middle font-medium px-4 text-left">{task.equipmentName}</td>
+                            <td className="px-2 py-2 align-middle">
                                 <div className="font-medium">{task.kind==="inspection"?'Finalize previous return inspection':
                                     task.kind==="cleaning"?'Clean returned equipment':
                                         task.kind==="routine"?'Routine cleaning / upkeep':
                                             task.kind==="repairs"?'Repair / safety review':'Missing equipment investigation'}</div>
-                                <div className="mt-1 max-w-[220px] break-all text-[10px] text-[#86778F]">{task.reference}</div>
+                                <div className="mx-auto mt-1 max-w-[220px] break-all text-[10px] text-[#86778F]">{task.reference}</div>
                                 {task.kind==="inspection"&&task.allocation.inspectionNotes&&
                                     <p title={task.allocation.inspectionNotes} className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]">{task.allocation.inspectionNotes}</p>}
                                 {(task.kind==="routine"||task.kind==="repairs")&&task.maintenance.reason&&
@@ -651,15 +667,15 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                 {task.kind==="missing"&&task.report.reason&&
                                     <p title={task.report.reason} className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]">{task.report.reason}</p>}
                             </td>
-                            <td className="px-2 py-2 align-top font-semibold tabular-nums">{task.units}</td>
-                            <td className="px-2 py-2 align-top">
+                            <td className="px-2 py-2 text-center align-middle font-semibold tabular-nums">{task.units}</td>
+                            <td className="px-2 py-2 text-center align-middle">
                                 {task.kind==="inspection"?<span className="break-words text-[10px] font-semibold text-[#C27416]">Pending Inspection</span>:
                                     task.kind==="cleaning"?<span className="break-words text-[10px] font-semibold text-[#C27416]">Needs Cleaning</span>:
                                         task.kind==="routine"?<span className="break-words text-[10px] font-semibold text-[#5330B6]">Routine Care</span>:
                                             task.kind==="missing"?<span className="break-words text-[10px] font-semibold text-[#A43D48]">Missing</span>:
                                                 <span className="break-words text-[10px] font-semibold text-[#A43D48]">Damaged</span>}
                             </td>
-                            <td className="px-2 py-2 align-top text-left">
+                            <td className="px-2 py-2 align-middle text-center">
                                 {task.kind==="inspection"?
                                     <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving}
                                             onClick={()=>setConfirmRecordedReturn(task.allocation)}>Finalize Return</button>:
@@ -691,15 +707,16 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                         <p className="mt-0.5 text-[11px] text-[#86778F]">Equipment receipts, rental movements, and repairs recorded today.</p>
                     </div>
                 </div>
-                <div className="min-h-0 flex-1 overflow-auto overscroll-contain" role="region" aria-label="Today's rental stock activity" tabIndex={0}>
-                    <table className="w-full min-w-[510px] text-left text-[11px]">
-                        <thead className="sticky top-0 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]">
+                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Today's rental stock activity" tabIndex={0}>
+                    <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                        <colgroup><col className="w-[16%]"/><col className="w-[30%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
+                        <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]">
                         <tr className="border-b border-[#E9E1EE]">
-                            <th className="px-3 py-3 font-semibold">Date &amp; Time</th>
-                            <th className="px-3 py-3 font-semibold">Equipment</th>
-                            <th className="px-3 py-3 font-semibold">Activity</th>
-                            <th className="px-2 py-3 text-center font-semibold">Qty</th>
-                            <th className="px-3 py-3 font-semibold">Reference No.</th>
+                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Date &amp; Time</th>
+                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Activity</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Qty</th>
+                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Reference No.</th>
                         </tr>
                         </thead>
                         <tbody>
@@ -709,16 +726,16 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                             const negative = staffNegativeMovements.has(event.type);
                             const label = staffActivityLabels[event.type] || event.type.replaceAll("_", " ");
                             return <tr key={event.id} className="border-b border-[#EFE8F2] last:border-0">
-                                <td className="whitespace-nowrap px-3 py-2.5 text-[#5F4E75]">
+                                <td className="whitespace-nowrap py-2 text-[#5F4E75] px-4 text-left">
                                     {when.date}
                                     {when.time && <div className="mt-0.5 text-[10px] text-[#8A7D90]">{when.time}</div>}
                                 </td>
-                                <td className="px-3 py-2.5 font-semibold text-[#2B174C]">{event.equipmentName}</td>
-                                <td className="px-3 py-2.5 text-[#4F3A5A]">{label}</td>
-                                <td className={`px-2 py-2.5 text-center font-semibold ${positive ? "text-[#23834A]" : negative ? "text-[#D92C3F]" : "text-[#4F3A5A]"}`}>
+                                <td className="px-2 py-2 font-semibold text-[#2B174C]">{event.equipmentName}</td>
+                                <td className={`px-2 py-2 text-center font-medium ${positive ? "text-[#23834A]" : negative ? "text-[#D92C3F]" : "text-[#5F4E75]"}`}>{label}</td>
+                                <td className={`px-2 py-2 text-center font-semibold ${positive ? "text-[#23834A]" : negative ? "text-[#D92C3F]" : "text-[#4F3A5A]"}`}>
                                     {positive ? "+" : negative ? "−" : ""}{Math.abs(event.quantity)}
                                 </td>
-                                <td className="break-all px-3 py-2.5 text-[#5F4E75]">{event.referenceNumber || "—"}</td>
+                                <td className="break-all px-2 py-2 text-[#5F4E75]">{event.referenceNumber || "—"}</td>
                             </tr>;
                         })}
                         </tbody>
@@ -730,47 +747,45 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         <section className={panel}><Header icon={<PackageCheck size={18}/>} title="Branch Rental Equipment List" subtitle={`Daily rental availability · ${branchName}`}
                                            right={<select className={action} aria-label="Filter rental product" value={rentalProductFilter} onChange={e=>setRentalProductFilter(e.target.value)}><option value="all">All Rental Products</option>{rentalProductNames.map(name=><option key={name} value={name}>{name}</option>)}</select>}/>
             <div className="border-b border-[#E9E1EE] px-4 py-3">
-                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto_auto_auto] xl:items-center">
+                <div className="w-full">
                     <label className="relative min-w-0"><span className="sr-only">Search rental equipment or booking</span>
                         <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
                         <input className="h-[44px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]" placeholder="Search equipment or booking..." value={search} onChange={e=>setSearch(e.target.value)}/>
                     </label>
-                    <button type="button" className={action} disabled={rental.refreshing} onClick={()=>void rental.refresh(true)}><RefreshCw size={16} className={rental.refreshing?"animate-spin":""}/> Refresh</button>
-                    <button type="button" className={action} onClick={()=>setTaskFilter("return")}><RotateCcw size={16}/> Returns</button>
-                    <Link href="/bookings" className={primary}><CalendarClock size={16}/> Bookings</Link>
                 </div>
             </div>
-            <div className="max-h-[360px] w-full overflow-auto overscroll-contain border-t border-[#E9E1EE]" role="region" aria-label="Branch rental equipment list" tabIndex={0}>
-                <table className="w-full min-w-[900px] text-left text-[11px]">
+            <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain border-t border-[#E9E1EE]" role="region" aria-label="Branch rental equipment list" tabIndex={0}>
+                <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                    <colgroup><col className="w-[10%]"/><col className="w-[20%]"/><col className="w-[8%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[10%]"/><col className="w-[27.5%]"/></colgroup>
                     <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                     <tr className="border-b border-[#E9E1EE]">
-                        <th className="px-1.5 py-3 font-semibold">Equipment No.</th>
-                        <th className="px-1.5 py-3 font-semibold">Rental Product</th>
-                        <th className="px-1.5 py-3 text-center font-semibold">Total Units</th>
-                        <th className="px-1.5 py-3 text-center font-semibold">Available Today</th>
-                        <th className="px-1.5 py-3 text-center font-semibold">Rented Out</th>
-                        <th className="px-1.5 py-3 text-center font-semibold">On Hold</th>
-                        <th className="px-1.5 py-3 text-center font-semibold">Availability</th>
-                        <th className="px-1.5 py-3 text-center font-semibold">Action</th>
+                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment No.</th>
+                        <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Rental Product</th>
+                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Total Units</th>
+                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Available Today</th>
+                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Rented Out</th>
+                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">On Hold</th>
+                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Availability</th>
+                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Action</th>
                     </tr>
                     </thead>
                     <tbody>{visibleEquipment.map(e=>{
                         const readyNow=Math.max(0,e.totalUnits-e.rentedOutUnits-e.maintenanceUnits-e.missingUnits);
                         const maximumUsable=Math.max(0,e.totalUnits-e.maintenanceUnits-e.missingUnits);
                         const availability=e.bookableToday<=0?(maximumUsable>0?'Fully Booked':'Unavailable'):e.alertLevel>0&&e.bookableToday<=e.alertLevel?'Low Availability':e.bookableToday===e.totalUnits&&e.maintenanceUnits===0&&e.missingUnits===0?'Fully Available':'Available';
-                        const availabilityColor=availability==='Fully Available'||availability==='Available'?'bg-[#E5F8EC] text-[#23834A]':availability==='Low Availability'?'bg-[#FFF2D3] text-[#A66A00]':'bg-[#FFE7EA] text-[#D92C3F]';
-                        return <tr key={e.id} className="border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
-                            <td className="px-1.5 py-3 text-[#4E2C66]">{e.equipmentNumber||'—'}</td>
-                            <td className="px-1.5 py-3 font-semibold">{e.name}</td>
-                            <td className="px-1.5 py-3 text-center font-semibold">{e.totalUnits}</td>
-                            <td className="px-1.5 py-3 text-center font-semibold" title="Available today after overlapping confirmed reservations, not just physically ready units">{e.bookableToday}</td>
-                            <td className="px-1.5 py-3 text-center">{e.rentedOutUnits}</td>
-                            <td className="px-1.5 py-3 text-center" title={`On Hold: ${holdBreakdown.get(e.id)?.inspection??0} inspection, ${holdBreakdown.get(e.id)?.cleaning??0} cleaning, ${holdBreakdown.get(e.id)?.routine??0} routine care, ${holdBreakdown.get(e.id)?.repairs??0} repair. Outstanding missing units: ${e.missingUnits}.`}>
+                        const availabilityColor=availability==='Fully Available'||availability==='Available'?'text-[#23834A]':availability==='Low Availability'?'text-[#A66A00]':'text-[#D92C3F]';
+                        return <tr key={e.id} className="h-12 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
+                            <td className="break-all py-2 px-4 text-left font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">{e.equipmentNumber||'—'}</td>
+                            <td className="px-2 py-2 font-semibold">{e.name}</td>
+                            <td className="px-2 py-2 text-center font-semibold">{e.totalUnits}</td>
+                            <td className="px-2 py-2 text-center font-semibold" title="Available today after overlapping confirmed reservations, not just physically ready units">{e.bookableToday}</td>
+                            <td className="px-2 py-2 text-center">{e.rentedOutUnits}</td>
+                            <td className="px-2 py-2 text-center" title={`On Hold: ${holdBreakdown.get(e.id)?.inspection??0} inspection, ${holdBreakdown.get(e.id)?.cleaning??0} cleaning, ${holdBreakdown.get(e.id)?.routine??0} routine care, ${holdBreakdown.get(e.id)?.repairs??0} repair. Outstanding missing units: ${e.missingUnits}.`}>
                                 <span>{e.maintenanceUnits}</span>
                                 {e.missingUnits > 0 && <span className="mt-1 block whitespace-nowrap text-[10px] font-semibold text-[#B45309]">Missing: {e.missingUnits}</span>}
                             </td>
-                            <td className="px-1.5 py-3 text-center"><span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${availabilityColor}`}>{availability}</span></td>
-                            <td className="px-1.5 py-3 text-center"><div className="flex flex-wrap items-center justify-center gap-1.5">
+                            <td className="px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${availabilityColor}`}>{availability}</span></td>
+                            <td className="px-2 py-2 text-center"><div className="flex flex-wrap items-center justify-center gap-1.5">
                                 <button type="button" className={viewAction} onClick={()=>setViewEquipment(e.id)}><Eye size={13}/> View</button>
                                 <button type="button" className={scheduleAction} onClick={()=>openSchedule(e.id)}><CalendarDays size={13}/> View Schedule</button>
                                 <button type="button" className={issueAction} disabled={!canOperate||readyNow<=0}
@@ -821,19 +836,19 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                                     : !selectedQueueDepositSettled ? "Security Deposit Pending" : "Fully Settled"}
                             </span>
                         </div>
-                        <div className="min-w-0 overflow-x-hidden">
-                            <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                        <div className="max-h-[320px] min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain">
+                            <table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                                 <colgroup><col className="w-[39%]"/><col className="w-[11%]"/><col className="w-[23%]"/><col className="w-[27%]"/></colgroup>
-                                <thead className="bg-[#FFFDF8]"><tr>{["Equipment","Qty","Status","Action"].map(h=><th key={h} className={th}>{h}</th>)}</tr></thead>
+                                <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>{["Equipment","Qty","Status","Action"].map(h=><th key={h} className={th}>{h}</th>)}</tr></thead>
                                 <tbody>{selectedQueueBooking.tasks.map(({item,type})=>{
                                     const perItemAction=type==="prepare"||type==="inspect";
                                     const nextLabel=type==="release"?"Ready for booking release":
                                         type==="return"?"Include in booking return":taskLabel[type||"prepare"];
                                     return <tr key={item.allocationId} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                                        <td className="break-words px-3 py-3 font-medium">{item.equipmentName}</td>
-                                        <td className="px-2 py-3 text-center font-semibold tabular-nums">{item.quantity}</td>
-                                        <td className="px-2 py-3 text-[11px]">{taskStatusLabel[type||"prepare"]||taskLabel[type||"prepare"]}</td>
-                                        <td className="px-2 py-3 text-center">
+                                        <td className="break-words py-2 font-medium px-4 text-left">{item.equipmentName}</td>
+                                        <td className="px-2 py-2 text-center font-semibold tabular-nums">{item.quantity}</td>
+                                        <td className={`px-2 py-2 text-center text-[10px] font-semibold ${type==="release"?"text-[#23834A]":type==="return"?"text-[#1D4ED8]":type==="damage"?"text-[#D92C3F]":"text-[#A56607]"}`}>{taskStatusLabel[type||"prepare"]||taskLabel[type||"prepare"]}</td>
+                                        <td className="px-2 py-2 text-center">
                                             {perItemAction?<button type="button" className={`${action} h-auto min-h-9 w-full break-words px-2 py-1.5 text-[11px]`}
                                                                    disabled={!canOperate||rental.saving} title={taskHelp[type||"prepare"]}
                                                                    onClick={()=>type==="inspect"?setConfirmRecordedReturn(item):openRentalAction(item)}>{taskLabel[type||"prepare"]}</button>:

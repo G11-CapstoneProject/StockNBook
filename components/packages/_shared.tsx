@@ -1,5 +1,5 @@
-import { CalendarDays, ChevronDown, ImagePlus, RefreshCw, Search } from "lucide-react";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { CalendarDays, ChevronDown, ImagePlus, Package2, RefreshCw, Search, Truck, X } from "lucide-react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -36,6 +36,8 @@ export const PACKAGE_CATEGORY_OPTIONS: PackageCategory[] = [
 ];
 
 export type PackageInclusion = {
+    itemType?: "consumable" | "rental";
+    equipmentId?: number | null;
     inventoryKey: string;
     productId: number;
     variantId?: number | null;
@@ -77,6 +79,8 @@ export type Product = {
 };
 
 export type PackageSelectableItem = {
+    itemType?: "consumable" | "rental";
+    equipmentId?: number | null;
     key: string;
     productId: number;
     variantId?: number | null;
@@ -226,6 +230,7 @@ function getVariantName(variant: ProductVariant) {
 }
 
 export function getInclusionKey(item: PackageInclusion) {
+    if (item.itemType === "rental" && item.equipmentId) return `rental:${item.equipmentId}`;
     if (item.inventoryKey) return item.inventoryKey;
 
     return item.variantId
@@ -314,7 +319,7 @@ export function Card({
     className?: string;
 }) {
     return (
-        <div className={`rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm ${className}`}>
+        <div className={`rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm ${className}`}>
             {children}
         </div>
     );
@@ -338,6 +343,34 @@ export function CardHeader({
                 </span>
             )}
         </div>
+    );
+}
+
+/** Summary tile with the same typography, spacing and icon treatment as POS StatCard. */
+export function PackageSummaryCard({
+                                       title,
+                                       value,
+                                       detail,
+                                       icon,
+                                       iconClassName = "bg-[#F0E9FF] text-[#5A35A5]",
+                                   }: {
+    title: string;
+    value: number;
+    detail: string;
+    icon: ReactNode;
+    iconClassName?: string;
+}) {
+    return (
+        <section className="flex min-h-[128px] items-center gap-4 rounded-[18px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
+            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`}>
+                {icon}
+            </span>
+            <div className="min-w-0">
+                <h2 className="text-[14px] font-medium text-[#2B174C]">{title}</h2>
+                <p className="mt-0.5 text-[26px] font-bold leading-tight text-[#1A1220]">{value}</p>
+                <p className="mt-1 text-xs text-[#806A8C]">{detail}</p>
+            </div>
+        </section>
     );
 }
 
@@ -497,13 +530,12 @@ export function PackageCard({
         0
     );
 
-    const regularInclusionCount = (pkg.inclusions || []).filter(
-        (item) => !item.variantId
-    ).length;
-
-    const variantInclusionCount = (pkg.inclusions || []).filter(
-        (item) => Boolean(item.variantId)
-    ).length;
+    const consumableInclusions = (pkg.inclusions || []).filter(
+        (item) => item.itemType !== "rental"
+    );
+    const rentalInclusions = (pkg.inclusions || []).filter(
+        (item) => item.itemType === "rental"
+    );
 
     const openDetails = () => setShowDetails(true);
 
@@ -623,14 +655,14 @@ export function PackageCard({
                     onClick={() => setShowDetails(false)}
                 >
                     <div
-                        className="flex max-h-[92vh] w-full max-w-[980px] flex-col overflow-hidden rounded-[22px] border border-[#E6DDF0] bg-white shadow-[0_24px_80px_rgba(20,10,35,0.28)]"
+                        className="flex max-h-[92vh] w-full max-w-[1000px] flex-col overflow-hidden rounded-[22px] border border-[#E6DDF0] bg-white shadow-[0_24px_80px_rgba(20,10,35,0.28)]"
                         onClick={(event) => event.stopPropagation()}
                     >
                         <div className="relative shrink-0 overflow-hidden bg-[#2D1B4E]">
                             <button
                                 type="button"
                                 onClick={() => setShowExpandedImage(true)}
-                                className="group/image block h-[280px] w-full cursor-zoom-in overflow-hidden text-left"
+                                className="group/image block h-[210px] sm:h-[230px] w-full cursor-zoom-in overflow-hidden text-left"
                                 aria-label="Expand package cover image"
                                 title="Click to enlarge image"
                             >
@@ -667,9 +699,9 @@ export function PackageCard({
                         </div>
 
                         <div className="min-h-0 flex-1 overflow-y-auto">
-                            <div className="grid gap-6 p-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+                            <div className="grid gap-5 p-4 sm:p-6 lg:grid-cols-[minmax(0,1fr)_minmax(330px,0.95fr)]">
                                 <div className="min-w-0 space-y-5">
-                                    <section>
+                                    <section className="rounded-[18px] border border-[#E6DDF0] bg-white p-4 sm:p-5">
                                         <h3 className="text-sm font-bold text-[#1A1220]">
                                             Package Information
                                         </h3>
@@ -699,7 +731,7 @@ export function PackageCard({
                                         </div>
                                     </section>
 
-                                    <section className="rounded-[16px] border border-[#EAE1EF] bg-[#FFFCF8] p-4">
+                                    <section className="rounded-[18px] border border-[#EAE1EF] bg-[#FFFCF8] p-4">
                                         <h3 className="text-sm font-bold text-[#1A1220]">
                                             Description
                                         </h3>
@@ -708,7 +740,7 @@ export function PackageCard({
                                         </p>
                                     </section>
 
-                                    <section className="rounded-[16px] border border-[#EAE1EF] bg-white p-4">
+                                    <section className="rounded-[18px] border border-[#EAE1EF] bg-white p-4">
                                         <div className="flex items-center justify-between gap-4">
                                             <div>
                                                 <h3 className="text-sm font-bold text-[#1A1220]">
@@ -734,71 +766,64 @@ export function PackageCard({
                                                 value={peso(totalInclusionValue)}
                                                 strong
                                             />
-                                            <DetailBox
-                                                label="Regular Products"
-                                                value={`${regularInclusionCount}`}
-                                            />
-                                            <DetailBox
-                                                label="Variants"
-                                                value={`${variantInclusionCount}`}
-                                            />
+                                            {consumableInclusions.length > 0 && (
+                                                <DetailBox label="Consumable Goods" value={`${consumableInclusions.length}`} />
+                                            )}
+                                            {rentalInclusions.length > 0 && (
+                                                <DetailBox label="Rental Goods" value={`${rentalInclusions.length}`} />
+                                            )}
                                         </div>
                                     </section>
                                 </div>
 
                                 <div className="min-w-0">
-                                    <section className="rounded-[18px] border border-[#E6DDF0] bg-[#FBF8FD] p-4">
-                                        <div className="flex items-center justify-between gap-4">
+                                    <section className="rounded-[18px] border border-[#E6DDF0] bg-[#FBF8FD] p-4 sm:p-5">
+                                        <div className="flex items-center justify-between gap-3">
                                             <div>
-                                                <h3 className="text-sm font-bold text-[#1A1220]">
-                                                    Package Inclusions
-                                                </h3>
-                                                <p className="mt-1 text-xs text-[#84738D]">
-                                                    Items included in this package.
-                                                </p>
+                                                <h3 className="text-sm font-bold text-[#1A1220]">Package Inclusions</h3>
+                                                <p className="mt-1 text-xs text-[#84738D]">What is included with this package.</p>
                                             </div>
-
                                             <span className="shrink-0 rounded-full bg-[#EEE5F8] px-3 py-1 text-xs font-bold text-[#4E2C66]">
                                                 {inclusionCount} {inclusionCount === 1 ? "item" : "items"}
                                             </span>
                                         </div>
 
-                                        <div className="mt-4 max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                                        <div className="mt-4 space-y-4">
                                             {inclusionCount === 0 ? (
                                                 <p className="rounded-xl border border-dashed border-[#DCCFE6] bg-white px-4 py-8 text-center text-sm text-[#7A6A84]">
                                                     No inclusions listed.
                                                 </p>
                                             ) : (
-                                                (pkg.inclusions || []).map((item) => (
-                                                    <div
-                                                        key={getInclusionKey(item)}
-                                                        className="rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(43,23,76,0.03)]"
-                                                    >
-                                                        <div className="flex items-start justify-between gap-4">
-                                                            <div className="min-w-0">
-                                                                <p className="break-words text-sm font-semibold leading-5 text-[#1A1220]">
-                                                                    {item.productName}
-                                                                </p>
-
-                                                                {item.variantName ? (
-                                                                    <p className="mt-1 break-words text-xs text-[#806F89]">
-                                                                        {item.variantName}
-                                                                    </p>
-                                                                ) : null}
-
-                                                                <p className="mt-1.5 text-xs text-[#7A6A84]">
-                                                                    {peso(item.unitSalesPrice)} each
-                                                                </p>
+                                                [
+                                                    { kind: "consumable", name: "Consumable Goods", items: consumableInclusions },
+                                                    { kind: "rental", name: "Rental Goods", items: rentalInclusions },
+                                                ].filter((group) => group.items.length > 0).map((group) => (
+                                                    <div key={group.kind} className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white">
+                                                        <div className="flex items-center justify-between gap-2 border-b border-[#EDE5F3] bg-[#F6F1FB] px-3.5 py-3">
+                                                            <div className="flex min-w-0 items-center gap-2 text-[#2B174C]">
+                                                                {group.kind === "rental" ? <Truck size={16} /> : <Package2 size={16} />}
+                                                                <h4 className="text-[13px] font-bold">{group.name}</h4>
                                                             </div>
-
-                                                            <div className="shrink-0 text-right">
-                                                                <p className="text-sm font-bold text-[#2B174C]">
-                                                                    × {item.quantity}
-                                                                </p>
-                                                                <p className="mt-1 text-xs font-semibold text-[#7A6A84]">
-                                                                    {peso(item.lineValue)}
-                                                                </p>
-                                                            </div>
+                                                            <span className="shrink-0 text-xs font-semibold text-[#705B81]">
+                                                                {group.items.length} {group.items.length === 1 ? "item" : "items"}
+                                                            </span>
+                                                        </div>
+                                                        <div className="divide-y divide-[#F0EAF4]">
+                                                            {group.items.map((item, index) => (
+                                                                <div key={`${getInclusionKey(item)}-${index}`} className="flex items-start justify-between gap-3 px-3.5 py-3">
+                                                                    <div className="min-w-0">
+                                                                        <p className="break-words text-[13px] font-semibold text-[#1A1220]">{item.productName}</p>
+                                                                        {item.variantName && <p className="mt-0.5 text-xs text-[#806F89]">{item.variantName}</p>}
+                                                                        <p className="mt-1 text-xs text-[#7A6A84]">
+                                                                            {peso(item.unitSalesPrice)} {group.kind === "rental" ? "per unit/day" : "each"}
+                                                                        </p>
+                                                                    </div>
+                                                                    <div className="shrink-0 text-right">
+                                                                        <p className="text-[13px] font-bold text-[#2B174C]">× {item.quantity}</p>
+                                                                        <p className="mt-1 text-xs font-semibold text-[#70617D]">{peso(item.lineValue)}</p>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
                                                         </div>
                                                     </div>
                                                 ))
@@ -940,6 +965,8 @@ export function PackageFormModal({
                                      setDownPaymentAmount,
                                      inclusions,
                                      products,
+                                     storeId,
+                                     branchId,
                                      selectedProductId,
                                      setSelectedProductId,
                                      inclusionQty,
@@ -977,6 +1004,8 @@ export function PackageFormModal({
     setDownPaymentAmount: (value: string) => void;
     inclusions: PackageInclusion[];
     products: PackageSelectableItem[];
+    storeId: number | null;
+    branchId: number | null;
     selectedProductId: string;
     setSelectedProductId: (value: string) => void;
     inclusionQty: string;
@@ -989,8 +1018,6 @@ export function PackageFormModal({
     onSubmit: (event: FormEvent<HTMLFormElement>) => void;
     onClose: () => void;
 }) {
-    if (!show) return null;
-
     const discountNumber = Number(discountValue || 0);
     const downPaymentInput = Number(downPaymentAmount || 0);
     const isPercentageType = discountType === "percentage";
@@ -1004,52 +1031,68 @@ export function PackageFormModal({
 
     const [inclusionSearch, setInclusionSearch] = useState("");
     const [inclusionCategory, setInclusionCategory] = useState("");
+    const [goodsTab, setGoodsTab] = useState<"consumable" | "rental">("consumable");
+    const [rentalCatalog, setRentalCatalog] = useState<Array<{
+        id: number; name: string; category?: string; dailyRate: number; physicallyAvailable: number; bookableToday: number;
+    }>>([]);
+    const [rentalLoading, setRentalLoading] = useState(false);
+    const [rentalError, setRentalError] = useState("");
     const [showFormImagePreview, setShowFormImagePreview] = useState(false);
 
-    const inclusionCategoryOptions = Array.from(
-        new Set(
-            products
-                .map((product) => String(product.category || "").trim())
-                .filter(Boolean)
-        )
-    ).sort((a, b) => a.localeCompare(b));
+    useEffect(() => {
+        if (!show || !storeId || !branchId) return;
+        const controller = new AbortController();
+        setRentalLoading(true);
+        setRentalError("");
+        setRentalCatalog([]);
+        void (async () => {
+            try {
+                // Same branch-scoped rental catalog as the customer booking portal.
+                // bookableToday is only a preview, NOT a reservation for an event date.
+                const response = await fetch("/api/bookings", {
+                    method: "POST", cache: "no-store", signal: controller.signal,
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ action: "get_public_rental_catalog", storeId, branchId }),
+                });
+                const data = await response.json();
+                if (!response.ok || Number(data.branchId) !== branchId) {
+                    throw new Error(data.error || "Unable to load rental equipment for this branch.");
+                }
+                if (!controller.signal.aborted) setRentalCatalog(Array.isArray(data.equipment) ? data.equipment : []);
+            } catch (reason) {
+                if (!controller.signal.aborted) {
+                    setRentalCatalog([]);
+                    setRentalError(reason instanceof Error ? reason.message : "Unable to load rental equipment.");
+                }
+            } finally {
+                if (!controller.signal.aborted) setRentalLoading(false);
+            }
+        })();
+        return () => controller.abort();
+    }, [show, storeId, branchId]);
 
-    const filteredInclusionProducts = products.filter((product) => {
+    const rentalProducts: PackageSelectableItem[] = rentalCatalog.map((item) => ({
+        key: `rental:${item.id}`, itemType: "rental", equipmentId: item.id,
+        productId: 0, productName: item.name, displayName: item.name,
+        category: item.category || "Other", stock: Math.max(0, Number(item.physicallyAvailable || 0)),
+        salesPrice: Number(item.dailyRate || 0),
+    }));
+    const activeProducts = goodsTab === "rental" ? rentalProducts : products;
+    const inclusionCategoryOptions = Array.from(new Set(activeProducts.map((p) =>
+        String(p.category || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    const filteredInclusionProducts = activeProducts.filter((product) => {
         const query = inclusionSearch.trim().toLowerCase();
-        const categoryQuery = inclusionCategory.trim().toLowerCase();
-
-        const matchesSearch =
-            !query ||
-            [
-                product.displayName,
-                product.productName,
-                product.variantName,
-                product.category,
-            ]
-                .filter(Boolean)
-                .join(" ")
-                .toLowerCase()
-                .includes(query);
-
-        const matchesCategory =
-            !categoryQuery ||
-            categoryQuery === "all" ||
-            categoryQuery === "all categories" ||
-            String(product.category || "")
-                .toLowerCase()
-                .includes(categoryQuery);
-
-        return matchesSearch && matchesCategory;
+        return (!query || [product.displayName, product.productName, product.variantName, product.category]
+                .filter(Boolean).join(" ").toLowerCase().includes(query)) &&
+            (!inclusionCategory || product.category === inclusionCategory);
     });
+    const getSelectedQuantity = (key: string) => inclusions.find((item) => getInclusionKey(item) === key)?.quantity || 0;
 
-    const getSelectedQuantity = (key: string) =>
-        inclusions.find(
-            (item) => getInclusionKey(item) === key
-        )?.quantity || 0;
+    if (!show) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6 backdrop-blur-sm">
-            <div className="max-h-[92vh] w-full max-w-[1460px] overflow-y-auto rounded-[18px] border border-[#E6DDF0] bg-white p-5 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#170D27]/55 px-3 py-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={editingId ? "Edit package" : "Add package"}>
+            <div className="max-h-[94vh] w-full max-w-[1360px] overflow-y-auto rounded-[20px] border border-[#E6DDF0] bg-[#FCFAFD] p-4 shadow-2xl sm:p-6">
                 <div className="mb-4 flex items-start justify-between gap-4">
                     <div>
                         <h2 className="text-[19px] font-bold text-[#1A1220]">
@@ -1057,30 +1100,28 @@ export function PackageFormModal({
                         </h2>
 
                         <p className="mt-1 text-sm leading-5 text-[#7A6A84]">
-                            Build a branch package using inventory products,
-                            category, picture, duration, discount rules, and
-                            required down payment.
+                            Set package details, choose consumable or rental goods, then review pricing and down payment.
                         </p>
                     </div>
 
                     <button
                         type="button"
                         onClick={onClose}
-                        className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E6DDF0] text-base text-[#7A6A84] hover:bg-[#F7F1FF]"
+                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#7A6A84] hover:bg-[#F7F1FF]"
                         aria-label="Close package form"
                     >
-                        ×
+                        <X size={18} />
                     </button>
                 </div>
 
-                <form onSubmit={onSubmit} className="space-y-3">
+                <form onSubmit={onSubmit} className="space-y-4">
                     {error && (
                         <div className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2.5 text-xs font-medium text-[#9B1C1C]">
                             {error}
                         </div>
                     )}
 
-                    <div className="grid grid-cols-[minmax(0,1.6fr)_minmax(220px,0.7fr)_minmax(220px,0.7fr)] gap-3">
+                    <div className="grid grid-cols-1 gap-3 rounded-2xl border border-[#E6DDF0] bg-white p-4 md:grid-cols-[minmax(0,1.6fr)_minmax(180px,.7fr)_minmax(180px,.7fr)]">
                         <Field label="Package Name">
                             <input
                                 value={name}
@@ -1120,7 +1161,7 @@ export function PackageFormModal({
                         </Field>
                     </div>
 
-                    <div className="grid grid-cols-2 items-stretch gap-3">
+                    <div className="grid grid-cols-1 items-stretch gap-3 rounded-2xl border border-[#E6DDF0] bg-white p-4 md:grid-cols-2">
                         <Field label="Description">
                             <textarea
                                 value={description}
@@ -1230,349 +1271,113 @@ export function PackageFormModal({
                         </div>
                     </div>
 
-                    <Card className="overflow-hidden bg-white p-0">
-                        <div className="border-b border-[#EAE1EF] px-4 py-3">
-                            <div className="flex items-center justify-between gap-4">
-                                <div>
-                                    <h3 className="text-[16px] font-bold text-[#1A1220]">
-                                        Package Inclusions
-                                    </h3>
-                                    <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                        Choose inventory items and set the quantity included in this package.
-                                    </p>
-                                </div>
-
-                                <span className="rounded-full bg-[#EFE8F8] px-3 py-1 text-xs font-bold text-[#4E2C66]">
-                                    {inclusions.length} selected
-                                </span>
+                    <Card className="overflow-hidden bg-white !p-0">
+                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#EAE1EF] px-4 py-4 sm:px-5">
+                            <div>
+                                <h3 className="text-[16px] font-bold text-[#1A1220]">Package Inclusions</h3>
+                                <p className="mt-1 text-xs text-[#7A6A84]">Choose goods included in this package. Rental equipment is subject to availability on the event dates.</p>
                             </div>
+                            <span className="rounded-full bg-[#EFE8F8] px-3 py-1 text-xs font-bold text-[#4E2C66]">{inclusions.length} selected</span>
                         </div>
-
-                        <div className="grid min-h-[430px] lg:grid-cols-[minmax(0,1fr)_500px]">
-                            <div className="min-w-0 border-b border-[#EAE1EF] lg:border-b-0 lg:border-r">
-                                <div className="p-3">
-                                    <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_240px]">
-                                        <div className="relative">
-                                            <Search
-                                                size={15}
-                                                className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                                            />
-                                            <input
-                                                value={inclusionSearch}
-                                                onChange={(event) =>
-                                                    setInclusionSearch(event.target.value)
-                                                }
-                                                placeholder="Search items or variants..."
-                                                className="w-full rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C]"
-                                            />
-                                        </div>
-
-                                        <div className="relative">
-                                            <select
-                                                value={inclusionCategory}
-                                                onChange={(event) =>
-                                                    setInclusionCategory(event.target.value)
-                                                }
-                                                className="w-full rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 text-sm font-medium text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C]"
-                                                aria-label="Filter inclusion products by category"
-                                            >
-                                                <option value="">
-                                                    All Categories
-                                                </option>
-
-                                                {inclusionCategoryOptions.map((option) => (
-                                                    <option key={option} value={option}>
-                                                        {option}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                    </div>
+                        <div className="grid lg:grid-cols-[minmax(0,1.3fr)_minmax(330px,1fr)]">
+                            <div className="min-w-0 border-b border-[#EAE1EF] p-4 lg:border-b-0 lg:border-r">
+                                <div className="mb-4 flex rounded-xl bg-[#F6F0FC] p-1" role="tablist" aria-label="Inclusion type">
+                                    <button type="button" role="tab" aria-selected={goodsTab === "consumable"}
+                                            onClick={() => { setGoodsTab("consumable"); setInclusionCategory(""); setInclusionSearch(""); }}
+                                            className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold transition ${goodsTab === "consumable" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#4E2C66] hover:bg-white"}`}>
+                                        <Package2 size={16} /> Consumable Goods
+                                    </button>
+                                    <button type="button" role="tab" aria-selected={goodsTab === "rental"}
+                                            onClick={() => { setGoodsTab("rental"); setInclusionCategory(""); setInclusionSearch(""); }}
+                                            className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold transition ${goodsTab === "rental" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#4E2C66] hover:bg-white"}`}>
+                                        <Truck size={16} /> Rental Goods
+                                    </button>
                                 </div>
-
-                                <div className="h-[470px] overflow-y-auto overflow-x-hidden">
-                                    <div className="sticky top-0 z-10 grid grid-cols-[minmax(0,2.1fr)_minmax(95px,0.55fr)_70px_95px_minmax(135px,0.75fr)] border-y border-[#EAE1EF] bg-[#FCFAFD] px-4 py-2.5 text-[10px] font-semibold uppercase tracking-[0.05em] text-[#806A8C]">
-                                        <span>Product</span>
-                                        <span>Category</span>
-                                        <span className="text-center">Stock</span>
-                                        <span className="text-right">Price</span>
-                                        <span className="text-center">Qty / Action</span>
+                                <div className="mb-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_180px]">
+                                    <label className="relative block">
+                                        <span className="sr-only">Search {goodsTab} items</span>
+                                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
+                                        <input value={inclusionSearch} onChange={(event) => setInclusionSearch(event.target.value)}
+                                               placeholder={goodsTab === "rental" ? "Search rental equipment..." : "Search items or variants..."}
+                                               className="h-10 w-full rounded-xl border border-[#E3D8EA] bg-white pl-9 pr-3 text-sm outline-none focus:border-[#2B174C]" />
+                                    </label>
+                                    <select value={inclusionCategory} onChange={(event) => setInclusionCategory(event.target.value)}
+                                            className="h-10 min-w-0 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs text-[#1A1220] outline-none focus:border-[#2B174C]"
+                                            aria-label="Filter inclusion items by category">
+                                        <option value="">All Categories</option>
+                                        {inclusionCategoryOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+                                    </select>
+                                </div>
+                                {goodsTab === "rental" && <p className="mb-3 rounded-lg bg-[#F9F5FE] px-3 py-2 text-[11px] leading-5 text-[#644879]">
+                                    Rates shown are per unit per day. The package pricing preview counts one day per rental unit; the Units column is physical stock, not future-date availability. Date-specific availability is checked when the customer books. Adding equipment here does not reserve it.
+                                </p>}
+                                {goodsTab === "rental" && rentalError && <p role="alert" className="mb-2 text-xs text-red-600">{rentalError}</p>}
+                                <div className="overflow-hidden rounded-xl border border-[#EAE1EF]">
+                                    <div className="grid grid-cols-[minmax(0,1fr)_80px_90px_112px] gap-2 border-b border-[#EAE1EF] bg-[#FBF8FD] px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-[#806A8C]">
+                                        <span>Product</span><span className="text-center">{goodsTab === "rental" ? "Units" : "Stock"}</span><span className="text-right">{goodsTab === "rental" ? "Rate / day" : "Price"}</span><span className="text-center">Qty</span>
                                     </div>
-
-                                    {filteredInclusionProducts.length === 0 ? (
-                                        <div className="px-4 py-10 text-center text-sm text-[#8A7A91]">
-                                            No products or variants match your search.
-                                        </div>
-                                    ) : (
-                                        filteredInclusionProducts.map((product) => {
-                                            const selectedQty =
-                                                getSelectedQuantity(product.key);
-
-                                            return (
-                                                <div
-                                                    key={product.key}
-                                                    className="grid grid-cols-[minmax(0,2.1fr)_minmax(95px,0.55fr)_70px_95px_minmax(135px,0.75fr)] items-center border-b border-[#EFE8F2] px-4 py-3 last:border-0"
-                                                >
-                                                    <div className="min-w-0 pr-3">
-                                                        <p className="truncate text-sm font-semibold text-[#1A1220]">
-                                                            {product.productName}
-                                                        </p>
-                                                        <p className="mt-0.5 truncate text-xs text-[#806F89]">
-                                                            {product.variantName || "Regular product"}
-                                                        </p>
-                                                    </div>
-
-                                                    <p className="truncate pr-2 text-xs text-[#6D5B78]">
-                                                        {product.category || "Uncategorized"}
-                                                    </p>
-
-                                                    <p
-                                                        className={`text-center text-sm font-bold tabular-nums ${
-                                                            product.stock <= 0
-                                                                ? "text-red-500"
-                                                                : "text-[#1A1220]"
-                                                        }`}
-                                                    >
-                                                        {product.stock}
-                                                    </p>
-
-                                                    <p className="text-right text-sm font-bold tabular-nums text-[#1A1220]">
-                                                        {peso(product.salesPrice)}
-                                                    </p>
-
-                                                    <div className="flex items-center justify-center gap-2">
-                                                        <button
-                                                            type="button"
-                                                            disabled={selectedQty <= 0}
-                                                            onClick={() =>
-                                                                onAdjustInclusion(product, -1)
-                                                            }
-                                                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-base font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-40"
-                                                        >
-                                                            −
-                                                        </button>
-
-                                                        <span className="min-w-6 text-center text-sm font-bold tabular-nums text-[#1A1220]">
-                                                            {selectedQty}
-                                                        </span>
-
-                                                        <button
-                                                            type="button"
-                                                            disabled={
-                                                                product.stock <= 0 ||
-                                                                selectedQty >= product.stock
-                                                            }
-                                                            onClick={() =>
-                                                                onAdjustInclusion(product, 1)
-                                                            }
-                                                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-base font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-40"
-                                                        >
-                                                            +
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            );
-                                        })
-                                    )}
+                                    <div className="max-h-[340px] divide-y divide-[#F1EAF5] overflow-y-auto">
+                                        {rentalLoading && goodsTab === "rental" ? <p className="p-6 text-center text-sm text-[#806A8C]">Loading branch rental equipment...</p>
+                                            : filteredInclusionProducts.length === 0 ? <p className="p-6 text-center text-sm text-[#806A8C]">No {goodsTab === "rental" ? "rental equipment" : "products"} match the filters.</p>
+                                                : filteredInclusionProducts.map((product) => {
+                                                    const selectedQty = getSelectedQuantity(product.key);
+                                                    return <div key={product.key} className="grid grid-cols-[minmax(0,1fr)_80px_90px_112px] items-center gap-2 px-3 py-3">
+                                                        <div className="min-w-0">
+                                                            <p className="truncate text-xs font-semibold text-[#1A1220]" title={product.displayName}>{product.displayName}</p>
+                                                            <p className="mt-0.5 truncate text-[11px] text-[#806F89]">{product.category || "Uncategorized"}</p>
+                                                        </div>
+                                                        <span className={`text-center text-xs font-semibold ${product.stock <= 0 ? "text-red-600" : "text-[#1A1220]"}`}>{product.stock}</span>
+                                                        <span className="text-right text-xs font-semibold tabular-nums text-[#1A1220]">{peso(product.salesPrice)}</span>
+                                                        <div className="flex items-center justify-center gap-1">
+                                                            <button type="button" disabled={selectedQty <= 0} onClick={() => onAdjustInclusion(product, -1)}
+                                                                    className="h-8 w-8 rounded-lg border border-[#E6DDF0] text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-30" aria-label={`Decrease ${product.displayName}`}>−</button>
+                                                            <span className="min-w-5 text-center text-xs font-bold tabular-nums">{selectedQty}</span>
+                                                            <button type="button" disabled={product.stock <= 0 || selectedQty >= product.stock} onClick={() => onAdjustInclusion(product, 1)}
+                                                                    className="h-8 w-8 rounded-lg border border-[#E6DDF0] text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-30" aria-label={`Increase ${product.displayName}`}>+</button>
+                                                        </div>
+                                                    </div>;
+                                                })}
+                                    </div>
                                 </div>
                             </div>
-
-                            <aside className="flex h-[547px] min-w-0 flex-col overflow-x-hidden bg-white p-4">
-                                <div className="flex items-center justify-between border-b border-[#EAE1EF] pb-3">
-                                    <h4 className="text-[18px] font-bold text-[#1A1220]">
-                                        Current Inclusion
-                                    </h4>
-
-                                    {inclusions.length > 0 && (
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                inclusions.forEach((item) =>
-                                                    onRemoveInclusion(
-                                                        getInclusionKey(item)
-                                                    )
-                                                );
-                                            }}
-                                            className="flex h-8 w-8 items-center justify-center rounded-lg text-red-500 transition hover:bg-red-50"
-                                            aria-label="Clear current inclusions"
-                                            title="Clear all"
-                                        >
-                                            <svg
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                strokeWidth="2"
-                                                className="h-4 w-4"
-                                                aria-hidden="true"
-                                            >
-                                                <path d="M4 7h16" />
-                                                <path d="M9 7V4h6v3" />
-                                                <path d="M7 7l1 13h8l1-13" />
-                                                <path d="M10 11v5M14 11v5" />
-                                            </svg>
-                                        </button>
-                                    )}
+                            <aside className="min-w-0 bg-[#FDFBFF] p-4">
+                                <div className="mb-3 flex items-center justify-between gap-3">
+                                    <h4 className="text-sm font-bold text-[#1A1220]">Selected Inclusions</h4>
+                                    {inclusions.length > 0 && <button type="button" className="text-xs font-semibold text-red-600 hover:underline"
+                                                                      onClick={() => inclusions.forEach((item) => onRemoveInclusion(getInclusionKey(item)))}>Clear all</button>}
                                 </div>
-
-                                <div className="mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_92px_82px_88px_18px] items-center gap-2 px-1 pb-2 text-[10px] font-semibold text-[#6D5B78]">
-                                    <span>Item</span>
-                                    <span className="text-center">Qty</span>
-                                    <span className="text-right">Unit Price</span>
-                                    <span className="text-right">Subtotal</span>
-                                    <span />
-                                </div>
-
-                                <div className="h-[380px] overflow-y-auto overflow-x-hidden pr-1">
-                                    {inclusions.length === 0 ? (
-                                        <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFDF8] px-4 text-center">
-                                            <p className="text-sm text-[#A28FAF]">
-                                                No items added yet.
-                                            </p>
-                                        </div>
-                                    ) : (
-                                        <div className="divide-y divide-[#EFE8F2]">
-                                            {inclusions.map((item) => {
-                                                const matchingProduct =
-                                                    products.find(
-                                                        (product) =>
-                                                            product.key ===
-                                                            getInclusionKey(item)
-                                                    );
-
-                                                return (
-                                                    <div
-                                                        key={getInclusionKey(item)}
-                                                        className="grid grid-cols-[minmax(0,1fr)_92px_82px_88px_18px] items-center gap-2 px-1 py-3"
-                                                    >
-                                                        <div className="min-w-0">
-                                                            <p
-                                                                className="truncate text-xs font-semibold text-[#1A1220]"
-                                                                title={item.productName}
-                                                            >
-                                                                {item.productName}
-                                                            </p>
-
-                                                            {item.variantName ? (
-                                                                <p className="mt-0.5 truncate text-[10px] text-[#806F89]">
-                                                                    {item.variantName}
-                                                                </p>
-                                                            ) : null}
-                                                        </div>
-
-                                                        <div className="flex items-center justify-center gap-1">
-                                                            <button
-                                                                type="button"
-                                                                disabled={!matchingProduct}
-                                                                onClick={() => {
-                                                                    if (matchingProduct) {
-                                                                        onAdjustInclusion(
-                                                                            matchingProduct,
-                                                                            -1
-                                                                        );
-                                                                    }
-                                                                }}
-                                                                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-sm text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-40"
-                                                                aria-label={`Decrease ${item.productName}`}
-                                                            >
-                                                                −
-                                                            </button>
-
-                                                            <span className="min-w-5 text-center text-xs font-bold tabular-nums text-[#2B174C]">
-                                                                {item.quantity}
-                                                            </span>
-
-                                                            <button
-                                                                type="button"
-                                                                disabled={
-                                                                    !matchingProduct ||
-                                                                    item.quantity >=
-                                                                    Number(
-                                                                        matchingProduct?.stock ||
-                                                                        0
-                                                                    )
-                                                                }
-                                                                onClick={() => {
-                                                                    if (matchingProduct) {
-                                                                        onAdjustInclusion(
-                                                                            matchingProduct,
-                                                                            1
-                                                                        );
-                                                                    }
-                                                                }}
-                                                                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-sm text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-40"
-                                                                aria-label={`Increase ${item.productName}`}
-                                                            >
-                                                                +
-                                                            </button>
-                                                        </div>
-
-                                                        <p className="text-right text-xs font-semibold tabular-nums text-[#1A1220]">
-                                                            {peso(item.unitSalesPrice)}
-                                                        </p>
-
-                                                        <p className="text-right text-xs font-semibold tabular-nums text-[#1A1220]">
-                                                            {peso(item.lineValue)}
-                                                        </p>
-
-                                                        <button
-                                                            type="button"
-                                                            onClick={() =>
-                                                                onRemoveInclusion(
-                                                                    getInclusionKey(item)
-                                                                )
-                                                            }
-                                                            className="flex h-6 w-6 items-center justify-center text-sm text-[#7A6A84] transition hover:text-red-500"
-                                                            aria-label={`Remove ${item.productName}`}
-                                                            title="Remove"
-                                                        >
-                                                            ×
-                                                        </button>
+                                <div className="max-h-[320px] min-h-[210px] space-y-2 overflow-y-auto">
+                                    {inclusions.length === 0 ? <div className="flex min-h-[210px] items-center justify-center rounded-xl border border-dashed border-[#E6DDF0] bg-white p-4 text-center text-xs text-[#A28FAF]">No items added yet. Choose products on the left.</div>
+                                        : inclusions.map((item) => {
+                                            const key = getInclusionKey(item);
+                                            const product = [...products, ...rentalProducts].find((p) => p.key === key);
+                                            return <div key={key} className="rounded-xl border border-[#EAE1EF] bg-white px-3 py-3">
+                                                <div className="flex items-start justify-between gap-2">
+                                                    <div className="min-w-0"><p className="truncate text-xs font-semibold text-[#1A1220]">{item.productName}</p>
+                                                        <p className="mt-1 text-[11px] text-[#806F89]">{item.itemType === "rental" ? "Rental · rate per day" : item.variantName || "Consumable"}</p></div>
+                                                    <button type="button" onClick={() => onRemoveInclusion(key)} className="text-[#9C829F] hover:text-red-600" aria-label={`Remove ${item.productName}`}><X size={15} /></button>
+                                                </div>
+                                                <div className="mt-2 flex items-center justify-between gap-2">
+                                                    <div className="flex items-center gap-1">
+                                                        <button type="button" disabled={!product} onClick={() => product && onAdjustInclusion(product, -1)} className="h-7 w-7 rounded-lg border border-[#E6DDF0] text-[#2B174C] disabled:opacity-30" aria-label={`Decrease selected ${item.productName}`}>−</button>
+                                                        <span className="min-w-5 text-center text-xs font-semibold">{item.quantity}</span>
+                                                        <button type="button" disabled={!product || item.quantity >= (product?.stock ?? 0)} onClick={() => product && onAdjustInclusion(product, 1)} className="h-7 w-7 rounded-lg border border-[#E6DDF0] text-[#2B174C] disabled:opacity-30" aria-label={`Increase selected ${item.productName}`}>+</button>
                                                     </div>
-                                                );
-                                            })}
-                                        </div>
-                                    )}
+                                                    <span className="text-xs font-bold tabular-nums text-[#2B174C]">{peso(item.lineValue)}</span>
+                                                </div>
+                                            </div>;
+                                        })}
                                 </div>
-
-                                <div className="mt-3 border-t border-dashed border-[#DCCFE6] pt-4">
-                                    <div className="flex items-center justify-between">
-                                        <span className="text-[16px] font-bold text-[#1A1220]">
-                                            Total
-                                        </span>
-
-                                        <span className="text-[20px] font-bold tabular-nums text-[#1A1220]">
-                                            {peso(originalValue)}
-                                        </span>
-                                    </div>
-
-                                    <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] text-[#7A6A84]">
-                                        <div className="rounded-lg bg-[#FAF7FC] px-3 py-2">
-                                            <span>Selected Items</span>
-                                            <p className="mt-0.5 text-sm font-bold text-[#2B174C]">
-                                                {inclusions.length}
-                                            </p>
-                                        </div>
-
-                                        <div className="rounded-lg bg-[#FAF7FC] px-3 py-2">
-                                            <span>Total Units</span>
-                                            <p className="mt-0.5 text-sm font-bold text-[#2B174C]">
-                                                {inclusions.reduce(
-                                                    (sum, item) =>
-                                                        sum +
-                                                        Number(
-                                                            item.quantity || 0
-                                                        ),
-                                                    0
-                                                )}
-                                            </p>
-                                        </div>
-                                    </div>
+                                <div className="mt-3 flex items-center justify-between border-t border-[#EAE1EF] pt-3">
+                                    <span className="text-xs font-semibold text-[#806F89]">Original Value</span>
+                                    <strong className="text-lg tabular-nums text-[#1A1220]">{peso(originalValue)}</strong>
                                 </div>
+                                <p className="mt-1 text-[11px] text-[#806F89]">{inclusions.length} item types · {inclusions.reduce((total, item) => total + item.quantity, 0)} units</p>
                             </aside>
                         </div>
                     </Card>
 
-                    <div className="grid grid-cols-4 gap-3">
+                    <div className="grid grid-cols-1 gap-3 rounded-2xl border border-[#E6DDF0] bg-white p-4 sm:grid-cols-2 lg:grid-cols-4">
                         <Field label="Type">
                             <select
                                 value={discountType}
@@ -1660,7 +1465,7 @@ export function PackageFormModal({
                         </Field>
                     </div>
 
-                    <div className="grid grid-cols-4 gap-3 rounded-xl border border-[#E6DDF0] bg-[#FFFCF7] p-3 text-center">
+                    <div className="grid grid-cols-2 gap-3 rounded-2xl border border-[#E6DDF0] bg-white p-4 text-center lg:grid-cols-4">
                         <SummaryBox
                             label="Original Value"
                             value={peso(originalValue)}
@@ -1916,6 +1721,8 @@ export function usePackageForm(
                 ...prev,
                 {
                     inventoryKey: product.key,
+                    itemType: product.itemType || "consumable",
+                    equipmentId: product.equipmentId ?? null,
                     productId: product.productId,
                     variantId: product.variantId ?? null,
                     productName: product.displayName,
@@ -1991,6 +1798,8 @@ export function usePackageForm(
                 ...previous,
                 {
                     inventoryKey: product.key,
+                    itemType: product.itemType || "consumable",
+                    equipmentId: product.equipmentId ?? null,
                     productId: product.productId,
                     variantId: product.variantId ?? null,
                     productName: product.displayName,
@@ -2030,7 +1839,7 @@ export function usePackageForm(
         }
 
         if (inclusions.length === 0) {
-            setError("Please add at least one product inclusion.");
+            setError("Please add at least one consumable or rental inclusion.");
             return;
         }
 

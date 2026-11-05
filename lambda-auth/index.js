@@ -10,11 +10,10 @@ const identifiers = (() => {
      *   Order      STORE-BRANCH-MMDDYY-XXXX   e.g. SPS-B4-110326-0001
      *   Product    STORE-BRANCH-PRD-XXXX      e.g. SPS-B4-PRD-0001  (one per product type)
      *   Equipment  STORE-BRANCH-EQP-XXXX      e.g. SPS-B4-EQP-0001  (one per physical rental unit)
-     *   Employee   STORE-BRANCH-EMP-XXXX      e.g. SPS-B4-EMP-0001  (managers and staff share one sequence)
+     *   Employee   STORE_ID-BRANCH_ID-MN/SF-XXXX  e.g. 6-12-MN-0001 / 6-12-SF-0001
      *
-     * This block is pasted, unchanged, into lambda-auth, lambda-pos, lambda-products
-     * and lambda-rental-inventory (each Lambda package stays self-contained).
-     * Keep all four copies identical.
+     * Other Lambdas retain the existing order/product/equipment numbering.
+     * Employee IDs are issued only by lambda-auth and have separate MN/SF sequences.
      *
      * Existing records are never modified: old Order IDs, Product Nos., equipment
      * numbers, store codes and branch codes stay exactly as they are. Only records
@@ -31,7 +30,7 @@ const identifiers = (() => {
         order: /^([A-Z0-9]{2,8})-([A-Z0-9]{2,8})-(\d{6})-(\d{4,})$/,
         product: /^([A-Z0-9]{2,8})-([A-Z0-9]{2,8})-PRD-(\d{4,})$/,
         equipment: /^([A-Z0-9]{2,8})-([A-Z0-9]{2,8})-EQP-(\d{4,})$/,
-        employee: /^([A-Z0-9]{2,8})-([A-Z0-9]{2,8})-EMP-(\d{4,})$/,
+        employee: /^(\d+)-(\d+)-(MN|SF)-(\d{4,})$/,
         // Product Nos. created before standardization, e.g. SPS-IMS-001.
         legacyProduct: /^([A-Za-z0-9]{2,8})-([A-Za-z0-9]{2,8})-(\d{3,})$/,
     });
@@ -202,9 +201,14 @@ const identifiers = (() => {
         assertCodes(storeCode, branchCode);
         return `${storeCode}-${branchCode}-EQP-${formatSequence(sequence)}`;
     }
-    function buildEmployeeCode(storeCode, branchCode, sequence) {
-        assertCodes(storeCode, branchCode);
-        return `${storeCode}-${branchCode}-EMP-${formatSequence(sequence)}`;
+    function buildEmployeeCode(storeId, branchId, roleCode, sequence) {
+        if (![storeId, branchId].every((value) => Number.isSafeInteger(Number(value)) && Number(value) > 0)) {
+            throw new Error("A valid store number and branch number are required for Employee IDs.");
+        }
+        if (roleCode !== "MN" && roleCode !== "SF") {
+            throw new Error("Employee ID role must be MN (manager) or SF (staff).");
+        }
+        return `${Number(storeId)}-${Number(branchId)}-${roleCode}-${formatSequence(sequence)}`;
     }
 
     function trailingSequence(value) {
@@ -418,17 +422,21 @@ const identifiers = (() => {
         return buildOrderId(storeCode, branchCode, orderDate, last);
     }
 
-    // Managers and staff share ONE sequence per branch, so their IDs never overlap.
-    async function generateEmployeeCode(connection, { storeId, branchId }) {
-        const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
-        const prefix = `${storeCode}-${branchCode}-EMP-`;
+    // Manager and staff Employee IDs are permanent and independently sequential per branch.
+    // The store/branch numbers are the existing immutable database primary keys.
+    async function generateEmployeeCode(connection, { storeId, branchId, roleCode }) {
+        if (roleCode !== "MN" && roleCode !== "SF") {
+            throw new Error("Employee ID role must be MN (manager) or SF (staff).");
+        }
+        const prefix = `${Number(storeId)}-${Number(branchId)}-${roleCode}-`;
+        const table = roleCode === "MN" ? "managers" : "staff";
         const floor = await maxSequenceFrom(connection,
-            `SELECT employee_code AS value FROM managers WHERE employee_code LIKE ?
-             UNION ALL
-            SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
-            [`${prefix}%`, `${prefix}%`], PATTERNS.employee);
-        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, entityType: "EMP", floor });
-        return buildEmployeeCode(storeCode, branchCode, last);
+            `SELECT employee_code AS value FROM ${table}
+             WHERE store_id = ? AND branch_id = ? AND employee_code LIKE ?`,
+            [storeId, branchId, `${prefix}%`], PATTERNS.employee);
+        const { last } = await reserveSequenceBlock(connection,
+            { storeId, branchId, entityType: "EMP", scopeKey: roleCode, floor });
+        return buildEmployeeCode(storeId, branchId, roleCode, last);
     }
 
     // Highest Product No. already issued with this exact prefix (products or rental types).
@@ -2172,7 +2180,7 @@ function generateSlug(storeName) {
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -4172,10 +4180,11 @@ module.exports.handler = async (event) => {
 
                         const permissions = branch.permissions || {};
 
-                        // Permanent Employee ID (shared manager/staff sequence per branch).
+                        // Permanent role-specific Employee ID within this store and branch.
                         const employeeCode = await identifiers.generateEmployeeCode(connection, {
                             storeId,
                             branchId,
+                            roleCode: "MN",
                         });
 
                         await connection.execute(
@@ -4859,13 +4868,14 @@ module.exports.handler = async (event) => {
             const inviteLink =
                 `${APP_BASE_URL}/accept-staff-invite?token=${encodeURIComponent(inviteToken)}`;
 
-            // Permanent Employee ID (shared manager/staff sequence per branch).
+            // Permanent role-specific Employee ID within this store and branch.
             if (!(await identifiers.ensureIdentifierSchema(connection))) {
                 throw new Error("Employee ID numbering is not set up. Run scripts/standardize-identifiers.js.");
             }
             const employeeCode = await identifiers.generateEmployeeCode(connection, {
                 storeId,
                 branchId,
+                roleCode: "SF",
             });
 
             await connection.execute(
@@ -6599,13 +6609,14 @@ module.exports.handler = async (event) => {
                     inviteToken
                 )}`;
 
-            // Permanent Employee ID (shared manager/staff sequence per branch).
+            // Permanent role-specific Employee ID within this store and branch.
             if (!(await identifiers.ensureIdentifierSchema(connection))) {
                 throw new Error("Employee ID numbering is not set up. Run scripts/standardize-identifiers.js.");
             }
             const employeeCode = await identifiers.generateEmployeeCode(connection, {
                 storeId,
                 branchId,
+                roleCode: "MN",
             });
 
             const [managerResult] =

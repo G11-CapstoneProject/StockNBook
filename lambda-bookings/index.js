@@ -332,10 +332,14 @@ async function saveRentalRequestLines(connection,{bookingId,storeId,branchId,ref
         if(line.quantity>remaining)
             throw rentalError(`${e.name}: only ${remaining} unit(s) available for ${startDate} to ${endDate}. Please reduce the quantity or choose another date.`);
         const cents=rentalMoneyCents(e.rental_rate_per_day);
-        if(line.expectedDailyRate!==undefined&&rentalMoneyCents(line.expectedDailyRate)!==cents)
-            throw rentalError(`${e.name}: the daily rental rate changed. Refresh the page before requesting this booking.`);
+        if ((line.expectedDailyRate !== undefined && rentalMoneyCents(line.expectedDailyRate) !== cents) ||
+            (line.includedDailyRate !== undefined && rentalMoneyCents(line.includedDailyRate) !== cents))
+            throw rentalError(`${e.name}: the daily rental rate changed. Ask the branch to update the package or refresh the quotation.`);
         if (cents<=0) throw new Error(`${e.name}: daily rental price has not been set.`);
-        const lineCents=cents*line.quantity*days;
+        const includedQuantity = Number(line.includedQuantity || 0);
+        if (!Number.isSafeInteger(includedQuantity) || includedQuantity < 0 || includedQuantity > line.quantity)
+            throw rentalError("Included rental quantity is invalid.");
+        const lineCents=cents*(line.quantity-includedQuantity)*days;
         if (!Number.isSafeInteger(lineCents)) throw new Error("Rental quotation is too large.");
         totalCents+=lineCents;
         await connection.execute(`INSERT INTO booking_rental_items
@@ -1481,6 +1485,7 @@ function packageInclusionsMatchBookedLines(snapshot, bookedItems) {
     if(!inclusions.length)return false;
     const expected=new Map();
     for(const line of inclusions) {
+        if (line.itemType === "rental") continue;
         const product=Number(line.productId ?? line.product_id);
         const variant=Number(line.variantId ?? line.variant_id ?? 0);
         const qty=Number(line.quantity ?? line.qty);
@@ -1498,6 +1503,18 @@ function packageInclusionsMatchBookedLines(snapshot, bookedItems) {
         actual.set(key,Number(line.booked_quantity));
     }
     return actual.size===expected.size&&[...expected].every(([key,qty])=>actual.get(key)===qty);
+}
+
+function packageRentalsMatchBookedLines(snapshot, bookedRentals) {
+    const inclusions = Array.isArray(snapshot?.inclusions) ? snapshot.inclusions : [];
+    const included = inclusions.filter(line => line.itemType === "rental");
+    return included.every(line => {
+        const id = Number(line.equipmentId ?? line.equipment_id);
+        const quantity = Number(line.quantity ?? line.qty);
+        const booked = bookedRentals.find(r => Number(r.equipmentId) === id);
+        return Number.isSafeInteger(id) && id > 0 && Number.isSafeInteger(quantity) && quantity > 0 &&
+            !!booked && Number(booked.quantity) >= quantity;
+    });
 }
 
 async function loadBookingApproval(connection, id, storeId, branchId) {
@@ -1529,7 +1546,7 @@ async function inspectBookingForConfirmation(connection, {bookingId,storeId,bran
          FROM booking_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
         [bookingId,storeId,branchId]);
     const [rentals]=await connection.execute(
-        `SELECT r.quantity,r.billable_days,r.daily_rate_snapshot,r.agreed_line_total,
+        `SELECT r.equipment_id AS equipmentId,r.quantity,r.billable_days,r.daily_rate_snapshot,r.agreed_line_total,
                 e.name AS equipment_name
          FROM booking_rental_items r JOIN rental_equipment e
                                           ON e.id=r.equipment_id AND e.store_id=r.store_id AND e.branch_id=r.branch_id
@@ -1551,16 +1568,25 @@ async function inspectBookingForConfirmation(connection, {bookingId,storeId,bran
         Number(billing.delivery_fee||0)+Number(billing.setup_fee||0))*100)/100;
     if(Math.abs(Number(billing.rental_subtotal||0)-rentalTotal)>0.01)
         reasons.push('Rental item charges do not match the saved quotation.');
-    if(rentals.some(i=>Math.abs(Number(i.agreed_line_total||0)-Number(i.quantity||0)*Number(i.billable_days||0)*Number(i.daily_rate_snapshot||0))>0.01))
-        reasons.push('One or more rental line amounts are inconsistent.');
+    const savedSnapshot = safeParseJSON(booking.package_json);
+    const includedRentalQuantities = new Map((Array.isArray(savedSnapshot?.inclusions) ? savedSnapshot.inclusions : [])
+        .filter(i => i.itemType === "rental")
+        .map(i => [Number(i.equipmentId ?? i.equipment_id), Number(i.quantity || 0)]));
+    if(rentals.some(i => {
+        const includedQty = Math.min(Number(i.quantity || 0), includedRentalQuantities.get(Number(i.equipmentId)) || 0);
+        return Math.abs(Number(i.agreed_line_total||0) -
+            (Number(i.quantity||0)-includedQty)*Number(i.billable_days||0)*Number(i.daily_rate_snapshot||0))>0.01;
+    })) reasons.push('One or more rental line amounts are inconsistent.');
     if(items.some(i=>!Number.isFinite(Number(i.unit_price)) || Number(i.booked_quantity)<=0 ||
         (String(i.source_type).toLowerCase()==='custom' &&
             Math.abs(Number(i.estimated_subtotal||0)-Number(i.unit_price||0)*Number(i.booked_quantity||0))>0.01)))
         reasons.push('One or more catalog item amounts are inconsistent.');
     if(!isCustom && (!booking.package_json || Number(booking.package_price||0)<=0))
         reasons.push('Package details or price need Manager verification.');
-    if(!isCustom && !packageInclusionsMatchBookedLines(safeParseJSON(booking.package_json),items))
+    if(!isCustom && !packageInclusionsMatchBookedLines(savedSnapshot,items))
         reasons.push('Package inventory lines are missing or inconsistent with its saved inclusions.');
+    if(!isCustom && !packageRentalsMatchBookedLines(savedSnapshot,rentals))
+        reasons.push('Included rental equipment is missing or inconsistent with the package.');
     if(isCustom && !items.length && !rentals.length)
         reasons.push('There are no verified catalog items; custom scope requires Manager review.');
     const agreed=Number(booking.agreed_price||0);
@@ -2076,12 +2102,14 @@ exports.handler = async (event) => {
                 'SELECT id,branch_name AS branchName FROM branches WHERE store_id=? AND id=? LIMIT 1',
                 [targetStoreId,requestedBranch]);
             if(!branches.length)return response(404,{error:"Branch not found for this store."});
-            const [items]=await connection.execute(`SELECT id,name,rental_rate_per_day AS dailyRate,
-                                                           total_units AS totalUnits,rented_out_units AS rentedOutUnits,
-                                                           maintenance_units AS maintenanceUnits,missing_units AS missingUnits
-                                                    FROM rental_equipment WHERE store_id=? AND branch_id=? AND archived_at IS NULL
-                                                                            AND rental_rate_per_day>0 AND total_units>maintenance_units+missing_units
-                                                    ORDER BY name LIMIT 200`,[targetStoreId,requestedBranch]);
+            const [items]=await connection.execute(`SELECT e.id,e.name,c.name AS category,e.rental_rate_per_day AS dailyRate,
+                                                           e.total_units AS totalUnits,e.rented_out_units AS rentedOutUnits,
+                                                           e.maintenance_units AS maintenanceUnits,e.missing_units AS missingUnits
+                                                    FROM rental_equipment e
+                                                    LEFT JOIN rental_categories c ON c.id=e.category_id AND c.store_id=e.store_id AND c.branch_id=e.branch_id
+                                                    WHERE e.store_id=? AND e.branch_id=? AND e.archived_at IS NULL
+                                                    AND e.rental_rate_per_day>0 AND e.total_units>e.maintenance_units+e.missing_units
+                                                    ORDER BY e.name LIMIT 200`,[targetStoreId,requestedBranch]);
             // Always calculate today's date-aware bookable units for the public
             // catalog preview, even before the customer selects event dates.
             // Selections/checkout still require explicit dates and server checks.
@@ -2115,7 +2143,7 @@ exports.handler = async (event) => {
                     const reservedToday=rentalPeakReserved(allocations,today,today,today);
                     const bookableToday=Math.max(0,capacity-reservedToday);
                     const reservedForDates=withDates?rentalPeakReserved(allocations,startDate,endDate,today):null;
-                    return {id:Number(e.id),name:e.name,dailyRate:Number(e.dailyRate),physicallyAvailable,
+                    return {id:Number(e.id),name:e.name,category:e.category || "Other",dailyRate:Number(e.dailyRate),physicallyAvailable,
                         bookableToday,reservedForDates,availableForDates:withDates?Math.max(0,capacity-reservedForDates):null};
                 })});
         }
@@ -2198,16 +2226,6 @@ exports.handler = async (event) => {
                         throw new Error('Rental end date must match the selected event end date.');
                 }
             } catch(error) { return response(400,{error:error.message}); }
-            let rentalStartDate=null,rentalEndDate=null;
-            if(rentalSelections.length){
-                try {rentalStartDate=rentalDate(requestedStart,'Event date');
-                    rentalEndDate=finalEventEndDate;
-                    const nowParts=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
-                    const datePart=type=>nowParts.find(x=>x.type===type)?.value||'';
-                    const today=`${datePart('year')}-${datePart('month')}-${datePart('day')}`;
-                    if(rentalStartDate<today)throw new Error('Rental start date cannot be in the past.');
-                } catch(error){return response(400,{error:error.message});}
-            }
             const finalBookingReference = bookingReference || booking_reference || null;
             const finalBookingType = bookingType || booking_type || "";
             const finalDate = date || event_date;
@@ -2309,6 +2327,42 @@ exports.handler = async (event) => {
                 ? ""
                 : packageSnapshot?.name || rawPackageName || "";
 
+            // Package rentals are INCLUDED in its fixed price. Merge with any
+            // optional customer-paid extras, but do not trust client flags or prices.
+            const packageRentalLines = isCustom ? [] : (packageSnapshot?.inclusions || [])
+                .filter(line => line.itemType === "rental");
+            if (packageRentalLines.length) {
+                const combined = new Map(rentalSelections.map(line => [line.equipmentId, {...line, includedQuantity:0}]));
+                for (const line of packageRentalLines) {
+                    const equipmentId = Number(line.equipmentId ?? line.equipment_id);
+                    const quantity = Number(line.quantity ?? line.qty);
+                    if (!Number.isSafeInteger(equipmentId) || equipmentId <= 0 ||
+                        !Number.isSafeInteger(quantity) || quantity <= 0)
+                        return response(409,{error:"Package contains invalid rental equipment. Ask the branch to correct it."});
+                    const existing = combined.get(equipmentId);
+                    if (existing) {
+                        existing.quantity += quantity;
+                        existing.includedQuantity = quantity;
+                        existing.includedDailyRate = line.unitSalesPrice ?? line.unit_sales_price;
+                    } else combined.set(equipmentId, {equipmentId, quantity, includedQuantity:quantity,
+                        expectedDailyRate:line.unitSalesPrice ?? line.unit_sales_price,
+                        includedDailyRate:line.unitSalesPrice ?? line.unit_sales_price});
+                }
+                rentalSelections = [...combined.values()];
+                if (rentalSelections.length > 30)
+                    return response(409,{error:"Too many rental equipment types in this booking."});
+            }
+            let rentalStartDate=null,rentalEndDate=null;
+            if(rentalSelections.length){
+                try {rentalStartDate=rentalDate(requestedStart,'Event date');
+                    rentalEndDate=finalEventEndDate;
+                    const nowParts=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+                    const datePart=type=>nowParts.find(x=>x.type===type)?.value||'';
+                    const today=`${datePart('year')}-${datePart('month')}-${datePart('day')}`;
+                    if(rentalStartDate<today)throw new Error('Rental start date cannot be in the past.');
+                } catch(error){return response(400,{error:error.message});}
+            }
+
             const packageJsonForSave = packageSnapshot
                 ? JSON.stringify(packageSnapshot)
                 : packageInput && typeof packageInput === "object"
@@ -2391,7 +2445,7 @@ exports.handler = async (event) => {
                 // package JSON must never silently bypass stock or branch checks.
                 const verifiedPackageItems = isCustom ? [] : await validatePublicBookingSalesItems(
                     connection,
-                    (packageSnapshot?.inclusions || []).map(item => {
+                    (packageSnapshot?.inclusions || []).filter(item => item.itemType !== "rental").map(item => {
                         const qty=Number(item.quantity ?? item.qty);
                         if(!Number.isSafeInteger(qty)||qty<1)
                             throw rentalError('Package has an invalid inventory quantity. Ask the branch to correct its package.');
@@ -2403,8 +2457,8 @@ exports.handler = async (event) => {
                     }),
                     targetStoreId,targetBranchId
                 );
-                if (!isCustom && !verifiedPackageItems.length)
-                    throw rentalError('This package does not have valid inventory inclusions. Ask the branch to review its package.');
+                if (!isCustom && !verifiedPackageItems.length && !packageRentalLines.length)
+                    throw rentalError('This package has no valid inventory or rental inclusions. Ask the branch to review it.');
                 const bookingItemsToSave = normalizeBookingItemsForSave(
                     isCustom ? verifiedCustomItems : verifiedPackageItems, {
                         bookingId,

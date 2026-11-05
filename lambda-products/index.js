@@ -5000,6 +5000,7 @@ exports.handler = async (event) => {
                         p.supplier, p.supplier_invoice_number AS supplierInvoiceNumber,
                         p.purchase_total AS purchaseTotal, p.payment_method AS paymentMethod,
                         DATE_FORMAT(p.purchase_date,'%Y-%m-%d') AS purchaseDate,
+                        DATE_FORMAT(p.created_at,'%Y-%m-%d %H:%i:%s') AS recordedAt,
                         DATE_FORMAT(p.payment_due_date,'%Y-%m-%d') AS paymentDueDate,
                         COALESCE((SELECT SUM(pay.amount) FROM inventory_supplier_payments pay
                                   WHERE pay.purchase_id=p.id),0) AS amountPaid

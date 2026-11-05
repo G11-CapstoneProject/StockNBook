@@ -90,16 +90,16 @@ function salesQueueBookingStatus(booking: SalesBooking): string {
     }
 }
 const salesQueueStatusStyles: Record<string, string> = {
-    "Pending Review": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
-    "Approved": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
-    "Confirmed": "border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]",
-    "Preparing": "border-[#D8CBE7] bg-[#F7F1FF] text-[#4E2C66]",
-    "Released": "border-[#C9D9FB] bg-[#EEF4FF] text-[#1D4ED8]",
-    "Return Inspection": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
-    "Pending Settlement": "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
-    "Completed": "border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]",
-    "Cancelled": "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]",
-    "Status unavailable": "border-[#E6DDF0] bg-[#F7F1FF] text-[#806A8C]",
+    "Pending Review": "text-[#A56607]",
+    "Approved": "text-[#A56607]",
+    "Confirmed": "text-[#1D4ED8]",
+    "Preparing": "text-[#4E2C66]",
+    "Released": "text-[#1D4ED8]",
+    "Return Inspection": "text-[#A56607]",
+    "Pending Settlement": "text-[#A56607]",
+    "Completed": "text-[#138342]",
+    "Cancelled": "text-[#C32F2F]",
+    "Status unavailable": "text-[#806A8C]",
 };
 function displaySalesBookingDate(date:string) {
     if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return date || "—";
@@ -132,7 +132,7 @@ const card = "min-w-0 overflow-hidden rounded-2xl border border-[#E6DDF0] bg-whi
 const outline = "inline-flex h-[42px] items-center justify-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-4 text-sm font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]";
 const primary = "inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]";
 const filterClass = "h-[40px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs text-[#2B174C] outline-none focus:border-[#2B174C]";
-const headClass = "px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]";
+const headClass = "truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]";
 
 function dateInManila(value = new Date()) {
     const parts = new Intl.DateTimeFormat("en-US", {
@@ -191,16 +191,16 @@ function toStockLines(products: Product[]): StockLine[] {
         if (product.hasVariants && product.variants?.length) {
             return product.variants.map(variant => {
                 const label = Object.values(variant.variantValues || {}).filter(Boolean).join(", ") || "Variant";
-                return from(variant.stock, variant.alertLevel, `${product.name} – ${label}`,
+                return from(variant.sellableStock ?? variant.stock, variant.alertLevel, `${product.name} – ${label}`,
                     variant.variantNumber || product.productNumber || "", `${product.id}:${variant.id}`, variant.id, variant.expirationDate);
             });
         }
-        return [from(product.stock, product.alertLevel, product.name, product.productNumber || "", `${product.id}:regular`, null, product.expirationDate)];
+        return [from(product.sellableStock ?? product.stock, product.alertLevel, product.name, product.productNumber || "", `${product.id}:regular`, null, product.expirationDate)];
     });
 }
 function stockBadge(status: StockLine["status"]) {
-    return status === "Out of Stock" ? "bg-[#FFE7EA] text-[#BF2438]" :
-        status === "Low Stock" ? "bg-[#FFF3D8] text-[#B07408]" : "bg-[#E5F7ED] text-[#218246]";
+    return status === "Out of Stock" ? "text-[#BF2438]" :
+        status === "Low Stock" ? "text-[#B07408]" : "text-[#218246]";
 }
 
 // Manager-style parent rows remain read-only for Staff. Each variant retains its
@@ -225,12 +225,12 @@ function staffProductDisplayStatus(product:Product): StaffInventoryStatus {
     return "In Stock";
 }
 function staffInventoryStatusClass(status:StaffInventoryStatus):string {
-    if(status==="Expired")return "bg-[#F4E9F8] text-[#8E4AA6]";
-    if(status==="Expiring Soon")return "bg-[#EEE8FF] text-[#6944C9]";
-    return stockBadge(status);
+    if(status==="Expired")return "text-[#8E4AA6]";
+    if(status==="Expiring Soon")return "text-[#6944C9]";
+    return status==="Out of Stock" ? "text-[#D92C3F]" : status==="Low Stock" ? "text-[#C77A00]" : "text-[#23834A]";
 }
 function staffInventoryStatusBadge(status:StaffInventoryStatus) {
-    return <span className={`inline-flex max-w-full items-center justify-center rounded-full px-2 py-1 text-center text-[10px] font-semibold leading-4 ${staffInventoryStatusClass(status)}`}>{status}</span>;
+    return <span className={`inline-block max-w-full text-center text-[10px] font-semibold leading-4 ${staffInventoryStatusClass(status)}`}>{status}</span>;
 }
 function staffStockInDay(value?:string|null):string {
     const raw=String(value||"").trim();
@@ -257,10 +257,10 @@ function fromMovements(movements: StockMovement[]): ActivityRow[] {
     }));
 }
 function activityBadge(kind: string) {
-    if (kind === "POS Sale") return "bg-[#F3F0F8] text-[#5A476A]";
-    if (kind === "Stock Received") return "bg-[#E5F7ED] text-[#218246]";
-    if (kind === "POS Void") return "bg-[#E9F2FF] text-[#2861A8]";
-    return "bg-[#F2EDF8] text-[#5A476A]";
+    if (kind === "POS Sale") return "text-[#5A476A]";
+    if (kind === "Stock Received") return "text-[#218246]";
+    if (kind === "POS Void") return "text-[#2861A8]";
+    return "text-[#5A476A]";
 }
 function requireApiSuccess(response: Response, data: { success?: boolean; error?: string }, fallback: string) {
     if (!response.ok || !data.success) {
@@ -289,13 +289,21 @@ function Stat({label,value,helper,icon,color,loading=false}: {
 }) {
     return (
         <div aria-busy={loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
-            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${color}`} aria-hidden="true">{icon}</span>
-            <span className="min-w-0 flex-1">
-                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
-                {loading ? <span className="mt-1 block h-7 w-24 max-w-full animate-pulse rounded-md bg-[#F1EBF8]" role="status" aria-label={`Loading ${label}`}/> :
-                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{value == null ? "—" : value.toLocaleString("en-PH")}</span>}
-                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{helper}</span>
-            </span>
+            {loading ? <>
+                <span className="h-14 w-14 shrink-0 animate-pulse rounded-full bg-[#EEE8F3]" aria-hidden="true"/>
+                <span className="min-w-0 flex-1 space-y-2.5" role="status" aria-label={`Loading ${label}`}>
+                    <span className="block h-3.5 w-32 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                    <span className="block h-7 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                    <span className="block h-2.5 w-40 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                </span>
+            </> : <>
+                <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${color}`} aria-hidden="true">{icon}</span>
+                <span className="min-w-0 flex-1">
+                    <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
+                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{value == null ? "—" : value.toLocaleString("en-PH")}</span>
+                    <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{helper}</span>
+                </span>
+            </>}
         </div>
     );
 }
@@ -769,10 +777,10 @@ export default function StaffInventory() {
                                 <button type="button" className="ml-2 underline" onClick={()=>setSalesQueueKey(key=>key+1)}>Retry</button></p>}
                             {salesQueueLoading?<div className="space-y-3 p-4" aria-busy="true">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]"/>)}</div>:
                                 <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Sales operations booking queue" tabIndex={0}>
-                                    <table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                                        <colgroup><col className="w-[27%]"/><col className="w-[16%]"/><col className="w-[19%]"/><col className="w-[22%]"/><col className="w-[16%]"/></colgroup>
-                                        <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>
-                                            {["Client / Booking Ref","Schedule","Booking Type","Status","Action"].map(label=><th key={label} className={`${headClass} !px-2 !py-2`}>{label}</th>)}
+                                    <table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                        <colgroup><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/></colgroup>
+                                        <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>
+                                            {["Client / Booking Ref","Schedule","Booking Type","Status","Action"].map(label=><th key={label} className={headClass}>{label}</th>)}
                                         </tr></thead>
                                         <tbody>{visibleSalesBookings.map(booking=>{
                                             const active=selectedSalesBookingRef===booking.reference;
@@ -782,24 +790,24 @@ export default function StaffInventory() {
                                                        onClick={open}
                                                        onKeyDown={e=>{if(e.target===e.currentTarget&&(e.key==="Enter"||e.key===" ")){e.preventDefault();open();}}}
                                                        className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"":"hover:bg-[#FCF9FF]"}`}>
-                                                <td className={`px-2 py-2 align-middle ${active?"border-l-4 border-[#6F3FD3] pl-2":""}`}>
+                                                <td className={`py-2 text-left align-middle ${active?"border-l-4 border-[#6F3FD3] px-3":"px-4"}`}>
                                                     <span className="block break-words font-semibold">{booking.clientName}</span>
                                                     <span className="mt-1 block break-all text-[10px] text-[#806A8C]">{booking.reference}</span>
                                                 </td>
-                                                <td className="px-2 py-2 align-middle">
+                                                <td className="px-2 py-2 text-center align-middle">
                                                     <span className="block font-medium">{displaySalesBookingDate(booking.eventDate)}</span>
                                                     {booking.eventTime&&<span className="mt-1 block text-[10px] text-[#806A8C]">{booking.eventTime}</span>}
                                                 </td>
-                                                <td className="px-2 py-2 align-middle">
+                                                <td className="px-2 py-2 text-center align-middle">
                                                     <span className="block break-words font-medium">{salesBookingType(booking.bookingType)}</span>
                                                     <span className="mt-1 block text-[10px] text-[#806A8C]">{booking.items.length} product {booking.items.length===1?"line":"lines"}</span>
                                                 </td>
-                                                <td className="px-2 py-2 align-top">
-                                                    <span className={`inline-flex max-w-full items-center justify-center rounded-full border px-2 py-1 text-center text-[10px] font-semibold leading-4 break-words ${salesQueueStatusStyles[statusLabel]||"border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>
+                                                <td className="px-2 py-2 text-center align-middle">
+                                                    <span className={`inline-block max-w-full text-center text-[10px] font-semibold leading-4 break-words ${salesQueueStatusStyles[statusLabel]||"text-[#2B174C]"}`}>
                                                         {statusLabel}
                                                     </span>
                                                 </td>
-                                                <td className="px-1 py-2 text-center align-middle">
+                                                <td className="px-2 py-2 text-center align-middle">
                                                     <button type="button" aria-haspopup="dialog"
                                                             onClick={e=>{e.stopPropagation();open();}}
                                                             className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">
@@ -821,25 +829,25 @@ export default function StaffInventory() {
                                     </select>
                                 </SectionHead>
                                 <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" tabIndex={0} aria-label="Stock alerts to review">
-                                    <table className="w-full min-w-0 table-fixed text-[10px] xl:text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                                        <colgroup><col className="w-[38%]"/><col className="w-[11%]"/><col className="w-[13%]"/><col className="w-[21%]"/><col className="w-[17%]"/></colgroup>
+                                    <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                        <colgroup><col className="w-[32%]"/><col className="w-[17%]"/><col className="w-[16%]"/><col className="w-[17%]"/><col className="w-[18%]"/></colgroup>
                                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
-                                            <th className="break-words px-2 py-2 text-left text-[9px] font-semibold uppercase text-[#806A8C]">Product</th>
-                                            <th className="break-words px-1 py-2 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Current Stock</th>
-                                            <th className="break-words px-1 py-2 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Reorder Point</th>
-                                            <th className="px-1 py-2 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Task</th>
-                                            <th className="px-1 py-2 text-center text-[9px] font-semibold uppercase text-[#806A8C]">Action</th>
+                                            <th className="truncate break-words px-2 py-2 font-semibold uppercase text-[#806A8C] text-center text-[10px] tracking-normal">Product</th>
+                                            <th className="truncate break-words px-2 py-2 text-center font-semibold uppercase text-[#806A8C] text-[10px] tracking-normal">Current Stock</th>
+                                            <th className="truncate break-words px-2 py-2 text-center font-semibold uppercase text-[#806A8C] text-[10px] tracking-normal">Reorder Point</th>
+                                            <th className="truncate px-2 py-2 text-center font-semibold uppercase text-[#806A8C] text-[10px] tracking-normal">Task</th>
+                                            <th className="truncate px-2 py-2 text-center font-semibold uppercase text-[#806A8C] text-[10px] tracking-normal">Action</th>
                                         </tr></thead>
                                         <tbody>{tasks.map(item=><tr key={item.key} className="border-b border-[#EFE8F2] text-[#2B174C] last:border-b-0">
-                                            <td className="break-words px-2 py-2 font-semibold align-middle">{item.name}</td>
-                                            <td className="px-1 py-2 text-center align-middle font-semibold">{item.stock}</td>
-                                            <td className="px-1 py-2 text-center align-middle text-[#5F4E75]">{item.reorder}</td>
-                                            <td className="px-1 py-2 text-center align-middle">
+                                            <td className="break-words py-2 font-semibold align-middle px-4 text-left">{item.name}</td>
+                                            <td className="px-2 py-2 text-center align-middle font-semibold">{item.stock}</td>
+                                            <td className="px-2 py-2 text-center align-middle text-[#5F4E75]">{item.reorder}</td>
+                                            <td className="px-2 py-2 text-center align-middle">
                                                 <span className={`inline-block max-w-full break-words text-[10px] font-semibold leading-4 ${reportsByKey.has(item.key) ? "text-[#A43D48]" : item.status === "Out of Stock" ? "text-[#BF2438]" : "text-[#B07408]"}`}>
                                                     {reportsByKey.has(item.key) ? "Reported" : item.status === "Out of Stock" ? "Report Shortage" : "Check / Report"}
                                                 </span>
                                             </td>
-                                            <td className="px-1 py-2 text-center align-middle">
+                                            <td className="px-2 py-2 text-center align-middle">
                                                 <button type="button" onClick={()=>openProductReview(item)} className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">Review</button>
                                             </td>
                                         </tr>)}</tbody>
@@ -852,15 +860,15 @@ export default function StaffInventory() {
                                 <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" tabIndex={0} aria-label="Today's recent consumable activity">
                                     {activityLoading ? <div aria-busy="true" className="space-y-3 p-4">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]" />)}</div> :
                                         activityError ? <p role="alert" className="px-4 py-5 text-xs text-red-700">{activityError} <button type="button" className="ml-2 underline" onClick={()=>setActivityKey(key=>key+1)}>Retry</button></p> : <>
-                                            <table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                                                <colgroup><col className="w-[20%]"/><col className="w-[27%]"/><col className="w-[20%]"/><col className="w-[9%]"/><col className="w-[24%]"/></colgroup>
-                                                <thead className="sticky top-0 z-[1] bg-[#FFFDF8]"><tr>{["Time","Product","Activity","Qty","Reference No."].map(label=><th key={label} className={`${headClass} !px-2 !py-2`}>{label}</th>)}</tr></thead>
+                                            <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                                <colgroup><col className="w-[16%]"/><col className="w-[30%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
+                                                <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>{["Time","Product","Activity","Qty","Reference No."].map(label=><th key={label} className={headClass}>{label}</th>)}</tr></thead>
                                                 <tbody>{todayActivities.map(item=><tr key={item.id} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                                                    <td className="px-2 py-2 align-top">{safeDate(item.at)}</td>
-                                                    <td className="px-2 py-2 align-top font-medium">{item.item}</td>
-                                                    <td className="px-2 py-2 align-top"><span className={`inline-flex max-w-full break-words rounded-lg px-2 py-1 text-[10px] ${activityBadge(item.kind)}`}>{item.kind}</span></td>
-                                                    <td className="px-2 py-2 align-top font-semibold">{quantityLabel(item.quantity)}</td>
-                                                    <td className="break-all px-2 py-2 align-top">{item.reference}</td>
+                                                    <td className="py-2 align-middle px-4 text-left">{safeDate(item.at)}</td>
+                                                    <td className="px-2 py-2 align-middle font-medium">{item.item}</td>
+                                                    <td className="px-2 py-2 text-center align-middle"><span className={`inline-block max-w-full break-words font-semibold text-[10px] ${activityBadge(item.kind)}`}>{item.kind}</span></td>
+                                                    <td className="px-2 py-2 text-center align-middle font-semibold">{quantityLabel(item.quantity)}</td>
+                                                    <td className="break-all px-2 py-2 align-middle">{item.reference}</td>
                                                 </tr>)}</tbody>
                                             </table>
                                             {todayActivities.length===0&&<p className="px-5 py-8 text-center text-sm text-[#8A7D90]">No consumable stock activity recorded today.</p>}
@@ -889,10 +897,10 @@ export default function StaffInventory() {
                                 </div>
                             </div>
                             <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Branch sales inventory list" tabIndex={0}>
-                                <table className="w-full min-w-0 table-fixed text-[10px] xl:text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-                                    <colgroup><col className="w-[11%]"/><col className="w-[19%]"/><col className="w-[11%]"/><col className="w-[9%]"/><col className="w-[9%]"/><col className="w-[11%]"/><col className="w-[10%]"/><col className="w-[11%]"/><col className="w-[9%]"/></colgroup>
+                                <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                    <colgroup><col className="w-[10%]"/><col className="w-[24%]"/><col className="w-[12%]"/><col className="w-[9%]"/><col className="w-[8.5%]"/><col className="w-[9%]"/><col className="w-[8.5%]"/><col className="w-[9%]"/><col className="w-[10%]"/></colgroup>
                                     <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
-                                        {['Product No.','Product','Category','Available Stock','Reorder Point','Last Stock In','Expiration','Status','Action'].map((label,index)=><th key={label} className={`break-words px-2 py-2 text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C] ${index===1||index===2?'text-left':'text-center'}`}>{label}</th>)}
+                                        {['Product No.','Product','Category','Available Stock','Reorder Point','Last Stock In','Expiration','Status','Action'].map(label=><th key={label} className={headClass}>{label}</th>)}
                                     </tr></thead>
                                     <tbody>{visibleProducts.map(product=>{
                                         const variants=product.hasVariants&&product.variants?.length?product.variants:[];
@@ -911,31 +919,31 @@ export default function StaffInventory() {
                                         return <React.Fragment key={product.id}>
                                             <tr className={`h-12 border-b border-[#EFE8F2] text-[#2B174C] hover:bg-[#FFFCF8] ${expandable?'cursor-pointer':''}`}
                                                 onClick={expandable?()=>setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]})):undefined}>
-                                                <td className="break-all px-2 py-2 text-center font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">
-                                                    <div className="flex items-center justify-center gap-1"><span className="inline-flex w-[13px] shrink-0 items-center justify-center">{expandable?<ChevronDown size={13} className={`transition ${expanded?'rotate-180':''}`}/>:null}</span><span>{product.productNumber||"—"}</span></div>
+                                                <td className="break-all py-2 font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px] px-4 text-left">
+                                                    <div className="flex items-center justify-start gap-1.5"><span>{product.productNumber||"—"}</span>{expandable?<ChevronDown size={13} className={`shrink-0 transition ${expanded?'rotate-180':''}`}/>:null}</div>
                                                 </td>
-                                                <td className="break-words px-3 py-2 font-semibold">{product.name}</td>
+                                                <td className="break-words px-2 py-2 font-semibold">{product.name}</td>
                                                 <td className="break-words px-2 py-2 text-[#5F4E75]">{product.category||"—"}</td>
                                                 <td className="px-2 py-2 text-center font-semibold">{availableStock.toLocaleString('en-PH')}</td>
                                                 <td className="px-2 py-2 text-center text-[#5F4E75]">{reorder.toLocaleString('en-PH')}</td>
                                                 <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.productDates[product.id])}</td>
                                                 <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(expiration)}</td>
-                                                <td className="px-1 py-2 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(sellableProduct))}</td>
-                                                <td className="px-1 py-2 text-center"><button type="button" className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                                                <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(sellableProduct))}</td>
+                                                <td className="px-2 py-2 text-center"><button type="button" className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                                                                                               onClick={e=>{e.stopPropagation();if(expandable)setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]}));else if(productLine)openProductReview(productLine);}}>{expandable?(expanded?'Hide':'Variants'):'View'}</button></td>
                                             </tr>
                                             {expandable&&expanded&&variants.map(variant=>{
                                                 const line=lines.find(row=>row.product.id===product.id&&row.variantId===variant.id);
                                                 return <tr key={variant.id} className="h-12 border-b border-[#EFE8F2] bg-[#FCF9FF] text-[#2B174C]">
-                                                    <td className="break-all px-2 py-2 text-center font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">{variant.variantNumber||"—"}</td>
-                                                    <td className="break-words px-3 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {staffVariantDisplayName(variant.variantValues)}</td>
+                                                    <td className="break-all py-2 px-4 text-left font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">{variant.variantNumber||"—"}</td>
+                                                    <td className="break-words px-2 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {staffVariantDisplayName(variant.variantValues)}</td>
                                                     <td className="px-2 py-2 text-[#8A7D90]">Variant</td>
                                                     <td className="px-2 py-2 text-center font-semibold">{Number(variant.sellableStock ?? variant.stock ?? 0).toLocaleString('en-PH')}</td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">{Number(variant.alertLevel||0).toLocaleString('en-PH')}</td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.variantDates[`${product.id}:${variant.id}`])}</td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(variant.expirationDate)}</td>
-                                                    <td className="px-1 py-2 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.sellableStock ?? variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
-                                                    <td className="px-1 py-2 text-center"><button type="button" disabled={!line} onClick={()=>line&&openProductReview(line)} className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">View</button></td>
+                                                    <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.sellableStock ?? variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
+                                                    <td className="px-2 py-2 text-center"><button type="button" disabled={!line} onClick={()=>line&&openProductReview(line)} className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">View</button></td>
                                                 </tr>;
                                             })}
                                         </React.Fragment>;
@@ -970,14 +978,14 @@ export default function StaffInventory() {
                             <span className={`rounded-full px-3 py-1 text-[10px] font-semibold ${salesBookingFullyPaid(selectedSalesBooking)?"bg-[#E5F7ED] text-[#218246]":"bg-[#FFF3D8] text-[#926400]"}`}>
                                 {salesBookingFullyPaid(selectedSalesBooking)?"Fully Paid":"Balance Pending"}</span>
                         </div>
-                        <div className="min-w-0 overflow-x-hidden"><table className="w-full min-w-0 table-fixed text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
+                        <div className="max-h-[320px] min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                             <colgroup><col className="w-[42%]"/><col className="w-[10%]"/><col className="w-[20%]"/><col className="w-[28%]"/></colgroup>
-                            <thead className="bg-[#FFFDF8]"><tr>{["Product / Variant","Qty","Status","Action"].map(label=><th className={headClass} key={label}>{label}</th>)}</tr></thead>
+                            <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>{["Product / Variant","Qty","Status","Action"].map(label=><th className={headClass} key={label}>{label}</th>)}</tr></thead>
                             <tbody>{selectedSalesBooking.items.map(item=><tr key={item.itemId} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                                <td className="break-words px-3 py-3 font-medium">{item.productName}{item.variantName?` — ${item.variantName}`:""}</td>
-                                <td className="px-2 py-3 text-center font-semibold">{item.quantity}</td>
-                                <td className="px-2 py-3">{item.issued?"Handed Over":item.prepared?"Prepared":"Needs Preparation"}</td>
-                                <td className="px-2 py-3 text-center">{!item.prepared&&!item.issued?
+                                <td className="break-words py-2 font-medium px-4 text-left">{item.productName}{item.variantName?` — ${item.variantName}`:""}</td>
+                                <td className="px-2 py-2 text-center font-semibold">{item.quantity}</td>
+                                <td className={`px-2 py-2 text-center text-[10px] font-semibold ${item.issued?"text-[#1D4ED8]":item.prepared?"text-[#23834A]":"text-[#A56607]"}`}>{item.issued?"Handed Over":item.prepared?"Prepared":"Needs Preparation"}</td>
+                                <td className="px-2 py-2 text-center">{!item.prepared&&!item.issued?
                                     <button type="button" className={`${outline} h-9 w-full px-2 text-xs disabled:opacity-40`}
                                             disabled={!canOperateSalesQueue||salesQueueSaving} onClick={()=>void sendSalesBookingAction("prepare_staff_sales_booking_item",selectedSalesBooking,item.itemId)}>
                                         {salesQueueSaving?"Saving...":"Mark Prepared"}</button>:
@@ -1036,15 +1044,16 @@ export default function StaffInventory() {
                     {activityHistoryLoading ? <div aria-busy="true" className="space-y-3 p-5">{[1,2,3,4,5].map(x=><div key={x} className="h-10 animate-pulse rounded-lg bg-[#F2EDF8]"/>)}</div> :
                         activityHistoryError ? <div role="alert" className="p-5 text-sm text-red-700">{activityHistoryError}
                                 <button type="button" className="ml-3 underline" onClick={()=>setHistoryRetry(x=>x+1)}>Retry</button></div> :
-                            <table className="w-full min-w-0 table-fixed text-left text-xs [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]"><thead className="sticky top-0 bg-[#FFFDF8]"><tr>
+                            <table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                <colgroup><col className="w-[17%]"/><col className="w-[27%]"/><col className="w-[18%]"/><col className="w-[8%]"/><col className="w-[19%]"/><col className="w-[11%]"/></colgroup><thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>
                                 {['Date & Time','Product / Variant','Activity','Qty','Reference','Recorded By'].map(label=><th key={label} className={headClass}>{label}</th>)}</tr></thead>
                                 <tbody>{activityHistory.map(item=><tr key={item.id} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                                    <td className="break-words px-2 py-3">{safeDate(item.at)}</td>
-                                    <td className="max-w-[240px] px-3 py-3 font-medium" title={item.item}>{item.item}</td>
-                                    <td className="px-3 py-3"><span className={`inline-flex max-w-full break-words rounded-lg px-2 py-1 ${activityBadge(item.kind)}`}>{item.kind}</span></td>
-                                    <td className="px-3 py-3 font-semibold">{quantityLabel(item.quantity)}</td>
-                                    <td className="max-w-[190px] break-all px-3 py-3">{item.reference}</td>
-                                    <td className="px-3 py-3">{item.actorName}</td>
+                                    <td className="break-words py-2 px-4 text-left">{safeDate(item.at)}</td>
+                                    <td className="max-w-[240px] px-2 py-2 font-medium" title={item.item}>{item.item}</td>
+                                    <td className="px-2 py-2 text-center"><span className={`inline-block max-w-full break-words font-semibold ${activityBadge(item.kind)}`}>{item.kind}</span></td>
+                                    <td className="px-2 py-2 text-center font-semibold">{quantityLabel(item.quantity)}</td>
+                                    <td className="max-w-[190px] break-all px-2 py-2">{item.reference}</td>
+                                    <td className="px-2 py-2 text-center">{item.actorName}</td>
                                 </tr>)}</tbody>
                             </table>}
                     {!activityHistoryLoading && !activityHistoryError && activityHistory.length === 0 &&

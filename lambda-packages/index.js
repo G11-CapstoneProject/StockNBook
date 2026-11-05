@@ -188,6 +188,23 @@ function buildPackageReference(id) {
 }
 
 function normalizeInclusion(item, index = 0) {
+    // Rental equipment remains in packages.inclusions JSON; package_items is
+    // reserved for Sales products. Never treat an equipment ID as a product ID.
+    if (item?.itemType === "rental" || item?.item_type === "rental") {
+        const equipmentId = Number(firstDefined(item.equipmentId, item.equipment_id) || 0);
+        const quantity = Number(item.quantity ?? item.qty ?? 0);
+        const rate = Number(firstDefined(item.unitSalesPrice, item.unit_sales_price, item.dailyRate) || 0);
+        const name = toSafeString(firstDefined(item.productName, item.product_name, item.name), 255);
+        return {
+            itemType: "rental", equipmentId, inventoryKey: `rental:${equipmentId}`,
+            productId: 0, product_id: 0, variantId: null, variant_id: null,
+            productName: name, product_name: name, variantName: "", variant_name: "",
+            quantity, unitSalesPrice: rate, unit_sales_price: rate,
+            unitPrice: rate, unit_price: rate, lineValue: rate * quantity,
+            line_value: rate * quantity, availableStock: Number(item.availableStock || 0),
+            item: name, variantLabel: "", variant_label: "",
+        };
+    }
     const productId = Number(
         firstDefined(item?.productId, item?.product_id) || 0
     );
@@ -415,8 +432,24 @@ function getIncomingPackage(body) {
 
 
 async function replacePackageItemsV2(connection, packageId, storeId, branchId, inclusions) {
+    // Validate rental equipment against the live, branch-scoped rental catalog.
+    // This is NOT a reservation; availability for event dates is checked by Bookings.
+    for (const inclusion of inclusions.filter(i => i.itemType === "rental")) {
+        const [rows] = await connection.execute(
+            `SELECT id, name, rental_rate_per_day, total_units, maintenance_units, missing_units
+             FROM rental_equipment WHERE id = ? AND store_id = ? AND branch_id = ?
+             AND archived_at IS NULL LIMIT 1`, [inclusion.equipmentId, storeId, branchId]);
+        if (!rows.length) throw new Error(`Rental equipment ${inclusion.equipmentId} is not available in this branch.`);
+        const equipment = rows[0];
+        const physical = Number(equipment.total_units) - Number(equipment.maintenance_units) - Number(equipment.missing_units);
+        if (inclusion.quantity > physical) throw new Error(`${equipment.name}: not enough physical rental units.`);
+        if (Number(equipment.rental_rate_per_day) <= 0 ||
+            Math.abs(Number(equipment.rental_rate_per_day) - Number(inclusion.unitSalesPrice)) > 0.005)
+            throw new Error(`${equipment.name}: rental rate has changed. Refresh the catalog before saving.`);
+    }
+    const consumableInclusions = inclusions.filter(i => i.itemType !== "rental");
     // Validate tenant/branch ownership before writing normalized package relations.
-    for (const inclusion of inclusions) {
+    for (const inclusion of consumableInclusions) {
         const params = [inclusion.productId, storeId, branchId];
         let query = `
             SELECT p.id, p.has_variants
@@ -457,10 +490,10 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
         [packageId]
     );
 
-    if (!Array.isArray(inclusions) || inclusions.length === 0) return;
+    if (!consumableInclusions.length) return;
 
-    const placeholders = inclusions.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
-    const params = inclusions.flatMap((inclusion, index) => [
+    const placeholders = consumableInclusions.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
+    const params = consumableInclusions.flatMap((inclusion, index) => [
         packageId,
         inclusion.productId,
         inclusion.variantId || null,
@@ -481,7 +514,7 @@ function validatePackageInput(pkg) {
     if (!pkg.name) return "Package name is required.";
 
     if (pkg.inclusions.length === 0) {
-        return "Please add at least one product inclusion.";
+        return "Please add at least one consumable or rental inclusion.";
     }
 
     if (
@@ -520,21 +553,30 @@ function validatePackageInput(pkg) {
 
     const seenInclusions=new Set();
     for (const inclusion of pkg.inclusions) {
-        const inclusionKey=`${inclusion.productId}:${inclusion.variantId||0}`;
-        if(seenInclusions.has(inclusionKey))return 'Each product/variant may appear only once in a package.';
+        const isRental = inclusion.itemType === "rental";
+        const inclusionKey = isRental ? `rental:${inclusion.equipmentId}` : `sales:${inclusion.productId}:${inclusion.variantId||0}`;
+        if (seenInclusions.has(inclusionKey)) return "Each item may appear only once in a package.";
         seenInclusions.add(inclusionKey);
-        if (
-            !Number.isInteger(inclusion.productId) ||
-            inclusion.productId <= 0
-        ) {
-            return "Each package inclusion must contain a valid productId.";
+        if (isRental) {
+            if (!Number.isSafeInteger(inclusion.equipmentId) || inclusion.equipmentId <= 0)
+                return "Each rental inclusion must specify valid equipment.";
+        } else if (!Number.isSafeInteger(inclusion.productId) || inclusion.productId <= 0) {
+            return "Each consumable inclusion must reference a valid product.";
         }
-
-        if (!Number.isSafeInteger(inclusion.quantity) || inclusion.quantity <= 0 || inclusion.quantity > 100000) {
-            return "Each package inclusion must contain a positive whole-number quantity.";
-        }
+        if (!Number.isSafeInteger(inclusion.quantity) || inclusion.quantity <= 0 || inclusion.quantity > 100000)
+            return "Each inclusion must contain a positive whole-number quantity.";
+        if (!Number.isFinite(inclusion.unitSalesPrice) || inclusion.unitSalesPrice < 0)
+            return "Each inclusion must contain a valid price.";
     }
 
+    const expectedOriginal = pkg.inclusions.reduce((total, line) => total + Number(line.lineValue || 0), 0);
+    if (Math.abs(expectedOriginal - pkg.originalValue) > 0.02)
+        return "The package total does not match its included items.";
+    const expectedPrice = pkg.discountType === "percentage"
+        ? pkg.originalValue * (1 - pkg.discountValue / 100)
+        : pkg.originalValue - pkg.discountValue;
+    if (Math.abs(Math.max(0, expectedPrice) - pkg.packagePrice) > 0.02)
+        return "The package price does not match its discount.";
     return "";
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { RefreshCw, Search } from "lucide-react";
+import { Boxes, CheckCircle2, CircleOff, RefreshCw, Search } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -12,6 +12,7 @@ import {
     Card,
     CardHeader,
     PackageCard,
+    PackageSummaryCard,
     EmptyState,
     PackageFormModal,
     usePackageForm,
@@ -48,6 +49,7 @@ export default function ManagerPackages() {
     const [search, setSearch] = useState("");
     const [selectedCategory, setSelectedCategory] =
         useState<PackageCategory>("All");
+    const [selectedStatus, setSelectedStatus] = useState<"All" | "Active" | "Inactive">("All");
     const [error, setError] = useState("");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
     const [isRefreshing, setIsRefreshing] = useState(false);
@@ -181,10 +183,16 @@ export default function ManagerPackages() {
             const matchesCategory =
                 selectedCategory === "All" ||
                 getPackageCategory(pkg) === selectedCategory;
+            const matchesStatus = selectedStatus === "All" ||
+                String(pkg.status || "").toLowerCase() === selectedStatus.toLowerCase();
 
-            return matchesSearch && matchesCategory;
+            return matchesSearch && matchesCategory && matchesStatus;
         });
-    }, [packages, search, selectedCategory]);
+    }, [packages, search, selectedCategory, selectedStatus]);
+
+    const totalPackages = packages.length;
+    const activePackages = packages.filter((pkg) => String(pkg.status || "").toLowerCase() === "active").length;
+    const inactivePackages = packages.filter((pkg) => String(pkg.status || "").toLowerCase() === "inactive").length;
 
     return (
         <>
@@ -230,63 +238,16 @@ export default function ManagerPackages() {
 
             <section className="px-6 py-4 font-sans">
                 <div className="space-y-3">
-                    <div className="flex gap-3">
-                        <div className="relative flex-1">
-                            <Search
-                                size={15}
-                                className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                            />
-
-                            <input
-                                value={search}
-                                onChange={(e) => setSearch(e.target.value)}
-                                placeholder="Search packages..."
-                                className="w-full rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C]"
-                            />
-                        </div>
-
-                        <button
-                            onClick={form.openAdd}
-                            className="inline-flex items-center rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                        >
-                            + Add package
-                        </button>
-                    </div>
-
-                    <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-                        <div className="mb-2 flex items-center justify-between gap-3">
-                            <h2 className="text-sm font-bold text-[#1A1220]">
-                                Categories
-                            </h2>
-
-                            <span className="shrink-0 text-xs font-semibold text-[#806A8C]">
-                                {PACKAGE_CATEGORY_OPTIONS.length - 1} categories
-                            </span>
-                        </div>
-
-                        <div className="overflow-x-auto pb-1">
-                            <div className="flex min-w-max gap-2">
-                                {PACKAGE_CATEGORY_OPTIONS.map((category) => {
-                                    const selected = selectedCategory === category;
-
-                                    return (
-                                        <button
-                                            key={category}
-                                            type="button"
-                                            onClick={() => setSelectedCategory(category)}
-                                            aria-pressed={selected}
-                                            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-                                                selected
-                                                    ? "bg-[#2B174C] text-white shadow-sm"
-                                                    : "border border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#F7F1FF]"
-                                            }`}
-                                        >
-                                            {category}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        </div>
+                    <div className="grid gap-3 md:grid-cols-3">
+                        <PackageSummaryCard title="Total Packages" value={totalPackages}
+                                            detail="Packages in your assigned branch"
+                                            icon={<Boxes size={20} />} iconClassName="bg-[#F0E9FF] text-[#5A35A5]" />
+                        <PackageSummaryCard title="Active Packages" value={activePackages}
+                                            detail="Available for customer booking"
+                                            icon={<CheckCircle2 size={20} />} iconClassName="bg-[#E7F7ED] text-[#168447]" />
+                        <PackageSummaryCard title="Inactive Packages" value={inactivePackages}
+                                            detail="Not currently available"
+                                            icon={<CircleOff size={20} />} iconClassName="bg-[#FFF1E5] text-[#C9781B]" />
                     </div>
 
                     <Card className="min-h-[420px]">
@@ -294,6 +255,43 @@ export default function ManagerPackages() {
                             title="Branch Package List"
                             action={`${filteredPackages.length} packages`}
                         />
+
+                        <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_190px_160px_170px]">
+                            <div className="relative min-w-0">
+                                <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
+                                <input
+                                    value={search}
+                                    onChange={(event) => setSearch(event.target.value)}
+                                    placeholder="Search packages..."
+                                    className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C]"
+                                />
+                            </div>
+                            <select
+                                aria-label="Filter packages by category"
+                                value={selectedCategory}
+                                onChange={(event) => setSelectedCategory(event.target.value as PackageCategory)}
+                                className="h-[42px] min-w-0 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm font-medium text-[#2B174C] outline-none shadow-sm focus:border-[#2B174C]"
+                            >
+                                {PACKAGE_CATEGORY_OPTIONS.map((category) => (
+                                    <option key={category} value={category}>{category === "All" ? "All Categories" : category}</option>
+                                ))}
+                            </select>
+                            <select
+                                aria-label="Filter packages by status"
+                                value={selectedStatus}
+                                onChange={(event) => setSelectedStatus(event.target.value as "All" | "Active" | "Inactive")}
+                                className="h-[42px] min-w-0 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm font-medium text-[#2B174C] outline-none shadow-sm focus:border-[#2B174C]"
+                            >
+                                <option value="All">All Status</option>
+                                <option value="Active">Active</option>
+                                <option value="Inactive">Inactive</option>
+                            </select>
+                            <button type="button" onClick={form.openAdd}
+                                    className="inline-flex h-[42px] items-center justify-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]">
+                                + Add Package
+                            </button>
+                        </div>
+
 
                         {error && (
                             <div className="mb-3 rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2.5 text-xs font-medium text-[#9B1C1C]">
@@ -305,8 +303,12 @@ export default function ManagerPackages() {
                             <ModuleSkeleton variant="packages" />
                         ) : filteredPackages.length === 0 ? (
                             <EmptyState
-                                title="No packages yet."
-                                detail="Create your first package using inventory items and discounts."
+                                title={search || selectedCategory !== "All" || selectedStatus !== "All"
+                                    ? "No matching packages."
+                                    : "No packages yet."}
+                                detail={search || selectedCategory !== "All" || selectedStatus !== "All"
+                                    ? "Try different search, category, or status filters."
+                                    : "Create your first package using inventory items and discounts."}
                             />
                         ) : (
                             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -320,7 +322,6 @@ export default function ManagerPackages() {
                                                 pkg.description || "No description"
                                             ),
                                         }}
-                                        featured={index === 1}
                                         canManage
                                         onEdit={() => form.openEdit(pkg)}
                                         onDelete={() => handleDelete(pkg.id)}
@@ -358,6 +359,8 @@ export default function ManagerPackages() {
                 setDownPaymentAmount={form.setDownPaymentAmount}
                 inclusions={form.inclusions}
                 products={packageProducts}
+                storeId={storeId}
+                branchId={branchId}
                 selectedProductId={form.selectedProductId}
                 setSelectedProductId={form.setSelectedProductId}
                 inclusionQty={form.inclusionQty}

@@ -9,7 +9,6 @@ import { usePOS } from "@/hooks/usePOS";
 import {
     Check,
     Copy,
-    CreditCard,
     Download,
     ExternalLink,
     Link2,
@@ -66,17 +65,42 @@ export default function SettingsPage() {
 
     const isOwner = role === "owner";
 
-    const loadSettings = useCallback(() => {
-        const savedStoreName =
+    const loadSettings = useCallback(async () => {
+        let savedStoreName =
             sessionStorage.getItem("store_name") ||
             sessionStorage.getItem("stocknbook_store_name") ||
             "Store Name";
 
-        const savedSlug =
+        let savedSlug =
             sessionStorage.getItem("store_slug") ||
             sessionStorage.getItem("slug");
 
         const savedRole = (sessionStorage.getItem("role") || "").toLowerCase();
+        const token = sessionStorage.getItem("token");
+        if (token) {
+            try {
+                const response = await fetch("/api/current-user?refresh=1", {
+                    headers: { Authorization: `Bearer ${token}` },
+                    cache: "no-store",
+                });
+                if (response.ok) {
+                    const data = await response.json() as { store_name?: string; store_slug?: string };
+                    if (data.store_name) {
+                        savedStoreName = data.store_name;
+                        sessionStorage.setItem("store_name", savedStoreName);
+                        sessionStorage.setItem("stocknbook_store_name", savedStoreName);
+                        sessionStorage.setItem("business_name", savedStoreName);
+                    }
+                    if (data.store_slug) {
+                        savedSlug = data.store_slug;
+                        sessionStorage.setItem("store_slug", savedSlug);
+                        sessionStorage.setItem("slug", savedSlug);
+                    }
+                }
+            } catch (error) {
+                console.warn("Unable to refresh business settings from the server:", error);
+            }
+        }
 
         const savedBranchId =
             sessionStorage.getItem("branch_id") ||
@@ -144,30 +168,52 @@ export default function SettingsPage() {
         }, 250);
     };
 
-    const handleSave = () => {
-        const cleanedName = storeName.trim();
+    const handleSave = async () => {
+        if (!isOwner || isSaving) return;
+        const cleanedName = storeName.trim().replace(/\s+/g, " ");
         const cleanedSlug = makeSlug(storeSlug || cleanedName);
 
         if (!cleanedName || !cleanedSlug) {
             alert("Please enter a business name and store slug.");
             return;
         }
-
+        const token = sessionStorage.getItem("token");
+        if (!token) {
+            alert("Please log in again to save business settings.");
+            return;
+        }
         setIsSaving(true);
-
-        sessionStorage.setItem("store_name", cleanedName);
-        sessionStorage.setItem("stocknbook_store_name", cleanedName);
-        sessionStorage.setItem("store_slug", cleanedSlug);
-        sessionStorage.setItem("slug", cleanedSlug);
-
-        setStoreName(cleanedName);
-        setStoreSlug(cleanedSlug);
-        setSaved(true);
-
-        window.setTimeout(() => {
-            setSaved(false);
+        setSaved(false);
+        try {
+            const response = await fetch("/api/auth", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                body: JSON.stringify({
+                    action: "update_store_profile",
+                    store_name: cleanedName,
+                    store_slug: cleanedSlug,
+                }),
+            });
+            const data = await response.json() as { success?: boolean; error?: string; store_name?: string; store_slug?: string };
+            if (!response.ok || !data.success || !data.store_name || !data.store_slug) {
+                throw new Error(data.error || "Business details could not be saved.");
+            }
+            // Update this session only AFTER the database confirms its update.
+            sessionStorage.setItem("store_name", data.store_name);
+            sessionStorage.setItem("stocknbook_store_name", data.store_name);
+            sessionStorage.setItem("business_name", data.store_name);
+            sessionStorage.setItem("store_slug", data.store_slug);
+            sessionStorage.setItem("slug", data.store_slug);
+            setStoreName(data.store_name);
+            setStoreSlug(data.store_slug);
+            setSaved(true);
+            window.dispatchEvent(new Event("stocknbook-business-updated"));
+            window.setTimeout(() => setSaved(false), 2000);
+        } catch (error) {
+            alert(error instanceof Error ? error.message : "Failed to save business details.");
+        } finally {
             setIsSaving(false);
-        }, 900);
+        }
     };
 
     const handleCopy = async () => {
@@ -375,12 +421,47 @@ function OwnerSettings({
                         </button>
 
                         <p className="text-center text-xs text-[#7A6A84]">
-                            Changes are saved for your current signed-in session.
+                            Changes are saved to the store database for all branches and modules.
                         </p>
                     </div>
                 </section>
 
                 <BusinessTaxSettings />
+
+
+            </div>
+            <div className="space-y-4">
+
+                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
+                    <SettingsCardHeading
+                        icon={<QrCode size={18} />}
+                        title="Store QR Code"
+                        detail="Customers can scan this code to open your store's booking page."
+                    />
+
+                    <div
+                        ref={qrContainerRef}
+                        className="mt-5 flex min-h-[228px] items-center justify-center rounded-xl border border-dashed border-[#D8CBE7] bg-[#FFFDF8] p-5"
+                    >
+                        {bookingLink ? (
+                            <QRCodeCanvas value={bookingLink} size={148} />
+                        ) : (
+                            <p className="text-sm text-[#9B8AAA]">
+                                No booking link available.
+                            </p>
+                        )}
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={onDownloadQR}
+                        disabled={!bookingLink}
+                        className="mt-4 inline-flex h-[42px] w-full items-center justify-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                        <Download size={16} />
+                        Download QR
+                    </button>
+                </section>
 
                 <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
                     <SettingsCardHeading
@@ -419,69 +500,6 @@ function OwnerSettings({
                     </div>
                 </section>
             </div>
-            <div className="space-y-4">
-                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
-                    <SettingsCardHeading
-                        icon={<CreditCard size={18} />}
-                        title="Subscription & Billing"
-                        detail="Review your current plan and account billing options."
-                    />
-
-                    <div className="mt-5 space-y-3">
-                        <div className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] p-4">
-                            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                                Current Plan
-                            </p>
-                            <p className="mt-2 text-[18px] font-bold text-[#1A1220]">
-                                Pro Plan
-                            </p>
-                            <p className="mt-1 text-sm font-medium text-[#5F4E75]">
-                                ₱2,999 / month
-                            </p>
-                        </div>
-
-                        <BillingRow
-                            title="Manage Subscription"
-                            detail="Change or review your current plan."
-                        />
-                        <BillingRow
-                            title="View Invoices"
-                            detail="Review past billing records and receipts."
-                        />
-                    </div>
-                </section>
-
-                <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
-                    <SettingsCardHeading
-                        icon={<QrCode size={18} />}
-                        title="Store QR Code"
-                        detail="Customers can scan this code to open your store's booking page."
-                    />
-
-                    <div
-                        ref={qrContainerRef}
-                        className="mt-5 flex min-h-[228px] items-center justify-center rounded-xl border border-dashed border-[#D8CBE7] bg-[#FFFDF8] p-5"
-                    >
-                        {bookingLink ? (
-                            <QRCodeCanvas value={bookingLink} size={148} />
-                        ) : (
-                            <p className="text-sm text-[#9B8AAA]">
-                                No booking link available.
-                            </p>
-                        )}
-                    </div>
-
-                    <button
-                        type="button"
-                        onClick={onDownloadQR}
-                        disabled={!bookingLink}
-                        className="mt-4 inline-flex h-[42px] w-full items-center justify-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-4 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                        <Download size={16} />
-                        Download QR
-                    </button>
-                </section>
-            </div>
         </div>
     );
 }
@@ -501,8 +519,9 @@ function BusinessTaxSettings() {
     const dialogRef = useRef<HTMLDivElement>(null);
 
     // Never make a tax decision from sessionStorage; the POS hook reads the store setting.
-    const databaseRegistration: TaxRegistration =
-        pos.taxType === "NON_VAT" ? "NON_VAT" : "VAT_REGISTERED";
+    const reportedRegistration = pos.ownerRevenue?.taxRegistration;
+    const databaseRegistration: TaxRegistration | null = reportedRegistration === "NON_VAT"
+        ? "NON_VAT" : reportedRegistration === "VAT_REGISTERED" ? "VAT_REGISTERED" : null;
     const currentRegistration = savedRegistration ?? databaseRegistration;
 
     // Clear the temporary display value once the POS hook reflects the persisted value.
@@ -557,6 +576,7 @@ function BusinessTaxSettings() {
             setPendingRegistration(null);
             const label = next === "NON_VAT" ? "Non-VAT Registered" : "VAT Registered (12%)";
             setMessage(`Tax setting saved: ${label}. Only future POS transactions are affected.`);
+            window.dispatchEvent(new Event("stocknbook-business-updated"));
 
             // Refresh the hook's store-wide tax snapshot. The save is already
             // confirmed at this point; a refresh failure must not imply rollback.
@@ -608,7 +628,7 @@ function BusinessTaxSettings() {
                     title="Business Tax Settings"
                     detail="Configure tax registration for all branches. Only the Owner can change this setting."
                 />
-                <fieldset className="mt-5 space-y-4" disabled={saving || pendingRegistration !== null}>
+                <fieldset className="mt-5 space-y-4" disabled={saving || pendingRegistration !== null || currentRegistration === null}>
                     <legend className="sr-only">Business tax registration</legend>
                     <label className="flex cursor-pointer items-center gap-3 text-sm font-semibold text-[#1A1220]">
                         <input
@@ -633,6 +653,11 @@ function BusinessTaxSettings() {
                         VAT Registered (12%)
                     </label>
                 </fieldset>
+                {currentRegistration === null && (
+                    <p role="status" className="mt-3 text-xs text-[#806A8C]">
+                        {pos.loading ? "Loading saved tax registration..." : "Tax registration could not be verified. Refresh the page before changing it."}
+                    </p>
+                )}
                 <p className="mt-4 text-xs leading-5 text-[#7A6A84]">
                     Listed POS product prices already include VAT when registered. Invoices separate
                     VATable sales and VAT instead of adding another 12% at checkout.
@@ -953,21 +978,6 @@ function ReadOnlyField({ label, value }: { label: string; value: string }) {
             >
                 {value}
             </div>
-        </div>
-    );
-}
-
-function BillingRow({ title, detail }: { title: string; detail: string }) {
-    return (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-[#E6DDF0] bg-white px-4 py-3">
-            <div>
-                <p className="text-sm font-semibold text-[#1A1220]">{title}</p>
-                <p className="mt-0.5 text-xs text-[#7A6A84]">{detail}</p>
-            </div>
-
-            <span className="shrink-0 rounded-lg border border-[#E6DDF0] bg-[#FFFDF8] px-2.5 py-1 text-xs font-semibold text-[#806A8C]">
-                Soon
-            </span>
         </div>
     );
 }

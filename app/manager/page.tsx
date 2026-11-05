@@ -1,6 +1,7 @@
 "use client";
 
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
@@ -35,6 +36,7 @@ type MenuItem = {
 
 export default function ManagerPage() {
     const router = useRouter();
+    const { user } = useCurrentUser();
 
     const [managerName, setManagerName] = useState("");
     const [storeName, setStoreName] = useState("");
@@ -60,6 +62,11 @@ export default function ManagerPage() {
             setPermissions({});
         }
     }, [router]);
+
+    // Keep the manager's business label aligned with the persisted store record.
+    useEffect(() => {
+        if (user?.store_name) setStoreName(user.store_name);
+    }, [user?.store_name]);
 
     const menuGroups = useMemo(
         () => [

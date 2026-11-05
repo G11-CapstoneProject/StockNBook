@@ -17,6 +17,7 @@ import {
     RefreshCw,
     AlertCircle,
     Trash2,
+    Truck,
 } from "lucide-react";
 
 const STORE_MESSENGER = "your.page.username";
@@ -24,6 +25,8 @@ const STORE_MESSENGER = "your.page.username";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type PackageInclusion = {
+    itemType?: "consumable" | "rental";
+    equipmentId?: number | null;
     inventoryKey?: string;
     productId: number;
     variantId?: number | null;
@@ -1130,9 +1133,11 @@ export default function CustomerBookingPage() {
     // A package is a request until Manager review. Show stock warnings for its
     // included consumables, but never incorrectly claim that browsing reserved them.
     const packageStockIssues = (selectedPackageData?.inclusions || []).filter(line => {
+        if (line.itemType === "rental") return false;
         const key = line.variantId ? `product:${line.productId}:variant:${line.variantId}` : `product:${line.productId}:regular`;
         return (liveConsumablesByKey.get(key)?.stock ?? 0) < Number(line.quantity || 0);
     });
+
     const selectedBranchName = branches.find(b => b.id === customBranchId)?.name || "";
     const eventEndDate = eventDurationType === "multiple" ? rentalEndDate : date;
     const requestedEventDays = date && eventEndDate && eventEndDate >= date
@@ -1145,6 +1150,17 @@ export default function CustomerBookingPage() {
         ? `${store.id}:${customBranchId}:${date}:${eventEndDate}` : "";
     const rentalAvailabilityReady = !!rentalPeriodKey && rentalCatalogPeriodKey === rentalPeriodKey &&
         !rentalCatalogLoading && !rentalCatalogError;
+    // Package rental inclusions are checked for the customer's event dates.
+    // Availability here is advisory; the booking service rechecks on submission
+    // and the branch must confirm before equipment is reserved.
+    const packageRentalIssues = (selectedPackageData?.inclusions || [])
+        .filter(line => line.itemType === "rental")
+        .filter(line => {
+            if (!rentalAvailabilityReady) return false;
+            const rental = rentalCatalog.find(item => item.id === Number(line.equipmentId));
+            const extras = selectedRentalItems.find(item => item.id === Number(line.equipmentId))?.quantity || 0;
+            return (rental?.availableForDates ?? 0) < Number(line.quantity || 0) + extras;
+        });
     // Preserve a customer's requested quantity when dates change, but flag it
     // rather than allowing an overbooked request to be submitted.
     const rentalSelectionConflict = rentalAvailabilityReady
@@ -1856,6 +1872,12 @@ export default function CustomerBookingPage() {
         : "";
 
     const detailsInclusionCount = detailsPackage?.inclusions?.length || 0;
+    const detailsConsumableInclusions = (detailsPackage?.inclusions || []).filter(
+        (item) => item.itemType !== "rental"
+    );
+    const detailsRentalInclusions = (detailsPackage?.inclusions || []).filter(
+        (item) => item.itemType === "rental"
+    );
 
     const detailsTotalIncludedUnits = (detailsPackage?.inclusions || []).reduce(
         (sum, item) => sum + Number(item.quantity || 0),
@@ -2613,6 +2635,10 @@ export default function CustomerBookingPage() {
                                             {selectedPackageData && <p className="mt-2 text-xs text-[#806A8C]">Handled by: <strong>{selectedBranchName || `Branch #${packageBranchId}`}</strong></p>}
                                             {selectedPackageData && !loadingInventory && !inventoryError && packageStockIssues.length > 0 &&
                                                 <p role="status" className="mt-2 text-xs text-amber-800">{packageStockIssues.length} package inclusion(s) currently have insufficient sellable stock for the chosen date. You may still send a request; the Manager must verify availability before approval.</p>}
+                                            {packageRentalIssues.length > 0 &&
+                                                <p role="status" className="mt-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-900">
+                                                    {packageRentalIssues.length} included rental item(s) exceed availability for the selected dates. Choose other event dates or contact the branch.
+                                                </p>}
                                             {fieldErrors.selection && <p className="mt-2 text-xs text-red-600">{fieldErrors.selection}</p>}
                                         </div>
                                         <p className="text-xs text-[#806A8C]">You can also select a package from the Available packages cards above.</p>
@@ -2648,7 +2674,9 @@ export default function CustomerBookingPage() {
                                     <div className="rounded-xl border border-[#E6DDF0] p-4 text-sm">
                                         <strong>{selectedPackageData?.name || "No package selected"}</strong>
                                         {(selectedPackageData?.inclusions || []).map((item, index) =>
-                                            <p key={`${item.productId}-${index}`} className="mt-2 text-xs">{item.productName}{item.variantName ? ` — ${item.variantName}` : ""} × {item.quantity}</p>
+                                            <p key={`${item.itemType || "consumable"}-${item.equipmentId || item.productId}-${index}`} className="mt-2 text-xs">
+                                                {item.itemType === "rental" ? "Rental · " : "Consumable · "}{item.productName}{item.variantName ? ` — ${item.variantName}` : ""} × {item.quantity}
+                                            </p>
                                         )}
                                     </div>
                                 ) : (
@@ -2832,8 +2860,8 @@ export default function CustomerBookingPage() {
                                                         <p className="text-xs font-bold text-[#2B174C]">Package inclusions</p>
                                                         {!selectedPackageData?.inclusions?.length ? <p className="mt-2 text-xs text-[#806A8C]">No package selected.</p> :
                                                             selectedPackageData.inclusions.map((item, index) =>
-                                                                <div key={`${item.productId}-${index}`} className="mt-2 flex justify-between gap-3 text-xs">
-                                                                    <span className="break-words">{item.productName}{item.variantName ? ` — ${item.variantName}` : ""}</span>
+                                                                <div key={`${item.itemType || "consumable"}-${item.equipmentId || item.productId}-${index}`} className="mt-2 flex justify-between gap-3 text-xs">
+                                                                    <span className="break-words">{item.itemType === "rental" ? "Rental · " : "Consumable · "}{item.productName}{item.variantName ? ` — ${item.variantName}` : ""}</span>
                                                                     <span className="shrink-0 font-semibold">× {item.quantity}</span>
                                                                 </div>)}
                                                     </div>
@@ -2952,14 +2980,14 @@ export default function CustomerBookingPage() {
                     }}
                 >
                     <div
-                        className="flex max-h-[92vh] w-full max-w-[980px] flex-col overflow-hidden rounded-[22px] border border-[#E6DDF0] bg-white shadow-[0_24px_80px_rgba(20,10,35,0.28)]"
+                        className="flex max-h-[92vh] w-full max-w-[1000px] flex-col overflow-hidden rounded-[22px] border border-[#E6DDF0] bg-white shadow-[0_24px_80px_rgba(20,10,35,0.28)]"
                         onClick={(event) => event.stopPropagation()}
                     >
                         <div className="relative shrink-0 overflow-hidden bg-[#2D1B4E]">
                             <button
                                 type="button"
                                 onClick={() => setShowExpandedPackageImage(true)}
-                                className="group/image block h-[280px] w-full cursor-zoom-in overflow-hidden text-left"
+                                className="group/image block h-[210px] sm:h-[230px] w-full cursor-zoom-in overflow-hidden text-left"
                                 aria-label="Expand package cover image"
                                 title="Click to enlarge image"
                             >
@@ -2999,9 +3027,9 @@ export default function CustomerBookingPage() {
                         </div>
 
                         <div className="min-h-0 flex-1 overflow-y-auto">
-                            <div className="grid gap-6 p-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+                            <div className="grid gap-5 p-4 sm:p-6 lg:grid-cols-[minmax(0,1fr)_minmax(330px,0.95fr)]">
                                 <div className="min-w-0 space-y-5">
-                                    <section>
+                                    <section className="rounded-[18px] border border-[#E6DDF0] bg-white p-4 sm:p-5">
                                         <h3 className="text-sm font-bold text-[#1A1220]">
                                             Package Information
                                         </h3>
@@ -3035,7 +3063,7 @@ export default function CustomerBookingPage() {
                                         </div>
                                     </section>
 
-                                    <section className="rounded-[16px] border border-[#EAE1EF] bg-[#FFFCF8] p-4">
+                                    <section className="rounded-[18px] border border-[#EAE1EF] bg-[#FFFCF8] p-4">
                                         <h3 className="text-sm font-bold text-[#1A1220]">
                                             Description
                                         </h3>
@@ -3044,7 +3072,7 @@ export default function CustomerBookingPage() {
                                         </p>
                                     </section>
 
-                                    <section className="rounded-[16px] border border-[#EAE1EF] bg-white p-4">
+                                    <section className="rounded-[18px] border border-[#EAE1EF] bg-white p-4">
                                         <div className="flex items-center justify-between gap-4">
                                             <div>
                                                 <h3 className="text-sm font-bold text-[#1A1220]">
@@ -3081,58 +3109,53 @@ export default function CustomerBookingPage() {
                                 </div>
 
                                 <div className="min-w-0">
-                                    <section className="rounded-[18px] border border-[#E6DDF0] bg-[#FBF8FD] p-4">
-                                        <div className="flex items-center justify-between gap-4">
+                                    <section className="rounded-[18px] border border-[#E6DDF0] bg-[#FBF8FD] p-4 sm:p-5">
+                                        <div className="flex items-center justify-between gap-3">
                                             <div>
-                                                <h3 className="text-sm font-bold text-[#1A1220]">
-                                                    Package Inclusions
-                                                </h3>
-                                                <p className="mt-1 text-xs text-[#84738D]">
-                                                    Items included in this package.
-                                                </p>
+                                                <h3 className="text-sm font-bold text-[#1A1220]">Package Inclusions</h3>
+                                                <p className="mt-1 text-xs text-[#84738D]">What is included with this package.</p>
                                             </div>
-
                                             <span className="shrink-0 rounded-full bg-[#EEE5F8] px-3 py-1 text-xs font-bold text-[#4E2C66]">
                                                 {detailsInclusionCount} {detailsInclusionCount === 1 ? "item" : "items"}
                                             </span>
                                         </div>
 
-                                        <div className="mt-4 max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                                        <div className="mt-4 space-y-4">
                                             {detailsInclusionCount === 0 ? (
                                                 <p className="rounded-xl border border-dashed border-[#DCCFE6] bg-white px-4 py-8 text-center text-sm text-[#7A6A84]">
                                                     No inclusions listed.
                                                 </p>
                                             ) : (
-                                                (detailsPackage.inclusions || []).map((item, index) => (
-                                                    <div
-                                                        key={item.inventoryKey || `${item.productId}-${item.variantId || 0}-${index}`}
-                                                        className="rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(43,23,76,0.03)]"
-                                                    >
-                                                        <div className="flex items-start justify-between gap-4">
-                                                            <div className="min-w-0">
-                                                                <p className="break-words text-sm font-semibold leading-5 text-[#1A1220]">
-                                                                    {item.productName}
-                                                                </p>
-
-                                                                {item.variantName ? (
-                                                                    <p className="mt-1 break-words text-xs text-[#806F89]">
-                                                                        {item.variantName}
-                                                                    </p>
-                                                                ) : null}
-
-                                                                <p className="mt-1.5 text-xs text-[#7A6A84]">
-                                                                    {peso(item.unitSalesPrice)} each
-                                                                </p>
+                                                [
+                                                    { kind: "consumable", name: "Consumable Goods", items: detailsConsumableInclusions },
+                                                    { kind: "rental", name: "Rental Goods", items: detailsRentalInclusions },
+                                                ].filter((group) => group.items.length > 0).map((group) => (
+                                                    <div key={group.kind} className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white">
+                                                        <div className="flex items-center justify-between gap-2 border-b border-[#EDE5F3] bg-[#F6F1FB] px-3.5 py-3">
+                                                            <div className="flex min-w-0 items-center gap-2 text-[#2B174C]">
+                                                                {group.kind === "rental" ? <Truck size={16} /> : <Package2 size={16} />}
+                                                                <h4 className="text-[13px] font-bold">{group.name}</h4>
                                                             </div>
-
-                                                            <div className="shrink-0 text-right">
-                                                                <p className="text-sm font-bold text-[#2B174C]">
-                                                                    × {item.quantity}
-                                                                </p>
-                                                                <p className="mt-1 text-xs font-semibold text-[#7A6A84]">
-                                                                    {peso(item.lineValue)}
-                                                                </p>
-                                                            </div>
+                                                            <span className="shrink-0 text-xs font-semibold text-[#705B81]">
+                                                                {group.items.length} {group.items.length === 1 ? "item" : "items"}
+                                                            </span>
+                                                        </div>
+                                                        <div className="divide-y divide-[#F0EAF4]">
+                                                            {group.items.map((item, index) => (
+                                                                <div key={`${item.inventoryKey || `${item.productId}-${item.variantId || 0}`}-${index}`} className="flex items-start justify-between gap-3 px-3.5 py-3">
+                                                                    <div className="min-w-0">
+                                                                        <p className="break-words text-[13px] font-semibold text-[#1A1220]">{item.productName}</p>
+                                                                        {item.variantName && <p className="mt-0.5 text-xs text-[#806F89]">{item.variantName}</p>}
+                                                                        <p className="mt-1 text-xs text-[#7A6A84]">
+                                                                            {peso(item.unitSalesPrice)} {group.kind === "rental" ? "per unit/day (included in package price)" : "each"}
+                                                                        </p>
+                                                                    </div>
+                                                                    <div className="shrink-0 text-right">
+                                                                        <p className="text-[13px] font-bold text-[#2B174C]">× {item.quantity}</p>
+                                                                        <p className="mt-1 text-xs font-semibold text-[#70617D]">{peso(item.lineValue)}</p>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
                                                         </div>
                                                     </div>
                                                 ))

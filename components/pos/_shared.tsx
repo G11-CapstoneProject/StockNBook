@@ -155,6 +155,8 @@ export type PosOrdersApiResponse = {
         cost: number;
         profit: number;
         vat?: number; // Manager-only aggregate; financial costs remain Owner-only.
+        bookingSales?: number | null;
+        walkInSales?: number;
     } | null;
     error?: string;
 };
@@ -582,7 +584,7 @@ export function POSLayout({
                     <div className="flex items-center justify-between px-6 py-3">
                         <div className="flex flex-wrap items-center gap-3">
                             <h1 className="text-[25px] font-bold text-[#1A1220]">
-                                {role === "owner" ? "Sales History & Audit" : role === "manager" ? "Branch Sales" : "POS Register"}
+                                {role === "owner" ? "Sales & Revenue" : role === "manager" ? "Branch Sales" : "POS Register"}
                             </h1>
 
                             <span className="rounded-lg bg-[#EFE8F8] px-3.5 py-1.5 text-sm font-medium text-[#4E2C66]">
@@ -684,7 +686,7 @@ export function OrdersTable({
             >
                 <table
                     className={`w-full table-fixed text-sm ${
-                        showBranch || showCustomerType || showPayment ? "min-w-[960px]" : ""
+                        allowHorizontalScroll && (showBranch || showCustomerType || showPayment) ? "min-w-[960px]" : ""
                     }`}
                 >
                     {showBranch && (
@@ -697,8 +699,8 @@ export function OrdersTable({
                         </colgroup>
                     )}
 
-                    <thead className={stickyHeader ? "sticky top-0 z-10 bg-white" : ""}>
-                    <tr className="border-b border-[#E6DDF0]">
+                    <thead className={stickyHeader ? "sticky top-0 z-10 bg-[#F9F6FD]" : "bg-[#F9F6FD]"}>
+                    <tr className="border-b border-[#E6DDF0] bg-[#F9F6FD]">
                         <th className="px-4 py-3 text-left text-xs font-semibold text-[#806A8C]">
                             Order ID
                         </th>

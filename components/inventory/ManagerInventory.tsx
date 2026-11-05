@@ -2697,8 +2697,19 @@ export default function ManagerInventory() {
         [managerProducts, lastStockInRecords]
     );
 
+    // KPI cards and the Stock Action Center count the same sellable stock shown in
+    // the Branch Inventory List ("Available Stock"). Each line keeps its original
+    // product, so edit/restock/dispose actions still receive the unmodified record.
     const allStockLines = React.useMemo(
-        () => managerProducts.flatMap(getProductStockLines),
+        () => managerProducts.flatMap((product) =>
+            getProductStockLines(product).map((line) => {
+                const variant = line.variantId == null
+                    ? null
+                    : (product.variants || []).find((item) => item.id === line.variantId);
+                const sellable = variant ? variant.sellableStock : product.sellableStock;
+                return sellable == null ? line : {...line, stock: Number(sellable)};
+            })
+        ),
         [managerProducts]
     );
 
@@ -3042,13 +3053,21 @@ function ManagerMetricCard({label, value, helper, icon, tone, loading = false}: 
     }[tone];
     return (
         <section aria-busy={loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
-            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`} aria-hidden="true">{icon}</span>
-            <span className="min-w-0 flex-1">
-                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
-                {loading ? <span className="mt-1 block h-7 w-24 max-w-full animate-pulse rounded-md bg-[#F1EBF8]" role="status" aria-label={`Loading ${label}`}/> :
-                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{formatNumber(value)}</span>}
-                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{helper}</span>
-            </span>
+            {loading ? <>
+                <span className="h-14 w-14 shrink-0 animate-pulse rounded-full bg-[#EEE8F3]" aria-hidden="true"/>
+                <span className="min-w-0 flex-1 space-y-2.5" role="status" aria-label={`Loading ${label}`}>
+                    <span className="block h-3.5 w-32 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                    <span className="block h-7 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                    <span className="block h-2.5 w-40 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                </span>
+            </> : <>
+                <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`} aria-hidden="true">{icon}</span>
+                <span className="min-w-0 flex-1">
+                    <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
+                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{formatNumber(value)}</span>
+                    <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{helper}</span>
+                </span>
+            </>}
         </section>
     );
 }
@@ -3745,18 +3764,18 @@ function StockActionCenter({
                 </div>
             ) : (
                 <div className="min-h-0 flex-1 w-full overflow-y-auto overflow-x-hidden">
-                    <table className="w-full table-fixed text-[10px] xl:text-[11px]">
+                    <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                         <colgroup>
-                            <col className="w-[27%]" />
-                            <col className="w-[11%]" />
-                            <col className="w-[12%]" />
-                            <col className="w-[12%]" />
-                            <col className="w-[16%]" />
-                            <col className="w-[22%]" />
+                            <col className="w-[24%]" />
+                            <col className="w-[15%]" />
+                            <col className="w-[14.5%]" />
+                            <col className="w-[15%]" />
+                            <col className="w-[12.5%]" />
+                            <col className="w-[19%]" />
                         </colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                         <tr className="border-b border-[#E9E1EE]">
-                            <MiniHeader>Product</MiniHeader>
+                            <MiniHeader center>Product</MiniHeader>
                             <MiniHeader center>Current Stock</MiniHeader>
                             <MiniHeader center>Reorder Point</MiniHeader>
                             <MiniHeader center>Sales Velocity</MiniHeader>
@@ -3770,24 +3789,24 @@ function StockActionCenter({
                                 key={row.id}
                                 className="border-b border-[#EFE8F2] last:border-b-0"
                             >
-                                <td className="break-words px-3 py-2.5 font-semibold text-[#2B174C]">
+                                <td className="break-words py-2 font-semibold text-[#2B174C] px-4 text-left">
                                     {row.productName}
                                 </td>
-                                <td className="px-1.5 py-2.5 text-center font-semibold text-[#4F3A5A]">
+                                <td className="px-2 py-2 text-center font-semibold text-[#4F3A5A]">
                                     {formatNumber(row.currentStock)}
                                 </td>
-                                <td className="px-1.5 py-2.5 text-center text-[#5F4E75]">
+                                <td className="px-2 py-2 text-center text-[#5F4E75]">
                                     {row.reorderPoint > 0
                                         ? formatNumber(row.reorderPoint)
                                         : "—"}
                                 </td>
-                                <td className="px-1.5 py-2.5 text-center font-semibold text-[#2B174C]">
+                                <td className="px-2 py-2 text-center font-semibold text-[#2B174C]">
                                     {row.salesVelocity}
                                 </td>
-                                <td className="px-1.5 py-2.5 text-center">
+                                <td className="px-2 py-2 text-center">
                                     <ActionIssueBadge issue={row.issue} />
                                 </td>
-                                <td className="px-1.5 py-2.5 text-center">
+                                <td className="px-2 py-2 text-center">
                                     <button
                                         type="button"
                                         onClick={() => {
@@ -4049,18 +4068,18 @@ function StockActionReviewDialog({
 function ActionIssueBadge({ issue }: { issue: ActionCenterRow["issue"] }) {
     const className =
         issue === "Out of Stock"
-            ? "bg-[#FFE7EA] text-[#D92C3F]"
+            ? "text-[#D92C3F]"
             : issue === "Low Stock"
-                ? "bg-[#FFF2D3] text-[#C77A00]"
+                ? "text-[#C77A00]"
                 : issue === "Slow Moving"
-                    ? "bg-[#E8F2FF] text-[#3372BA]"
+                    ? "text-[#3372BA]"
                     : issue === "Expired"
-                        ? "bg-[#F4E9F8] text-[#8E4AA6]"
-                        : "bg-[#EEE8FF] text-[#6944C9]";
+                        ? "text-[#8E4AA6]"
+                        : "text-[#6944C9]";
 
     return (
         <span
-            className={`inline-flex max-w-full items-center justify-center rounded-full px-2.5 py-1 text-center text-[10px] font-semibold leading-4 ${className}`}
+            className={`inline-block max-w-full text-center text-[10px] font-semibold leading-4 ${className}`}
         >
             {issue}
         </span>
@@ -4100,18 +4119,18 @@ function RecentStockActivity({
                 </div>
             ) : (
                 <div className="min-h-0 flex-1 w-full overflow-y-auto overflow-x-hidden">
-                    <table className="w-full table-fixed text-[10px] xl:text-[11px]">
+                    <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                         <colgroup>
-                            <col className="w-[23%]" />
-                            <col className="w-[29%]" />
+                            <col className="w-[16%]" />
+                            <col className="w-[30%]" />
                             <col className="w-[18%]" />
-                            <col className="w-[12%]" />
-                            <col className="w-[18%]" />
+                            <col className="w-[9%]" />
+                            <col className="w-[27%]" />
                         </colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                         <tr className="border-b border-[#E9E1EE]">
-                            <MiniHeader>Date & Time</MiniHeader>
-                            <MiniHeader>Product</MiniHeader>
+                            <MiniHeader center>Date & Time</MiniHeader>
+                            <MiniHeader center>Product</MiniHeader>
                             <MiniHeader center>Movement</MiniHeader>
                             <MiniHeader center>Qty</MiniHeader>
                             <MiniHeader center>Reference No.</MiniHeader>
@@ -4126,7 +4145,7 @@ function RecentStockActivity({
                                     key={movement.id}
                                     className="border-b border-[#EFE8F2] last:border-b-0"
                                 >
-                                    <td className="px-3 py-2.5 text-[#4F3A5A]">
+                                    <td className="py-2 text-[#4F3A5A] px-4 text-left">
                                         <div className="font-medium">
                                             {formatStockActivityDate(movement.date)}
                                         </div>
@@ -4136,16 +4155,16 @@ function RecentStockActivity({
                                                 : formatStockActivityTime(movement.date)}
                                         </div>
                                     </td>
-                                    <td className="break-words px-3 py-2.5 font-medium text-[#2B174C]">
+                                    <td className="break-words px-2 py-2 font-medium text-[#2B174C]">
                                         {movement.productName}
                                     </td>
-                                    <td className="px-2 py-2.5 text-center">
+                                    <td className="px-2 py-2 text-center">
                                         <span
                                             className={[
-                                                "inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold",
+                                                "inline-block text-[10px] font-semibold",
                                                 isStockIn
-                                                    ? "bg-[#E5F8EC] text-[#23834A]"
-                                                    : "bg-[#FFE7EA] text-[#D92C3F]",
+                                                    ? "text-[#23834A]"
+                                                    : "text-[#D92C3F]",
                                             ].join(" ")}
                                         >
                                             {movement.movement}
@@ -4153,7 +4172,7 @@ function RecentStockActivity({
                                     </td>
                                     <td
                                         className={[
-                                            "px-2 py-2.5 text-center font-semibold",
+                                            "px-2 py-2 text-center font-semibold",
                                             isStockIn
                                                 ? "text-[#23834A]"
                                                 : "text-[#D92C3F]",
@@ -4162,7 +4181,7 @@ function RecentStockActivity({
                                         {isStockIn ? "+" : "-"}
                                         {formatNumber(movement.quantity)}
                                     </td>
-                                    <td className="px-2 py-2.5 text-center text-[#5F4E75]">
+                                    <td className="px-2 py-2 text-center text-[#5F4E75]">
                                         {movement.referenceNumber || "—"}
                                     </td>
                                 </tr>
@@ -4185,7 +4204,7 @@ function MiniHeader({
 }) {
     return (
         <th
-            className={`break-words px-2 py-2.5 text-[9px] font-semibold uppercase tracking-[0.05em] text-[#806A8C] ${
+            className={`truncate px-2 py-2 text-[10px] font-semibold uppercase tracking-normal text-[#806A8C] ${
                 center ? "text-center" : "text-left"
             }`}
         >
@@ -4396,7 +4415,7 @@ type SupplierPayable = {
     purchaseId:number;purchaseNumber:string;supplier:string;supplierInvoiceNumber:string|null;
     purchaseTotal:number;amountPaid:number;outstandingBalance:number;paymentStatus:string;
     paymentMethod:"cash"|"credit";
-    purchaseDate:string;paymentDueDate:string|null;
+    purchaseDate:string;recordedAt?:string|null;paymentDueDate:string|null;
 };
 type SupplierPurchaseItem = {
     productId:number; productNumber:string|null; productName:string; variantId:number|null;
@@ -4520,6 +4539,25 @@ function SupplierPurchaseEditDialog({purchase,onClose,onSave}:{
     </div>;
 }
 
+function formatSupplierPurchaseDate(value?: string | null) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value || "");
+    if (!match) return "—";
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== `${match[1]}-${match[2]}-${match[3]}`) return "—";
+    const months = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "Jun.", "Jul.", "Aug.", "Sep.", "Oct.", "Nov.", "Dec."];
+    return `${months[month - 1]} ${day}, ${year}`;
+}
+function formatPurchaseRecordedTime(value?: string | null) {
+    // created_at records when StockNBook saved the purchase, not the supplier's transaction time.
+    // The API returns database-local clock text; avoid converting an unknown timezone.
+    const match = /^\d{4}-\d{2}-\d{2}[ T](\d{2}):(\d{2})/.exec(value || "");
+    if (!match || Number(match[1]) > 23) return "—";
+    const hour = Number(match[1]);
+    return `${hour % 12 || 12}:${match[2]} ${hour >= 12 ? "PM" : "AM"}`;
+}
 
 function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
     const [rows,setRows]=React.useState<SupplierPayable[]>([]);
@@ -4665,18 +4703,20 @@ function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
                 {error && <p role="alert" className="rounded-lg bg-red-50 p-2 text-xs text-red-600">{error}</p>}
                 {loading?<p className="text-sm">Loading supplier purchases...</p>:filtered.length===0?
                     <p className="text-sm">{rows.length===0?"No transaction-ledger purchases found.":"No purchases match this search."}</p>:
-                    <div className="overflow-x-auto"><table className="w-full text-left text-xs">
-                        <thead><tr className="border-b border-[#E3D8EA] text-[#806A8C]">
-                            <th className="p-2">Purchase</th><th className="p-2">Supplier</th><th className="p-2">Method</th><th className="p-2">Total</th>
-                            <th className="p-2">Paid</th><th className="p-2">Outstanding</th><th className="p-2">Status</th><th className="p-2">Action</th></tr></thead>
+                    <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                        <colgroup><col className="w-[17%]"/><col className="w-[15%]"/><col className="w-[14%]"/><col className="w-[10%]"/><col className="w-[9%]"/><col className="w-[8.5%]"/><col className="w-[10%]"/><col className="w-[8%]"/><col className="w-[8.5%]"/></colgroup>
+                        <thead className="sticky top-0 z-10 bg-white"><tr className="border-b border-[#E3D8EA] text-[#806A8C]">
+                            <th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Purchase No.</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Purchase Date / Time</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Supplier</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Method</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Total</th>
+                            <th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Paid</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Outstanding</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Status</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Action</th></tr></thead>
                         <tbody>{filtered.map(row=><tr key={row.purchaseId} className="border-b border-[#F0EAF4]">
-                            <td className="p-2"><button type="button" className="font-semibold text-[#5734B3] underline underline-offset-2" onClick={()=>void openPurchase(row)}>{row.purchaseNumber}</button></td>
-                            <td className="p-2">{row.supplier}</td><td className="p-2">{row.paymentMethod === "cash" ? "Cash" : "Credit (Utang)"}</td>
-                            <td className="p-2">{money(row.purchaseTotal)}</td><td className="p-2">{money(row.amountPaid)}</td>
-                            <td className="p-2">{money(row.outstandingBalance)}</td><td className="p-2">{row.paymentStatus}</td>
-                            <td className="p-2"><button type="button" disabled={saving} aria-label={`Edit purchase ${row.purchaseNumber}`}
-                                                        onClick={event=>{editTriggerRef.current=event.currentTarget;setEditPurchase(row);setError("");setNotice("");}}
-                                                        className="inline-flex items-center gap-1.5 rounded-lg border border-[#E3D8EA] px-3 py-1.5 font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50">
+                            <td className="min-w-0 break-words py-1.5 px-4 text-left"><button type="button" className="font-semibold text-[#5734B3] underline underline-offset-2" onClick={()=>void openPurchase(row)}>{row.purchaseNumber}</button></td>
+                            <td className="p-1.5">{formatSupplierPurchaseDate(row.purchaseDate)}<div className="mt-1 text-[10px] text-[#806A8C]">{formatPurchaseRecordedTime(row.recordedAt)}</div></td>
+                            <td className="min-w-0 break-words p-1.5">{row.supplier}</td><td className="min-w-0 break-words p-1.5 text-center">{row.paymentMethod === "cash" ? "Cash" : "Credit (Utang)"}</td>
+                            <td className="min-w-0 break-words p-1.5 text-center tabular-nums">{money(row.purchaseTotal)}</td><td className="min-w-0 break-words p-1.5 text-center tabular-nums">{money(row.amountPaid)}</td>
+                            <td className="min-w-0 break-words p-1.5 text-center tabular-nums">{money(row.outstandingBalance)}</td><td className={`min-w-0 break-words p-1.5 text-center font-semibold ${row.paymentStatus === "Paid" ? "text-[#23834A]" : row.paymentStatus === "Unpaid" ? "text-[#D92C3F]" : "text-[#A66A00]"}`}>{row.paymentStatus}</td>
+                            <td className="min-w-0 break-words p-1.5 text-center"><button type="button" disabled={saving} aria-label={`Edit purchase ${row.purchaseNumber}`}
+                                                                                          onClick={event=>{editTriggerRef.current=event.currentTarget;setEditPurchase(row);setError("");setNotice("");}}
+                                                                                          className="inline-flex items-center justify-center gap-1 rounded-lg bg-[#F1EBFF] px-2.5 py-1.5 text-[11px] font-semibold text-[#5330B6] transition hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5330B6] disabled:opacity-50">
                                 <Pencil size={13}/> Edit</button></td>
                         </tr>)}</tbody></table></div>}
                 {viewPurchase && <section className="space-y-2 rounded-xl border border-[#E3D8EA] bg-[#FCF9FF] p-3">
@@ -4684,12 +4724,13 @@ function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
                         <button className="text-xs text-[#806A8C]" onClick={()=>setViewPurchase(null)} type="button">Close details</button></div>
                     <p className="text-xs text-[#806A8C]">Only products and variants recorded in this purchase are shown. Current stock may differ from purchased quantity.</p>
                     {itemsLoading?<p className="text-xs">Loading purchased items...</p>:purchaseItems.length===0?<p className="text-xs">No purchase line items found.</p>:
-                        <div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead><tr className="border-b text-[#806A8C]">
-                            <th className="p-2">Product / Variant</th><th className="p-2">Quantity Purchased</th><th className="p-2">Unit Cost</th><th className="p-2">Line Total</th></tr></thead>
+                        <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                            <colgroup><col className="w-[42%]"/><col className="w-[18%]"/><col className="w-[20%]"/><col className="w-[20%]"/></colgroup><thead className="sticky top-0 z-10 bg-[#FCF9FF]"><tr className="border-b text-[#806A8C]">
+                            <th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Product / Variant</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Quantity Purchased</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Unit Cost</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Line Total</th></tr></thead>
                             <tbody>{purchaseItems.map((item,index)=><tr key={`${item.productId}-${item.variantId??"regular"}-${index}`} className="border-b">
-                                <td className="p-2"><strong>{item.productName}</strong> {item.productNumber?`(${item.productNumber})`:""}
+                                <td className="py-2 px-4 text-left"><strong>{item.productName}</strong> {item.productNumber?`(${item.productNumber})`:""}
                                     {item.variantId!=null && <div className="text-[#806A8C]">{typeof item.variantValues === "string" ? item.variantValues : Object.entries(item.variantValues || {}).map(([key,val])=>`${key}: ${val}`).join(" / ")} {item.variantNumber?`· ${item.variantNumber}`:""}</div>}</td>
-                                <td className="p-2">{item.quantity}</td><td className="p-2">{money(item.unitCost)}</td><td className="p-2">{money(item.lineTotal)}</td>
+                                <td className="p-2 text-center">{item.quantity}</td><td className="p-2 text-center">{money(item.unitCost)}</td><td className="p-2 text-center">{money(item.lineTotal)}</td>
                             </tr>)}</tbody></table></div>}
                 </section>}
                 <form onSubmit={preparePayment} className="space-y-3 border-t border-[#E3D8EA] pt-4">
@@ -4867,23 +4908,23 @@ function ManagerInventoryTable({
                 </div>
             ) : (
                 <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain" style={{ maxHeight: 360 }} role="region" aria-label="Branch inventory list" tabIndex={0}>
-                    <table className="w-full table-fixed text-[10px] xl:text-[11px]">
+                    <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                         <colgroup>
-                            <col className="w-[8%]" />
-                            <col className="w-[18%]" />
                             <col className="w-[10%]" />
-                            <col className="w-[8%]" />
-                            <col className="w-[8%]" />
-                            <col className="w-[10%]" />
-                            <col className="w-[10%]" />
+                            <col className="w-[20%]" />
+                            <col className="w-[11%]" />
                             <col className="w-[9%]" />
-                            <col className="w-[19%]" />
+                            <col className="w-[8.5%]" />
+                            <col className="w-[9%]" />
+                            <col className="w-[8.5%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[16%]" />
                         </colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                         <tr className="border-b border-[#E9E1EE]">
                             <MiniHeader center>Product No.</MiniHeader>
-                            <MiniHeader>Product</MiniHeader>
-                            <MiniHeader>Category</MiniHeader>
+                            <MiniHeader center>Product</MiniHeader>
+                            <MiniHeader center>Category</MiniHeader>
                             <MiniHeader center>Available Stock</MiniHeader>
                             <MiniHeader center>Reorder Point</MiniHeader>
                             <MiniHeader center>Last Stock In</MiniHeader>
@@ -4912,9 +4953,9 @@ function ManagerInventoryTable({
                             return (
                                 <React.Fragment key={product.id}>
                                     <tr
-                                        className={`h-14 border-b border-[#EFE8F2] ${
+                                        className={`h-12 border-b border-[#EFE8F2] hover:bg-[#FFFCF8] ${
                                             expandable
-                                                ? "cursor-pointer hover:bg-[#FFFCF8]"
+                                                ? "cursor-pointer"
                                                 : ""
                                         }`}
                                         onClick={
@@ -4927,8 +4968,9 @@ function ManagerInventoryTable({
                                                 : undefined
                                         }
                                     >
-                                        <td className="px-2 py-2.5 font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">
-                                            <div className="flex items-center justify-center gap-1.5">
+                                        <td className="break-all py-2 font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px] px-4 text-left">
+                                            <div className="flex items-center justify-start gap-1.5">
+                                                <span>{getProductNumber(product) || "—"}</span>
                                                 {expandable ? (
                                                     <ChevronDown
                                                         size={13}
@@ -4936,13 +4978,10 @@ function ManagerInventoryTable({
                                                             expanded ? "rotate-180" : ""
                                                         }`}
                                                     />
-                                                ) : (
-                                                    <span className="w-[13px] shrink-0" />
-                                                )}
-                                                <span>{getProductNumber(product) || "—"}</span>
+                                                ) : null}
                                             </div>
                                         </td>
-                                        <td className="break-words px-3 py-2.5 font-semibold text-[#2B174C]">
+                                        <td className="break-words px-2 py-2 font-semibold text-[#2B174C]">
                                             <span>{product.name}</span>
                                             {product.ledgerMismatch && (
                                                 <span
@@ -4953,27 +4992,27 @@ function ManagerInventoryTable({
                                                 </span>
                                             )}
                                         </td>
-                                        <td className="break-words px-2 py-2.5 text-[#5F4E75]">
+                                        <td className="break-words px-2 py-2 text-[#5F4E75]">
                                             {product.category || "—"}
                                         </td>
-                                        <td className="px-2 py-2.5 text-center font-semibold text-[#2B174C]">
+                                        <td className="px-2 py-2 text-center font-semibold text-[#2B174C]">
                                             {formatNumber(getProductTotalStock(sellableProduct))}
                                         </td>
-                                        <td className="px-2 py-2.5 text-center text-[#5F4E75]">
+                                        <td className="px-2 py-2 text-center text-[#5F4E75]">
                                             {formatNumber(getProductReorderLevel(product))}
                                         </td>
-                                        <td className="px-2 py-2.5 text-center text-[#5F4E75]">
+                                        <td className="px-2 py-2 text-center text-[#5F4E75]">
                                             {formatDate(lastStockInDates.productDates[product.id])}
                                         </td>
-                                        <td className="px-2 py-2.5 text-center text-[#5F4E75]">
+                                        <td className="px-2 py-2 text-center text-[#5F4E75]">
                                             {expiration
                                                 ? formatDate(expiration.toISOString())
                                                 : "—"}
                                         </td>
-                                        <td className="px-2 py-2.5 text-center">
+                                        <td className="px-2 py-2 text-center">
                                             <ManagerStatusBadge status={status} />
                                         </td>
-                                        <td className="px-2 py-2.5 text-center">
+                                        <td className="px-2 py-2 text-center">
                                             <div className="flex flex-wrap items-center justify-center gap-1">
                                                 <button
                                                     type="button"
@@ -5045,37 +5084,37 @@ function ManagerInventoryTable({
                                             return (
                                                 <tr
                                                     key={variant.id}
-                                                    className="h-14 border-b border-[#EFE8F2] bg-[#FCF9FF]"
+                                                    className="h-12 border-b border-[#EFE8F2] bg-[#FCF9FF]"
                                                 >
-                                                    <td className="break-all px-2 py-2.5 text-center font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">
+                                                    <td className="break-all py-2 px-4 text-left font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">
                                                         {variant.variantNumber || "—"}
                                                     </td>
-                                                    <td className="break-words px-3 py-2.5 pl-8 text-[10px] font-semibold text-[#5F3D82]">
+                                                    <td className="break-words px-2 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">
                                                         ↳ {getVariantName(variant)}
                                                     </td>
-                                                    <td className="px-2 py-2.5 text-[#8A7D90]">
+                                                    <td className="px-2 py-2 text-[#8A7D90]">
                                                         Variant
                                                     </td>
-                                                    <td className="px-2 py-2.5 text-center font-semibold text-[#2B174C]">
+                                                    <td className="px-2 py-2 text-center font-semibold text-[#2B174C]">
                                                         {formatNumber(variant.sellableStock ?? variant.stock)}
                                                     </td>
-                                                    <td className="px-2 py-2.5 text-center text-[#5F4E75]">
+                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">
                                                         {formatNumber(variant.alertLevel)}
                                                     </td>
-                                                    <td className="px-2 py-2.5 text-center text-[#5F4E75]">
+                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">
                                                         {formatDate(lastStockInDates.variantDates[`${product.id}:${variant.id}`])}
                                                     </td>
-                                                    <td className="px-2 py-2.5 text-center text-[#5F4E75]">
+                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">
                                                         {formatDate(
                                                             variant.expirationDate
                                                         )}
                                                     </td>
-                                                    <td className="px-2 py-2.5 text-center">
+                                                    <td className="px-2 py-2 text-center">
                                                         <ManagerStatusBadge
                                                             status={getLineStatus(line)}
                                                         />
                                                     </td>
-                                                    <td className="px-2 py-2.5 text-center">
+                                                    <td className="px-2 py-2 text-center">
                                                         {Number(variant.expiredBatchUnits || 0) > 0 && (
                                                             <button type="button" onClick={() => onDispose(product, variant.id)}
                                                                     className="rounded-lg bg-[#FFF0F0] px-2 py-1.5 text-[10px] font-semibold text-[#B42335] hover:bg-[#FFE2E2]">
@@ -5100,18 +5139,18 @@ function ManagerInventoryTable({
 function ManagerStatusBadge({ status }: { status: ManagerInventoryStatus }) {
     const className =
         status === "In Stock"
-            ? "bg-[#E5F8EC] text-[#23834A]"
+            ? "text-[#23834A]"
             : status === "Low Stock"
-                ? "bg-[#FFF2D3] text-[#C77A00]"
+                ? "text-[#C77A00]"
                 : status === "Out of Stock"
-                    ? "bg-[#FFE7EA] text-[#D92C3F]"
+                    ? "text-[#D92C3F]"
                     : status === "Expiring Soon"
-                        ? "bg-[#EEE8FF] text-[#6944C9]"
-                        : "bg-[#F4E9F8] text-[#8E4AA6]";
+                        ? "text-[#6944C9]"
+                        : "text-[#8E4AA6]";
 
     return (
         <span
-            className={`inline-flex max-w-full items-center justify-center rounded-full px-2.5 py-1 text-center text-[10px] font-semibold leading-4 ${className}`}
+            className={`inline-block max-w-full text-center text-[10px] font-semibold leading-4 ${className}`}
         >
             {status}
         </span>
@@ -6480,26 +6519,26 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                                                 <p className="text-[15px] font-bold text-[#21132E]">{product.name}</p>
                                                 <p className="mt-1 text-xs text-[#675875]">Category: {product.category} • Variants: {product.hasVariants ? "Yes" : "No"}</p>
                                             </div>
-                                            <span className="rounded-full bg-[#E5F8EC] px-3 py-1 text-xs font-semibold text-[#23834A]">Valid</span>
+                                            <span className="text-xs font-semibold text-[#23834A]">Valid</span>
                                         </div>
                                         <div className="space-y-3 p-4">
                                             <h4 className="text-sm font-bold text-[#21132E]">Inventory &amp; Pricing Details</h4>
-                                            <div className="overflow-x-auto rounded-lg border border-[#E9E1EE] bg-white">
-                                                <table className="w-full min-w-[750px] table-fixed text-[11px]">
+                                            <div className="max-h-[320px] overflow-auto overscroll-contain rounded-lg border border-[#E9E1EE] bg-white">
+                                                <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                                                     <colgroup>
                                                         <col className="w-[24%]"/><col className="w-[9%]"/>
                                                         <col className="w-[10%]"/><col className="w-[12%]"/>
                                                         <col className="w-[16%]"/><col className="w-[13%]"/>
                                                         <col className="w-[16%]"/>
                                                     </colgroup>
-                                                    <thead className="bg-[#F8F3FC] text-[#5A476A]"><tr>
-                                                        <th className="px-3 py-2 text-left">Variant</th>
-                                                        <th className="px-2 py-2 text-center">Stock</th>
-                                                        <th className="px-2 py-2 text-center">Reorder Point</th>
-                                                        <th className="px-2 py-2 text-center">Cost Price</th>
-                                                        <th className="px-2 py-2 text-center">Pricing Method</th>
-                                                        <th className="px-2 py-2 text-center">Selling Price</th>
-                                                        <th className="px-2 py-2 text-center">Expiration Date</th>
+                                                    <thead className="sticky top-0 z-10 bg-[#F8F3FC] text-[#5A476A]"><tr>
+                                                        <th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Variant</th>
+                                                        <th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Stock</th>
+                                                        <th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Reorder Point</th>
+                                                        <th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Cost Price</th>
+                                                        <th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Pricing Method</th>
+                                                        <th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Selling Price</th>
+                                                        <th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Expiration Date</th>
                                                     </tr></thead>
                                                     <tbody>
                                                     {lines.map((rawLine, index) => {
@@ -6508,13 +6547,13 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                                                             ? Object.entries(line.variantValues || {}).map(([k, v]) => `${k}: ${v}`).join(" / ") || `Variant ${index + 1}`
                                                             : "Regular";
                                                         return <tr key={`${product.tempId}-${index}`} className="border-t border-[#EFE7F4]">
-                                                            <td className="break-words px-3 py-3 font-semibold text-[#2B174C]">{variantName}</td>
-                                                            <td className="px-2 py-3 text-center">{formatNumber(line.stock)}</td>
-                                                            <td className="px-2 py-3 text-center">{formatNumber(line.alertLevel)}</td>
-                                                            <td className="px-2 py-3 text-center">{money(Number(line.originalPrice))}</td>
-                                                            <td className="px-2 py-3 text-center">{previewPricingLabel(line)}</td>
-                                                            <td className="px-2 py-3 text-center font-bold text-[#21132E]">{money(Number(line.salesPrice))}</td>
-                                                            <td className="px-2 py-3 text-center">{formatImportExpirationDate(line.expirationDate)}</td>
+                                                            <td className="break-words py-2 font-semibold text-[#2B174C] px-4 text-left">{variantName}</td>
+                                                            <td className="px-2 py-2 text-center">{formatNumber(line.stock)}</td>
+                                                            <td className="px-2 py-2 text-center">{formatNumber(line.alertLevel)}</td>
+                                                            <td className="px-2 py-2 text-center">{money(Number(line.originalPrice))}</td>
+                                                            <td className="px-2 py-2 text-center">{previewPricingLabel(line)}</td>
+                                                            <td className="px-2 py-2 text-center font-bold text-[#21132E]">{money(Number(line.salesPrice))}</td>
+                                                            <td className="px-2 py-2 text-center">{formatImportExpirationDate(line.expirationDate)}</td>
                                                         </tr>;
                                                     })}
                                                     </tbody>

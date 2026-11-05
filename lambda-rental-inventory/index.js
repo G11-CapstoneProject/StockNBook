@@ -1310,6 +1310,7 @@ async function getPayables(db,scope) {
     const [rows]=await db.execute(`SELECT p.id AS purchaseId,p.purchase_number AS purchaseNumber,p.supplier,
                                           p.supplier_invoice_number AS supplierInvoiceNumber,p.purchase_total AS purchaseTotal,
                                           p.payment_method AS paymentMethod,DATE_FORMAT(p.purchase_date,'%Y-%m-%d') AS purchaseDate,
+                                          DATE_FORMAT(p.created_at,'%Y-%m-%d %H:%i:%s') AS recordedAt,
                                           DATE_FORMAT(p.payment_due_date,'%Y-%m-%d') AS paymentDueDate,COALESCE(SUM(pay.amount),0) AS amountPaid
                                    FROM rental_purchase_transactions p LEFT JOIN rental_supplier_payments pay ON pay.purchase_id=p.id
                                    WHERE p.store_id=? AND p.branch_id=? GROUP BY p.id ORDER BY p.id DESC`,[scope.storeId,scope.branchId]);

@@ -368,6 +368,18 @@ export function usePOS() {
     const [managerOrderEndDate, setManagerOrderEndDate] = useState("");
     const [managerOrderSearch, setManagerOrderSearchState] = useState("");
     const [managerOrderPage, setManagerOrderPage] = useState(1);
+    const [managerSalesSource, setManagerSalesSourceState] = useState<"ALL" | "BOOKING" | "WALK_IN">("ALL");
+    const [managerPaymentFilter, setManagerPaymentFilterState] = useState<"ALL" | "CASH" | "GCASH" | "BANK_TRANSFER">("ALL");
+    const [managerBookingAvailable, setManagerBookingAvailable] = useState<boolean | null>(null);
+    const [managerOrderError, setManagerOrderError] = useState<string | null>(null);
+    const setManagerSalesSource = useCallback((value: "ALL" | "BOOKING" | "WALK_IN") => {
+        setManagerSalesSourceState(value);
+        setManagerOrderPage(1);
+    }, []);
+    const setManagerPaymentFilter = useCallback((value: "ALL" | "CASH" | "GCASH" | "BANK_TRANSFER") => {
+        setManagerPaymentFilterState(value);
+        setManagerOrderPage(1);
+    }, []);
     const managerOrderPageSize = 50;
     const [managerOrderTotal, setManagerOrderTotal] = useState(0);
     const [managerOrderTotalPages, setManagerOrderTotalPages] = useState(1);
@@ -375,6 +387,8 @@ export function usePOS() {
         transactions: 0,
         sales: 0,
         vat: 0,
+        bookingSales: null as number | null,
+        walkInSales: 0,
     });
 
     const setManagerOrderDateRange = useCallback((startDate: string, endDate: string) => {
@@ -496,7 +510,12 @@ export function usePOS() {
                     Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
-                    action: isCurrentOwner ? "get_owner_sales_report" : "get_orders",
+                    action: isCurrentOwner ? "get_owner_sales_report" :
+                        isCurrentManager ? "get_branch_sales_report" : "get_orders",
+                    ...(isCurrentManager ? {
+                        sales_source: managerSalesSource,
+                        ...(managerPaymentFilter !== "ALL" ? { payment_method: managerPaymentFilter } : {}),
+                    } : {}),
                     ...(isCurrentOwner ? {
                         sales_source: ownerSalesSource,
                         payment_method: ownerPaymentFilter,
@@ -569,9 +588,16 @@ export function usePOS() {
                     setOwnerOrderTotalPages(1);
                 }
             }
-            if (ordersRes.ok && ordersData.taxType) {
-                const backendTaxType = String(ordersData.taxType || "").toUpperCase();
-                setTaxType(backendTaxType === "NON_VAT" ? "NON_VAT" : "VAT");
+            // Owner sales responses use taxRegistration, while branch POS responses
+            // use taxType. Both represent the persisted stores.tax_registration.
+            if (ordersRes.ok) {
+                const registration = String(ordersData.taxRegistration || "").toUpperCase();
+                if (registration === "NON_VAT") setTaxType("NON_VAT");
+                else if (registration === "VAT_REGISTERED") setTaxType("VAT");
+                else if (ordersData.taxType) {
+                    const backendTaxType = String(ordersData.taxType).toUpperCase();
+                    setTaxType(backendTaxType === "NON_VAT" ? "NON_VAT" : "VAT");
+                }
             }
 
             if (isCurrentOwner) {
@@ -611,6 +637,8 @@ export function usePOS() {
                 setOrders(mapped);
 
                 if (isCurrentManager) {
+                    setManagerOrderError(null);
+                    setManagerBookingAvailable(ordersData.bookingIntegration?.available ?? null);
                     const pagination = ordersData.pagination;
                     setManagerOrderTotal(Number(pagination?.total ?? mapped.length));
                     setManagerOrderTotalPages(Math.max(1, Number(pagination?.totalPages ?? 1)));
@@ -618,6 +646,8 @@ export function usePOS() {
                         transactions: Number(ordersData.summary?.transactions ?? 0),
                         sales: Number(ordersData.summary?.sales ?? 0),
                         vat: Number(ordersData.summary?.vat ?? 0),
+                        bookingSales: ordersData.summary?.bookingSales == null ? null : Number(ordersData.summary.bookingSales),
+                        walkInSales: Number(ordersData.summary?.walkInSales ?? 0),
                     });
                 }
 
@@ -649,10 +679,25 @@ export function usePOS() {
                 } else {
                     safeSetSessionJson("stocknbook_orders", mapped);
                 }
+            } else if (isCurrentManager) {
+                setManagerOrderError(ordersData.error || "Unable to load branch transactions.");
+                setManagerBookingAvailable(null);
+                setOrders([]);
+                setManagerOrderTotal(0);
+                setManagerOrderTotalPages(1);
+                setManagerOrderSummary({ transactions: 0, sales: 0, vat: 0, bookingSales: null, walkInSales: 0 });
             }
 
         } catch (err) {
             console.warn("POS loadData failed:", err);
+            if (isCurrentManager) {
+                setManagerOrderError("Unable to retrieve live branch transactions. Verify the POS API connection.");
+                setManagerBookingAvailable(null);
+                setOrders([]);
+                setManagerOrderTotal(0);
+                setManagerOrderTotalPages(1);
+                setManagerOrderSummary({ transactions: 0, sales: 0, vat: 0, bookingSales: null, walkInSales: 0 });
+            }
             if (isCurrentOwner) {
                 setOwnerRevenue(null);
                 setOwnerRevenueError("Unable to retrieve live sales records. Verify the POS API connection.");
@@ -674,6 +719,8 @@ export function usePOS() {
         managerOrderStartDate,
         managerOrderEndDate,
         managerOrderSearch,
+        managerSalesSource,
+        managerPaymentFilter,
         managerOrderPage,
     ]);
 
@@ -732,8 +779,12 @@ export function usePOS() {
         const timer = window.setTimeout(() => {
             void refreshAll();
         }, 0);
-
-        return () => window.clearTimeout(timer);
+        const refreshBusinessSettings = () => { void refreshAll({ silent: true }); };
+        window.addEventListener("stocknbook-business-updated", refreshBusinessSettings);
+        return () => {
+            window.clearTimeout(timer);
+            window.removeEventListener("stocknbook-business-updated", refreshBusinessSettings);
+        };
     }, [refreshAll]);
     // Other employees may restock, reserve, or sell stock in a different session.
     // Read the backend periodically; the server still enforces stock at checkout.
@@ -1286,7 +1337,11 @@ export function usePOS() {
             }
 
             setTaxType(String(data.taxType).toUpperCase() === "NON_VAT" ? "NON_VAT" : "VAT");
-            await loadData();
+            try {
+                await loadData();
+            } catch (refreshError) {
+                console.warn("Tax setting saved; POS data refresh failed:", refreshError);
+            }
             return true;
         } catch (error) {
             console.error(error);
@@ -1461,6 +1516,12 @@ export function usePOS() {
         setManagerOrderDateRange,
         managerOrderSearch,
         setManagerOrderSearch,
+        managerSalesSource,
+        setManagerSalesSource,
+        managerPaymentFilter,
+        setManagerPaymentFilter,
+        managerBookingAvailable,
+        managerOrderError,
         managerOrderPage,
         setManagerOrderPage,
         managerOrderPageSize,

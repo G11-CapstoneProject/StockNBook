@@ -67,9 +67,10 @@ export async function GET(req: NextRequest) {
 
         const key = getAuthorizationKey(authorization);
         const now = Date.now();
+        const forceRefresh = req.nextUrl.searchParams.get("refresh") === "1";
         const cached = currentUserCache.get(key);
 
-        if (cached && cached.expiresAt > now) {
+        if (!forceRefresh && cached && cached.expiresAt > now) {
             return NextResponse.json(cached.data, {
                 status: cached.status,
                 headers: {
@@ -81,7 +82,7 @@ export async function GET(req: NextRequest) {
 
         if (cached) currentUserCache.delete(key);
 
-        let pending = currentUserInFlight.get(key);
+        let pending = forceRefresh ? undefined : currentUserInFlight.get(key);
         if (!pending) {
             pending = resolveCurrentUser(authorization);
             currentUserInFlight.set(key, pending);
@@ -91,7 +92,7 @@ export async function GET(req: NextRequest) {
         try {
             result = await pending;
         } finally {
-            currentUserInFlight.delete(key);
+            if (currentUserInFlight.get(key) === pending) currentUserInFlight.delete(key);
         }
 
         // Cache only successful authenticated responses.

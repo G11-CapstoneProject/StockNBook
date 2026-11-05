@@ -231,14 +231,15 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     {rental.loading ? <PanelSkeleton/> : !rental.connected ? <EmptyPanel label="Connect rental records to view activity."/> :
                         todayRentalActivity.length === 0 ? <EmptyPanel label="No rental stock movements recorded today."/> : (
                             <div className="min-h-0 flex-1 overflow-auto">
-                                <table className="w-full min-w-[510px] text-left text-[11px]">
-                                    <thead className="sticky top-0 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]">
+                                <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                    <colgroup><col className="w-[16%]"/><col className="w-[30%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
+                                    <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]">
                                     <tr className="border-b border-[#E9E1EE]">
-                                        <th className="px-3 py-3 font-semibold">Date &amp; Time</th>
-                                        <th className="px-3 py-3 font-semibold">Equipment</th>
-                                        <th className="px-3 py-3 font-semibold">Activity</th>
-                                        <th className="px-2 py-3 text-center font-semibold">Qty</th>
-                                        <th className="px-3 py-3 font-semibold">Reference No.</th>
+                                        <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Date &amp; Time</th>
+                                        <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment</th>
+                                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Activity</th>
+                                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Qty</th>
+                                        <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Reference No.</th>
                                     </tr></thead>
                                     <tbody>{todayRentalActivity.slice(0, 100).map(record => (
                                         <ActivityRow key={record.id} item={record}/>
@@ -340,19 +341,20 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                 {appliedDates && <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-xs font-medium text-[#5330B6]">
                     Booking availability for {appliedDates.from} to {appliedDates.to} · The "Available" column and Availability badges refer to these dates.
                 </p>}
-                <div className="max-h-[360px] w-full overflow-auto overscroll-contain border-t border-[#E9E1EE]" style={{ maxHeight: 360 }} role="region" aria-label="Branch rental equipment list" tabIndex={0}>
-                    <table className="w-full min-w-[1090px] text-left text-[11px]">
+                <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain border-t border-[#E9E1EE]" style={{ maxHeight: 360 }} role="region" aria-label="Branch rental equipment list" tabIndex={0}>
+                    <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                        <colgroup><col className="w-[10%]"/><col className="w-[18%]"/><col className="w-[10%]"/><col className="w-[8%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[9.5%]"/><col className="w-[20%]"/></colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                         <tr className="border-b border-[#E9E1EE]">
-                            <th className="px-4 py-3 font-semibold">Equipment No.</th>
-                            <th className="px-3 py-3 font-semibold">Rental Product</th>
-                            <th className="px-3 py-3 font-semibold">Category</th>
-                            <th className="px-2 py-3 text-center font-semibold">Total Units</th>
-                            <th className="px-2 py-3 text-center font-semibold">{appliedDates ? "Available" : "Available Today"}</th>
-                            <th className="px-2 py-3 text-center font-semibold">Rented Out</th>
-                            <th className="px-2 py-3 text-center font-semibold">On Hold</th>
-                            <th className="px-2 py-3 text-center font-semibold">Availability</th>
-                            <th className="px-3 py-3 text-center font-semibold">Action</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment No.</th>
+                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Rental Product</th>
+                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Category</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Total Units</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">{appliedDates ? "Available" : "Available Today"}</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Rented Out</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">On Hold</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Availability</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Action</th>
                         </tr>
                         </thead>
                         <tbody>
@@ -360,21 +362,21 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                             !rental.connected ? <tr><td colSpan={9} className="px-5 py-12 text-center text-sm text-[#86778F]">Rental data is not connected. No equipment is displayed here.</td></tr> :
                                 filtered.length === 0 ? <tr><td colSpan={9} className="px-5 py-12 text-center text-sm text-[#86778F]">No matching rental equipment.</td></tr> :
                                     filtered.map(item => (
-                                        <tr key={item.id} className="border-b border-[#EFE8F2] last:border-0">
-                                            <td className="px-4 py-3 text-[#4E2C66]">
+                                        <tr key={item.id} className="h-12 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
+                                            <td className="break-all py-2 px-4 text-left font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">
                                                 <span className="block whitespace-nowrap">{item.equipmentNumber || "—"}</span>
                                             </td>
-                                            <td className="px-3 py-3 font-semibold text-[#2B174C]">{item.name}</td>
-                                            <td className="px-3 py-3 text-[#5F4E75]">{item.category}</td>
-                                            <td className="px-2 py-3 text-center font-semibold">{item.totalUnits}</td>
-                                            <td className="px-2 py-3 text-center font-semibold" title={appliedDates ? "Available units for the selected date range" : "Available today after confirmed reservations; physically ready units are tracked separately"}>{appliedDates ? (datesAvailability?.get(item.id) ?? "—") : item.bookableToday}</td>
-                                            <td className="px-2 py-3 text-center">{item.rentedOutUnits}</td>
-                                            <td className="px-2 py-3 text-center" title={`On hold for inspection, care, or repair: ${item.maintenanceUnits}. Unrecovered missing units: ${item.missingUnits}.`}>
+                                            <td className="px-2 py-2 font-semibold text-[#2B174C]">{item.name}</td>
+                                            <td className="px-2 py-2 text-[#5F4E75]">{item.category}</td>
+                                            <td className="px-2 py-2 text-center font-semibold">{item.totalUnits}</td>
+                                            <td className="px-2 py-2 text-center font-semibold" title={appliedDates ? "Available units for the selected date range" : "Available today after confirmed reservations; physically ready units are tracked separately"}>{appliedDates ? (datesAvailability?.get(item.id) ?? "—") : item.bookableToday}</td>
+                                            <td className="px-2 py-2 text-center">{item.rentedOutUnits}</td>
+                                            <td className="px-2 py-2 text-center" title={`On hold for inspection, care, or repair: ${item.maintenanceUnits}. Unrecovered missing units: ${item.missingUnits}.`}>
                                                 <span>{item.maintenanceUnits}</span>
                                                 {item.missingUnits > 0 && <span className="mt-1 block whitespace-nowrap text-[10px] font-semibold text-[#B45309]">Missing: {item.missingUnits}</span>}
                                             </td>
-                                            <td className="px-2 py-3 text-center"><IssueBadge issue={equipmentDisplayStatus(item, true, appliedDates ? datesAvailability?.get(item.id) : item.bookableToday)} /></td>
-                                            <td className="px-3 py-3 text-center">
+                                            <td className="px-2 py-2 text-center"><IssueBadge issue={equipmentDisplayStatus(item, true, appliedDates ? datesAvailability?.get(item.id) : item.bookableToday)} /></td>
+                                            <td className="px-2 py-2 text-center">
                                                 <div className="flex flex-wrap items-center justify-center gap-1.5">
                                                     <button type="button" onClick={()=>setDialog({mode:"receive",item})} disabled={!canManage||!item.active}
                                                             aria-label={`Restock ${item.name}`}
@@ -462,11 +464,11 @@ function equipmentStatuses(item: RentalEquipment, checkingDates: boolean, onDate
 }
 
 function IssueBadge({issue}:{issue:string}) {
-    const style = ["Fully Available", "Available"].includes(issue) ? "bg-[#E5F8EC] text-[#23834A]" :
-        ["Needs Review", "Unavailable", "Fully Booked"].includes(issue) ? "bg-[#FFE7EA] text-[#D92C3F]" :
-            issue === "Low Availability" ? "bg-[#FFF2D3] text-[#A66A00]" :
-                issue === "Archived" || issue === "Not Checked" ? "bg-[#ECE7EE] text-[#6B6174]" :
-                    "bg-[#EEE8FF] text-[#6944C9]";
+    const style = ["Fully Available", "Available"].includes(issue) ? "text-[#23834A]" :
+        ["Needs Review", "Unavailable", "Fully Booked"].includes(issue) ? "text-[#D92C3F]" :
+            issue === "Low Availability" ? "text-[#A66A00]" :
+                issue === "Archived" || issue === "Not Checked" ? "text-[#6B6174]" :
+                    "text-[#6944C9]";
     const explanation:Record<string,string> = {
         "Fully Available": "All units are available in the current context (now or on the checked dates).",
         "Available": "Some units are available; other units may be booked, rented out, missing or on hold.",
@@ -477,7 +479,7 @@ function IssueBadge({issue}:{issue:string}) {
         "On Hold": "Equipment awaiting inspection, cleaning or repair.",
         "Not Checked": "No date availability result returned for this equipment.",
     };
-    return <span title={explanation[issue]} className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-semibold ${style}`}>{issue}</span>;
+    return <span title={explanation[issue]} className={`inline-block text-[10px] font-semibold ${style}`}>{issue}</span>;
 }
 
 // Read-only Manager oversight. Staff retains full responsibility for confirming
@@ -523,18 +525,18 @@ function ManagerConditionDate({value}:{value:string|null|undefined}) {
 }
 function ManagerConditionIssueTable({issues,onView}:{issues:ManagerConditionIssue[];onView:(value:ManagerConditionIssue)=>void}){
     return <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Active equipment issues" tabIndex={0}>
-        <table className="w-full min-w-0 table-fixed text-[11px] [&_th]:break-words [&_td]:break-words [&_td]:[overflow-wrap:anywhere]">
-            <colgroup><col className="w-[22%]"/><col className="w-[29%]"/><col className="w-[8%]"/><col className="w-[17%]"/><col className="w-[24%]"/></colgroup>
+        <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+            <colgroup><col className="w-[24%]"/><col className="w-[31%]"/><col className="w-[9%]"/><col className="w-[17%]"/><col className="w-[19%]"/></colgroup>
             <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr className="border-b border-[#E9E1EE]">
-                {['Equipment','Work Item / Reference','Units','Status','Action'].map(label=><th key={label} className="px-2 py-3 text-left font-semibold">{label}</th>)}
+                {['Equipment','Work Item / Reference','Units','Status','Action'].map(label=><th key={label} className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">{label}</th>)}
             </tr></thead>
             <tbody>{issues.map(issue=><tr key={issue.key} className="border-b border-[#EFE8F2] align-top last:border-0 text-[#2B174C]">
-                <td className="px-2 py-2 font-medium">{issue.equipmentName}</td>
+                <td className="py-2 font-medium px-4 text-left">{issue.equipmentName}</td>
                 <td className="px-2 py-2"><p className="font-medium">{issue.title}</p>
                     <p className="mt-1 break-all text-[10px] text-[#86778F]">{issue.reference}</p>
                     {issue.notes&&<p className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]" title={issue.notes}>{issue.notes}</p>}</td>
-                <td className="px-2 py-2 font-semibold tabular-nums">{issue.units}</td>
-                <td className={`px-2 py-2 text-[10px] font-semibold ${issue.status==='Missing'||issue.status==='Damaged'?'text-[#A43D48]':'text-[#C27416]'}`}>{issue.status}</td>
+                <td className="px-2 py-2 text-center font-semibold tabular-nums">{issue.units}</td>
+                <td className={`px-2 py-2 text-center text-[10px] font-semibold ${issue.status==='Missing'||issue.status==='Damaged'?'text-[#A43D48]':'text-[#C27416]'}`}>{issue.status}</td>
                 <td className="px-2 py-2 text-center"><button type="button" onClick={()=>onView(issue)}
                                                               className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3]">View Details</button></td>
             </tr>)}</tbody>
@@ -542,19 +544,20 @@ function ManagerConditionIssueTable({issues,onView}:{issues:ManagerConditionIssu
     </div>;
 }
 function ManagerConditionHistoryTable({records,onView}:{records:RentalMaintenanceHistory[];onView:(value:RentalMaintenanceHistory)=>void}){
-    return <div className="min-h-0 flex-1 overflow-auto overscroll-contain" role="region" aria-label="Completed repair and recovery history" tabIndex={0}>
-        <table className="w-full min-w-[550px] text-left text-[11px]">
+    return <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Completed repair and recovery history" tabIndex={0}>
+        <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+            <colgroup><col className="w-[26%]"/><col className="w-[32%]"/><col className="w-[23%]"/><col className="w-[19%]"/></colgroup>
             <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr className="border-b border-[#E9E1EE]">
-                <th className="px-3 py-3 font-semibold">Equipment</th><th className="px-3 py-3 font-semibold">Completed Activity</th>
-                <th className="px-2 py-3 font-semibold">Recorded By</th><th className="px-3 py-3 text-center font-semibold">Action</th>
+                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment</th><th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Completed Activity</th>
+                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Recorded By</th><th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Action</th>
             </tr></thead>
             <tbody>{records.map(record=><tr key={`history-${record.id}`} className="border-b border-[#EFE8F2] align-top last:border-0">
-                <td className="px-3 py-3"><p className="font-semibold text-[#2B174C]">{record.equipmentName}</p>
+                <td className="py-2 px-4 text-left"><p className="font-semibold text-[#2B174C]">{record.equipmentName}</p>
                     <p className="mt-1 text-[#86778F]">{record.quantity} {record.quantity===1?'unit':'units'}</p></td>
-                <td className="px-3 py-3"><p className="font-medium text-[#49345A]">{record.type==='maintenance_completed'?'Repair Completed':record.type==='missing_replaced'?'Replacement Recorded':'Recovery Recorded'}</p>
+                <td className="px-2 py-2 text-center"><p className="font-medium text-[#23834A]">{record.type==='maintenance_completed'?'Repair Completed':record.type==='missing_replaced'?'Replacement Recorded':'Recovery Recorded'}</p>
                     <p className="mt-1 text-[10px] text-[#86778F]"><ManagerConditionDate value={record.occurredAt}/></p></td>
-                <td className="px-2 py-3 text-[#5F4E75]">{record.actorName||'Not recorded'}</td>
-                <td className="px-3 py-3 text-center"><button type="button" onClick={()=>onView(record)}
+                <td className="px-2 py-2 text-center text-[#5F4E75]">{record.actorName||'Not recorded'}</td>
+                <td className="px-2 py-2 text-center"><button type="button" onClick={()=>onView(record)}
                                                               className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3]">View Details</button></td>
             </tr>)}</tbody>
         </table>
@@ -661,13 +664,21 @@ function RentalMetric({label,value,description,icon,tone,loading}: {
     }[tone];
     return (
         <section aria-busy={loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
-            <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`} aria-hidden="true">{icon}</span>
-            <span className="min-w-0 flex-1">
-                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
-                {loading ? <span className="mt-1 block h-7 w-24 max-w-full animate-pulse rounded-md bg-[#F1EBF8]" role="status" aria-label={`Loading ${label}`}/> :
-                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{value === null ? "—" : value.toLocaleString("en-PH")}</span>}
-                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{description}</span>
-            </span>
+            {loading ? <>
+                <span className="h-14 w-14 shrink-0 animate-pulse rounded-full bg-[#EEE8F3]" aria-hidden="true"/>
+                <span className="min-w-0 flex-1 space-y-2.5" role="status" aria-label={`Loading ${label}`}>
+                    <span className="block h-3.5 w-32 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                    <span className="block h-7 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                    <span className="block h-2.5 w-40 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                </span>
+            </> : <>
+                <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`} aria-hidden="true">{icon}</span>
+                <span className="min-w-0 flex-1">
+                    <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
+                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{value === null ? "—" : value.toLocaleString("en-PH")}</span>
+                    <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{description}</span>
+                </span>
+            </>}
         </section>
     );
 }
@@ -681,16 +692,16 @@ function ActivityRow({item}:{item:RentalActivity}) {
         (item.type === "adjustment" && /^Physical stock correction \+/.test(item.description || ""));
     const when = new Date(item.occurredAt);
     return <tr className="border-b border-[#EFE8F2] last:border-0">
-        <td className="whitespace-nowrap px-3 py-2.5 text-[#5F4E75]">
+        <td className="whitespace-nowrap py-2 text-[#5F4E75] px-4 text-left">
             {when.toLocaleDateString("en-PH",{timeZone:"Asia/Manila",month:"short",day:"numeric",year:"numeric"})}
             <div className="mt-0.5 text-[10px] text-[#8A7D90]">{when.toLocaleTimeString("en-PH",{timeZone:"Asia/Manila",hour:"numeric",minute:"2-digit"})}</div>
         </td>
-        <td className="px-3 py-2.5 font-semibold text-[#2B174C]">{item.equipmentName}</td>
-        <td className="px-3 py-2.5 text-[#4F3A5A]">{activityNames[item.type]}</td>
-        <td className={`px-2 py-2.5 text-center font-semibold ${isPositive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>
+        <td className="px-2 py-2 font-semibold text-[#2B174C]">{item.equipmentName}</td>
+        <td className={`px-2 py-2 text-center font-medium ${isPositive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>{activityNames[item.type]}</td>
+        <td className={`px-2 py-2 text-center font-semibold ${isPositive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>
             {isPositive ? "+" : "−"}{item.quantity}
         </td>
-        <td className="break-all px-3 py-2.5 text-[#5F4E75]">{item.referenceNumber || "—"}</td>
+        <td className="break-all px-2 py-2 text-[#5F4E75]">{item.referenceNumber || "—"}</td>
     </tr>;
 }
 
@@ -1314,13 +1325,14 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
                     {error&&<div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800"><strong>Import not saved — check the following</strong><p>{error}</p></div>}
                     <section className="overflow-hidden rounded-xl border border-[#E3D8EA] bg-[#FFFCF8]">
                         <div className="border-b border-[#E3D8EA] bg-white p-4"><h3 className="text-sm font-bold text-[#21132E]">Rental Inventory &amp; Pricing Details</h3><p className="mt-1 text-xs text-[#675875]">Regular equipment only — no variants or Reorder Point.</p></div>
-                        <div className="overflow-x-auto"><table className="w-full min-w-[770px] text-left text-xs">
-                            <thead className="bg-[#F8F3FC] text-[#5A476A]"><tr>{["Rental Product","Category","Stock","Cost Price","Rental Rate / Day","Purchase Cost","Status"].map(h=><th className="px-3 py-3" key={h}>{h}</th>)}</tr></thead>
+                        <div className="max-h-[320px] overflow-auto overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                            <colgroup><col className="w-[23%]"/><col className="w-[14%]"/><col className="w-[9%]"/><col className="w-[13%]"/><col className="w-[16%]"/><col className="w-[16%]"/><col className="w-[9%]"/></colgroup>
+                            <thead className="sticky top-0 z-10 bg-[#F8F3FC] text-[#5A476A]"><tr>{["Rental Product","Category","Stock","Cost Price","Rental Rate / Day","Purchase Cost","Status"].map(h=><th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]" key={h}>{h}</th>)}</tr></thead>
                             <tbody>{(preview?.rows||[]).map((row,i)=><tr key={`${row.name}-${i}`} className="border-t border-[#EFE7F4]">
-                                <td className="px-3 py-3 font-semibold text-[#2B174C]">{row.name}</td><td className="px-3 py-3">{row.category}</td>
-                                <td className="px-3 py-3">{row.openingUnits}</td><td className="px-3 py-3">{peso(row.unitCost)}</td>
-                                <td className="px-3 py-3">{peso(row.rentalRatePerDay)}<div className="text-[10px] text-[#806A8C]">{row.pricingMethod==="cost_based"?"Cost-Based":"Manual"}</div></td><td className="px-3 py-3">{peso(row.openingUnits*row.unitCost)}</td>
-                                <td className="px-3 py-3 font-semibold text-[#23834A]">Valid</td>
+                                <td className="py-2 font-semibold text-[#2B174C] px-4 text-left">{row.name}</td><td className="px-2 py-2">{row.category}</td>
+                                <td className="px-2 py-2 text-center">{row.openingUnits}</td><td className="px-2 py-2 text-center">{peso(row.unitCost)}</td>
+                                <td className="px-2 py-2 text-center">{peso(row.rentalRatePerDay)}<div className="text-[10px] text-[#806A8C]">{row.pricingMethod==="cost_based"?"Cost-Based":"Manual"}</div></td><td className="px-2 py-2 text-center">{peso(row.openingUnits*row.unitCost)}</td>
+                                <td className="px-2 py-2 text-center font-semibold text-[#23834A]">Valid</td>
                             </tr>)}</tbody></table></div>
                     </section>
                     {preview&&<section className="rounded-xl border border-[#E3D8EA] bg-white p-4">
@@ -1468,6 +1480,7 @@ type RentalSupplierPayable = {
     supplier: string;
     supplierInvoiceNumber: string | null;
     purchaseDate: string;
+    recordedAt?: string | null;
     paymentDueDate: string | null;
     paymentMethod: "cash" | "credit";
     purchaseTotal: number;
@@ -1498,6 +1511,26 @@ function cents(value: string): number | null {
     const number = Number(value);
     return Number.isSafeInteger(Math.round(number * 100)) && number > 0 ? Math.round(number * 100) : null;
 }
+function formatSupplierPurchaseDate(value?: string | null) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value || "");
+    if (!match) return "—";
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== `${match[1]}-${match[2]}-${match[3]}`) return "—";
+    const months = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "Jun.", "Jul.", "Aug.", "Sep.", "Oct.", "Nov.", "Dec."];
+    return `${months[month - 1]} ${day}, ${year}`;
+}
+function formatPurchaseRecordedTime(value?: string | null) {
+    // created_at records when StockNBook saved the purchase, not the supplier's transaction time.
+    // The API returns database-local clock text; avoid converting an unknown timezone.
+    const match = /^\d{4}-\d{2}-\d{2}[ T](\d{2}):(\d{2})/.exec(value || "");
+    if (!match || Number(match[1]) > 23) return "—";
+    const hour = Number(match[1]);
+    return `${hour % 12 || 12}:${match[2]} ${hour >= 12 ? "PM" : "AM"}`;
+}
+
 function readPayable(value: unknown): RentalSupplierPayable | null {
     if (!value || typeof value !== "object") return null;
     const item = value as Record<string, unknown>;
@@ -1517,6 +1550,7 @@ function readPayable(value: unknown): RentalSupplierPayable | null {
         supplier: String(item.supplier || ""),
         supplierInvoiceNumber: item.supplierInvoiceNumber == null ? null : String(item.supplierInvoiceNumber),
         purchaseDate: String(item.purchaseDate || ""),
+        recordedAt: item.recordedAt == null ? null : String(item.recordedAt),
         paymentDueDate: item.paymentDueDate == null ? null : String(item.paymentDueDate),
         paymentMethod, purchaseTotal, amountPaid, outstandingBalance,
         paymentStatus: outstandingBalance === 0 ? "Paid" : amountPaid > 0 ? "Partially Paid" : "Unpaid",
@@ -1719,17 +1753,19 @@ function RentalSupplierPayablesDialog({
                 {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
                 {loading ? <div className="space-y-2" aria-label="Loading rental supplier purchases">{[0,1,2].map(n=><div key={n} className="h-11 animate-pulse rounded-xl bg-[#F4F0F8]"/>)}</div> :
                     filtered.length===0 ? <p className="rounded-lg bg-[#FCF9FF] p-4 text-sm text-[#806A8C]">{payables.length===0?"No rental supplier purchases recorded yet.":"No purchases match the selected filters."}</p> :
-                        <div className="overflow-x-auto"><table className="w-full min-w-[740px] text-left text-xs">
-                            <thead className="border-b border-[#E3D8EA] bg-white text-[#806A8C]"><tr>
-                                <th className="p-2">Purchase</th><th className="p-2">Supplier</th><th className="p-2">Method</th><th className="p-2">Total</th>
-                                <th className="p-2">Paid</th><th className="p-2">Outstanding</th><th className="p-2">Status</th>
+                        <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                            <colgroup><col className="w-[19%]"/><col className="w-[15%]"/><col className="w-[16%]"/><col className="w-[10%]"/><col className="w-[9%]"/><col className="w-[9%]"/><col className="w-[12%]"/><col className="w-[10%]"/></colgroup>
+                            <thead className="sticky top-0 z-10 border-b border-[#E3D8EA] bg-white text-[#806A8C]"><tr>
+                                <th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Purchase No.</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Purchase Date / Time</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Supplier</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Method</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Total</th>
+                                <th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Paid</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Outstanding</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Status</th>
                             </tr></thead>
                             <tbody>{filtered.map(item=><tr key={item.purchaseId} className="border-t border-[#EFE8F2] text-[#2B174C]">
-                                <td className="px-2 py-2"><button type="button" onClick={()=>void view(item)} className="font-semibold text-[#5330B6] underline underline-offset-2">{item.purchaseNumber}</button></td>
-                                <td className="px-2 py-2">{item.supplier}</td><td className="px-2 py-2">{item.paymentMethod==="cash"?"Cash":"Credit (Utang)"}</td>
-                                <td className="px-2 py-2">{peso(item.purchaseTotal)}</td><td className="px-2 py-2">{peso(item.amountPaid)}</td>
-                                <td className="px-2 py-2 font-semibold">{peso(item.outstandingBalance)}</td>
-                                <td className="px-2 py-2"><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${item.paymentStatus==="Paid"?"bg-[#E5F8EC] text-[#23834A]":item.paymentStatus==="Unpaid"?"bg-[#FFE7EA] text-[#D92C3F]":"bg-[#FFF2D3] text-[#C77A00]"}`}>{item.paymentStatus}</span></td>
+                                <td className="min-w-0 break-words py-2 px-4 text-left"><button type="button" onClick={()=>void view(item)} className="rounded-lg px-1 py-1 font-semibold text-[#5330B6] underline underline-offset-2 transition hover:bg-[#F1EBFF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5330B6]">{item.purchaseNumber}</button></td>
+                                <td className="min-w-0 px-2 py-2">{formatSupplierPurchaseDate(item.purchaseDate)}<div className="mt-1 text-[10px] text-[#806A8C]">{formatPurchaseRecordedTime(item.recordedAt)}</div></td>
+                                <td className="min-w-0 break-words px-2 py-2">{item.supplier}</td><td className="min-w-0 break-words px-2 py-2 text-center">{item.paymentMethod==="cash"?"Cash":"Credit (Utang)"}</td>
+                                <td className="min-w-0 break-words px-2 py-2 text-center tabular-nums">{peso(item.purchaseTotal)}</td><td className="min-w-0 break-words px-2 py-2 text-center tabular-nums">{peso(item.amountPaid)}</td>
+                                <td className="min-w-0 break-words px-2 py-2 text-center font-semibold tabular-nums">{peso(item.outstandingBalance)}</td>
+                                <td className="min-w-0 break-words px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${item.paymentStatus==="Paid"?"text-[#23834A]":item.paymentStatus==="Unpaid"?"text-[#D92C3F]":"text-[#C77A00]"}`}>{item.paymentStatus}</span></td>
                             </tr>)}</tbody>
                         </table></div>}
 
@@ -1738,17 +1774,18 @@ function RentalSupplierPayablesDialog({
                         <button type="button" onClick={()=>{setSelectedPurchase(null);lastItemRequestRef.current+=1;}} className="text-xs font-semibold text-[#806A8C]">Close Details</button></div>
                     <div className="grid gap-2 text-xs text-[#5A476A] sm:grid-cols-2 lg:grid-cols-4">
                         <span>Supplier Invoice: <strong>{selectedPurchase.supplierInvoiceNumber||"—"}</strong></span>
-                        <span>Purchase Date: <strong>{selectedPurchase.purchaseDate}</strong></span>
-                        <span>Due Date: <strong>{selectedPurchase.paymentDueDate||"—"}</strong></span>
+                        <span>Purchase Date: <strong>{formatSupplierPurchaseDate(selectedPurchase.purchaseDate)}</strong></span>
+                        <span>Due Date: <strong>{formatSupplierPurchaseDate(selectedPurchase.paymentDueDate)}</strong></span>
                         <span>Payment Method: <strong>{selectedPurchase.paymentMethod==="cash"?"Cash":"Credit"}</strong></span>
                     </div>
                     {itemsLoading ? <p className="text-xs text-[#806A8C]">Loading purchased equipment...</p> : purchaseItems.length === 0 ?
                         <p className="text-xs text-[#806A8C]">No purchase item details were returned.</p> :
-                        <div className="overflow-x-auto"><table className="w-full min-w-[580px] text-left text-xs">
-                            <thead className="text-[#806A8C]"><tr><th className="p-2">Rental Equipment</th><th className="p-2">Quantity Purchased</th><th className="p-2">Unit Cost</th><th className="p-2">Line Total</th></tr></thead>
+                        <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                            <colgroup><col className="w-[42%]"/><col className="w-[18%]"/><col className="w-[20%]"/><col className="w-[20%]"/></colgroup>
+                            <thead className="sticky top-0 z-10 bg-[#FCF9FF] text-[#806A8C]"><tr><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Rental Equipment</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Quantity Purchased</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Unit Cost</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Line Total</th></tr></thead>
                             <tbody>{purchaseItems.map((item,index)=><tr key={`${item.equipmentId}-${index}`} className="border-t border-[#E9E1EE]">
-                                <td className="p-2"><strong>{item.name}</strong> <span className="text-[#806A8C]">{item.equipmentNumber||""}</span></td>
-                                <td className="p-2">{item.quantity}</td><td className="p-2">{peso(item.unitCost)}</td><td className="p-2">{peso(item.lineTotal)}</td>
+                                <td className="py-2 px-4 text-left"><strong>{item.name}</strong> <span className="text-[#806A8C]">{item.equipmentNumber||""}</span></td>
+                                <td className="p-2 text-center">{item.quantity}</td><td className="p-2 text-center">{peso(item.unitCost)}</td><td className="p-2 text-center">{peso(item.lineTotal)}</td>
                             </tr>)}</tbody>
                         </table></div>}
                 </section>}

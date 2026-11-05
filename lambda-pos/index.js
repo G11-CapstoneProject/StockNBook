@@ -956,10 +956,6 @@ const getOwnerSalesReport = (() => {
         }
 
         if (body.vat_export === true) {
-            if (!vatRegistered) {
-                const error = new Error('VAT download is available only for VAT-registered stores.');
-                error.statusCode = 400; throw error;
-            }
             // Return a complete filtered extract, never a silently truncated file.
             // Limit JSON response size; owners can narrow the date range if needed.
             const MAX_EXPORT_ROWS = 5000;
@@ -975,6 +971,10 @@ const getOwnerSalesReport = (() => {
                 exportWhere.push('(v.orderId LIKE ? OR v.customerName LIKE ?)');
                 exportParams.push(`%${search}%`, `%${search}%`);
             }
+            if (payment) {
+                exportWhere.push("UPPER(COALESCE(v.paymentMode,'')) = ?");
+                exportParams.push(payment);
+            }
             const exportWhereSql = exportWhere.length
                 ? `WHERE ${exportWhere.join(' AND ')}`
                 : '';
@@ -985,7 +985,7 @@ const getOwnerSalesReport = (() => {
                 ORDER BY v.transactionAt DESC, v.orderId DESC
                     LIMIT ${MAX_EXPORT_ROWS + 1}`, exportParams);
             if (vatRows.length > MAX_EXPORT_ROWS) {
-                const error = new Error('VAT export exceeds 5,000 transactions. Select a shorter date range and download again.');
+                const error = new Error('Transaction export exceeds 5,000 records. Select a shorter date range and download again.');
                 error.statusCode = 400; throw error;
             }
             const normalizeVatRow = (row) => {
@@ -1004,6 +1004,9 @@ const getOwnerSalesReport = (() => {
                     branchName: String(row.branchName || ''),
                     salesSource: row.salesSource === 'BOOKING' ? 'Booking' : 'Walk-in',
                     date: reportDate,
+                    createdAt: row.transactionAt instanceof Date
+                        ? `${row.transactionAt.getFullYear()}-${String(row.transactionAt.getMonth()+1).padStart(2,'0')}-${String(row.transactionAt.getDate()).padStart(2,'0')} ${String(row.transactionAt.getHours()).padStart(2,'0')}:${String(row.transactionAt.getMinutes()).padStart(2,'0')}`
+                        : String(row.transactionAt || '').slice(0,16),
                     paymentMode: String(row.paymentMode || ''),
                     taxType: rowTax,
                     totalInclusive: money(amount),
@@ -1037,7 +1040,11 @@ const getOwnerSalesReport = (() => {
             return {
                 export: true,
                 taxRegistration,
-                vatSummary: exportVatSummary,
+                vatSummary: vatRegistered ? exportVatSummary : null,
+                transactionSummary: {
+                    count: exportRows.length,
+                    totalSales: money(exportRows.reduce((sum, row) => sum + Number(row.totalInclusive || 0), 0)),
+                },
                 scope: { branchId: branchId || null, dateFrom, dateTo, salesSource: source, search },
                 bookingIntegration: {
                     available: bookingSchema.available,
@@ -1073,6 +1080,21 @@ const getOwnerSalesReport = (() => {
         if (search) { outerWhere.push('(r.orderId LIKE ? OR r.customerName LIKE ?)'); outerParams.push(`%${search}%`,`%${search}%`); }
         const filterSql = outerWhere.length ? `WHERE ${outerWhere.join(' AND ')}` : '';
         const [[count]] = await db.execute(`SELECT COUNT(*) AS total FROM (${unionSql}) r ${filterSql}`, [...unionParams,...outerParams]);
+        let filteredSummary = null;
+        if (body.branch_reporting === true) {
+            const [[branchTotals]] = await db.execute(`
+                SELECT COUNT(*) AS transactions, COALESCE(SUM(r.total), 0) AS sales,
+                       COALESCE(SUM(r.vatAmount), 0) AS vat,
+                       COALESCE(SUM(CASE WHEN r.salesSource = 'BOOKING' THEN r.total ELSE 0 END), 0) AS bookingSales,
+                       COALESCE(SUM(CASE WHEN r.salesSource = 'WALK_IN' THEN r.total ELSE 0 END), 0) AS walkInSales
+                FROM (${unionSql}) r ${filterSql}`, [...unionParams, ...outerParams]);
+            filteredSummary = {
+                transactions: Number(branchTotals.transactions || 0),
+                sales: money(branchTotals.sales), vat: money(branchTotals.vat),
+                bookingSales: bookingSchema.available ? money(branchTotals.bookingSales) : null,
+                walkInSales: money(branchTotals.walkInSales),
+            };
+        }
         const total = Number(count.total || 0);
         const totalPages = Math.max(1,Math.ceil(total/pageSize));
         const sortOrder = sort==='OLDEST' ? 'ASC' : 'DESC';
@@ -1097,6 +1119,7 @@ const getOwnerSalesReport = (() => {
                     `${r.transactionAt.getFullYear()}-${String(r.transactionAt.getMonth()+1).padStart(2,'0')}-${String(r.transactionAt.getDate()).padStart(2,'0')} ${String(r.transactionAt.getHours()).padStart(2,'0')}:${String(r.transactionAt.getMinutes()).padStart(2,'0')}:${String(r.transactionAt.getSeconds()).padStart(2,'0')}` : String(r.transactionAt || ''),
             })),
             pagination: {page,pageSize,total,totalPages,hasPrevious:page>1,hasMore:page<totalPages},
+            filteredSummary,
             summary, paymentMethods: methods.map(m=>String(m.method)),
             taxRegistration, vatSummary,
             bookingIntegration: {
@@ -1113,7 +1136,7 @@ const getOwnerSalesReport = (() => {
      * Read only. Uses the same walk-in / fulfilled-booking eligibility as the
      * owner report. Never fabricates item names, unit prices or invoice numbers.
      */
-    async function getOwnerOrderDetail(db, storeId, body) {
+    async function getOwnerOrderDetail(db, storeId, body, scopedBranchId = null) {
         const orderId = String(body.order_id ?? body.orderId ?? '').trim();
         const source = String(body.sales_source ?? body.salesSource ?? '').trim().toUpperCase();
         if (!orderId || orderId.length > 100 || !['WALK_IN', 'BOOKING'].includes(source)) {
@@ -1129,9 +1152,10 @@ const getOwnerSalesReport = (() => {
             throw error;
         }
         const query = source === 'BOOKING'
-            ? bookingSql(bookingSchema, { storeId, exactOrderId: orderId })
+            ? bookingSql(bookingSchema, { storeId, branchId: scopedBranchId, exactOrderId: orderId })
             : posSql({
                 storeId,
+                branchId: scopedBranchId,
                 orderColumns: await listColumns(db, 'orders'),
                 bookingSchema,
                 exactOrderId: orderId,
@@ -1188,8 +1212,9 @@ const getOwnerSalesReport = (() => {
             if (parentColumns.has('id')) {
                 const [parentRows] = await db.execute(
                     `SELECT id FROM ${id(bookingSchema.table)}
-                     WHERE ${id(f.storeId)} = ? AND CAST(${id(f.reference)} AS CHAR) = ? LIMIT 2`,
-                    [storeId, orderId]
+                     WHERE ${id(f.storeId)} = ? AND CAST(${id(f.reference)} AS CHAR) = ?
+                         ${scopedBranchId ? `AND ${id(f.branchId)} = ?` : ''} LIMIT 2`,
+                    scopedBranchId ? [storeId, orderId, scopedBranchId] : [storeId, orderId]
                 );
                 if (parentRows.length === 1) bookingKey = parentRows[0].id;
             }
@@ -1207,8 +1232,8 @@ const getOwnerSalesReport = (() => {
                     if (cols.has('store_id')) { where.push('bi.store_id = ?'); args.push(storeId); }
                     const [lines] = await db.execute(
                         `SELECT ${id(name)} AS itemName, ${id(qty)} AS quantity,
-                         ${expr('bi', unitPrice)} AS unitPrice,
-                         ${expr('bi', lineTotal)} AS lineTotal
+                                ${expr('bi', unitPrice)} AS unitPrice,
+                                ${expr('bi', lineTotal)} AS lineTotal
                          FROM ${id(table)} bi WHERE ${where.join(' AND ')} LIMIT 501`, args
                     );
                     if (!lines.length) continue;
@@ -2340,7 +2365,8 @@ exports.handler = async (event) => {
             return jsonResponse(403, headers, { error: "POS access is not permitted for this account." });
         }
         const posReadActions = new Set([
-            "get_orders", "get_owner_dashboard_summary", "get_owner_sales_report", "get_owner_order_detail", "get_tax_registration",
+            "get_orders", "get_owner_dashboard_summary", "get_owner_sales_report", "get_owner_order_detail",
+            "get_branch_sales_report", "get_branch_order_detail", "get_tax_registration",
         ]);
         if (posAccess !== "full" && !posReadActions.has(action)) {
             return jsonResponse(403, headers, { error: "Full POS access is required for this action." });
@@ -2721,6 +2747,49 @@ exports.handler = async (event) => {
                 if ([400, 404, 409].includes(error?.statusCode)) {
                     return jsonResponse(error.statusCode, headers, { error: error.message });
                 }
+                throw error;
+            }
+        }
+
+        if (action === "get_branch_order_detail") {
+            if (tokenRole !== "manager") {
+                return jsonResponse(403, headers, { error: "Only the branch manager may view branch order details." });
+            }
+            if (requestedBranchId && requestedBranchId !== tokenBranchId) {
+                return jsonResponse(403, headers, { error: "Only the assigned branch can be accessed." });
+            }
+            try {
+                const detail = await getOwnerSalesReport.getOrderDetail(connection, storeId, body, tokenBranchId);
+                return jsonResponse(200, headers, { success: true, detail });
+            } catch (error) {
+                if ([400, 404, 409].includes(error?.statusCode)) {
+                    return jsonResponse(error.statusCode, headers, { error: error.message });
+                }
+                throw error;
+            }
+        }
+
+        if (action === "get_branch_sales_report") {
+            if (tokenRole !== "manager") {
+                return jsonResponse(403, headers, { error: "Only the branch manager may access branch sales." });
+            }
+            if (requestedBranchId && requestedBranchId !== tokenBranchId) {
+                return jsonResponse(403, headers, { error: "Only the assigned branch can be accessed." });
+            }
+            try {
+                // The branch scope comes from the verified employee token, never the request body.
+                const report = await getOwnerSalesReport(connection, storeId, tokenBranchId,
+                    { ...body, branch_reporting: body.vat_export !== true });
+                if (report.export) return jsonResponse(200, headers, { success: true, ...report });
+                const orders = report.orders.map(({ totalCost, profit, customerContactNumber, ...visible }) => visible);
+                return jsonResponse(200, headers, {
+                    success: true, orders, pagination: report.pagination,
+                    summary: report.filteredSummary,
+                    taxRegistration: report.taxRegistration,
+                    bookingIntegration: report.bookingIntegration,
+                });
+            } catch (error) {
+                if (error?.statusCode === 400) return badRequest(headers, error.message);
                 throw error;
             }
         }

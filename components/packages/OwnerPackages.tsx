@@ -6,6 +6,9 @@ import {
     ChevronDown,
     RefreshCw,
     Search,
+    Boxes,
+    CheckCircle2,
+    CircleOff,
 } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
@@ -21,6 +24,7 @@ import {
     getToken,
     PACKAGE_CATEGORY_OPTIONS,
     PackageCard,
+    PackageSummaryCard,
     type PackageCategory,
     type PackageItem,
 } from "./_shared";
@@ -89,32 +93,6 @@ function formatCurrentDateTime(value: Date) {
 }
 
 
-function PackageSummaryCard({
-                                title,
-                                value,
-                                detail,
-                            }: {
-    title: string;
-    value: number;
-    detail: string;
-}) {
-    return (
-        <div className="min-h-[112px] rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-            <p className="text-sm font-semibold text-[#1A1220]">
-                {title}
-            </p>
-
-            <p className="mt-2 text-[25px] font-bold leading-none text-[#1A1220]">
-                {value}
-            </p>
-
-            <p className="mt-2 text-xs text-[#7A6A84]">
-                {detail}
-            </p>
-        </div>
-    );
-}
-
 export default function OwnerPackages() {
     const [branches, setBranches] = useState<Branch[]>([]);
     const [selectedBranchId, setSelectedBranchId] = useState<number | null>(
@@ -129,6 +107,7 @@ export default function OwnerPackages() {
     const [search, setSearch] = useState("");
     const [selectedCategory, setSelectedCategory] =
         useState<PackageCategory>("All");
+    const [selectedStatus, setSelectedStatus] = useState<"All" | "Active" | "Inactive">("All");
 
     const [branchQuery, setBranchQuery] = useState("All Branches");
     const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
@@ -439,10 +418,12 @@ export default function OwnerPackages() {
             const matchesCategory =
                 selectedCategory === "All" ||
                 getPackageCategory(pkg) === selectedCategory;
+            const matchesStatus = selectedStatus === "All" ||
+                String(pkg.status || "").toLowerCase() === selectedStatus.toLowerCase();
 
-            return matchesSearch && matchesCategory;
+            return matchesSearch && matchesCategory && matchesStatus;
         });
-    }, [packages, search, selectedCategory]);
+    }, [packages, search, selectedCategory, selectedStatus]);
 
     const hasLoadedSelectedScope = isAllBranchesView
         ? loadedPackageScope === "all"
@@ -464,6 +445,7 @@ export default function OwnerPackages() {
         setIsBranchMenuOpen(false);
         setSearch("");
         setSelectedCategory("All");
+        setSelectedStatus("All");
         setPackages([]);
         setLoadedPackageScope(null);
     };
@@ -475,6 +457,7 @@ export default function OwnerPackages() {
         setIsBranchMenuOpen(false);
         setSearch("");
         setSelectedCategory("All");
+        setSelectedStatus("All");
         setPackages([]);
         setLoadedPackageScope(null);
     };
@@ -545,6 +528,8 @@ export default function OwnerPackages() {
                         <PackageSummaryCard
                             title="Total Packages"
                             value={totalPackages}
+                            icon={<Boxes size={20} />}
+                            iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
                             detail={
                                 isAllBranchesView
                                     ? "Packages across all branches"
@@ -554,6 +539,8 @@ export default function OwnerPackages() {
                         <PackageSummaryCard
                             title="Active Packages"
                             value={activePackages}
+                            icon={<CheckCircle2 size={20} />}
+                            iconClassName="bg-[#E7F7ED] text-[#168447]"
                             detail={
                                 isAllBranchesView
                                     ? "Available across all branches"
@@ -563,6 +550,8 @@ export default function OwnerPackages() {
                         <PackageSummaryCard
                             title="Inactive Packages"
                             value={inactivePackages}
+                            icon={<CircleOff size={20} />}
+                            iconClassName="bg-[#FFF1E5] text-[#C9781B]"
                             detail={
                                 isAllBranchesView
                                     ? "Inactive across all branches"
@@ -571,213 +560,13 @@ export default function OwnerPackages() {
                         />
                     </div>
 
-                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_290px]">
-                        <div className="relative">
-                            <Search
-                                size={15}
-                                className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                            />
-                            <input
-                                value={search}
-                                onChange={(event) =>
-                                    setSearch(event.target.value)
-                                }
-                                disabled={
-                                    !isAllBranchesView && !selectedBranchId
-                                }
-                                placeholder={
-                                    isAllBranchesView || selectedBranchId
-                                        ? "Search plans..."
-                                        : "Select a branch first"
-                                }
-                                className="w-full rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C] disabled:cursor-not-allowed disabled:bg-[#FCFAFD] disabled:text-[#9B8AAA]"
-                            />
-                        </div>
-
-                        <div ref={branchSelectorRef} className="relative">
-                            <Building2
-                                size={15}
-                                className="pointer-events-none absolute left-4 top-1/2 z-10 -translate-y-1/2 text-[#9B8AAA]"
-                            />
-
-                            <input
-                                value={branchQuery}
-                                onFocus={handleBranchInputFocus}
-                                onChange={(event) => {
-                                    setBranchQuery(event.target.value);
-                                    setIsBranchMenuOpen(true);
-                                }}
-                                onKeyDown={(event) => {
-                                    if (
-                                        event.key === "Escape" ||
-                                        event.key === "Tab"
-                                    ) {
-                                        setIsBranchMenuOpen(false);
-                                    }
-                                }}
-                                disabled={loadingBranches}
-                                placeholder={
-                                    loadingBranches
-                                        ? "Loading branches..."
-                                        : "Search or select branch..."
-                                }
-                                className="w-full rounded-xl border border-[#E3D8EA] bg-white px-10 py-2.5 pr-10 text-sm font-semibold text-[#1A1220] outline-none shadow-sm placeholder:font-normal placeholder:text-[#9B8AAA] focus:border-[#2B174C] disabled:cursor-not-allowed disabled:opacity-60"
-                                role="combobox"
-                                aria-expanded={isBranchMenuOpen}
-                                aria-controls="owner-package-branch-options"
-                                aria-autocomplete="list"
-                            />
-
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setIsBranchMenuOpen((isOpen) => !isOpen);
-
-                                    if (!isBranchMenuOpen) {
-                                        setBranchQuery("");
-                                    }
-                                }}
-                                className="absolute right-0 top-0 flex h-full w-10 items-center justify-center text-[#2B174C]"
-                                aria-label="Show branch choices"
-                            >
-                                <ChevronDown
-                                    size={14}
-                                    className={`transition ${
-                                        isBranchMenuOpen ? "rotate-180" : ""
-                                    }`}
-                                />
-                            </button>
-
-                            {isBranchMenuOpen && !loadingBranches && (
-                                <div
-                                    id="owner-package-branch-options"
-                                    className="absolute z-30 mt-1 max-h-60 w-full overflow-y-auto rounded-xl border border-[#D8CBE7] bg-white py-1 shadow-lg"
-                                    role="listbox"
-                                >
-                                    <button
-                                        type="button"
-                                        role="option"
-                                        aria-selected={isAllBranchesView}
-                                        onMouseDown={(event) =>
-                                            event.preventDefault()
-                                        }
-                                        onClick={handleSelectAllBranches}
-                                        className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition ${
-                                            isAllBranchesView
-                                                ? "bg-[#F1E9FF] font-semibold text-[#2B174C]"
-                                                : "text-[#1A1220] hover:bg-[#F7F1FF]"
-                                        }`}
-                                    >
-                                        <span>All Branches</span>
-
-                                        {isAllBranchesView && (
-                                            <Check
-                                                size={15}
-                                                className="shrink-0"
-                                            />
-                                        )}
-                                    </button>
-
-                                    {matchingBranches.length === 0 ? (
-                                        <p className="px-4 py-3 text-sm text-[#7A6A84]">
-                                            No matching branch found.
-                                        </p>
-                                    ) : (
-                                        matchingBranches.map((branch) => {
-                                            const isSelected =
-                                                branch.id === selectedBranchId;
-
-                                            return (
-                                                <button
-                                                    key={branch.id}
-                                                    type="button"
-                                                    role="option"
-                                                    aria-selected={isSelected}
-                                                    onMouseDown={(event) =>
-                                                        event.preventDefault()
-                                                    }
-                                                    onClick={() =>
-                                                        handleSelectBranch(
-                                                            branch
-                                                        )
-                                                    }
-                                                    className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition ${
-                                                        isSelected
-                                                            ? "bg-[#F1E9FF] font-semibold text-[#2B174C]"
-                                                            : "text-[#1A1220] hover:bg-[#F7F1FF]"
-                                                    }`}
-                                                >
-                                                    <span className="truncate">
-                                                        {branch.name}
-                                                    </span>
-
-                                                    {isSelected && (
-                                                        <Check
-                                                            size={15}
-                                                            className="shrink-0"
-                                                        />
-                                                    )}
-                                                </button>
-                                            );
-                                        })
-                                    )}
-                                </div>
-                            )}
-                        </div>
-                    </div>
-
-                    {(isAllBranchesView || selectedBranchId) && (
-                        <div className="rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-                            <div className="mb-2 flex items-center justify-between gap-3">
-                                <h2 className="text-sm font-bold text-[#1A1220]">
-                                    Categories
-                                </h2>
-
-                                <span className="text-xs font-semibold text-[#806A8C]">
-                                    {PACKAGE_CATEGORY_OPTIONS.length - 1} categories
-                                </span>
-                            </div>
-
-                            <div className="overflow-x-auto pb-1">
-                                <div className="flex min-w-max gap-2">
-                                    {PACKAGE_CATEGORY_OPTIONS.map(
-                                        (category) => {
-                                            const selected =
-                                                selectedCategory === category;
-
-                                            return (
-                                                <button
-                                                    key={category}
-                                                    type="button"
-                                                    onClick={() =>
-                                                        setSelectedCategory(
-                                                            category
-                                                        )
-                                                    }
-                                                    aria-pressed={selected}
-                                                    className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-                                                        selected
-                                                            ? "bg-[#2B174C] text-white shadow-sm"
-                                                            : "border border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#F7F1FF]"
-                                                    }`}
-                                                >
-                                                    {category}
-                                                </button>
-                                            );
-                                        }
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
                     {error && (
                         <div className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2.5 text-xs font-medium text-[#9B1C1C]">
                             {error}
                         </div>
                     )}
 
-                    <section className="min-h-[440px] rounded-[14px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
+                    <section className="min-h-[440px] rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
                         <div className="mb-3 flex items-center justify-between gap-4">
                             <div>
                                 <h2 className="text-[16px] font-bold text-[#1A1220]">
@@ -807,6 +596,185 @@ export default function OwnerPackages() {
                             )}
                         </div>
 
+                        <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_190px_160px_240px]">
+                            <div className="relative">
+                                <Search
+                                    size={15}
+                                    className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
+                                />
+                                <input
+                                    value={search}
+                                    onChange={(event) =>
+                                        setSearch(event.target.value)
+                                    }
+                                    disabled={
+                                        !isAllBranchesView && !selectedBranchId
+                                    }
+                                    placeholder={
+                                        isAllBranchesView || selectedBranchId
+                                            ? "Search plans..."
+                                            : "Select a branch first"
+                                    }
+                                    className="w-full rounded-xl border border-[#E3D8EA] bg-white px-4 py-2.5 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C] disabled:cursor-not-allowed disabled:bg-[#FCFAFD] disabled:text-[#9B8AAA]"
+                                />
+                            </div>
+
+                            <select
+                                aria-label="Filter packages by category"
+                                value={selectedCategory}
+                                onChange={(event) => setSelectedCategory(event.target.value as PackageCategory)}
+                                className="h-[42px] min-w-0 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm font-medium text-[#2B174C] outline-none shadow-sm focus:border-[#2B174C]"
+                            >
+                                {PACKAGE_CATEGORY_OPTIONS.map((category) => (
+                                    <option key={category} value={category}>
+                                        {category === "All" ? "All Categories" : category}
+                                    </option>
+                                ))}
+                            </select>
+
+                            <select
+                                aria-label="Filter packages by status"
+                                value={selectedStatus}
+                                onChange={(event) => setSelectedStatus(event.target.value as "All" | "Active" | "Inactive")}
+                                className="h-[42px] min-w-0 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm font-medium text-[#2B174C] outline-none shadow-sm focus:border-[#2B174C]"
+                            >
+                                <option value="All">All Status</option>
+                                <option value="Active">Active</option>
+                                <option value="Inactive">Inactive</option>
+                            </select>
+
+                            <div ref={branchSelectorRef} className="relative">
+                                <Building2
+                                    size={15}
+                                    className="pointer-events-none absolute left-4 top-1/2 z-10 -translate-y-1/2 text-[#9B8AAA]"
+                                />
+
+                                <input
+                                    value={branchQuery}
+                                    onFocus={handleBranchInputFocus}
+                                    onChange={(event) => {
+                                        setBranchQuery(event.target.value);
+                                        setIsBranchMenuOpen(true);
+                                    }}
+                                    onKeyDown={(event) => {
+                                        if (
+                                            event.key === "Escape" ||
+                                            event.key === "Tab"
+                                        ) {
+                                            setIsBranchMenuOpen(false);
+                                        }
+                                    }}
+                                    disabled={loadingBranches}
+                                    placeholder={
+                                        loadingBranches
+                                            ? "Loading branches..."
+                                            : "Search or select branch..."
+                                    }
+                                    className="w-full rounded-xl border border-[#E3D8EA] bg-white px-10 py-2.5 pr-10 text-sm font-semibold text-[#1A1220] outline-none shadow-sm placeholder:font-normal placeholder:text-[#9B8AAA] focus:border-[#2B174C] disabled:cursor-not-allowed disabled:opacity-60"
+                                    role="combobox"
+                                    aria-expanded={isBranchMenuOpen}
+                                    aria-controls="owner-package-branch-options"
+                                    aria-autocomplete="list"
+                                />
+
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setIsBranchMenuOpen((isOpen) => !isOpen);
+
+                                        if (!isBranchMenuOpen) {
+                                            setBranchQuery("");
+                                        }
+                                    }}
+                                    className="absolute right-0 top-0 flex h-full w-10 items-center justify-center text-[#2B174C]"
+                                    aria-label="Show branch choices"
+                                >
+                                    <ChevronDown
+                                        size={14}
+                                        className={`transition ${
+                                            isBranchMenuOpen ? "rotate-180" : ""
+                                        }`}
+                                    />
+                                </button>
+
+                                {isBranchMenuOpen && !loadingBranches && (
+                                    <div
+                                        id="owner-package-branch-options"
+                                        className="absolute z-30 mt-1 max-h-60 w-full overflow-y-auto rounded-xl border border-[#D8CBE7] bg-white py-1 shadow-lg"
+                                        role="listbox"
+                                    >
+                                        <button
+                                            type="button"
+                                            role="option"
+                                            aria-selected={isAllBranchesView}
+                                            onMouseDown={(event) =>
+                                                event.preventDefault()
+                                            }
+                                            onClick={handleSelectAllBranches}
+                                            className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition ${
+                                                isAllBranchesView
+                                                    ? "bg-[#F1E9FF] font-semibold text-[#2B174C]"
+                                                    : "text-[#1A1220] hover:bg-[#F7F1FF]"
+                                            }`}
+                                        >
+                                            <span>All Branches</span>
+
+                                            {isAllBranchesView && (
+                                                <Check
+                                                    size={15}
+                                                    className="shrink-0"
+                                                />
+                                            )}
+                                        </button>
+
+                                        {matchingBranches.length === 0 ? (
+                                            <p className="px-4 py-3 text-sm text-[#7A6A84]">
+                                                No matching branch found.
+                                            </p>
+                                        ) : (
+                                            matchingBranches.map((branch) => {
+                                                const isSelected =
+                                                    branch.id === selectedBranchId;
+
+                                                return (
+                                                    <button
+                                                        key={branch.id}
+                                                        type="button"
+                                                        role="option"
+                                                        aria-selected={isSelected}
+                                                        onMouseDown={(event) =>
+                                                            event.preventDefault()
+                                                        }
+                                                        onClick={() =>
+                                                            handleSelectBranch(
+                                                                branch
+                                                            )
+                                                        }
+                                                        className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition ${
+                                                            isSelected
+                                                                ? "bg-[#F1E9FF] font-semibold text-[#2B174C]"
+                                                                : "text-[#1A1220] hover:bg-[#F7F1FF]"
+                                                        }`}
+                                                    >
+                                                        <span className="truncate">
+                                                            {branch.name}
+                                                        </span>
+
+                                                        {isSelected && (
+                                                            <Check
+                                                                size={15}
+                                                                className="shrink-0"
+                                                            />
+                                                        )}
+                                                    </button>
+                                                );
+                                            })
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
                         {(loadingBranches && branches.length === 0) ||
                         ((loadingPackages || !hasLoadedSelectedScope) && packages.length === 0) ? (
                             <ModuleSkeleton variant="packages" />
@@ -814,8 +782,8 @@ export default function OwnerPackages() {
                             <EmptyState
                                 title="No packages found."
                                 detail={
-                                    search || selectedCategory !== "All"
-                                        ? "Try a different search or category."
+                                    search || selectedCategory !== "All" || selectedStatus !== "All"
+                                        ? "Try different search, category, or status filters."
                                         : isAllBranchesView
                                             ? "No plans are available across branches yet."
                                             : "This branch does not have plans yet."

@@ -9,6 +9,7 @@ import {
     Boxes,
     CheckCircle2,
     CircleOff,
+    Download,
 } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
@@ -22,6 +23,7 @@ import {
     EmptyState,
     getPackageCategory,
     getToken,
+    downloadPackagesPdf,
     PACKAGE_CATEGORY_OPTIONS,
     PackageCard,
     PackageSummaryCard,
@@ -586,14 +588,20 @@ export default function OwnerPackages() {
                                 </p>
                             </div>
 
-                            {(isAllBranchesView || selectedBranchId) && (
-                                <span className="shrink-0 text-xs font-semibold text-[#806A8C]">
-                                    {filteredPackages.length} package
-                                    {filteredPackages.length !== 1
-                                        ? "s"
-                                        : ""}
-                                </span>
-                            )}
+                            <button
+                                type="button"
+                                onClick={() => void downloadPackagesPdf(filteredPackages, {
+                                    scopeLabel: selectedScopeLabel,
+                                    branchNameForPackage: (pkg) => branches.find((branch) => branch.id === Number(pkg.branch_id))?.name || (pkg.branch_id ? `Branch #${pkg.branch_id}` : "Not recorded"),
+                                    fileName: `stocknbook-packages-${isAllBranchesView ? "all-branches" : `branch-${selectedBranchId}`}.pdf`,
+                                }).catch((reason) => alert(reason instanceof Error ? reason.message : "Unable to download package PDF."))}
+                                disabled={!hasLoadedSelectedScope || loadingPackages || loadingBranches || filteredPackages.length === 0}
+                                className="inline-flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] shadow-sm transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
+                                title="Download all matching packages as PDF"
+                                aria-label="Download all matching packages as PDF"
+                            >
+                                <Download size={18} />
+                            </button>
                         </div>
 
                         <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_190px_160px_240px]">
@@ -795,6 +803,7 @@ export default function OwnerPackages() {
                                     <PackageCard
                                         key={pkg.id}
                                         pkg={pkg}
+                                        branchName={branches.find((branch) => branch.id === Number(pkg.branch_id))?.name || (pkg.branch_id ? `Branch #${pkg.branch_id}` : "Not recorded")}
                                         canManage={false}
                                         onEdit={() => undefined}
                                         onDelete={() => undefined}

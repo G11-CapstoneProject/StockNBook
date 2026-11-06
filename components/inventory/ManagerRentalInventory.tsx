@@ -18,6 +18,40 @@ import {
 } from "@/hooks/useRentalInventory";
 import { SuccessToast } from "./_shared";
 
+// Use the shared StockNBook report format for the manager's read-only panels.
+async function exportRentalPanelPdf(title: string, headers: string[], rows: string[][], range: string) {
+    const { exportTableAsPdf } = await import("@/components/dashboard/_shared");
+    exportTableAsPdf({title, headers, rows}, {
+        storeName: sessionStorage.getItem("store_name") || "StockNBook",
+        branch: sessionStorage.getItem("branch_name") || "Assigned branch",
+        dateRange: range,
+    }, `stocknbook_${title.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`);
+}
+
+// Keep Inventory filters visually consistent without changing their values or handlers.
+function RentalInventoryFilterSelect({ containerClassName = "", className = "", children, ...props }:
+                                         React.ComponentProps<"select"> & { containerClassName?: string }) {
+    return (
+        <span className={`relative inline-flex min-w-0 ${containerClassName}`}>
+            <select {...props} className={`h-9 w-full min-w-0 appearance-none rounded-xl border border-[#E3D8EA] bg-white py-1 pl-3 pr-9 text-xs font-semibold text-[#2B174C] outline-none focus:border-[#BFA8E2] focus-visible:ring-2 focus-visible:ring-[#F1EBFF] ${className}`}>
+                {children}
+            </select>
+            <ChevronDown aria-hidden="true" size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#806A8C]" />
+        </span>
+    );
+}
+
+// Staff and manager activity labels share the same operational stock direction.
+function rentalActivityDirection(record: RentalActivity): "in" | "out" | "other" {
+    if (["received", "returned", "missing_replaced", "missing_resolved", "maintenance_completed"].includes(record.type)) return "in";
+    if (["rented_out", "missing_reported", "maintenance_started"].includes(record.type)) return "out";
+    if (record.type === "adjustment") {
+        if (/^Physical stock correction \+/.test(record.description || "")) return "in";
+        if (/^Physical stock correction -/.test(record.description || "")) return "out";
+    }
+    return "other";
+}
+
 // The manager manages physical equipment and maintenance, not checkout/return
 // transactions. Staff's booking workflow is the authority for rentals/returns.
 export default function ManagerRentalInventory({ branchId }: { branchId?: number }) {
@@ -30,6 +64,9 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const [search, setSearch] = React.useState("");
     const [category, setCategory] = React.useState("All Categories");
     const [status, setStatus] = React.useState("All Status");
+    const [activityDateFilter, setActivityDateFilter] = React.useState<"today" | "all" | "date">("today");
+    const [activityDate, setActivityDate] = React.useState("");
+    const [activityDirection, setActivityDirection] = React.useState<"all" | "in" | "out">("all");
     const [dialog, setDialog] = React.useState<{
         mode: "add" | "edit" | "receive" | "maintenance" | "review" | "correct";
         item: RentalEquipment | null;
@@ -53,15 +90,25 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const [datesError, setDatesError] = React.useState("");
 
     const categories = rental.categories;
-    // Today's branch operations only. The backend retains earlier rental history.
-    const todayRentalActivity = React.useMemo(() => {
-        const todayKey = new Date().toLocaleDateString("en-PH", { timeZone: "Asia/Manila" });
+    // Filter the branch-scoped recent activity that is actually returned by the API.
+    // The backend limits this feed, so "All loaded" never implies lifetime history.
+    const filteredRentalActivity = React.useMemo(() => {
+        const todayKey = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" });
         return rental.recentActivity.filter(record => {
             const occurredAt = new Date(record.occurredAt);
-            return !Number.isNaN(occurredAt.getTime()) &&
-                occurredAt.toLocaleDateString("en-PH", { timeZone: "Asia/Manila" }) === todayKey;
+            if (Number.isNaN(occurredAt.getTime())) return false;
+            const key = occurredAt.toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" });
+            if (activityDateFilter === "today" && key !== todayKey) return false;
+            if (activityDateFilter === "date" && (!activityDate || key !== activityDate)) return false;
+            return activityDirection === "all" || rentalActivityDirection(record) === activityDirection;
         });
-    }, [rental.recentActivity]);
+    }, [rental.recentActivity, activityDateFilter, activityDate, activityDirection]);
+    const activityRange = `${activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? "Today" : activityDate || "Choose a date"} · ${activityDirection === "all" ? "All activity" : activityDirection === "in" ? "Stock In" : "Stock Out"}`;
+    const downloadPanel = (title: string, headers: string[], rows: string[][], range = "All loaded records") => {
+        void exportRentalPanelPdf(title, headers, rows, range)
+            .then(() => { setExportError(""); setNotice(`${title} PDF downloaded. Check your browser downloads.`); })
+            .catch(() => setExportError(`Unable to download ${title.toLowerCase()}.`));
+    };
     const filtered = React.useMemo(() => rental.equipment.filter(item => {
         // Retired equipment stays in history but not the default active catalog.
         if(!item.active && status!=="Archived")return false;
@@ -210,6 +257,13 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                     className={`inline-flex h-9 items-center justify-center whitespace-nowrap rounded-xl border px-3 text-[11px] font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] ${conditionTab==='history'?'border-[#D8CBE7] bg-[#F4EFFD] text-[#5B32C5]':'border-[#E6DDF0] bg-white text-[#2B174C] hover:bg-[#F7F1FF]'}`}>
                                 Maintenance History
                             </button>
+                            <button type="button" title="Download displayed equipment condition report (PDF)" aria-label="Download equipment condition report"
+                                    onClick={() => conditionTab === "active" ? downloadPanel("Equipment Condition Active Issues",
+                                            ["Equipment", "Work Item", "Reference", "Units", "Status"],
+                                            managerConditionIssues.map(issue => [issue.equipmentName, issue.title, issue.reference, String(issue.units), issue.status])) :
+                                        downloadPanel("Equipment Maintenance History", ["Equipment", "Activity", "Units", "Recorded By"],
+                                            rental.maintenanceHistory.map(record => [record.equipmentName, record.type, String(record.quantity), record.actorName || "Not recorded"]))}
+                                    className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]"><Download size={16}/></button>
                         </div>
                     </div>
                     {rental.loading ? <PanelSkeleton/> : !rental.connected ?
@@ -226,10 +280,31 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                 </section>
 
                 <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
-                    <PanelHeading icon={<CalendarClock size={18}/>} title="Today's Rental Stock Activity"
-                                  subtitle="Equipment receipts, rental movements, and repairs recorded today."/>
+                    <PanelHeading icon={<CalendarClock size={18}/>} title="Rental Stock Activity"
+                                  subtitle="Equipment receipts, rentals, and maintenance in loaded recent records."
+                                  actions={<div className="flex shrink-0 items-center gap-1.5">
+                                      <RentalInventoryFilterSelect containerClassName="w-[104px]" value={activityDateFilter} aria-label="Filter rental activity date" onChange={e => setActivityDateFilter(e.target.value as "today" | "all" | "date")}>
+                                          <option value="today">Today</option><option value="all">All loaded</option><option value="date">Choose date</option>
+                                      </RentalInventoryFilterSelect>
+                                      {activityDateFilter === "date" && <input type="date" aria-label="Choose rental activity date" value={activityDate} onChange={e => setActivityDate(e.target.value)}
+                                                                               className="h-9 max-w-[135px] rounded-xl border border-[#E3D8EA] bg-white px-1 text-[11px] text-[#2B174C]"/>}
+                                      <RentalInventoryFilterSelect containerClassName="w-[114px]" value={activityDirection} aria-label="Filter rental activity movement" onChange={e => setActivityDirection(e.target.value as "all" | "in" | "out")}>
+                                          <option value="all">All Activity</option><option value="in">Stock In</option><option value="out">Stock Out</option>
+                                      </RentalInventoryFilterSelect>
+                                      <button type="button" disabled={rental.loading || (activityDateFilter === "date" && !activityDate)}
+                                              title="Download filtered rental activity PDF" aria-label="Download filtered rental stock activity"
+                                              onClick={() => downloadPanel("Rental Stock Activity", ["Date", "Time", "Equipment", "Activity", "Qty", "Reference No."],
+                                                  filteredRentalActivity.map(record => {
+                                                      const occurred = new Date(record.occurredAt);
+                                                      return [occurred.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "short", day: "numeric", year: "numeric" }),
+                                                          occurred.toLocaleTimeString("en-PH", { timeZone: "Asia/Manila", hour: "numeric", minute: "2-digit" }),
+                                                          record.equipmentName, activityNames[record.type],
+                                                          `${rentalActivityDirection(record) === "in" ? "+" : "−"}${record.quantity}`, record.referenceNumber || "—"];
+                                                  }), activityRange)}
+                                              className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] hover:bg-[#F7F1FF] disabled:opacity-40"><Download size={16}/></button>
+                                  </div>}/>
                     {rental.loading ? <PanelSkeleton/> : !rental.connected ? <EmptyPanel label="Connect rental records to view activity."/> :
-                        todayRentalActivity.length === 0 ? <EmptyPanel label="No rental stock movements recorded today."/> : (
+                        filteredRentalActivity.length === 0 ? <EmptyPanel label="No rental movements match the selected filters."/> : (
                             <div className="min-h-0 flex-1 overflow-auto">
                                 <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                                     <colgroup><col className="w-[16%]"/><col className="w-[30%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
@@ -241,7 +316,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                         <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Qty</th>
                                         <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Reference No.</th>
                                     </tr></thead>
-                                    <tbody>{todayRentalActivity.slice(0, 100).map(record => (
+                                    <tbody>{filteredRentalActivity.map(record => (
                                         <ActivityRow key={record.id} item={record}/>
                                     ))}</tbody>
                                 </table>
@@ -283,22 +358,21 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                         </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                        <select value={category} onChange={e=>setCategory(e.target.value)} aria-label="Filter rental category"
-                                className="h-10 min-w-[150px] rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C]">
+                        <RentalInventoryFilterSelect containerClassName="w-[154px]" value={category} onChange={e=>setCategory(e.target.value)} aria-label="Filter rental category">
                             <option>All Categories</option>{categories.map(name=><option key={name}>{name}</option>)}
-                        </select>
-                        <select value={status} onChange={e=>setStatus(e.target.value)} aria-label="Filter rental equipment status"
-                                className="h-10 min-w-[145px] rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C]">
+                        </RentalInventoryFilterSelect>
+                        <RentalInventoryFilterSelect containerClassName="w-[148px]" value={status} onChange={e=>setStatus(e.target.value)} aria-label="Filter rental equipment status">
                             {["All Status","Fully Available","Available","Low Availability","Unavailable","Fully Booked","Needs Review","On Hold","Out on Rental","Missing Units","Stock Discrepancy"].map(value=><option key={value}>{value}</option>)}
-                        </select>
+                        </RentalInventoryFilterSelect>
                         <button type="button" aria-expanded={dateFiltersOpen} onClick={()=>setDateFiltersOpen(v=>!v)}
-                                className="flex h-10 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
+                                className="flex h-9 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
                             <CalendarClock size={15}/> {appliedDates ? "Dates Applied" : "Date Availability"} <ChevronDown size={14}/>
                         </button>
                         <div className="relative">
                             <button type="button" aria-expanded={exportOpen} onClick={()=>setExportOpen(v=>!v)}
-                                    className="flex h-10 items-center gap-2 rounded-xl border border-[#D9CDF0] bg-white px-4 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
-                                <Download size={15}/> Export <ChevronDown size={13}/>
+                                    aria-label="Download filtered rental inventory list" title="Download filtered rental inventory list"
+                                    className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#2B174C] hover:bg-[#F8F3FC]">
+                                <Download size={17}/>
                             </button>
                             {exportOpen && <div className="absolute right-0 top-full z-20 mt-1 min-w-[155px] rounded-xl border border-[#E3D8EA] bg-white p-1 shadow-lg">
                                 <button type="button" onClick={()=>downloadExport("xlsx")} className="block w-full rounded-lg px-3 py-2 text-left text-xs text-[#2B174C] hover:bg-[#F5F0FF]">Export Excel (.xlsx)</button>
@@ -636,11 +710,14 @@ function RetireEquipmentDialog({item,saving,close,onSave}:{
     </div>;
 }
 
-function PanelHeading({title,subtitle,icon}:{title:string;subtitle:string;icon:React.ReactNode}) {
-    return <div className="flex items-start gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">{icon}</span>
-        <div><h2 className="text-[15px] font-bold text-[#21132E]">{title}</h2>
-            <p className="mt-0.5 text-[11px] text-[#86778F]">{subtitle}</p></div>
+function PanelHeading({title,subtitle,icon,actions}:{title:string;subtitle:string;icon:React.ReactNode;actions?:React.ReactNode}) {
+    return <div className="flex min-w-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">{icon}</span>
+            <div className="min-w-0"><h2 className="text-[15px] font-bold text-[#21132E]">{title}</h2>
+                <p className="mt-0.5 text-[11px] text-[#86778F]">{subtitle}</p></div>
+        </div>
+        {actions && <div className="flex shrink-0 items-center justify-end">{actions}</div>}
     </div>;
 }
 function EmptyPanel({label}:{label:string}) {
@@ -1727,7 +1804,17 @@ function RentalSupplierPayablesDialog({
         <div role="dialog" aria-modal="true" aria-label="Supplier Payables" className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
             <div className="flex items-center justify-between gap-3 border-b border-[#E3D8EA] px-5 py-4 sm:px-6">
                 <h2 className="text-lg font-bold text-[#2B174C]">Supplier Payables</h2>
-                <button type="button" aria-label="Close Rental Supplier Payables" disabled={saving} onClick={onClose} className="rounded-lg px-2 py-1 text-sm text-[#806A8C] hover:text-[#2B174C] disabled:opacity-50">Close</button>
+                <div className="flex items-center gap-3">
+                    <button type="button" title="Download filtered rental supplier payables PDF" aria-label="Download rental supplier payables"
+                            onClick={() => void exportRentalPanelPdf("Rental Supplier Payables",
+                                ["Purchase No.", "Purchase Date", "Supplier", "Method", "Total", "Paid", "Outstanding", "Status"],
+                                filtered.map(row => [row.purchaseNumber, row.purchaseDate, row.supplier,
+                                    row.paymentMethod, peso(row.purchaseTotal), peso(row.amountPaid), peso(row.outstandingBalance), row.paymentStatus]),
+                                methodFilter === "all" ? "All payments" : methodFilter)
+                                .catch(() => setError("Unable to download the supplier payables report."))}
+                            className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]"><Download size={16}/></button>
+                    <button type="button" aria-label="Close Rental Supplier Payables" disabled={saving} onClick={onClose} className="rounded-lg px-2 py-1 text-sm text-[#806A8C] hover:text-[#2B174C] disabled:opacity-50">Close</button>
+                </div>
             </div>
             <div className="space-y-4 overflow-y-auto px-5 py-5 sm:px-6">
                 <p className="text-xs text-[#806A8C]">Purchase balances belong to the supplier transaction, not to each equipment unit. Payments do not alter rental stock.</p>
@@ -1745,9 +1832,9 @@ function RentalSupplierPayablesDialog({
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row">
                     <input aria-label="Search rental supplier purchases" placeholder="Search Purchase No., supplier, invoice, or status..." value={search} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setSearch(e.target.value)} className={`${inputClass} flex-1`}/>
-                    <select aria-label="Filter rental supplier payment method" value={methodFilter} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setMethodFilter(e.target.value as typeof methodFilter)} className={`${inputClass} sm:w-44`}>
+                    <RentalInventoryFilterSelect containerClassName="w-full sm:w-[176px]" aria-label="Filter rental supplier payment method" value={methodFilter} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setMethodFilter(e.target.value as typeof methodFilter)}>
                         <option value="all">All Payments</option><option value="cash">Cash</option><option value="credit">Credit (Utang)</option>
-                    </select>
+                    </RentalInventoryFilterSelect>
                 </div>
                 <SuccessToast toast={notice ? {title:"Supplier payment updated",message:notice} : null} onClose={closePaymentToast} />
                 {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}

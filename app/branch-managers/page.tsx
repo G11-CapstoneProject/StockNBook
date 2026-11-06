@@ -8,6 +8,7 @@ import {
     useCallback,
     useEffect,
     useMemo,
+    useRef,
     useState,
 } from "react";
 import { useRouter } from "next/navigation";
@@ -157,10 +158,10 @@ function attendanceHours(value?: number | string | null) {
 function AttendanceBadge({ status }: { status: string }) {
     const label = String(status || "Not Recorded");
     const classes = label === "On Duty" || label === "Completed" || label === "Present"
-        ? "bg-[#E6F7EE] text-[#16834A]"
-        : label === "On Leave" ? "bg-[#FFF3D8] text-[#A56607]"
-            : label === "Absent" ? "bg-[#FFF0F0] text-[#D52B2B]" : "bg-[#F2EFF5] text-[#806A8C]";
-    return <span className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-bold ${classes}`}>{label}</span>;
+        ? "text-[#16834A]"
+        : label === "On Leave" ? "text-[#A56607]"
+            : label === "Absent" ? "text-[#D52B2B]" : "text-[#806A8C]";
+    return <span className={`inline-flex whitespace-nowrap text-[11px] font-semibold ${classes}`}>{label}</span>;
 }
 function AttendanceCount({ label, value, tone }: { label: string; value: number; tone: "green" | "gold" | "red" | "gray" }) {
     const classes = { green: "bg-[#E6F7EE] text-[#16834A]", gold: "bg-[#FFF3D8] text-[#A56607]",
@@ -325,14 +326,14 @@ function getStatusLabel(status: ManagerStatus) {
 
 function getStatusClass(status: ManagerStatus) {
     if (status === "active") {
-        return "border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]";
+        return "text-[#138342]";
     }
 
     if (status === "inactive") {
-        return "border-[#F3C6C6] bg-[#FFF1F1] text-[#C13333]";
+        return "text-[#C13333]";
     }
 
-    return "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]";
+    return "text-[#A56607]";
 }
 
 type SubscriptionPlan = "starter" | "growth" | "scale";
@@ -413,6 +414,25 @@ export default function BranchManagersPage() {
     const [attendanceBranchFilter, setAttendanceBranchFilter] = useState("all");
     const [attendanceStatusFilter, setAttendanceStatusFilter] = useState("all");
     const [reviewingManagerRequest, setReviewingManagerRequest] = useState<ManagerLeaveGroup | null>(null);
+    const [activeTeamDetail, setActiveTeamDetail] = useState<"attendance" | "requests" | "invites" | null>(null);
+    const teamDetailTriggerRef = useRef<HTMLButtonElement | null>(null);
+    const teamDetailCloseRef = useRef<HTMLButtonElement | null>(null);
+    const openTeamDetail = (detail: "attendance" | "requests" | "invites", trigger: HTMLButtonElement) => {
+        teamDetailTriggerRef.current = trigger;
+        setActiveTeamDetail(detail);
+    };
+    const closeTeamDetail = () => {
+        setActiveTeamDetail(null);
+        window.requestAnimationFrame(() => teamDetailTriggerRef.current?.focus());
+    };
+    useEffect(() => {
+        if (!activeTeamDetail) return;
+        teamDetailCloseRef.current?.focus();
+        const originalOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+        return () => { document.body.style.overflow = originalOverflow; };
+    }, [activeTeamDetail]);
+
     const [reviewReason, setReviewReason] = useState("");
     const [reviewError, setReviewError] = useState("");
     const [reviewSaving, setReviewSaving] = useState(false);
@@ -739,6 +759,30 @@ export default function BranchManagersPage() {
         return counts;
     }, [managers, managerAttendanceRows, attendanceToday]);
     const attendancePeriodLabel = { today: "Today", month: "This Month", previous: "Last Month", all: "Last 90 Days" }[attendancePeriod] || "Today";
+
+    const exportManagerList = () => {
+        void import("@/components/dashboard/_shared")
+            .then(module => module.exportTableAsPdf({
+                    title: "Branch Manager List",
+                    headers: ["Employee ID", "Manager", "Email", "Branch", "Status"],
+                    rows: listedManagers.map(manager => [manager.employeeCode || "—", manager.name,
+                        manager.email, manager.branch, getStatusLabel(manager.status)]),
+                }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
+                    branch: "All branches", dateRange: statusFilter === "all" ? "All statuses" : getStatusLabel(statusFilter as ManagerStatus) },
+                "owner_branch_managers"))
+            .catch(() => setNotice({ title: "Export unavailable", message: "Could not export the manager list.", kind: "error" }));
+    };
+
+    const exportManagerInvites = () => {
+        void import("@/components/dashboard/_shared")
+            .then(module => module.exportTableAsPdf({
+                title: "Pending Manager Invitations",
+                headers: ["Manager", "Email", "Branch", "Status"],
+                rows: pendingInvites.map(manager => [manager.name, manager.email, manager.branch, "Pending"]),
+            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
+                branch: "All branches", dateRange: "Pending invitations" }, "owner_manager_invites"))
+            .catch(() => setNotice({ title: "Export unavailable", message: "Could not export pending manager invitations.", kind: "error" }));
+    };
 
     const exportManagerAttendance = () => {
         void import("@/components/dashboard/_shared")
@@ -1226,97 +1270,6 @@ export default function BranchManagersPage() {
                             />
                         </div>
 
-                        <div className="flex flex-col gap-3 lg:flex-row">
-                            <div className="relative min-w-0 flex-1">
-                                <Search
-                                    size={18}
-                                    className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                                />
-
-                                <input
-                                    value={search}
-                                    onChange={(event) =>
-                                        setSearch(event.target.value)
-                                    }
-                                    placeholder="Search manager name, email, branch, or status..."
-                                    className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                                />
-
-                                {search && (
-                                    <button
-                                        type="button"
-                                        onClick={() => setSearch("")}
-                                        aria-label="Clear manager search"
-                                        className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
-                                    >
-                                        <X size={15} />
-                                    </button>
-                                )}
-                            </div>
-
-                            <div className="flex shrink-0 gap-2.5">
-                                <div className="relative">
-                                    <Filter
-                                        size={16}
-                                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
-                                    />
-
-                                    <select
-                                        value={statusFilter}
-                                        onChange={(event) =>
-                                            setStatusFilter(
-                                                event.target.value as
-                                                    | "all"
-                                                    | ManagerStatus
-                                            )
-                                        }
-                                        aria-label="Filter managers by status"
-                                        className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                                    >
-                                        <option value="all">
-                                            All Status
-                                        </option>
-                                        <option value="active">
-                                            Active
-                                        </option>
-                                        <option value="inactive">
-                                            Inactive
-                                        </option>
-                                        <option value="pending">
-                                            Pending
-                                        </option>
-                                    </select>
-
-                                    <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#806A8C]">
-                                        ▾
-                                    </span>
-                                </div>
-
-                                <button
-                                    type="button"
-                                    onClick={openAddManagerModal}
-                                    title="Add a manager to a branch without an assigned manager"
-                                    className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
-                                    style={{
-                                        backgroundColor: "#2B174C",
-                                        border: "1px solid #2B174C",
-                                        color: "#FFFFFF",
-                                        boxShadow:
-                                            "0 4px 10px rgba(43, 23, 76, 0.22)",
-                                    }}
-                                >
-                                    <Plus
-                                        size={18}
-                                        strokeWidth={2.2}
-                                        color="#FFFFFF"
-                                    />
-                                    <span style={{ color: "#FFFFFF" }}>
-                                        Add Manager
-                                    </span>
-                                </button>
-                            </div>
-                        </div>
-
                         {error && (
                             <div className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-4 py-3 text-sm font-medium text-[#9B1C1C]">
                                 {error}
@@ -1403,19 +1356,108 @@ export default function BranchManagersPage() {
                                         </p>
                                     </div>
                                 </div>
+                                <button type="button" onClick={exportManagerList} title="Download manager list as PDF" aria-label="Download manager list as PDF" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]">
+                                    <Download size={17} />
+                                </button>
+                            </div>
 
-                                <span className="inline-flex items-center rounded-full bg-[#F5EEFF] px-3 py-1.5 text-xs font-semibold text-[#6D35D4]">
-                                {listedManagers.length}{" "}
-                                    {listedManagers.length === 1
-                                        ? "manager"
-                                        : "managers"}
-                            </span>
+                            <div className="border-b border-[#E6DDF0] px-4 py-3 sm:px-5">
+                                <div className="flex flex-col gap-3 lg:flex-row">
+                                    <div className="relative min-w-0 flex-1">
+                                        <Search
+                                            size={18}
+                                            className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
+                                        />
+
+                                        <input
+                                            value={search}
+                                            onChange={(event) =>
+                                                setSearch(event.target.value)
+                                            }
+                                            placeholder="Search manager name, email, branch, or status..."
+                                            className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                        />
+
+                                        {search && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setSearch("")}
+                                                aria-label="Clear manager search"
+                                                className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
+                                            >
+                                                <X size={15} />
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    <div className="flex flex-wrap items-center gap-2.5">
+                                        <div className="relative">
+                                            <Filter
+                                                size={16}
+                                                className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
+                                            />
+
+                                            <select
+                                                value={statusFilter}
+                                                onChange={(event) =>
+                                                    setStatusFilter(
+                                                        event.target.value as
+                                                            | "all"
+                                                            | ManagerStatus
+                                                    )
+                                                }
+                                                aria-label="Filter managers by status"
+                                                className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                            >
+                                                <option value="all">
+                                                    All Status
+                                                </option>
+                                                <option value="active">
+                                                    Active
+                                                </option>
+                                                <option value="inactive">
+                                                    Inactive
+                                                </option>
+                                                <option value="pending">
+                                                    Pending
+                                                </option>
+                                            </select>
+
+                                            <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#806A8C]">
+                                                ▾
+                                            </span>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={openAddManagerModal}
+                                            title="Add a manager to a branch without an assigned manager"
+                                            className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
+                                            style={{
+                                                backgroundColor: "#2B174C",
+                                                border: "1px solid #2B174C",
+                                                color: "#FFFFFF",
+                                                boxShadow:
+                                                    "0 4px 10px rgba(43, 23, 76, 0.22)",
+                                            }}
+                                        >
+                                            <Plus
+                                                size={18}
+                                                strokeWidth={2.2}
+                                                color="#FFFFFF"
+                                            />
+                                            <span style={{ color: "#FFFFFF" }}>
+                                                Add Manager
+                                            </span>
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
 
                             {loading && managers.length === 0 ? (
-                                <div className="p-4"><ModuleSkeleton variant="team" /></div>
+                                <div className="min-h-[180px] xl:min-h-[210px] p-4"><ModuleSkeleton variant="team" /></div>
                             ) : listedManagers.length === 0 ? (
-                                <div className="flex min-h-[180px] flex-col items-center justify-center px-4 text-center">
+                                <div className="flex min-h-[180px] xl:min-h-[210px] flex-col items-center justify-center px-4 text-center">
                                 <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={22} />
                                 </span>
@@ -1427,18 +1469,16 @@ export default function BranchManagersPage() {
                                     </p>
                                 </div>
                             ) : (
-                                <div className="overflow-x-auto p-4">
+                                <div>
                                     <div
-                                        className="overflow-hidden rounded-[14px]"
-                                        style={{
-                                            boxShadow:
-                                                "inset 0 0 0 1px #EAE2F0",
-                                        }}
+                                        className="min-h-[180px] xl:min-h-[210px] max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"
+                                        role="region" aria-label="Manager list" tabIndex={0}
                                     >
-                                        <table className="w-full min-w-[820px] border-collapse font-sans">
-                                            <thead className="bg-[#FBF8FF]">
+                                        <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                            <colgroup><col className="w-[17%]" /><col className="w-[29%]" /><col className="w-[19%]" /><col className="w-[13%]" /><col className="w-[22%]" /></colgroup>
+                                            <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                                             <tr className="border-b border-[#E6DDF0]">
-                                                <TableHeader>
+                                                <TableHeader align="center">
                                                     Employee ID
                                                 </TableHeader>
                                                 <TableHeader>
@@ -1450,7 +1490,7 @@ export default function BranchManagersPage() {
                                                 <TableHeader>
                                                     Status
                                                 </TableHeader>
-                                                <TableHeader align="right">
+                                                <TableHeader align="center">
                                                     Actions
                                                 </TableHeader>
                                             </tr>
@@ -1465,11 +1505,11 @@ export default function BranchManagersPage() {
                                                         key={manager.id}
                                                         className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
                                                     >
-                                                        <td className="whitespace-nowrap px-5 py-3 text-sm font-semibold text-[#4E2C66]">
+                                                        <td className="whitespace-nowrap px-3 py-2.5 text-sm font-semibold text-[#4E2C66]">
                                                             {manager.employeeCode || "—"}
                                                         </td>
 
-                                                        <td className="px-5 py-3">
+                                                        <td className="px-3 py-2.5">
                                                             <div className="min-w-0">
                                                                 <p className="truncate text-sm font-bold text-[#1A1220]">
                                                                     {manager.name}
@@ -1480,30 +1520,31 @@ export default function BranchManagersPage() {
                                                             </div>
                                                         </td>
 
-                                                        <td className="px-5 py-3">
+                                                        <td className="px-3 py-2.5">
                                                             <span className="truncate text-sm font-semibold text-[#1A1220]">
                                                                 {manager.branch}
                                                             </span>
                                                         </td>
 
-                                                        <td className="px-5 py-3">
+                                                        <td className="px-3 py-2.5">
                                                             <span
-                                                                className={`inline-flex rounded-full border px-4 py-1.5 text-sm font-semibold ${getStatusClass(manager.status)}`}
+                                                                className={`inline-flex text-xs font-semibold ${getStatusClass(manager.status)}`}
                                                             >
                                                                 {getStatusLabel(manager.status)}
                                                             </span>
                                                         </td>
 
-                                                        <td className="px-5 py-3 text-right">
-                                                            <div className="flex justify-end gap-2">
+                                                        <td className="px-3 py-2.5 text-center">
+                                                            <div className="flex flex-wrap items-center justify-center gap-1.5">
                                                                 <button
                                                                     type="button"
                                                                     disabled={isUpdating}
                                                                     onClick={() => setConfirmAccessChange(manager)}
-                                                                    className={`inline-flex h-[34px] items-center justify-center rounded-lg px-3 text-xs font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${manager.status === "inactive"
-                                                                        ? "border border-[#B7E9C8] bg-[#EDFBF1] text-[#138342] hover:bg-[#DDF5E5]"
-                                                                        : "bg-[#A33E20] text-white hover:bg-[#883117]"}`}
+                                                                    className={`inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 ${manager.status === "inactive"
+                                                                        ? "bg-[#E8F7EE] text-[#138342] hover:bg-[#DDF5E5]"
+                                                                        : "bg-[#FDEDED] text-[#C13333] hover:bg-[#FADDDD]"}`}
                                                                 >
+                                                                    {manager.status === "inactive" ? <CheckCircle2 size={13} /> : <UserX size={13} />}
                                                                     {isUpdating ? "Updating..." : manager.status === "inactive" ? "Reactivate Access" : "Deactivate Access"}
                                                                 </button>
                                                             </div>
@@ -1518,119 +1559,165 @@ export default function BranchManagersPage() {
                             )}
                         </section>
 
-                        <section id="manager-attendance" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                <div className="flex items-center gap-3">
-                                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span>
-                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Manager Attendance</h2>
-                                        <p className="mt-0.5 text-xs text-[#7A6A84]">Time In and Time Out recorded by branch managers from their dashboards.</p></div>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <select aria-label="Filter manager attendance by period" value={attendancePeriod} onChange={e => setAttendancePeriod(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                        <option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Last 90 Days</option>
-                                    </select>
-                                    <select aria-label="Filter manager attendance by branch" value={attendanceBranchFilter} onChange={e => setAttendanceBranchFilter(e.target.value)} className="h-9 max-w-40 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                        <option value="all">All Branches</option>{attendanceBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
-                                    </select>
-                                    <select aria-label="Filter manager attendance by status" value={attendanceStatusFilter} onChange={e => setAttendanceStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                        <option value="all">All Statuses</option><option value="On Duty">On Duty</option><option value="Completed">Completed</option><option value="On Leave">On Leave</option><option value="Absent">Absent</option>
-                                    </select>
-                                    <button type="button" onClick={exportManagerAttendance} title="Export manager attendance to PDF" aria-label="Export manager attendance" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
-                                </div>
-                            </div>
-                            {attendanceToday && !(loading && managers.length === 0) && <div className="flex flex-wrap items-center gap-2 border-b border-[#EEE7F2] bg-[#FFFCF7] px-5 py-2.5 text-xs">
-                                <span className="mr-1 font-semibold text-[#5F4E75]">Today · {managerAttendanceToday.total} active {managerAttendanceToday.total === 1 ? "manager" : "managers"}</span>
-                                <AttendanceCount label="Present" value={managerAttendanceToday.present} tone="green"/>
-                                <AttendanceCount label="On Leave" value={managerAttendanceToday.onLeave} tone="gold"/>
-                                <AttendanceCount label="Absent" value={managerAttendanceToday.absent} tone="red"/>
-                                <AttendanceCount label="Not Recorded" value={managerAttendanceToday.notRecorded} tone="gray"/>
-                            </div>}
-                            {attendanceError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{attendanceError}</p>}
-                            <div className="max-h-[360px] overflow-auto">
-                                <table className="w-full min-w-[980px] text-left text-xs">
-                                    <thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee ID", "Manager Name", "Branch", "Date", "Time In", "Time Out", "Hours Worked", "Status"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
-                                    <tbody>
-                                    {visibleManagerAttendance.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={`${row.managerId}-${row.id}-${row.date}`}>
-                                        <td className="whitespace-nowrap px-4 py-3 font-semibold text-[#4E2C66]">{row.employeeCode || "—"}</td>
-                                        <td className="px-4 py-3 font-semibold text-[#2B174C]">{row.managerName}</td>
-                                        <td className="px-4 py-3">{row.branchName}</td>
-                                        <td className="whitespace-nowrap px-4 py-3">{managerDateLabel(row.date)}</td>
-                                        <td className="whitespace-nowrap px-4 py-3">{attendanceClockTime(row.timeIn)}</td>
-                                        <td className="whitespace-nowrap px-4 py-3">{attendanceClockTime(row.timeOut)}</td>
-                                        <td className="whitespace-nowrap px-4 py-3">{attendanceHours(row.hoursWorked)}</td>
-                                        <td className="px-4 py-3"><AttendanceBadge status={row.status}/></td>
-                                    </tr>)}
-                                    {visibleManagerAttendance.length === 0 && <tr><td colSpan={8} className="px-4 py-10 text-center text-[#8A7D92]">{attendanceLoading && managerAttendance.length === 0 ? "Loading manager attendance..." : attendanceError ? "Manager attendance unavailable." : attendanceStatusFilter !== "all" || attendanceBranchFilter !== "all" ? "No attendance records match the selected filters." : attendancePeriod === "today" ? "No manager attendance recorded today yet. Time In records from manager dashboards will appear here." : "No manager attendance or approved leave for this period."}</td></tr>}
-                                    </tbody>
-                                </table>
-                            </div>
-                            <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {visibleManagerAttendance.length} {visibleManagerAttendance.length === 1 ? "record" : "records"} · Hours are shown after Time Out</div>
+                        {/* Compact navigation preserves the detailed records in their original tables. */}
+                        <section aria-label="Team records" className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                            <button type="button" onClick={(event) => openTeamDetail("attendance", event.currentTarget)}
+                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
+                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Manager Attendance</span><span className="block text-xs text-[#7A6A84]">Time In, Time Out, and hours worked</span></span></span>
+                                <span className="text-xs font-semibold text-[#5F4E75]">{`Present ${managerAttendanceToday.present} · Not recorded ${managerAttendanceToday.notRecorded}`}</span>
+                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Attendance <ArrowUpRight size={15}/></span>
+                            </button>
+                            <button type="button" onClick={(event) => openTeamDetail("requests", event.currentTarget)}
+                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
+                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Manager Requests</span><span className="block text-xs text-[#7A6A84]">Review branch manager leave requests</span></span></span>
+                                <span className="text-xs font-semibold text-[#A56607]">{pendingManagerRequests} pending</span>
+                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Requests <ArrowUpRight size={15}/></span>
+                            </button>
+                            <button type="button" onClick={(event) => openTeamDetail("invites", event.currentTarget)}
+                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
+                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Pending Invites</span><span className="block text-xs text-[#7A6A84]">Managers awaiting account activation</span></span></span>
+                                <span className="text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
+                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Invites <ArrowUpRight size={15}/></span>
+                            </button>
                         </section>
 
-                        <section id="manager-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                <div className="flex items-center gap-3">
-                                    <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span>
-                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Manager Requests</h2>
-                                        <p className="mt-0.5 text-xs text-[#7A6A84]">Review branch manager leave requests across all branches.</p></div>
-                                    <span className="rounded-full bg-[#FFF3D8] px-2.5 py-1 text-[10px] font-bold text-[#A56607]">{pendingManagerRequests} pending</span>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <select aria-label="Filter manager requests by status" value={requestsStatusFilter} onChange={e => setRequestsStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                        <option value="all">All Statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option>
-                                    </select>
-                                    <select aria-label="Filter manager requests by branch" value={requestsBranchFilter} onChange={e => setRequestsBranchFilter(e.target.value)} className="h-9 max-w-40 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                        <option value="all">All Branches</option>{managerRequestBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
-                                    </select>
-                                    <select aria-label="Filter manager requests by leave type" value={requestsTypeFilter} onChange={e => setRequestsTypeFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                        <option value="all">All Leave Types</option>{managerLeaveTypes.map(type => <option key={type} value={type}>{type}</option>)}
-                                    </select>
-                                    <button type="button" onClick={exportManagerRequests} title="Export manager requests to PDF" aria-label="Export manager requests" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                        {activeTeamDetail && (
+                            <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-3 backdrop-blur-[2px] sm:p-5"
+                                 onMouseDown={(event) => { if (event.target === event.currentTarget && !reviewingManagerRequest && !reviewSaving) closeTeamDetail(); }}
+                                 onKeyDown={(event) => { if (event.key === "Escape" && !reviewingManagerRequest && !reviewSaving) { event.stopPropagation(); closeTeamDetail(); } }}>
+                                <div role="dialog" aria-modal="true" aria-labelledby="manager-team-detail-title"
+                                     className="flex max-h-[90vh] w-full max-w-[1120px] flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-[#FFFDF8] shadow-2xl">
+                                    <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#E6DDF0] bg-white px-5 py-4">
+                                        <h2 id="manager-team-detail-title" className="text-[18px] font-bold text-[#1A1220]">{activeTeamDetail === "attendance" ? "Manager Attendance" : activeTeamDetail === "requests" ? "Manager Requests" : "Pending Invites"}</h2>
+                                        <button ref={teamDetailCloseRef} type="button" aria-label="Close details" onClick={closeTeamDetail}
+                                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] hover:bg-[#F7F1FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#6D35D4]"><X size={19}/></button>
+                                    </div>
+                                    <div className="min-h-0 overflow-y-auto p-3 sm:p-5">
+                                        {activeTeamDetail === "attendance" && (
+                                            <section id="manager-attendance" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span>
+                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Manager Attendance</h2>
+                                                            <p className="mt-0.5 text-xs text-[#7A6A84]">Time In and Time Out recorded by branch managers from their dashboards.</p></div>
+                                                    </div>
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <select aria-label="Filter manager attendance by period" value={attendancePeriod} onChange={e => setAttendancePeriod(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                                            <option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Last 90 Days</option>
+                                                        </select>
+                                                        <select aria-label="Filter manager attendance by branch" value={attendanceBranchFilter} onChange={e => setAttendanceBranchFilter(e.target.value)} className="h-9 max-w-40 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                                            <option value="all">All Branches</option>{attendanceBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
+                                                        </select>
+                                                        <select aria-label="Filter manager attendance by status" value={attendanceStatusFilter} onChange={e => setAttendanceStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                                            <option value="all">All Statuses</option><option value="On Duty">On Duty</option><option value="Completed">Completed</option><option value="On Leave">On Leave</option><option value="Absent">Absent</option>
+                                                        </select>
+                                                        <button type="button" onClick={exportManagerAttendance} title="Export manager attendance to PDF" aria-label="Export manager attendance" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                                    </div>
+                                                </div>
+                                                {attendanceToday && !(loading && managers.length === 0) && <div className="flex flex-wrap items-center gap-2 border-b border-[#EEE7F2] bg-[#FFFCF7] px-5 py-2.5 text-xs">
+                                                    <span className="mr-1 font-semibold text-[#5F4E75]">Today · {managerAttendanceToday.total} active {managerAttendanceToday.total === 1 ? "manager" : "managers"}</span>
+                                                    <AttendanceCount label="Present" value={managerAttendanceToday.present} tone="green"/>
+                                                    <AttendanceCount label="On Leave" value={managerAttendanceToday.onLeave} tone="gold"/>
+                                                    <AttendanceCount label="Absent" value={managerAttendanceToday.absent} tone="red"/>
+                                                    <AttendanceCount label="Not Recorded" value={managerAttendanceToday.notRecorded} tone="gray"/>
+                                                </div>}
+                                                {attendanceError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{attendanceError}</p>}
+                                                <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain">
+                                                    <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                                        <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee ID", "Manager Name", "Branch", "Date", "Time In", "Time Out", "Hours Worked", "Status"].map(label => <th className="px-2.5 py-2.5 text-center" key={label}>{label}</th>)}</tr></thead>
+                                                        <tbody>
+                                                        {visibleManagerAttendance.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={`${row.managerId}-${row.id}-${row.date}`}>
+                                                            <td className="whitespace-nowrap px-2.5 py-2.5 font-semibold text-[#4E2C66]">{row.employeeCode || "—"}</td>
+                                                            <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{row.managerName}</td>
+                                                            <td className="px-2.5 py-2.5">{row.branchName}</td>
+                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{managerDateLabel(row.date)}</td>
+                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{attendanceClockTime(row.timeIn)}</td>
+                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{attendanceClockTime(row.timeOut)}</td>
+                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{attendanceHours(row.hoursWorked)}</td>
+                                                            <td className="px-2.5 py-2.5"><AttendanceBadge status={row.status}/></td>
+                                                        </tr>)}
+                                                        {visibleManagerAttendance.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-[#8A7D92]">{attendanceLoading && managerAttendance.length === 0 ? "Loading manager attendance..." : attendanceError ? "Manager attendance unavailable." : attendanceStatusFilter !== "all" || attendanceBranchFilter !== "all" ? "No attendance records match the selected filters." : attendancePeriod === "today" ? "No manager attendance recorded today yet. Time In records from manager dashboards will appear here." : "No manager attendance or approved leave for this period."}</td></tr>}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                                <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {visibleManagerAttendance.length} {visibleManagerAttendance.length === 1 ? "record" : "records"} · Hours are shown after Time Out</div>
+                                            </section>
+                                        )}
+                                        {activeTeamDetail === "requests" && (
+                                            <section id="manager-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span>
+                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Manager Requests</h2>
+                                                            <p className="mt-0.5 text-xs text-[#7A6A84]">Review branch manager leave requests across all branches.</p></div>
+                                                        <span className="rounded-full bg-[#FFF3D8] px-2.5 py-1 text-[10px] font-bold text-[#A56607]">{pendingManagerRequests} pending</span>
+                                                    </div>
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <select aria-label="Filter manager requests by status" value={requestsStatusFilter} onChange={e => setRequestsStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                                            <option value="all">All Statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option>
+                                                        </select>
+                                                        <select aria-label="Filter manager requests by branch" value={requestsBranchFilter} onChange={e => setRequestsBranchFilter(e.target.value)} className="h-9 max-w-40 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                                            <option value="all">All Branches</option>{managerRequestBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
+                                                        </select>
+                                                        <select aria-label="Filter manager requests by leave type" value={requestsTypeFilter} onChange={e => setRequestsTypeFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
+                                                            <option value="all">All Leave Types</option>{managerLeaveTypes.map(type => <option key={type} value={type}>{type}</option>)}
+                                                        </select>
+                                                        <button type="button" onClick={exportManagerRequests} title="Export manager requests to PDF" aria-label="Export manager requests" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                                    </div>
+                                                </div>
+                                                {requestsError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestsError}</p>}
+                                                <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain">
+                                                    <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                                        <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr>{["Manager", "Branch", "Employee ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-2.5 py-2.5 text-center" key={label}>{label}</th>)}</tr></thead>
+                                                        <tbody>
+                                                        {filteredManagerRequests.map(item => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={item.key}>
+                                                            <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{item.managerName}</td>
+                                                            <td className="px-2.5 py-2.5">{item.branchName}</td>
+                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{item.employeeCode || "—"}</td>
+                                                            <td className="px-2.5 py-2.5">{item.leaveType}</td>
+                                                            <td className="px-2.5 py-2.5">{managerRangeLabel(item)}</td>
+                                                            <td className="px-2.5 py-2.5"><span className={`text-[11px] font-semibold ${item.status === "Approved" ? "text-green-700" : item.status === "Rejected" ? "text-red-700" : "text-amber-700"}`}>{item.status}</span></td>
+                                                            <td className="px-2.5 py-2.5"><button type="button" onClick={() => { setReviewingManagerRequest(item); setReviewReason(""); setReviewError(""); }} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF]">Review</button></td>
+                                                        </tr>)}
+                                                        {filteredManagerRequests.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-[#8A7D92]">{requestsLoading ? "Loading manager requests..." : requestsError ? "Requests unavailable." : "No manager requests found."}</td></tr>}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                                <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {filteredManagerRequests.length} of {groupedManagerRequests.length} requests</div>
+                                            </section>
+                                        )}
+                                        {activeTeamDetail === "invites" && (
+                                            <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                                    <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span>
+                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Pending Invites</h2><p className="mt-0.5 text-xs text-[#7A6A84]">Managers waiting to activate their accounts.</p></div>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="rounded-full bg-[#FFF7E8] px-3 py-1.5 text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
+                                                        <button type="button" onClick={exportManagerInvites} title="Download pending manager invites as PDF" aria-label="Download pending manager invites as PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                                    </div>
+                                                </div>
+                                                <div className="p-4">
+                                                    {loading && managers.length === 0 ? <div className="p-2"><ModuleSkeleton variant="team" /></div> : pendingInvites.length === 0 ?
+                                                        <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFCF7] px-4 py-6 text-sm text-[#7A6A84]">No pending invites yet.</div> :
+                                                        <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                                            <thead className="bg-[#FFFCF8] uppercase text-[#806A8C]"><tr>{["Manager", "Email", "Branch", "Status", "Action"].map(label => <th key={label} className="px-2.5 py-2.5">{label}</th>)}</tr></thead>
+                                                            <tbody>{pendingInvites.map(manager => <tr key={manager.id} className="border-t border-[#EEE7F2]">
+                                                                <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{manager.name}</td>
+                                                                <td className="px-2.5 py-2.5">{manager.email}</td>
+                                                                <td className="px-2.5 py-2.5">{manager.branch}</td>
+                                                                <td className="px-2.5 py-2.5"><span className="font-semibold text-[#A56607]">Pending</span></td>
+                                                                <td className="px-2.5 py-2.5"><button type="button" onClick={() => void resendManagerInvite(manager)} disabled={resendingManagerId === manager.id} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF] disabled:opacity-50">{resendingManagerId === manager.id ? "Resending..." : "Resend Invite"}</button></td>
+                                                            </tr>)}</tbody>
+                                                        </table></div>}
+                                                </div>
+                                            </section>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
-                            {requestsError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestsError}</p>}
-                            <div className="max-h-[360px] overflow-auto">
-                                <table className="w-full min-w-[870px] text-left text-xs">
-                                    <thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Manager", "Branch", "Employee ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
-                                    <tbody>
-                                    {filteredManagerRequests.map(item => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={item.key}>
-                                        <td className="px-4 py-3 font-semibold text-[#2B174C]">{item.managerName}</td>
-                                        <td className="px-4 py-3">{item.branchName}</td>
-                                        <td className="whitespace-nowrap px-4 py-3">{item.employeeCode || "—"}</td>
-                                        <td className="px-4 py-3">{item.leaveType}</td>
-                                        <td className="px-4 py-3">{managerRangeLabel(item)}</td>
-                                        <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${item.status === "Approved" ? "bg-green-50 text-green-700" : item.status === "Rejected" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{item.status}</span></td>
-                                        <td className="px-4 py-3"><button type="button" onClick={() => { setReviewingManagerRequest(item); setReviewReason(""); setReviewError(""); }} className="rounded-lg border border-[#D7C7E8] bg-[#F7F1FF] px-3 py-1.5 font-semibold text-[#5D2DAB] hover:bg-[#ECE3F8]">Review</button></td>
-                                    </tr>)}
-                                    {filteredManagerRequests.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-[#8A7D92]">{requestsLoading ? "Loading manager requests..." : requestsError ? "Requests unavailable." : "No manager requests found."}</td></tr>}
-                                    </tbody>
-                                </table>
-                            </div>
-                            <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {filteredManagerRequests.length} of {groupedManagerRequests.length} requests</div>
-                        </section>
+                        )}
 
-                        <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span>
-                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Pending Invites</h2><p className="mt-0.5 text-xs text-[#7A6A84]">Managers waiting to activate their accounts.</p></div>
-                                </div>
-                                <span className="rounded-full bg-[#FFF7E8] px-3 py-1.5 text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
-                            </div>
-                            <div className="p-4">
-                                {loading && managers.length === 0 ? <div className="p-2"><ModuleSkeleton variant="team" /></div> : pendingInvites.length === 0 ?
-                                    <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFCF7] px-4 py-6 text-sm text-[#7A6A84]">No pending invites yet.</div> :
-                                    <div className="overflow-x-auto"><table className="w-full min-w-[780px] text-left text-xs">
-                                        <thead className="bg-[#FBF8FF] uppercase text-[#806A8C]"><tr>{["Manager", "Email", "Branch", "Status", "Action"].map(label => <th key={label} className="px-4 py-3">{label}</th>)}</tr></thead>
-                                        <tbody>{pendingInvites.map(manager => <tr key={manager.id} className="border-t border-[#EEE7F2]">
-                                            <td className="px-4 py-3 font-semibold text-[#2B174C]">{manager.name}</td>
-                                            <td className="px-4 py-3">{manager.email}</td>
-                                            <td className="px-4 py-3">{manager.branch}</td>
-                                            <td className="px-4 py-3"><span className="rounded-full border border-[#F4D79A] bg-[#FFF8E8] px-3 py-1.5 font-semibold text-[#A56607]">Pending</span></td>
-                                            <td className="px-4 py-3"><button type="button" onClick={() => void resendManagerInvite(manager)} disabled={resendingManagerId === manager.id} className="rounded-xl border border-[#D7C7E8] bg-white px-3 py-2 font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50">{resendingManagerId === manager.id ? "Resending..." : "Resend Invite"}</button></td>
-                                        </tr>)}</tbody>
-                                    </table></div>}
-                            </div>
-                        </section>
                     </section>
 
                     {reviewingManagerRequest && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !reviewSaving) setReviewingManagerRequest(null); }}>
@@ -2035,15 +2122,15 @@ function StatCard({
 
 function TableHeader({
                          children,
-                         align = "left",
+                         align = "center",
                      }: {
     children: ReactNode;
-    align?: "left" | "right";
+    align?: "left" | "center";
 }) {
     return (
         <th
-            className={`px-5 py-3.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C] ${
-                align === "right" ? "text-right" : "text-left"
+            className={`px-2.5 py-2.5 text-[10px] font-semibold uppercase leading-tight tracking-normal text-[#806A8C] ${
+                align === "left" ? "text-left" : "text-center"
             }`}
         >
             {children}

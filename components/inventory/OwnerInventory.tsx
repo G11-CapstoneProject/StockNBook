@@ -163,52 +163,6 @@ function OwnerTableLoadingRow({ columns, label }: { columns: number; label: stri
     </td></tr>;
 }
 
-function ExpandedPurchaseProducts({ bill }: { bill: SupplierBill }) {
-    const [items, setItems] = React.useState<PurchaseItem[]>([]);
-    const [loading, setLoading] = React.useState(true);
-    const [error, setError] = React.useState("");
-    const [retry, setRetry] = React.useState(0);
-    React.useEffect(() => {
-        const controller = new AbortController();
-        setLoading(true);
-        setError("");
-        void ownerRequest<{ items: PurchaseItem[] }>(supplierEndpoint(bill.source), {
-            action: bill.source === "rental" ? "get_rental_purchase_items" : "get_supplier_purchase_items",
-            purchaseId: bill.purchaseId,
-            branch_id: bill.branchId,
-        }, controller.signal).then(result => {
-            if (!Array.isArray(result.items)) throw new Error("The purchase items were not returned by the inventory API.");
-            if (!controller.signal.aborted) setItems(result.items);
-        }).catch(reason => {
-            if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to load purchase items.");
-        }).finally(() => {
-            if (!controller.signal.aborted) setLoading(false);
-        });
-        return () => controller.abort();
-    }, [bill.key, bill.purchaseId, bill.branchId, bill.source, retry]);
-    return <tr className="border-b border-[#E9E1EE] bg-[#FAF7FF]">
-        <td colSpan={8} className="min-w-0 px-3 py-3 text-left sm:px-4">
-            <div className="rounded-xl border border-[#E3D8EA] bg-[#FAF7FF] p-3">
-                <h3 className="text-xs font-bold text-[#2B174C]">{bill.purchaseNumber} — Linked Products</h3>
-                <p className="mt-1 text-[11px] text-[#806A8C]">Only products or equipment recorded for this purchase are shown. Purchased quantities may differ from current stock.</p>
-                {loading ? <p className="py-4 text-xs text-[#806A8C]">Loading purchased products…</p> : error ?
-                    <div role="alert" className="flex flex-wrap items-center gap-3 py-3 text-xs text-[#C32F2F]">{error}<button type="button" onClick={() => setRetry(value => value + 1)} className="rounded-lg border border-[#E3D8EA] bg-white px-3 py-1.5 text-[#2B174C]">Retry</button></div> :
-                    items.length === 0 ? <p className="py-4 text-xs text-[#806A8C]">No linked purchase items were returned.</p> :
-                        <div className="mt-3 max-h-[320px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                            <colgroup><col className="w-[44%]"/><col className="w-[17%]"/><col className="w-[18%]"/><col className="w-[21%]"/></colgroup>
-                            <thead className="sticky top-0 z-10 border-b border-[#BCA9CE] bg-[#FAF7FF]"><tr><th className={headerCell}>Product / Variant</th><th className={`${headerCell} text-center`}>Quantity Purchased</th><th className={`${headerCell} text-center`}>Unit Cost</th><th className={`${headerCell} text-center`}>Line Total</th></tr></thead>
-                            <tbody>{items.map((item, index) => <tr key={`${item.productId ?? item.equipmentId ?? 'item'}-${item.variantId ?? 'base'}-${index}`} className="border-b border-[#E3D8EA] last:border-0">
-                                <td className={firstBodyCell}><span className="font-semibold text-[#2B174C]">{item.productName || item.name || "Recorded item"}</span><span className="ml-1 text-[11px] text-[#806A8C]">{item.productNumber || item.equipmentNumber ? `(${item.productNumber || item.equipmentNumber})` : ""}</span>{item.variantNumber && <p className="mt-0.5 text-[10px] text-[#806A8C]">Variant: {item.variantNumber}</p>}</td>
-                                <td className={`${bodyCell} text-center tabular-nums`}>{formatNumber(Number(item.quantity))}</td>
-                                <td className={`${bodyCell} text-center tabular-nums`}>{formatPeso(Number(item.unitCost))}</td>
-                                <td className={`${bodyCell} text-center tabular-nums`}>{formatPeso(Number(item.lineTotal))}</td>
-                            </tr>)}</tbody>
-                        </table></div>}
-            </div>
-        </td>
-    </tr>;
-}
-
 function StatusBadge({ status }: { status: BillStatus }) {
     const colors = { Paid: "text-[#168A48]", Overdue: "text-[#C32F2F]", "Due soon": "text-[#A56607]", "Partially paid": "text-[#8A5A00]", Unpaid: "text-[#9A2424]" };
     return <span className={`font-semibold text-[11px] ${colors[status]}`}>{status}</span>;
@@ -335,7 +289,6 @@ export default function OwnerInventory() {
     const [supplierSearch, setSupplierSearch] = React.useState("");
     const [supplierFilter, setSupplierFilter] = React.useState("all");
     const [selectedBill, setSelectedBill] = React.useState<SupplierBill | null>(null);
-    const [expandedPurchaseKey, setExpandedPurchaseKey] = React.useState<string | null>(null);
     const [notice, setNotice] = React.useState("");
     const billRequestSequence = React.useRef(0);
     const billTrigger = React.useRef<HTMLButtonElement | null>(null);
@@ -429,7 +382,6 @@ export default function OwnerInventory() {
             window.removeEventListener("focus", update); document.removeEventListener("visibilitychange", update);
         };
     }, [branches, loadBills, refresh]);
-    React.useEffect(() => { setExpandedPurchaseKey(null); }, [branch, supplierSearch, supplierFilter]);
     React.useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(""), 6000); return () => window.clearTimeout(timer); }, [notice]);
 
     // Rental payables are loaded per branch, so the total is complete only once the branch list is known.
@@ -532,26 +484,24 @@ export default function OwnerInventory() {
                     {supplierError && <div role="alert" className="mx-4 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#FFF0F0] p-3 text-xs text-[#C32F2F]"><p>Some supplier records are unavailable. {supplierError}</p><button type="button" onClick={() => { setBillsLoading(true); if (branches === null) setRefresh(value => value + 1); else void loadBills(); }} className="rounded-md border border-current px-2.5 py-1 font-semibold">Retry</button></div>}
                     <div className="min-h-0 max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain border-t border-[#E9E1EE]" role="region" aria-label="Supplier Payables table" tabIndex={0}><table className="w-full min-w-0 table-fixed text-center [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                         <thead className="sticky top-0 z-10 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr>
-                            <th className="truncate w-[20%] px-2 py-2 text-[10px] font-semibold uppercase text-[#806A8C] text-center tracking-normal">Purchase No.</th><th className="truncate w-[13%] px-2 py-2 text-[10px] font-semibold uppercase text-[#806A8C] text-center tracking-normal">Purchase Date / Time</th><th className="truncate w-[12%] px-2 py-2 text-[10px] font-semibold uppercase text-[#806A8C] text-center tracking-normal">Branch</th><th className="truncate w-[18%] px-2 py-2 text-[10px] font-semibold uppercase text-[#806A8C] text-center tracking-normal">Supplier</th>
-                            <th className="truncate w-[8.5%] px-2 py-2 text-center text-[10px] font-semibold uppercase text-[#806A8C] tracking-normal">Total</th>
-                            <th className="truncate w-[10%] px-2 py-2 text-center text-[10px] font-semibold uppercase text-[#806A8C] tracking-normal">Outstanding</th><th className="truncate w-[8.5%] px-2 py-2 text-center text-[10px] font-semibold uppercase text-[#806A8C] tracking-normal">Status</th>
+                            <th className="truncate w-[22%] px-2 py-2 text-[10px] font-semibold uppercase text-[#806A8C] text-center tracking-normal">Purchase No.</th><th className="truncate w-[14%] px-2 py-2 text-[10px] font-semibold uppercase text-[#806A8C] text-center tracking-normal">Purchase Date / Time</th><th className="truncate w-[13%] px-2 py-2 text-[10px] font-semibold uppercase text-[#806A8C] text-center tracking-normal">Branch</th><th className="truncate w-[20%] px-2 py-2 text-[10px] font-semibold uppercase text-[#806A8C] text-center tracking-normal">Supplier</th>
+                            <th className="truncate w-[12%] px-2 py-2 text-center text-[10px] font-semibold uppercase text-[#806A8C] tracking-normal">Outstanding</th><th className="truncate w-[9%] px-2 py-2 text-center text-[10px] font-semibold uppercase text-[#806A8C] tracking-normal">Status</th>
                             <th className="truncate w-[10%] px-2 py-2 text-center text-[10px] font-semibold uppercase text-[#806A8C] tracking-normal">Action</th>
                         </tr></thead>
                         <tbody>
                         {filteredBills.map(bill => {
                             const unpaid = Number(bill.outstandingBalance) > 0;
-                            return <React.Fragment key={bill.key}><tr className="border-b border-[#EFE8F2] hover:bg-[#FFFCF8]">
-                                <td className="min-w-0 break-all py-2 text-[11px] px-4 text-left"><button type="button" aria-expanded={expandedPurchaseKey === bill.key} aria-label={`${expandedPurchaseKey === bill.key ? "Hide" : "Show"} linked products for ${bill.purchaseNumber}`} onClick={() => setExpandedPurchaseKey(current => current === bill.key ? null : bill.key)} className="font-semibold text-[#5330B6] underline underline-offset-2 hover:text-[#2B174C] focus-visible:rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#5B31D4]">{bill.purchaseNumber}</button></td><td className="min-w-0 px-2 py-2 text-[11px]"><span>{formatSupplierPurchaseDate(bill.purchaseDate)}</span><p className="mt-1 text-[10px] text-[#7A6A84]">{formatPurchaseRecordedTime(bill.recordedAt)}</p></td><td className="min-w-0 break-words px-2 py-2 text-[11px]"><span className="font-medium">{bill.branchName || branches?.find(item => item.id === bill.branchId)?.branchName || "Unknown branch"}</span></td>
+                            return <tr key={bill.key} className="border-b border-[#EFE8F2] hover:bg-[#FFFCF8]">
+                                <td className="min-w-0 break-all py-2 text-[11px] px-4 text-left"><span className="font-semibold text-[#2B174C]">{bill.purchaseNumber}</span></td><td className="min-w-0 px-2 py-2 text-[11px]"><span>{formatSupplierPurchaseDate(bill.purchaseDate)}</span><p className="mt-1 text-[10px] text-[#7A6A84]">{formatPurchaseRecordedTime(bill.recordedAt)}</p></td><td className="min-w-0 break-words px-2 py-2 text-[11px]"><span className="font-medium">{bill.branchName || branches?.find(item => item.id === bill.branchId)?.branchName || "Unknown branch"}</span></td>
                                 <td className="min-w-0 break-words px-2 py-2 text-[11px]"><span className="font-medium">{bill.supplier}</span><p className="mt-1 text-[10px] text-[#7A6A84]">{bill.supplierInvoiceNumber || "No supplier invoice"}</p></td>
 
-                                <td className="min-w-0 px-2 py-2 text-center text-[11px] tabular-nums">{formatPeso(Number(bill.purchaseTotal))}</td>
 
                                 <td className="min-w-0 px-2 py-2 text-center text-[11px] font-semibold tabular-nums">{formatPeso(Number(bill.outstandingBalance))}<p className="mt-1 text-[10px] font-normal text-[#7A6A84]">{unpaid ? `Due ${formatSupplierPurchaseDate(bill.paymentDueDate)}` : "Settled"}</p></td>
                                 <td className="min-w-0 px-2 py-2 text-center text-[11px]"><StatusBadge status={billStatus(bill)}/></td>
                                 <td className="min-w-0 px-2 py-2 text-center"><button type="button" aria-label={`${unpaid ? "Pay" : "View"} supplier bill ${bill.purchaseNumber}`} onClick={event => { billTrigger.current = event.currentTarget; setSelectedBill(bill); }} className={`inline-flex w-full items-center justify-center gap-1 rounded-lg px-1.5 py-2 text-[11px] font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5330B6] ${unpaid ? "bg-[#2B174C] text-white hover:bg-[#1B0D31]" : "bg-[#F1EBFF] text-[#5330B6] hover:bg-[#EAE0FF]"}`}>{unpaid ? <Wallet size={13} className="shrink-0"/> : <ReceiptText size={13} className="shrink-0"/>}{unpaid ? "Pay Now" : "View Bill"}</button></td>
-                            </tr>{expandedPurchaseKey === bill.key && <ExpandedPurchaseProducts bill={bill}/>}</React.Fragment>;
+                            </tr>;
                         })}
-                        {filteredBills.length === 0 && (billsLoading ? <OwnerTableLoadingRow columns={8} label="Loading supplier purchases..."/> : <tr><td colSpan={8} className="px-3 py-8 text-center text-xs text-[#7A6A84]">{supplierError ? "Supplier records are unavailable." : "No supplier purchases returned for the selected branches. Check Owner API access if Manager shows purchases."}</td></tr>)}
+                        {filteredBills.length === 0 && (billsLoading ? <OwnerTableLoadingRow columns={7} label="Loading supplier purchases..."/> : <tr><td colSpan={7} className="px-3 py-8 text-center text-xs text-[#7A6A84]">{supplierError ? "Supplier records are unavailable." : "No supplier purchases returned for the selected branches. Check Owner API access if Manager shows purchases."}</td></tr>)}
                         </tbody>
                     </table></div>
                 </section>

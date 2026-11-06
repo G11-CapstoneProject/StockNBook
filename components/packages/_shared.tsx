@@ -1,4 +1,4 @@
-import { CalendarDays, ChevronDown, ImagePlus, Package2, RefreshCw, Search, Truck, X } from "lucide-react";
+import { CalendarDays, ChevronDown, Download, ImagePlus, Package2, RefreshCw, Search, Truck, X } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -495,16 +495,324 @@ function getPackageCoverImage(pkg: PackageItem) {
                         : "https://images.unsplash.com/photo-1507504031003-b417219a0fde?auto=format&fit=crop&w=900&q=85";
 }
 
+/**
+ * Export saved package information to a downloadable A4 PDF, without adding a
+ * package or changing the Packages API. Canvas rendering preserves names and
+ * descriptions with Unicode characters, and every package is fully itemized.
+ */
+export async function downloadPackagesPdf(
+    packages: PackageItem[],
+    options: {
+        scopeLabel: string;
+        branchNameForPackage?: (pkg: PackageItem) => string;
+        fileName?: string;
+    }
+): Promise<void> {
+    if (!packages.length) throw new Error("There are no matching packages to export.");
+    if (typeof window === "undefined") throw new Error("PDF export is only available in the browser.");
+
+    const storeName = sessionStorage.getItem("store_name") ||
+        localStorage.getItem("store_name") || "StockNBook Store";
+    const dateLabel = new Date().toLocaleString("en-PH", {
+        month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true,
+    });
+    const W = 595, H = 842, scale = 2, margin = 35, right = W - margin;
+    const ink = "#251535", muted = "#776786", purple = "#2B174C";
+    const pale = "#F6F1FA", border = "#E6DDF0";
+    const money = (n: number) => `PHP ${Number(n || 0).toLocaleString("en-PH", {
+        minimumFractionDigits: 2, maximumFractionDigits: 2,
+    })}`;
+    const clean = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
+    const pages: Uint8Array[] = [];
+    let canvas: HTMLCanvasElement | null = null;
+    let ctx: CanvasRenderingContext2D;
+    let y = 0;
+    let pageNumber = 0;
+
+    const font = (size: number, bold = false) => {
+        ctx.font = `${bold ? "700" : "400"} ${size}px Arial, Helvetica, sans-serif`;
+    };
+    const text = (s: unknown, x: number, baseline: number, size = 10, bold = false, color = ink) => {
+        ctx.fillStyle = color;
+        font(size, bold);
+        ctx.fillText(clean(s), x, baseline);
+    };
+    const rightText = (s: unknown, x: number, baseline: number, size = 10, bold = false, color = ink) => {
+        ctx.fillStyle = color;
+        font(size, bold);
+        ctx.fillText(clean(s), x - ctx.measureText(clean(s)).width, baseline);
+    };
+    const box = (x: number, top: number, width: number, height: number, fill: string, stroke?: string) => {
+        ctx.fillStyle = fill;
+        ctx.fillRect(x, top, width, height);
+        if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 0.7; ctx.strokeRect(x, top, width, height); }
+    };
+    const wrap = (value: unknown, maxWidth: number, size: number, bold = false): string[] => {
+        font(size, bold);
+        const source = String(value ?? "").replace(/\r/g, "").split("\n");
+        const result: string[] = [];
+        for (const paragraph of source) {
+            const words = paragraph.split(/\s+/).filter(Boolean);
+            if (!words.length) { result.push(""); continue; }
+            let line = "";
+            for (const word of words) {
+                if (line && ctx.measureText(`${line} ${word}`).width <= maxWidth) {
+                    line += ` ${word}`;
+                } else {
+                    if (line) result.push(line);
+                    line = "";
+                    // Long product names/IDs must not extend beyond the column.
+                    for (const character of word) {
+                        if (line && ctx.measureText(line + character).width > maxWidth) {
+                            result.push(line);
+                            line = "";
+                        }
+                        line += character;
+                    }
+                }
+            }
+            if (line) result.push(line);
+        }
+        return result.length ? result : ["-"];
+    };
+    const writeLines = (lines: string[], x: number, start: number, size: number, leading: number, bold = false, color = ink) => {
+        lines.forEach((line, index) => text(line, x, start + index * leading, size, bold, color));
+    };
+    const savePage = () => {
+        if (!canvas) return;
+        const base64 = canvas.toDataURL("image/jpeg", 0.86).split(",")[1];
+        const decoded = atob(base64);
+        const bytes = new Uint8Array(decoded.length);
+        for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+        pages.push(bytes);
+    };
+    const newPage = (continued = false) => {
+        savePage();
+        canvas = document.createElement("canvas");
+        canvas.width = W * scale;
+        canvas.height = H * scale;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Unable to create the PDF rendering surface.");
+        ctx = context;
+        ctx.setTransform(scale, 0, 0, scale, 0, 0);
+        box(0, 0, W, H, "#FFFFFF");
+        box(0, 0, W, 11, purple);
+        pageNumber += 1;
+        text("STOCKNBOOK  /  PACKAGE INFORMATION REPORT", margin, 37, 14, true, purple);
+        text(storeName, margin, 56, 10, true);
+        text(`Scope: ${options.scopeLabel}`, margin, 72, 9, false, muted);
+        rightText(`Generated: ${dateLabel}`, right, 72, 8, false, muted);
+        box(margin, 83, W - margin * 2, 1, border);
+        box(margin, 793, W - margin * 2, 1, border);
+        text("Internal package information copy  |  Prices in PHP", margin, 811, 8, false, muted);
+        rightText(`Page ${pageNumber}`, right, 811, 8, true, muted);
+        y = 103;
+        if (continued) { text("Package details (continued)", margin, y + 11, 10, true, purple); y += 28; }
+    };
+    const need = (height: number) => {
+        if (y + height > 784) newPage(true);
+    };
+    const sectionTitle = (title: string, hint = "") => {
+        need(37);
+        box(margin, y, W - margin * 2, 27, pale);
+        text(title, margin + 10, y + 18, 11, true, purple);
+        if (hint) rightText(hint, right - 10, y + 18, 8, false, muted);
+        y += 35;
+    };
+    const infoCard = (label: string, value: string, x: number, top: number, width: number) => {
+        box(x, top, width, 47, "#FFFFFF", border);
+        text(label, x + 10, top + 16, 8, false, muted);
+        const lines = wrap(value, width - 18, 10, true);
+        text(lines[0], x + 10, top + 33, 10, true);
+    };
+    // Cover images are included when the existing URL permits browser CORS;
+    // a failure never blocks export of the package's authoritative text/data.
+    const loadImage = async (url?: string): Promise<HTMLImageElement | null> => {
+        if (!url) return null;
+        return new Promise((resolve) => {
+            const img = new Image();
+            let done = false;
+            const finish = (found: HTMLImageElement | null) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                img.onload = null;
+                img.onerror = null;
+                resolve(found);
+            };
+            const timer = window.setTimeout(() => finish(null), 4500);
+            img.crossOrigin = "anonymous";
+            img.onload = () => finish(img);
+            img.onerror = () => finish(null);
+            img.src = url;
+        });
+    };
+    const drawGroup = (name: string, rows: PackageInclusion[], isRental: boolean) => {
+        if (!rows.length) return;
+        sectionTitle(name, `${rows.length} item type${rows.length === 1 ? "" : "s"}`);
+        const header = () => {
+            need(28);
+            box(margin, y, W - margin * 2, 22, "#F9F6FC");
+            text("ITEM / SERVICE", margin + 9, y + 15, 8, true, muted);
+            rightText("QTY", 394, y + 15, 8, true, muted);
+            rightText(isRental ? "RATE / DAY" : "UNIT PRICE", 479, y + 15, 8, true, muted);
+            rightText("VALUE", right - 9, y + 15, 8, true, muted);
+            y += 22;
+        };
+        header();
+        for (const item of rows) {
+            const label = clean(item.productName) || "Unnamed item";
+            const sub = clean(item.variantName);
+            const lines = wrap(label, 290, 9.5, true);
+            const subLines = sub ? wrap(sub, 290, 8) : [];
+            const rowHeight = Math.max(34, 10 + lines.length * 12 + subLines.length * 11);
+            if (y + rowHeight > 781) { newPage(true); sectionTitle(`${name} (continued)`); header(); }
+            box(margin, y, W - margin * 2, rowHeight, rows.indexOf(item) % 2 ? "#FFFFFF" : "#FCFAFE");
+            writeLines(lines, margin + 9, y + 15, 9.5, 12, true);
+            writeLines(subLines, margin + 9, y + 15 + lines.length * 12, 8, 11, false, muted);
+            rightText(String(Number(item.quantity || 0)), 394, y + 17, 9);
+            rightText(money(Number(item.unitSalesPrice || 0)).replace("PHP ", ""), 479, y + 17, 8.7);
+            rightText(money(Number(item.lineValue || 0)).replace("PHP ", ""), right - 9, y + 17, 8.7, true);
+            y += rowHeight;
+            box(margin, y, W - margin * 2, 0.6, border);
+        }
+        y += 11;
+        if (isRental) {
+            need(36);
+            const note = wrap("Rental rates are per unit per day. Final availability is verified for the event dates; including equipment in a package is not a reservation.", W - margin * 2 - 20, 8.5);
+            writeLines(note, margin + 8, y + 10, 8.5, 12, false, muted);
+            y += 12 + note.length * 12;
+        }
+    };
+
+    for (let index = 0; index < packages.length; index++) {
+        const pkg = packages[index];
+        newPage(false); // Each package starts on a new page in the combined report.
+        const nameLines = wrap(pkg.name, W - 2 * margin, 17, true);
+        need(16 + nameLines.length * 22);
+        writeLines(nameLines, margin, y + 14, 17, 22, true, purple);
+        y += nameLines.length * 22 + 8;
+
+        const image = await loadImage(pkg.cover_image);
+        if (image) {
+            need(118);
+            const top = y;
+            ctx.save();
+            ctx.beginPath(); ctx.rect(margin, top, W - 2 * margin, 108); ctx.clip();
+            const ratio = Math.max((W - 2 * margin) / image.width, 108 / image.height);
+            const iw = image.width * ratio, ih = image.height * ratio;
+            ctx.drawImage(image, margin + (W - 2 * margin - iw) / 2, top + (108 - ih) / 2, iw, ih);
+            ctx.restore();
+            y += 120;
+        }
+
+        sectionTitle("Package Information");
+        need(102);
+        const cardWidth = (W - 2 * margin - 10) / 2;
+        infoCard("Category", getPackageCategory(pkg), margin, y, cardWidth);
+        infoCard("Duration", clean(pkg.duration) || "Not specified", margin + cardWidth + 10, y, cardWidth);
+        y += 55;
+        infoCard("Branch", options.branchNameForPackage?.(pkg) || options.scopeLabel, margin, y, cardWidth);
+        infoCard("Status", clean(pkg.status) || "Not specified", margin + cardWidth + 10, y, cardWidth);
+        y += 57;
+
+        sectionTitle("Package Pricing");
+        need(102);
+        const discount = pkg.discount_type === "percentage"
+            ? `${Number(pkg.discount_value || 0)}% (${money(Number(pkg.original_value || 0) - Number(pkg.package_price || 0))})`
+            : money(Number(pkg.discount_value || 0));
+        infoCard("Original Value", money(pkg.original_value), margin, y, cardWidth);
+        infoCard("Discount", discount, margin + cardWidth + 10, y, cardWidth);
+        y += 55;
+        infoCard("Package Price", money(pkg.package_price), margin, y, cardWidth);
+        infoCard("Down Payment", money(pkg.down_payment_amount), margin + cardWidth + 10, y, cardWidth);
+        y += 56;
+
+        sectionTitle("Description");
+        const description = wrap(pkg.description || "No description provided.", W - 2 * margin - 16, 9.5);
+        for (const line of description) {
+            need(15);
+            text(line, margin + 8, y + 10, 9.5, false, ink);
+            y += 15;
+        }
+        y += 15;
+
+        const inclusions = Array.isArray(pkg.inclusions) ? pkg.inclusions : [];
+        const consumables = inclusions.filter((item) => item.itemType !== "rental");
+        const rentals = inclusions.filter((item) => item.itemType === "rental");
+        sectionTitle("Package Inclusions", `${inclusions.length} types / ${inclusions.reduce((n, item) => n + Number(item.quantity || 0), 0)} units`);
+        if (!inclusions.length) {
+            need(26);
+            text("No package inclusions recorded.", margin + 9, y + 14, 10, false, muted);
+            y += 29;
+        } else {
+            drawGroup("Consumable Goods", consumables, false);
+            drawGroup("Rental Goods", rentals, true);
+        }
+        need(38);
+        box(margin, y, W - 2 * margin, 34, pale);
+        text("Total Inclusion Value", margin + 11, y + 22, 10, true, purple);
+        rightText(money(inclusions.reduce((n, item) => n + Number(item.lineValue || 0), 0)), right - 11, y + 22, 10, true, purple);
+    }
+    savePage();
+
+    // PDF 1.4 image-page assembly. Binary offsets use byte lengths, not JS
+    // string lengths, so saved files remain valid on every browser.
+    const encoder = new TextEncoder();
+    const blobs: BlobPart[] = [];
+    let position = 0;
+    const offsets: number[] = [0];
+    const append = (data: string | Uint8Array) => {
+        const bytes = typeof data === "string" ? encoder.encode(data) : data;
+        blobs.push(bytes);
+        position += bytes.length;
+    };
+    const object = (id: number, body: string | Uint8Array, prefix = "", suffix = "") => {
+        offsets[id] = position;
+        append(`${id} 0 obj\n`);
+        if (prefix) append(prefix);
+        append(body);
+        if (suffix) append(suffix);
+        append("\nendobj\n");
+    };
+    append("%PDF-1.4\n%----\n");
+    object(1, "<< /Type /Catalog /Pages 2 0 R >>");
+    const pageIds = pages.map((_, i) => 3 + i * 3);
+    object(2, `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`);
+    pages.forEach((jpeg, i) => {
+        const pageId = pageIds[i], streamId = pageId + 1, imageId = pageId + 2;
+        const pageCommands = `q ${W} 0 0 ${H} 0 0 cm /Cover Do Q\n`;
+        object(pageId, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Cover ${imageId} 0 R >> >> /Contents ${streamId} 0 R >>`);
+        object(streamId, pageCommands, `<< /Length ${encoder.encode(pageCommands).length} >>\nstream\n`, "endstream");
+        object(imageId, jpeg, `<< /Type /XObject /Subtype /Image /Width ${W * scale} /Height ${H * scale} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`, "\nendstream");
+    });
+    const xrefPosition = position;
+    const totalObjects = 2 + pages.length * 3;
+    append(`xref\n0 ${totalObjects + 1}\n0000000000 65535 f \n`);
+    for (let i = 1; i <= totalObjects; i++) append(`${String(offsets[i]).padStart(10, "0")} 00000 n \n`);
+    append(`trailer\n<< /Size ${totalObjects + 1} /Root 1 0 R >>\nstartxref\n${xrefPosition}\n%%EOF\n`);
+    const url = URL.createObjectURL(new Blob(blobs, { type: "application/pdf" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = options.fileName || "stocknbook-packages.pdf";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
 export function PackageCard({
                                 pkg,
                                 featured = false,
                                 canManage = true,
+                                branchName,
                                 onEdit,
                                 onDelete,
                             }: {
     pkg: PackageItem;
     featured?: boolean;
     canManage?: boolean;
+    branchName?: string;
     onEdit: () => void;
     onDelete: () => void;
 }) {
@@ -839,39 +1147,54 @@ export function PackageCard({
                                 Click the cover image above to view it in full size.
                             </p>
 
-                            {canManage ? (
-                                <div className="flex items-center gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setShowDetails(false);
-                                            onEdit();
-                                        }}
-                                        className="rounded-xl border border-[#DCCFE6] bg-white px-5 py-2.5 text-sm font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]"
-                                    >
-                                        Edit
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setShowDetails(false);
-                                            onDelete();
-                                        }}
-                                        className="rounded-xl bg-red-500 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-red-600"
-                                    >
-                                        Delete
-                                    </button>
-                                </div>
-                            ) : (
+                            <div className="flex items-center gap-2">
                                 <button
                                     type="button"
-                                    onClick={() => setShowDetails(false)}
-                                    className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                    onClick={() => void downloadPackagesPdf([pkg], {
+                                        scopeLabel: "Selected Package",
+                                        branchNameForPackage: () => branchName || (pkg.branch_id ? `Branch #${pkg.branch_id}` : "Not recorded"),
+                                        fileName: `stocknbook-package-${pkg.id}.pdf`,
+                                    }).catch((reason) => alert(reason instanceof Error ? reason.message : "Unable to download package PDF."))}
+                                    title="Download package information as PDF"
+                                    aria-label={`Download PDF for ${pkg.name}`}
+                                    className="inline-flex h-[40px] w-[40px] items-center justify-center rounded-xl border border-[#DCCFE6] bg-white text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]"
                                 >
-                                    Close
+                                    <Download size={18} />
                                 </button>
-                            )}
+                                {canManage ? (
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setShowDetails(false);
+                                                onEdit();
+                                            }}
+                                            className="rounded-xl border border-[#DCCFE6] bg-white px-5 py-2.5 text-sm font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]"
+                                        >
+                                            Edit
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setShowDetails(false);
+                                                onDelete();
+                                            }}
+                                            className="rounded-xl bg-red-500 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-red-600"
+                                        >
+                                            Delete
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowDetails(false)}
+                                        className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                    >
+                                        Close
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>

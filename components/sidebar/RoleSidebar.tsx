@@ -979,7 +979,7 @@ export default function RoleSidebar() {
                                     }
                                     item={{
                                         label:
-                                            "Reports",
+                                            "Audit Logs",
                                         href:
                                             "/reports",
                                         icon:

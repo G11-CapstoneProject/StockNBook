@@ -1,7 +1,7 @@
 "use client";
 
 import {
-    ReportsWorkspace,
+    AuditLogsWorkspace,
     type ReportsViewConfig,
 } from "./_shared";
 
@@ -20,7 +20,7 @@ export default function OwnerReports({
                                          storeName,
                                      }: OwnerReportsProps) {
     return (
-        <ReportsWorkspace
+        <AuditLogsWorkspace
             initialRole="owner"
             assignedBranch={assignedBranch}
             storeName={storeName}

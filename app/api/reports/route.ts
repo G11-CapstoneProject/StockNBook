@@ -13,6 +13,10 @@ type TokenPayload = jwt.JwtPayload & {
     storeId?: number | string;
     branch_id?: number | string;
     branchId?: number | string;
+    staff_id?: number | string;
+    staffId?: number | string;
+    manager_id?: number | string;
+    managerId?: number | string;
     role?: string;
 };
 
@@ -651,6 +655,7 @@ async function loadEmployeeActions(
         SELECT
             ea.id,
             ea.branch_id,
+            ea.employee_id,
             ea.employee_name,
             ea.employee_role,
             ea.module,
@@ -711,6 +716,8 @@ async function loadEmployeeActions(
         employeeRole:
             asText(row.employee_role) || "Staff",
 
+        employeeId: asPositiveInteger(row.employee_id),
+
         action:
             asText(row.action),
 
@@ -739,6 +746,123 @@ async function loadEmployeeActions(
         time:
             asText(row.action_time),
     }));
+}
+
+// An audit request must also honor the existing Reports permission, not
+// merely a client-side sidebar check. Account IDs and branches come from JWT.
+async function canReadAuditLogs(
+    connection: Connection, role: Role, storeId: number,
+    branchId: number | null, employeeId: number | null
+) {
+    if (role === "owner") return true;
+    if (!branchId || !employeeId) return false;
+    const table = role === "manager" ? "managers" : "staff";
+    const [rows] = await connection.execute(
+        `SELECT permissions FROM ${table}
+         WHERE id = ? AND store_id = ? AND branch_id = ?
+           AND LOWER(status) = 'active' LIMIT 1`,
+        [employeeId, storeId, branchId]
+    );
+    const account = (rows as Array<{ permissions?: unknown }>)[0];
+    if (!account) return false;
+    let permissions = account.permissions;
+    if (typeof permissions === "string") {
+        try { permissions = JSON.parse(permissions); } catch { return false; }
+    }
+    if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) return false;
+    const values = permissions as Record<string, unknown>;
+    const access = values.reports_access ?? values.reports;
+    return access === true || access === 1 || access === "true" ||
+        access === "1" || access === "view" || access === "view_only" ||
+        access === "viewOnly" || access === "full";
+}
+
+// Audit Logs: employees only. Restrict scope in SQL, not in the browser.
+// Owner: managers and staff of this store. Manager: staff in their token branch.
+// Staff (if granted the existing Reports permission): only their own actions.
+// Preserve the original Reports employee_actions data source, which also serves
+// the previous Employee Actions History. Filter it on the server using the
+// authenticated store / branch and role, never client-provided role values.
+function normalizeAuditModule(value: string) {
+    const moduleName = asText(value);
+    const normalized = moduleName.toLowerCase();
+    if (normalized.startsWith("book")) return "Bookings";
+    if (normalized.startsWith("invent") || normalized.includes("stock") || normalized.startsWith("restock")) return "Inventory";
+    if (normalized.startsWith("package")) return "Packages";
+    if (normalized.startsWith("sales") || normalized.includes("pos")) return "Sales / POS";
+    return moduleName || "Other";
+}
+
+const AUDIT_MODULE_OPTIONS = ["Bookings", "Inventory", "Sales / POS", "Packages"];
+
+async function loadAuditLogs(
+    connection: Connection,
+    storeId: number,
+    role: Role,
+    branchId: number | null,
+    staffId: number | null,
+    range: DateRange,
+    searchParams: URLSearchParams
+) {
+    // This is the same query used by the original employee actions screen.
+    // Managers / staff are restricted to their JWT branch in the caller.
+    const sourceActions = await loadEmployeeActions(connection, storeId, branchId, range);
+    const moduleFilter = normalizeAuditModule(asText(searchParams.get("module")).slice(0, 100));
+    const hasModuleFilter = Boolean(asText(searchParams.get("module")));
+    const search = asText(searchParams.get("search")).toLowerCase().slice(0, 120);
+
+    const matchingActions = sourceActions.filter((record) => {
+        const employeeRole = record.employeeRole.trim().toLowerCase();
+        // Do not expose owner actions, even when the records came from the
+        // unrestricted legacy report. Only manager + staff for owner;
+        // only staff for manager; only self for staff.
+        const isManagerAction = employeeRole === "manager" || employeeRole.endsWith(" manager");
+        const isStaffAction = employeeRole === "staff" || employeeRole.endsWith(" staff");
+        if (role === "owner" && !isManagerAction && !isStaffAction) return false;
+        if (role === "manager" && !isStaffAction) return false;
+        if (role === "staff" && (!isStaffAction || record.employeeId !== staffId)) return false;
+
+        const displayModule = normalizeAuditModule(record.module);
+        if (hasModuleFilter && displayModule !== moduleFilter) return false;
+        if (!search) return true;
+        return [
+            record.employeeName, record.employeeRole, record.action,
+            record.details, record.module, displayModule, record.referenceNumber,
+            record.referenceId, record.branch,
+        ].some((value) => asText(value).toLowerCase().includes(search));
+    });
+
+    const pageSize = 25;
+    const requestedPage = Number(searchParams.get("page") || "1");
+    const page = Number.isSafeInteger(requestedPage) && requestedPage > 0
+        ? Math.min(requestedPage, 100000) : 1;
+    const total = matchingActions.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.min(page, totalPages);
+    const pageRows = matchingActions.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+    // Always load the store's real branches, not just branches that currently
+    // have actions in the selected date range.
+    const branches = role === "owner"
+        ? (await loadBranches(connection, storeId, null)).map((branch) => ({
+            id: Number(branch.id), name: asText(branch.name),
+        }))
+        : [];
+
+    const logs = pageRows.map((record) => ({
+        id: record.id,
+        employeeName: record.employeeName,
+        employeeRole: record.employeeRole,
+        action: record.action || "Recorded action",
+        details: record.details,
+        module: normalizeAuditModule(record.module),
+        reference: record.referenceNumber !== "-" ? record.referenceNumber : record.referenceId !== "-" ? record.referenceId : "",
+        branch: record.branch,
+        date: record.date,
+        time: record.time,
+    }));
+
+    return { logs, total, page: safePage, pageSize, totalPages, modules: AUDIT_MODULE_OPTIONS, branches };
 }
 
 async function loadForecastReport(
@@ -879,6 +1003,19 @@ export async function GET(request: NextRequest) {
             }
 
             branchId = requestedBranchId;
+        }
+
+        if (scope === "audit_logs" || scope === "audit-logs") {
+            const staffId = asPositiveInteger(token.staff_id ?? token.staffId);
+            const managerId = asPositiveInteger(token.manager_id ?? token.managerId);
+            const employeeId = role === "manager" ? managerId : staffId;
+            if (!(await canReadAuditLogs(connection, role, storeId, branchId, employeeId))) {
+                return jsonError("You do not have permission to view these audit logs.", 403);
+            }
+            const audit = await loadAuditLogs(
+                connection, storeId, role, branchId, staffId, range, searchParams
+            );
+            return NextResponse.json({ success: true, data: audit });
         }
 
         // Staff dashboard only needs today's employee activity. Allow it to

@@ -8,6 +8,7 @@ import {
     useEffect,
     useMemo,
     useState,
+    useRef,
 } from "react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
@@ -17,6 +18,7 @@ import {
     ChevronDown,
     ChevronUp,
     DollarSign,
+    Download,
     FileSpreadsheet,
     FileText,
     MapPin,
@@ -1545,6 +1547,7 @@ function createTablePdf({
                             dateRange,
                             headers,
                             rows,
+                            maxCellLines = 3,
                         }: {
     title: string;
     storeName: string;
@@ -1552,6 +1555,7 @@ function createTablePdf({
     dateRange: string;
     headers: string[];
     rows: string[][];
+    maxCellLines?: number;
 }) {
     const pageWidth = 842;
     const pageHeight = 595;
@@ -1749,7 +1753,7 @@ function createTablePdf({
 
     function drawTableRow(row: string[], rowIndex: number) {
         const cellLines = columns.map((_, index) =>
-            wrapPdfText(row[index] ?? "-", characterLimits[index], 3)
+            wrapPdfText(row[index] ?? "-", characterLimits[index], maxCellLines)
         );
         const maxLines = Math.max(...cellLines.map((lines) => lines.length));
         const rowHeight = Math.max(20, maxLines * lineHeight + cellPaddingY * 2);
@@ -6430,6 +6434,332 @@ export function ReportsWorkspace({
                     )}
                 </div>
             </div>
+        </div>
+    );
+}
+// Format audit timestamps for display and exports; preserve the stored time.
+function formatAuditClockTime(value: string): string {
+    const raw = String(value || "").trim();
+    if (!raw) return "—";
+    const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(raw);
+    if (!match) return raw; // Already 12-hour format, or an unknown format.
+    const hour = Number(match[1]);
+    if (hour < 0 || hour > 23) return raw;
+    const hour12 = hour % 12 || 12;
+    const seconds = match[3] ? `:${match[3]}` : "";
+    return `${hour12}:${match[2]}${seconds} ${hour < 12 ? "AM" : "PM"}`;
+}
+
+function auditModuleBadgeClass(module: string): string {
+    switch (String(module || "").trim().toLowerCase()) {
+        case "bookings": return "bg-[#EAF2FF] text-[#1D4ED8]";
+        case "inventory": return "bg-[#FFF1E6] text-[#B45309]";
+        case "sales / pos":
+        case "pos":
+        case "sales": return "bg-[#E8F7EE] text-[#15803D]";
+        case "packages": return "bg-[#F1EAFE] text-[#6D28D9]";
+        default: return "bg-[#F2EDF6] text-[#594767]";
+    }
+}
+
+// Audit Logs retains the existing Reports route and role-scoped API.
+// The table follows the original column order used by Employee Actions History.
+type AuditLogRow = {
+    id: string;
+    date: string;
+    time: string;
+    employeeName: string;
+    employeeRole: string;
+    action: string;
+    details: string;
+    module: string;
+    reference: string;
+    branch: string;
+};
+
+type AuditLogResponse = {
+    success?: boolean;
+    error?: string;
+    data?: {
+        logs: AuditLogRow[];
+        total: number;
+        page: number;
+        pageSize: number;
+        totalPages: number;
+        modules: string[];
+        branches: Array<{ id: number; name: string }>;
+    };
+};
+
+export function AuditLogsWorkspace({
+                                       initialRole,
+                                       assignedBranch,
+                                       storeName,
+                                       viewConfig,
+                                   }: ReportsWorkspaceProps) {
+    const owner = initialRole === "owner";
+    const manager = initialRole === "manager";
+    const [search, setSearch] = useState("");
+    const [startDate, setStartDate] = useState(() => getMonthStart(getToday()));
+    const [endDate, setEndDate] = useState(getToday);
+    const [moduleName, setModuleName] = useState("");
+    const [branchId, setBranchId] = useState("");
+    const [branches, setBranches] = useState<Array<{ id: number; name: string }>>([]);
+    const [rows, setRows] = useState<AuditLogRow[]>([]);
+    const [total, setTotal] = useState(0);
+    const [page, setPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
+    const [loading, setLoading] = useState(true);
+    const scrollLoadPending = useRef(false);
+    const [exporting, setExporting] = useState(false);
+    const [error, setError] = useState("");
+
+    const buildAuditQuery = useCallback((requestedPage: number) => {
+        const query = new URLSearchParams({
+            scope: "audit_logs",
+            startDate,
+            endDate,
+            page: String(requestedPage),
+        });
+        if (search.trim()) query.set("search", search.trim());
+        if (moduleName) query.set("module", moduleName);
+        // Branch restrictions for managers and staff remain enforced by /api/reports.
+        if (owner && branchId) query.set("branch_id", branchId);
+        return query;
+    }, [owner, search, startDate, endDate, moduleName, branchId]);
+
+    const requestAuditPage = useCallback(async (requestedPage: number, signal?: AbortSignal) => {
+        const token = getStoredSessionValue(["token"]);
+        if (!token) throw new Error("Your session has expired. Please sign in again.");
+        const response = await fetch(`/api/reports?${buildAuditQuery(requestedPage)}`, {
+            headers: { Authorization: `Bearer ${token}` },
+            cache: "no-store",
+            signal,
+        });
+        const result = (await response.json()) as AuditLogResponse;
+        if (!response.ok || !result.success || !result.data) {
+            throw new Error(result.error || "Unable to load audit logs.");
+        }
+        return result.data;
+    }, [buildAuditQuery]);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => {
+            const load = async () => {
+                setLoading(true);
+                setError("");
+                try {
+                    const data = await requestAuditPage(page, controller.signal);
+                    if (controller.signal.aborted) return;
+                    // Keep previous rows visible when the user scrolls to load more.
+                    setRows((previous) => page === 1
+                        ? (Array.isArray(data.logs) ? data.logs : [])
+                        : [...previous, ...(Array.isArray(data.logs) ? data.logs : [])]);
+                    setTotal(Number(data.total) || 0);
+                    setTotalPages(Math.max(1, Number(data.totalPages) || 1));
+                    // Prevent an invalid API page from producing "0–NaN" in pagination.
+                    const validPage = Number(data.page);
+                    if (Number.isSafeInteger(validPage) && validPage > 0 && validPage !== page) {
+                        setPage(validPage);
+                    }
+                    if (owner) setBranches(Array.isArray(data.branches) ? data.branches : []);
+                } catch (caught) {
+                    if (controller.signal.aborted) return;
+                    setRows([]);
+                    setTotal(0);
+                    setError(caught instanceof Error ? caught.message : "Unable to load audit logs.");
+                } finally {
+                    if (!controller.signal.aborted) {
+                        scrollLoadPending.current = false;
+                        setLoading(false);
+                    }
+                }
+            };
+            void load();
+        }, search.trim() ? 250 : 0);
+        return () => { window.clearTimeout(timeout); controller.abort(); };
+    }, [owner, page, requestAuditPage]);
+
+    const downloadAuditLogs = async () => {
+        if (exporting || loading || total === 0) return;
+        setExporting(true);
+        setError("");
+        try {
+            // Get a fresh first page, then download every remaining page using
+            // the SAME filters. Never export only the currently visible page.
+            // This endpoint applies the role/branch restrictions to every request.
+            const firstPage = await requestAuditPage(1);
+            const allLogs: AuditLogRow[] = [...(firstPage.logs || [])];
+            const numberOfPages = Math.max(1, Number(firstPage.totalPages) || 1);
+            for (let first = 2; first <= numberOfPages; first += 6) {
+                const last = Math.min(first + 5, numberOfPages);
+                const batch = await Promise.all(
+                    Array.from({ length: last - first + 1 }, (_, index) =>
+                        requestAuditPage(first + index)
+                    )
+                );
+                batch.forEach((result) => allLogs.push(...(result.logs || [])));
+            }
+            if (allLogs.length === 0) {
+                setError("No matching audit logs to download.");
+                return;
+            }
+
+            const scopeLabel = owner
+                ? (branchId ? branches.find((branch) => String(branch.id) === branchId)?.name || "Selected Branch" : "All Branches")
+                : assignedBranch || "Assigned Branch";
+            const pdf = createTablePdf({
+                title: "Audit Logs / Employee Actions",
+                storeName: storeName || "StockNBook",
+                branch: scopeLabel,
+                dateRange: `${startDate} to ${endDate}`,
+                // Preserve longer action descriptions without changing other report exports.
+                maxCellLines: 10,
+                headers: viewConfig.showBranchColumn
+                    ? ["Date / Time", "Employee", "Action", "Module", "Reference", "Branch"]
+                    : ["Date / Time", "Employee", "Action", "Module", "Reference"],
+                rows: allLogs.map((log) => {
+                    const cells = [
+                        `${log.date || "-"} ${formatAuditClockTime(log.time)}`.trim(),
+                        `${log.employeeName || "Unknown"} (${log.employeeRole || "Staff"})`,
+                        log.details ? `${log.action || "-"} - ${log.details}` : log.action || "-",
+                        log.module || "-",
+                        log.reference || "-",
+                    ];
+                    if (viewConfig.showBranchColumn) cells.push(log.branch || "-");
+                    return cells;
+                }),
+            });
+            downloadFile(`stocknbook-audit-logs-${startDate}-to-${endDate}.pdf`, "application/pdf", pdf);
+        } catch (caught) {
+            setError(caught instanceof Error ? caught.message : "Failed to download audit logs.");
+        } finally {
+            setExporting(false);
+        }
+    };
+
+    const inputStyle = "h-[42px] min-w-0 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10";
+
+    return (
+        <div className="min-h-screen bg-[#FFFDF8] font-sans text-[#1A1220]">
+            <header className="sticky top-0 z-20 flex min-h-[72px] flex-wrap items-center justify-between gap-3 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 px-6 py-3 backdrop-blur">
+                <div>
+                    <h1 className="text-[25px] font-bold text-[#1A1220]">Audit Logs</h1>
+                    <p className="mt-1 text-xs text-[#806A8C]">
+                        {owner ? "Manager and staff actions across your branches."
+                            : manager ? `Staff actions in ${assignedBranch || "your assigned branch"}.`
+                                : "Your recorded employee actions."}
+                    </p>
+                </div>
+            </header>
+
+            <section className="px-6 py-4">
+                <div className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-3 px-5 pb-3 pt-5">
+                        <div>
+                            <h2 className="text-[16px] font-bold text-[#1A1220]">Employee Action History</h2>
+                            <p className="mt-1 text-xs text-[#806A8C]">Who performed the action, what changed, where it happened, and when.</p>
+                        </div>
+                        <button type="button" onClick={() => void downloadAuditLogs()}
+                                disabled={loading || exporting || total === 0}
+                                aria-label="Download filtered audit logs as PDF"
+                                title="Download filtered audit logs as PDF"
+                                className="inline-flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl border border-[#DFCFEF] bg-white text-[#5A35A5] shadow-sm transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-40">
+                            <Download size={18} className={exporting ? "animate-pulse" : ""} />
+                        </button>
+                    </div>
+
+                    <div className={`grid gap-3 px-5 pb-4 sm:grid-cols-2 ${owner && viewConfig.showBranchFilter ? "xl:grid-cols-[minmax(220px,1fr)_175px_175px_185px_195px]" : "xl:grid-cols-[minmax(220px,1fr)_185px_185px_210px]"}`}>
+                        <label className="relative block min-w-0">
+                            <span className="sr-only">Search employee actions</span>
+                            <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
+                            <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }}
+                                   placeholder="Search employee, action or reference..."
+                                   className={`${inputStyle} pl-10 placeholder:text-[#9B8AAA]`} />
+                        </label>
+                        <label className="relative block min-w-0">
+                            <span className="sr-only">From date</span>
+                            <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-[10px] font-semibold text-[#806A8C]">FROM</span>
+                            <input type="date" value={startDate} max={endDate} onChange={(event) => { setStartDate(event.target.value); setPage(1); }}
+                                   className={`${inputStyle} pl-14`} />
+                        </label>
+                        <label className="relative block min-w-0">
+                            <span className="sr-only">To date</span>
+                            <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-[10px] font-semibold text-[#806A8C]">TO</span>
+                            <input type="date" value={endDate} min={startDate} onChange={(event) => { setEndDate(event.target.value); setPage(1); }}
+                                   className={`${inputStyle} pl-9`} />
+                        </label>
+                        <select aria-label="Filter audit logs by module" value={moduleName}
+                                onChange={(event) => { setModuleName(event.target.value); setPage(1); }} className={inputStyle}>
+                            <option value="">All Modules</option>
+                            {["Bookings", "Inventory", "Sales / POS", "Packages"].map((name) => (
+                                <option key={name} value={name}>{name}</option>
+                            ))}
+                        </select>
+                        {owner && viewConfig.showBranchFilter && (
+                            <select aria-label="Filter audit logs by branch" value={branchId}
+                                    onChange={(event) => { setBranchId(event.target.value); setPage(1); }} className={inputStyle}>
+                                <option value="">All Branches</option>
+                                {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+                            </select>
+                        )}
+                    </div>
+
+                    {error && <div role="alert" className="mx-5 mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+                    <div
+                        className="max-h-[580px] overflow-x-auto overflow-y-auto border-t border-[#EAE1EF]"
+                        onScroll={(event) => {
+                            const element = event.currentTarget;
+                            const nearBottom = element.scrollTop + element.clientHeight >= element.scrollHeight - 120;
+                            if (nearBottom && !loading && !scrollLoadPending.current && page < totalPages) {
+                                scrollLoadPending.current = true;
+                                setPage((current) => current + 1);
+                            }
+                        }}
+                    >
+                        <table className={`w-full border-collapse text-left text-[12px] ${viewConfig.showBranchColumn ? "min-w-[880px]" : "min-w-[740px]"}`}>
+                            <thead className="sticky top-0 z-10 bg-[#F8F4FC] text-[11px] font-medium uppercase tracking-wide text-[#705B81]">
+                            <tr className="border-b border-[#E6DDF0]">
+                                <th className="px-4 py-3">Date / Time</th>
+                                <th className="px-4 py-3">Employee</th>
+                                <th className="px-4 py-3">Action</th>
+                                <th className="px-4 py-3">Module</th>
+                                <th className="px-4 py-3">Reference</th>
+                                {viewConfig.showBranchColumn && <th className="px-4 py-3">Branch</th>}
+                            </tr>
+                            </thead>
+                            <tbody className="divide-y divide-[#EEE7F3]">
+                            {loading && rows.length === 0 ? (
+                                <tr><td colSpan={viewConfig.showBranchColumn ? 6 : 5} className="px-4 py-12 text-center text-sm text-[#806A8C]">Loading employee actions...</td></tr>
+                            ) : rows.length === 0 ? (
+                                <tr><td colSpan={viewConfig.showBranchColumn ? 6 : 5} className="px-4 py-12 text-center text-sm text-[#806A8C]">No employee actions match the selected filters.</td></tr>
+                            ) : rows.map((log) => (
+                                <tr key={log.id} className="align-top transition-colors hover:bg-[#FCFAFF]">
+                                    <td className="whitespace-nowrap px-4 py-4">
+                                        <p className="font-semibold text-[#2B174C]">{formatDate(log.date)}</p>
+                                        <p className="mt-1 text-[11px] text-[#806A8C]">{formatAuditClockTime(log.time)}</p>
+                                    </td>
+                                    <td className="px-4 py-4">
+                                        <p className="font-semibold text-[#1A1220]">{log.employeeName}</p>
+                                        <p className="mt-1 text-[11px] text-[#806A8C]">{log.employeeRole}</p>
+                                    </td>
+                                    <td className="max-w-[410px] px-4 py-4">
+                                        <p className="font-semibold text-[#1A1220]">{log.action}</p>
+                                        {log.details && <p className="mt-1 break-words text-[11px] leading-5 text-[#806A8C]">{log.details}</p>}
+                                    </td>
+                                    <td className="px-4 py-4">
+                                        <span className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-semibold ${auditModuleBadgeClass(log.module)}`}>{log.module}</span>
+                                    </td>
+                                    <td className="max-w-[155px] break-all px-4 py-4 font-medium text-[#594767]">{log.reference || "—"}</td>
+                                    {viewConfig.showBranchColumn && <td className="px-4 py-4 text-[#594767]">{log.branch}</td>}
+                                </tr>
+                            ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
         </div>
     );
 }

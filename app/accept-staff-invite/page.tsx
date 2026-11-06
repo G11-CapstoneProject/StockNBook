@@ -6,7 +6,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
     ArrowLeft,
     ArrowRight,
-    Boxes,
     CalendarDays,
     Check,
     CheckCircle2,
@@ -50,7 +49,7 @@ type InviteDetails = {
     branch_name: string;
     role: "staff";
     status: string;
-    permissions: Record<string, boolean>;
+    permissions: Record<string, unknown>;
 };
 
 type ActivationResult = InviteDetails & {
@@ -71,20 +70,34 @@ const steps = [
     "Success",
 ];
 
-const permissionMeta: Record<
-    string,
-    { label: string; icon: typeof LayoutDashboard }
-> = {
-    dashboard: { label: "Dashboard", icon: LayoutDashboard },
-    bookings: { label: "Bookings", icon: CalendarDays },
-    packages: { label: "Packages", icon: Package },
-    packages_manage: { label: "Manage Packages", icon: Boxes },
-    inventory: { label: "Inventory", icon: Boxes },
-    pos: { label: "Sales / POS", icon: ShoppingCart },
-    reports: { label: "Reports", icon: LayoutDashboard },
-    staff_management: { label: "Staff Management", icon: UserRound },
-    branch_settings: { label: "Branch Settings", icon: Store },
-};
+// These are display labels only. Actual access checks still use the server's
+// original permission keys and modes without alteration.
+const invitationPermissionModules = [
+    { label: "Dashboard", flag: "dashboard" },
+    { label: "Sales / POS", flag: "pos", access: "pos_access" },
+    { label: "Bookings", flag: "bookings", access: "bookings_access" },
+    { label: "Inventory", flag: "inventory", access: "inventory_access" },
+    { label: "Packages", flag: "packages", access: "package_access" },
+    { label: "Reports", flag: "reports", access: "reports_access" },
+    { label: "Analytics", flag: "analytics", access: "analytics_access" },
+    { label: "Forecasting", flag: "forecasting", access: "forecasting_access" },
+    { label: "Staff Management", flag: "staff_management" },
+    { label: "Branch Settings", flag: "branch_settings" },
+] as const;
+
+function getVisibleStaffAccess(permissions: Record<string, unknown>) {
+    return invitationPermissionModules.flatMap(module => {
+        const granular = "access" in module ? permissions[module.access] : undefined;
+        const granted = granular !== undefined ? granular : permissions[module.flag];
+        if (granted === true || granted === "full" || granted === "true") {
+            return [{ label: module.label, viewOnly: false }];
+        }
+        if (granted === "view" || granted === "view_only" || granted === "viewOnly") {
+            return [{ label: module.label, viewOnly: true }];
+        }
+        return [];
+    });
+}
 
 function maskEmail(email: string) {
     const [name, domain] = email.split("@");
@@ -127,10 +140,8 @@ async function postInviteAction<T>(
     return data;
 }
 
-function PermissionChips({ permissions }: { permissions: Record<string, boolean> }) {
-    const enabledPermissions = Object.entries(permissions || {}).filter(
-        ([, enabled]) => Boolean(enabled)
-    );
+function PermissionChips({ permissions }: { permissions: Record<string, unknown> }) {
+    const enabledPermissions = getVisibleStaffAccess(permissions || {});
 
     if (enabledPermissions.length === 0) {
         return (
@@ -141,24 +152,13 @@ function PermissionChips({ permissions }: { permissions: Record<string, boolean>
     }
 
     return (
-        <div className="flex flex-wrap gap-2.5">
-            {enabledPermissions.map(([permission]) => {
-                const meta = permissionMeta[permission] || {
-                    label: permission,
-                    icon: CheckCircle2,
-                };
-                const Icon = meta.icon;
-
-                return (
-                    <div
-                        key={permission}
-                        className="inline-flex items-center gap-2 rounded-xl bg-[#F0E8FA] px-3.5 py-2 text-sm font-semibold text-[#2D1B4E]"
-                    >
-                        <Icon className="h-4 w-4" />
-                        {meta.label}
-                    </div>
-                );
-            })}
+        <div className="flex flex-wrap gap-x-5 gap-y-2" aria-label="Assigned modules">
+            {enabledPermissions.map(({ label, viewOnly }) => (
+                <span key={label} className="text-sm font-semibold text-[#5B32C5]">
+                    {label}
+                    {viewOnly && <span className="ml-1 font-normal text-[#8A7896]">(View only)</span>}
+                </span>
+            ))}
         </div>
     );
 }

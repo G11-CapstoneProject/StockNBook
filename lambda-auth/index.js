@@ -848,7 +848,7 @@ const SMTP_USER = "noreplystocknbook@gmail.com";
 // Replace this value with a CURRENT 16-character Google App Password
 // generated for the same Gmail account used in SMTP_USER.
 // Do not use the normal Gmail account password.
-const SMTP_PASS = "xokj flbi mavr shyt"
+const SMTP_PASS = "hked wrge cdlh bmep"
     .replace(/\s/g, "");
 
 const EMAIL_FROM =
@@ -1709,25 +1709,32 @@ function buildStaffInvitationEmail({
     const safeInviteLink = escapeHtml(inviteLink);
     const safeRecipient = escapeHtml(toEmail);
 
-    const enabledPermissions = Object.entries(permissions || {})
-        .map(([permission, value]) => ({
-            label: permissionLabel(permission),
-            access: permissionAccessLevel(value),
-        }))
-        .filter((entry) => entry.access !== null);
+    // A staff permission may be represented twice (e.g. pos + pos_access).
+    // Show each granted module once, without exposing internal field names.
+    const invitationModules = [
+        { label: "Dashboard", flag: "dashboard" },
+        { label: "Sales / POS", flag: "pos", access: "pos_access" },
+        { label: "Bookings", flag: "bookings", access: "bookings_access" },
+        { label: "Inventory", flag: "inventory", access: "inventory_access" },
+        { label: "Packages", flag: "packages", access: "package_access" },
+        { label: "Reports", flag: "reports", access: "reports_access" },
+        { label: "Analytics", flag: "analytics", access: "analytics_access" },
+        { label: "Forecasting", flag: "forecasting", access: "forecasting_access" },
+        { label: "Staff Management", flag: "staff_management" },
+        { label: "Branch Settings", flag: "branch_settings" },
+    ];
+    const enabledPermissions = invitationModules.flatMap(({ label, flag, access }) => {
+        const granular = access ? permissions?.[access] : undefined;
+        const value = granular !== undefined ? granular : permissions?.[flag];
+        const level = permissionAccessLevel(value);
+        return level ? [{ label, level }] : [];
+    });
 
-    const permissionItems =
-        enabledPermissions.length > 0
-            ? enabledPermissions
-                .map(({ label, access }) => {
-                    const isFullAccess = access === "Full Access";
-                    const background = isFullAccess ? "#F1E9FF" : "#FDF3E3";
-                    const color = isFullAccess ? "#4B2380" : "#946617";
-
-                    return `<span style="display:inline-block;margin:4px 6px 4px 0;padding:7px 10px;border-radius:999px;background:${background};color:${color};font-size:12px;font-weight:700;">✓ ${escapeHtml(label)} — ${escapeHtml(access)}</span>`;
-                })
-                .join("")
-            : `<span style="color:#7A6E88;font-size:13px;">Your access will be configured by your branch manager.</span>`;
+    const permissionItems = enabledPermissions.length > 0
+        ? enabledPermissions.map(({ label, level }) =>
+            `<span style="display:inline-block;margin:4px 18px 4px 0;color:#5B32C5;font-size:13px;font-weight:700;">${escapeHtml(label)}${level === "View Only" ? ' <span style="color:#8A7896;font-weight:400;">(View only)</span>' : ""}</span>`
+        ).join("")
+        : `<span style="color:#7A6E88;font-size:13px;">Your access will be configured by your branch manager.</span>`;
 
     const subject = "StockNBook Staff Invitation";
 

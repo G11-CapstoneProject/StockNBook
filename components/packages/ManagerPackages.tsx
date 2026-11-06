@@ -1,16 +1,16 @@
 "use client";
 
-import { Boxes, CheckCircle2, CircleOff, RefreshCw, Search } from "lucide-react";
+import { Boxes, CheckCircle2, CircleOff, Download, RefreshCw, Search } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useEffect, useMemo, useState } from "react";
 import {
     getToken,
+    downloadPackagesPdf,
     formatText,
     getPackageCategory,
     buildPackageSelectableItems,
     PACKAGE_CATEGORY_OPTIONS,
     Card,
-    CardHeader,
     PackageCard,
     PackageSummaryCard,
     EmptyState,
@@ -251,10 +251,23 @@ export default function ManagerPackages() {
                     </div>
 
                     <Card className="min-h-[420px]">
-                        <CardHeader
-                            title="Branch Package List"
-                            action={`${filteredPackages.length} packages`}
-                        />
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                            <h2 className="text-[16px] font-bold text-[#1A1220]">Branch Package List</h2>
+                            <button
+                                type="button"
+                                onClick={() => void downloadPackagesPdf(filteredPackages, {
+                                    scopeLabel: branchName,
+                                    branchNameForPackage: () => branchName,
+                                    fileName: `stocknbook-packages-branch-${branchId || "assigned"}.pdf`,
+                                }).catch((reason) => alert(reason instanceof Error ? reason.message : "Unable to download package PDF."))}
+                                disabled={loading || filteredPackages.length === 0}
+                                className="inline-flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] shadow-sm transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
+                                title="Download all matching branch packages as PDF"
+                                aria-label="Download all matching branch packages as PDF"
+                            >
+                                <Download size={18} />
+                            </button>
+                        </div>
 
                         <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_190px_160px_170px]">
                             <div className="relative min-w-0">
@@ -323,6 +336,7 @@ export default function ManagerPackages() {
                                             ),
                                         }}
                                         canManage
+                                        branchName={branchName}
                                         onEdit={() => form.openEdit(pkg)}
                                         onDelete={() => handleDelete(pkg.id)}
                                     />

@@ -28,6 +28,19 @@ import {
     type InventoryController,
 } from "@/hooks/useInventory";
 
+// Keep Inventory filters visually consistent without changing their values or handlers.
+function ManagerInventoryFilterSelect({ containerClassName = "", className = "", children, ...props }:
+                                          React.ComponentProps<"select"> & { containerClassName?: string }) {
+    return (
+        <span className={`relative inline-flex min-w-0 ${containerClassName}`}>
+            <select {...props} className={`h-9 w-full min-w-0 appearance-none rounded-xl border border-[#E3D8EA] bg-white py-1 pl-3 pr-9 text-xs font-semibold text-[#2B174C] outline-none focus:border-[#BFA8E2] focus-visible:ring-2 focus-visible:ring-[#F1EBFF] ${className}`}>
+                {children}
+            </select>
+            <ChevronDown aria-hidden="true" size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#806A8C]" />
+        </span>
+    );
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                  TYPES                                     */
 /* -------------------------------------------------------------------------- */
@@ -330,6 +343,27 @@ type ActionCenterFilter =
     | "Out of Stock Items"
     | "Expiring / Expired"
     | "Slow Moving";
+
+// Inventory downloads reuse the same report format as StockNBook's management modules.
+async function downloadManagerInventoryReport(
+    title: string, headers: string[], rows: string[][],
+    branchName: string, dateRange: string, filename: string
+) {
+    const { exportTableAsPdf } = await import("@/components/dashboard/_shared");
+    exportTableAsPdf({ title, headers, rows }, {
+        storeName: sessionStorage.getItem("store_name") || "StockNBook",
+        branch: branchName,
+        dateRange,
+    }, filename);
+}
+
+function manilaActivityDateKey(value: Date) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(value);
+    const part = (type: string) => parts.find(item => item.type === type)?.value || "";
+    return `${part("year")}-${part("month")}-${part("day")}`;
+}
 
 /* -------------------------------------------------------------------------- */
 /*                               BASIC HELPERS                                */
@@ -2738,10 +2772,7 @@ export default function ManagerInventory() {
     );
 
     const recentStockMovements = React.useMemo(() => {
-        // Operational activity is today's movements only (Philippine business day).
-        // Historical movements stay available to the separate Reports module.
-        const todayKey = new Date().toLocaleDateString("en-PH", { timeZone: "Asia/Manila" });
-
+        // Keep the loaded recent activity available for the date and movement filters.
         return buildRecentStockMovements({
             salesMovements: recentSales.movements,
             restockRecords: restockHistory,
@@ -2751,10 +2782,7 @@ export default function ManagerInventory() {
             initialStockByProduct,
             purchaseReferences: stockPurchaseReferences,
             disposalRecords: expiredDisposalActivity,
-        }).filter((movement) =>
-            Boolean(movement.date &&
-                movement.date.toLocaleDateString("en-PH", { timeZone: "Asia/Manila" }) === todayKey)
-        );
+        });
     }, [
         inventoryEmployeeActions,
         expiredDisposalActivity,
@@ -2930,6 +2958,7 @@ export default function ManagerInventory() {
                         <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
                             <StockActionCenter
                                 rows={actionRows}
+                                branchName={branchBadge}
                                 onEdit={inv.handleEditProduct}
                                 onReceive={(product) => setReceivingProduct(product)}
                                 onDispose={(product, variantId) => setDisposalSelection({product, variantId})}
@@ -2946,6 +2975,7 @@ export default function ManagerInventory() {
 
                             <RecentStockActivity
                                 movements={recentStockMovements}
+                                branchName={branchBadge}
                                 loading={salesLoading || stockActivityLoading}
                             />
                         </div>
@@ -3697,6 +3727,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
 
 function StockActionCenter({
                                rows,
+                               branchName,
                                onEdit,
                                onReceive,
                                onDispose,
@@ -3704,6 +3735,7 @@ function StockActionCenter({
                                onVariantRemoved,
                            }: {
     rows: ActionCenterRow[];
+    branchName: string;
     onEdit: (product: Product) => void;
     onReceive: (product: Product) => void;
     onDispose: (product: Product, variantId: number | null) => void;
@@ -3712,6 +3744,7 @@ function StockActionCenter({
 }) {
     const [filter, setFilter] = React.useState<ActionCenterFilter>("All");
     const [reviewRow, setReviewRow] = React.useState<ActionCenterRow | null>(null);
+    const [exportError, setExportError] = React.useState("");
 
     const visibleRows = React.useMemo(() => {
         return rows.filter((row) => {
@@ -3742,21 +3775,33 @@ function StockActionCenter({
                     </div>
                 </div>
 
-                <select
-                    value={filter}
-                    onChange={(event) =>
-                        setFilter(event.target.value as ActionCenterFilter)
-                    }
-                    aria-label="Filter stock action center"
-                    className="h-9 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none sm:w-auto"
-                >
-                    <option value="All">All</option>
-                    <option value="Low Stock Items">Low Stock Items</option>
-                    <option value="Out of Stock Items">Out of Stock Items</option>
-                    <option value="Expiring / Expired">Expiring / Expired</option>
-                    <option value="Slow Moving">Slow Moving</option>
-                </select>
+                <div className="flex shrink-0 items-center gap-2">
+                    <ManagerInventoryFilterSelect containerClassName="w-[165px]"
+                                                  value={filter}
+                                                  onChange={(event) =>
+                                                      setFilter(event.target.value as ActionCenterFilter)
+                                                  }
+                                                  aria-label="Filter stock action center"
+                    >
+                        <option value="All">All</option>
+                        <option value="Low Stock Items">Low Stock Items</option>
+                        <option value="Out of Stock Items">Out of Stock Items</option>
+                        <option value="Expiring / Expired">Expiring / Expired</option>
+                        <option value="Slow Moving">Slow Moving</option>
+                    </ManagerInventoryFilterSelect>
+                    <button type="button" title="Download filtered stock action report (PDF)" aria-label="Download stock action report"
+                            onClick={() => void downloadManagerInventoryReport("Stock Action Center",
+                                ["Product", "Current Stock", "Reorder Point", "Sales Velocity", "Status", "Action"],
+                                visibleRows.map(row => [row.productName, String(row.currentStock), String(row.reorderPoint), row.salesVelocity, row.issue, row.action]),
+                                branchName, filter, "stocknbook_stock_action_center")
+                                .then(() => setExportError(""))
+                                .catch(() => setExportError("Unable to download stock action report."))}
+                            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]">
+                        <Download size={16}/>
+                    </button>
+                </div>
             </div>
+            {exportError && <p role="alert" className="px-4 py-1 text-xs text-red-600">{exportError}</p>}
 
             {visibleRows.length === 0 ? (
                 <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">
@@ -4088,34 +4133,76 @@ function ActionIssueBadge({ issue }: { issue: ActionCenterRow["issue"] }) {
 
 function RecentStockActivity({
                                  movements,
+                                 branchName,
                                  loading,
                              }: {
     movements: RecentStockMovement[];
+    branchName: string;
     loading: boolean;
 }) {
+    const [activityDateFilter, setActivityDateFilter] = React.useState<"today" | "all" | "date">("today");
+    const [selectedDate, setSelectedDate] = React.useState("");
+    const [movementFilter, setMovementFilter] = React.useState<"all" | "in" | "out">("all");
+    const [exportError, setExportError] = React.useState("");
+    const todayKey = manilaActivityDateKey(new Date());
+    const filteredMovements = React.useMemo(() => movements.filter(movement => {
+        if (!movement.date) return false;
+        const key = manilaActivityDateKey(movement.date);
+        if (activityDateFilter === "today" && key !== todayKey) return false;
+        if (activityDateFilter === "date" && (!selectedDate || key !== selectedDate)) return false;
+        if (movementFilter === "in" && movement.movement !== "Stock In") return false;
+        if (movementFilter === "out" && movement.movement === "Stock In") return false;
+        return true;
+    }), [movements, activityDateFilter, selectedDate, movementFilter, todayKey]);
+    const downloadActivity = () => void downloadManagerInventoryReport(
+        "Consumable Stock Activity", ["Date", "Time", "Product", "Movement", "Qty", "Reference No."],
+        filteredMovements.map(m => [formatStockActivityDate(m.date),
+            m.source === "POS Sale" && !m.hasRecordedTime ? "Not recorded" : formatStockActivityTime(m.date),
+            m.productName, m.movement, String(m.movement === "Stock In" ? m.quantity : -m.quantity),
+            m.referenceNumber || "—"]), branchName,
+        `${activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? "Today" : selectedDate || "Select a date"} · ${movementFilter === "all" ? "All activity" : movementFilter === "in" ? "Stock In" : "Stock Out"}`,
+        "stocknbook_consumable_stock_activity")
+        .then(() => setExportError(""))
+        .catch(() => setExportError("Unable to download the activity report."));
     return (
         <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
-            <div className="flex items-start gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
+            <div className="flex min-w-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 flex-1 items-start gap-3">
                 <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
                     <CalendarClock size={18} />
                 </span>
-                <div>
-                    <h2 className="text-[15px] font-bold text-[#21132E]">
-                        Today&apos;s Consumable Stock Activity
-                    </h2>
-                    <p className="mt-0.5 text-[11px] text-[#86778F]">
-                        Consumable additions, restocks, POS sales, and disposals recorded today.
-                    </p>
+                    <div>
+                        <h2 className="text-[15px] font-bold text-[#21132E]">
+                            Consumable Stock Activity
+                        </h2>
+                        <p className="mt-0.5 text-[11px] text-[#86778F]">
+                            Recorded consumable stock movements for the selected period.
+                        </p>
+                    </div>
+                </div>
+                <div className="flex shrink-0 items-center justify-end gap-1.5">
+                    <ManagerInventoryFilterSelect containerClassName="w-[105px]" aria-label="Filter consumable activity date" value={activityDateFilter} onChange={e => setActivityDateFilter(e.target.value as "today" | "all" | "date")}>
+                        <option value="today">Today</option><option value="all">All loaded</option><option value="date">Choose date</option>
+                    </ManagerInventoryFilterSelect>
+                    {activityDateFilter === "date" && <input type="date" aria-label="Choose consumable activity date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)}
+                                                             className="h-9 max-w-[135px] rounded-xl border border-[#E3D8EA] bg-white px-1 text-[11px] text-[#2B174C]" />}
+                    <ManagerInventoryFilterSelect containerClassName="w-[116px]" aria-label="Filter consumable activity direction" value={movementFilter} onChange={e => setMovementFilter(e.target.value as "all" | "in" | "out")}>
+                        <option value="all">All Activity</option><option value="in">Stock In</option><option value="out">Stock Out</option>
+                    </ManagerInventoryFilterSelect>
+                    <button type="button" title="Download filtered activity PDF" aria-label="Download filtered consumable activity" onClick={downloadActivity}
+                            disabled={loading || (activityDateFilter === "date" && !selectedDate)}
+                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF] disabled:opacity-40"><Download size={16}/></button>
                 </div>
             </div>
+            {exportError && <p role="alert" className="px-4 text-xs text-red-600">{exportError}</p>}
 
             {loading ? (
                 <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">
                     Loading recent stock activity...
                 </div>
-            ) : movements.length === 0 ? (
+            ) : filteredMovements.length === 0 ? (
                 <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">
-                    No stock movements recorded today.
+                    No stock movements match the selected filters.
                 </div>
             ) : (
                 <div className="min-h-0 flex-1 w-full overflow-y-auto overflow-x-hidden">
@@ -4137,7 +4224,7 @@ function RecentStockActivity({
                         </tr>
                         </thead>
                         <tbody>
-                        {movements.map((movement) => {
+                        {filteredMovements.map((movement) => {
                             const isStockIn = movement.movement === "Stock In";
 
                             return (
@@ -4675,7 +4762,19 @@ function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
         <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-2xl" inert={editPurchase ? true : undefined}>
             <div className="flex items-center justify-between border-b border-[#E3D8EA] px-6 py-4">
                 <h2 className="text-lg font-bold text-[#2B174C]">Supplier Payables</h2>
-                <button type="button" onClick={onClose} className="text-sm text-[#806A8C]">Close</button>
+                <div className="flex items-center gap-3">
+                    <button type="button" title="Download filtered supplier payables PDF" aria-label="Download supplier payables"
+                            onClick={() => void downloadManagerInventoryReport("Consumable Supplier Payables",
+                                ["Purchase No.", "Purchase Date", "Supplier", "Method", "Total", "Paid", "Outstanding", "Status"],
+                                filtered.map(row => [row.purchaseNumber, formatSupplierPurchaseDate(row.purchaseDate), row.supplier,
+                                    row.paymentMethod, money(row.purchaseTotal), money(row.amountPaid), money(row.outstandingBalance), row.paymentStatus]),
+                                sessionStorage.getItem("branch_name") || "Assigned Branch",
+                                paymentMethodFilter === "all" ? "All payments" : paymentMethodFilter,
+                                "stocknbook_consumable_supplier_payables")
+                                .catch(() => setError("Unable to download the supplier payables report."))}
+                            className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]"><Download size={16}/></button>
+                    <button type="button" onClick={onClose} className="text-sm text-[#806A8C]">Close</button>
+                </div>
             </div>
             <div className="space-y-4 overflow-y-auto p-6">
                 <p className="text-xs text-[#806A8C]">Balances belong to the purchase, not each product. Use Edit on a purchase row to correct its supplier and payment details.</p>
@@ -4693,11 +4792,11 @@ function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row">
                     <input aria-label="Search supplier purchases" className={`${fieldClass} min-w-0 flex-1`} placeholder="Search Purchase No., supplier, invoice, status..." value={search} onChange={e=>setSearch(e.target.value)}/>
-                    <select aria-label="Filter payment method" className={`${fieldClass} sm:w-48`} value={paymentMethodFilter} onChange={e=>setPaymentMethodFilter(e.target.value as "all"|"cash"|"credit")}>
+                    <ManagerInventoryFilterSelect containerClassName="w-full sm:w-[176px]" aria-label="Filter payment method" value={paymentMethodFilter} onChange={e=>setPaymentMethodFilter(e.target.value as "all"|"cash"|"credit")}>
                         <option value="all">All Payments</option>
                         <option value="cash">Cash</option>
                         <option value="credit">Credit (Utang)</option>
-                    </select>
+                    </ManagerInventoryFilterSelect>
                 </div>
                 {notice && <p role="status" className="rounded-lg bg-green-50 p-2 text-sm text-green-700">{notice}</p>}
                 {error && <p role="alert" className="rounded-lg bg-red-50 p-2 text-xs text-red-600">{error}</p>}
@@ -4836,10 +4935,9 @@ function ManagerInventoryTable({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                    <select
-                        value={selectedCategory}
-                        onChange={(event) => onCategoryChange(event.target.value)}
-                        className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none"
+                    <ManagerInventoryFilterSelect containerClassName="w-[168px]"
+                                                  value={selectedCategory}
+                                                  onChange={(event) => onCategoryChange(event.target.value)}
                     >
                         <option value="All">All Categories</option>
                         {categories.map((category) => (
@@ -4847,12 +4945,11 @@ function ManagerInventoryTable({
                                 {category}
                             </option>
                         ))}
-                    </select>
+                    </ManagerInventoryFilterSelect>
 
-                    <select
-                        value={statusFilter}
-                        onChange={(event) => onStatusFilterChange(event.target.value)}
-                        className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none"
+                    <ManagerInventoryFilterSelect containerClassName="w-[140px]"
+                                                  value={statusFilter}
+                                                  onChange={(event) => onStatusFilterChange(event.target.value)}
                     >
                         <option>All Status</option>
                         <option>In Stock</option>
@@ -4860,7 +4957,7 @@ function ManagerInventoryTable({
                         <option>Out of Stock</option>
                         <option>Expiring Soon</option>
                         <option>Expired</option>
-                    </select>
+                    </ManagerInventoryFilterSelect>
 
                     <div className="relative">
                         <button
@@ -4869,10 +4966,11 @@ function ManagerInventoryTable({
                             disabled={products.length === 0}
                             aria-haspopup="menu"
                             aria-expanded={exportMenuOpen}
-                            className="inline-flex h-9 items-center gap-2 rounded-xl border border-[#D9CDF0] bg-white px-4 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC] disabled:opacity-50"
+                            aria-label="Download filtered inventory list"
+                            title="Download filtered inventory list"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#2B174C] hover:bg-[#F8F3FC] disabled:opacity-50"
                         >
-                            <Download size={14} />
-                            Export
+                            <Download size={16} />
                         </button>
                         {exportMenuOpen && (
                             <div role="menu" className="absolute right-0 top-full z-30 mt-2 w-48 overflow-hidden rounded-xl border border-[#D9CDF0] bg-white py-1 shadow-lg">

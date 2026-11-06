@@ -20,10 +20,10 @@ import {
     UserPlus,
     UsersRound,
     UserX,
-    Bell, CalendarDays, Download,
+    Bell, CalendarDays, Download, ArrowUpRight,
     X,
 } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type AccessMode = "none" | "view" | "full";
@@ -153,6 +153,25 @@ export default function ManagerStaffManagementPage() {
     const [requestStatusFilter, setRequestStatusFilter] = useState("all");
     const [requestTypeFilter, setRequestTypeFilter] = useState("all");
     const [reviewingRequest, setReviewingRequest] = useState<SMLeaveGroup | null>(null);
+    const [activeTeamDetail, setActiveTeamDetail] = useState<"attendance" | "requests" | "invites" | null>(null);
+    const teamDetailTriggerRef = useRef<HTMLButtonElement | null>(null);
+    const teamDetailCloseRef = useRef<HTMLButtonElement | null>(null);
+    const openTeamDetail = (detail: "attendance" | "requests" | "invites", trigger: HTMLButtonElement) => {
+        teamDetailTriggerRef.current = trigger;
+        setActiveTeamDetail(detail);
+    };
+    const closeTeamDetail = () => {
+        setActiveTeamDetail(null);
+        window.requestAnimationFrame(() => teamDetailTriggerRef.current?.focus());
+    };
+    useEffect(() => {
+        if (!activeTeamDetail) return;
+        teamDetailCloseRef.current?.focus();
+        const originalOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+        return () => { document.body.style.overflow = originalOverflow; };
+    }, [activeTeamDetail]);
+
     const [requestDecisionNote, setRequestDecisionNote] = useState("");
     const [requestDecisionError, setRequestDecisionError] = useState("");
     const [savingDecision, setSavingDecision] = useState(false);
@@ -333,6 +352,31 @@ export default function ManagerStaffManagementPage() {
         } catch (error) { setRequestDecisionError(error instanceof Error ? error.message : "Review failed."); }
         finally { setSavingDecision(false); }
     };
+    const exportStaffListAsPdf = () => {
+        void import("@/components/dashboard/_shared")
+            .then(module => module.exportTableAsPdf({
+                    title: "Staff List",
+                    headers: ["Employee ID", "Staff", "Email", "Access", "Status"],
+                    rows: filteredStaff.map(staff => [staff.employeeCode || "—", staff.name, staff.email,
+                        formatRoleSummary(staff.permissions), staff.status === "Accepted" ? "Active" : "Inactive"]),
+                }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
+                    branch: branchName, dateRange: statusFilter === "all" ? "All statuses" : statusFilter },
+                "manager_staff_list"))
+            .catch(() => setStaffStatusToast({ kind: "error", title: "Export unavailable", message: "Could not export the staff list." }));
+    };
+
+    const exportPendingStaffInvitesAsPdf = () => {
+        void import("@/components/dashboard/_shared")
+            .then(module => module.exportTableAsPdf({
+                title: "Pending Staff Invitations",
+                headers: ["Email", "Invited", "Expires", "Access", "Status"],
+                rows: filteredPendingInvites.map(invite => [invite.email, invite.invitedAt,
+                    invite.expiresAt, formatPermissions(invite.permissions), "Pending"]),
+            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
+                branch: branchName, dateRange: "Pending invitations" }, "manager_staff_invites"))
+            .catch(() => setStaffStatusToast({ kind: "error", title: "Export unavailable", message: "Could not export pending staff invitations." }));
+    };
+
     const exportRequestsAsPdf = () => {
         void import("@/components/dashboard/_shared")
             .then(module => module.exportTableAsPdf({
@@ -498,14 +542,6 @@ export default function ManagerStaffManagementPage() {
             ...prev,
             [feature]: value !== "none",
             [accessKey]: value,
-        }));
-    };
-
-    const updateEditReportsAccess = (value: ReportsAccessMode) => {
-        setEditPermissions((prev) => ({
-            ...prev,
-            reports: value !== "none",
-            reports_access: value,
         }));
     };
 
@@ -819,88 +855,6 @@ export default function ManagerStaffManagementPage() {
                             />
                         </div>
 
-                        <div className="flex flex-col gap-3 lg:flex-row">
-                            <div className="relative min-w-0 flex-1">
-                                <Search
-                                    size={18}
-                                    className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                                />
-
-                                <input
-                                    value={staffSearch}
-                                    onChange={(event) =>
-                                        setStaffSearch(event.target.value)
-                                    }
-                                    placeholder="Search staff name, email, branch, or role..."
-                                    className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                                />
-
-                                {staffSearch && (
-                                    <button
-                                        type="button"
-                                        onClick={() => setStaffSearch("")}
-                                        aria-label="Clear staff search"
-                                        className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
-                                    >
-                                        <X size={15} />
-                                    </button>
-                                )}
-                            </div>
-
-                            <div className="flex shrink-0 gap-2.5">
-                                <div className="relative">
-                                    <Filter
-                                        size={16}
-                                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
-                                    />
-
-                                    <select
-                                        value={statusFilter}
-                                        onChange={(event) =>
-                                            setStatusFilter(
-                                                event.target.value as StaffStatusFilter
-                                            )
-                                        }
-                                        aria-label="Filter staff by status"
-                                        className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                                    >
-                                        <option value="all">All Status</option>
-                                        <option value="active">Active</option>
-                                        <option value="inactive">Inactive</option>
-                                        <option value="pending">Pending</option>
-                                    </select>
-
-                                    <ChevronDown
-                                        size={15}
-                                        className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]"
-                                    />
-                                </div>
-
-                                <button
-                                    type="button"
-                                    onClick={() => setShowAddDialog(true)}
-                                    title="Add a staff member"
-                                    className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
-                                    style={{
-                                        backgroundColor: "#2B174C",
-                                        border: "1px solid #2B174C",
-                                        color: "#FFFFFF",
-                                        boxShadow:
-                                            "0 4px 10px rgba(43, 23, 76, 0.22)",
-                                    }}
-                                >
-                                    <Plus
-                                        size={18}
-                                        strokeWidth={2.2}
-                                        color="#FFFFFF"
-                                    />
-                                    <span style={{ color: "#FFFFFF" }}>
-                                        Add Staff
-                                    </span>
-                                </button>
-                            </div>
-                        </div>
-
                         {inviteLink && (
                             <section className="rounded-[18px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
                                 <div className="flex items-center gap-3">
@@ -966,7 +920,7 @@ export default function ManagerStaffManagementPage() {
                         )}
 
                         <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-4">
                                 <div className="flex min-w-0 items-center gap-3">
                                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={21} strokeWidth={2} />
@@ -981,19 +935,99 @@ export default function ManagerStaffManagementPage() {
                                         </p>
                                     </div>
                                 </div>
+                                <button type="button" onClick={exportStaffListAsPdf} title="Download staff list as PDF" aria-label="Download staff list as PDF" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]">
+                                    <Download size={17}/>
+                                </button>
+                            </div>
 
-                                <span className="inline-flex items-center rounded-full bg-[#F5EEFF] px-3 py-1.5 text-xs font-semibold text-[#6D35D4]">
-                                {filteredStaff.length}{" "}
-                                    {filteredStaff.length === 1
-                                        ? "staff member"
-                                        : "staff members"}
-                            </span>
+                            <div className="border-b border-[#E6DDF0] px-4 py-3 sm:px-5">
+                                <div className="flex flex-col gap-3 lg:flex-row">
+                                    <div className="relative min-w-0 flex-1">
+                                        <Search
+                                            size={18}
+                                            className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
+                                        />
+
+                                        <input
+                                            value={staffSearch}
+                                            onChange={(event) =>
+                                                setStaffSearch(event.target.value)
+                                            }
+                                            placeholder="Search staff name, email, branch, or role..."
+                                            className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                        />
+
+                                        {staffSearch && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setStaffSearch("")}
+                                                aria-label="Clear staff search"
+                                                className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
+                                            >
+                                                <X size={15} />
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    <div className="flex flex-wrap items-center gap-2.5">
+                                        <div className="relative">
+                                            <Filter
+                                                size={16}
+                                                className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
+                                            />
+
+                                            <select
+                                                value={statusFilter}
+                                                onChange={(event) =>
+                                                    setStatusFilter(
+                                                        event.target.value as StaffStatusFilter
+                                                    )
+                                                }
+                                                aria-label="Filter staff by status"
+                                                className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                            >
+                                                <option value="all">All Status</option>
+                                                <option value="active">Active</option>
+                                                <option value="inactive">Inactive</option>
+                                                <option value="pending">Pending</option>
+                                            </select>
+
+                                            <ChevronDown
+                                                size={15}
+                                                className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]"
+                                            />
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowAddDialog(true)}
+                                            title="Add a staff member"
+                                            className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
+                                            style={{
+                                                backgroundColor: "#2B174C",
+                                                border: "1px solid #2B174C",
+                                                color: "#FFFFFF",
+                                                boxShadow:
+                                                    "0 4px 10px rgba(43, 23, 76, 0.22)",
+                                            }}
+                                        >
+                                            <Plus
+                                                size={18}
+                                                strokeWidth={2.2}
+                                                color="#FFFFFF"
+                                            />
+                                            <span style={{ color: "#FFFFFF" }}>
+                                                Add Staff
+                                            </span>
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
 
                             {pageLoading && staffList.length === 0 ? (
-                                <div className="p-4"><ModuleSkeleton variant="team" /></div>
+                                <div className="min-h-[180px] xl:min-h-[210px] p-4"><ModuleSkeleton variant="team" /></div>
                             ) : filteredStaff.length === 0 ? (
-                                <div className="flex min-h-[180px] flex-col items-center justify-center px-4 text-center">
+                                <div className="flex min-h-[180px] xl:min-h-[210px] flex-col items-center justify-center px-4 text-center">
                                 <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={22} />
                                 </span>
@@ -1005,22 +1039,20 @@ export default function ManagerStaffManagementPage() {
                                     </p>
                                 </div>
                             ) : (
-                                <div className="overflow-x-auto p-4">
+                                <div>
                                     <div
-                                        className="overflow-hidden rounded-[14px]"
-                                        style={{
-                                            boxShadow:
-                                                "inset 0 0 0 1px #EAE2F0",
-                                        }}
+                                        className="min-h-[180px] xl:min-h-[210px] max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"
+                                        role="region" aria-label="Staff list" tabIndex={0}
                                     >
-                                        <table className="w-full min-w-[900px] border-collapse font-sans">
-                                            <thead className="bg-[#FBF8FF]">
+                                        <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                            <colgroup><col className="w-[15%]" /><col className="w-[20%]" /><col className="w-[36%]" /><col className="w-[10%]" /><col className="w-[19%]" /></colgroup>
+                                            <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                                             <tr className="border-b border-[#E6DDF0]">
-                                                <TableHeader>Employee ID</TableHeader>
+                                                <TableHeader align="center">Employee ID</TableHeader>
                                                 <TableHeader>Staff</TableHeader>
                                                 <TableHeader>Access</TableHeader>
                                                 <TableHeader>Status</TableHeader>
-                                                <TableHeader align="right">
+                                                <TableHeader align="center">
                                                     Actions
                                                 </TableHeader>
                                             </tr>
@@ -1032,11 +1064,11 @@ export default function ManagerStaffManagementPage() {
                                                     key={staff.id}
                                                     className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
                                                 >
-                                                    <td className="whitespace-nowrap px-5 py-3 text-sm font-semibold text-[#4E2C66]">
+                                                    <td className="whitespace-nowrap px-3 py-2.5 text-sm font-semibold text-[#4E2C66]">
                                                         {staff.employeeCode || "—"}
                                                     </td>
 
-                                                    <td className="px-5 py-3">
+                                                    <td className="px-3 py-2.5">
                                                         <div className="min-w-0">
                                                             <p className="truncate text-sm font-bold text-[#1A1220]">
                                                                 {staff.name}
@@ -1048,14 +1080,14 @@ export default function ManagerStaffManagementPage() {
                                                         </div>
                                                     </td>
 
-                                                    <td className="px-5 py-3">
-                                                        <div className="flex flex-wrap gap-1.5">
+                                                    <td className="px-3 py-2.5">
+                                                        <div className="flex flex-wrap justify-center gap-x-2 gap-y-1">
                                                             {formatRoleSummary(staff.permissions)
                                                                 .split(" & ")
                                                                 .map((access) => (
                                                                     <span
                                                                         key={access}
-                                                                        className="rounded-full bg-[#F5EEFF] px-2.5 py-1 text-[11px] font-semibold text-[#6D35D4]"
+                                                                        className="text-[11px] font-semibold text-[#6D35D4]"
                                                                     >
                                                                     {access}
                                                                 </span>
@@ -1063,7 +1095,7 @@ export default function ManagerStaffManagementPage() {
                                                         </div>
                                                     </td>
 
-                                                    <td className="px-5 py-3">
+                                                    <td className="px-3 py-2.5">
                                                         <StatusBadge
                                                             label={
                                                                 staff.status === "Accepted"
@@ -1078,12 +1110,12 @@ export default function ManagerStaffManagementPage() {
                                                         />
                                                     </td>
 
-                                                    <td className="px-5 py-3 text-right">
-                                                        <div className="flex justify-end gap-2">
+                                                    <td className="px-3 py-2.5 text-center">
+                                                        <div className="flex flex-wrap items-center justify-center gap-1.5">
                                                             <button
                                                                 type="button"
                                                                 onClick={() => handleEditStaff(staff)}
-                                                                className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg border border-[#D7C7E8] bg-white px-3 text-xs font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#F7F1FF]"
+                                                                className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg bg-[#F1EBFF] px-3 text-xs font-semibold text-[#6D35D4] transition hover:bg-[#E6DCFF]"
                                                             >
                                                                 <Pencil size={13} />
                                                                 Edit
@@ -1093,12 +1125,13 @@ export default function ManagerStaffManagementPage() {
                                                                 type="button"
                                                                 disabled={updatingStaffStatusId !== null}
                                                                 onClick={() => setStaffStatusTarget(staff)}
-                                                                className={`inline-flex h-[34px] items-center justify-center rounded-lg px-3 text-xs font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                                                                className={`inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 ${
                                                                     staff.status === "Accepted"
-                                                                        ? "bg-[#A33E20] text-white hover:bg-[#883117]"
-                                                                        : "border border-[#B7E9C8] bg-[#EDFBF1] text-[#138342] hover:bg-[#DDF5E5]"
+                                                                        ? "bg-[#FDEDED] text-[#C13333] hover:bg-[#FADDDD]"
+                                                                        : "bg-[#E8F7EE] text-[#138342] hover:bg-[#DDF5E5]"
                                                                 }`}
                                                             >
+                                                                {staff.status === "Accepted" ? <UserX size={13} /> : <CheckCircle2 size={13} />}
                                                                 {updatingStaffStatusId === staff.id
                                                                     ? "Updating..."
                                                                     : staff.status === "Accepted" ? "Deactivate Access" : "Reactivate Access"}
@@ -1110,177 +1143,216 @@ export default function ManagerStaffManagementPage() {
                                             </tbody>
                                         </table>
                                     </div>
-
-                                    <div className="px-1 pt-4 text-xs text-[#7A6A84]">
-                                        Showing {filteredStaff.length} of {staffList.length}{" "}
-                                        {staffList.length === 1
-                                            ? "staff member"
-                                            : "staff members"}
-                                    </div>
                                 </div>
                             )}
                         </section>
 
-                        <section id="staff-attendance" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                <div className="flex items-center gap-3"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span>
-                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Staff Attendance</h2><p className="text-xs text-[#7A6A84]">Time In and Time Out recorded by staff of {branchName} from their dashboards.</p></div>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <select aria-label="Filter staff attendance by period" value={attendancePeriod} onChange={e => setAttendancePeriod(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]"><option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Last 90 Days</option></select>
-                                    <select aria-label="Filter staff attendance by status" value={attendanceStatusFilter} onChange={e => setAttendanceStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]"><option value="all">All Statuses</option><option value="On Duty">On Duty</option><option value="Completed">Completed</option><option value="On Leave">On Leave</option><option value="Absent">Absent</option></select>
-                                    <button type="button" onClick={exportStaffAttendanceAsPdf} title="Export staff attendance to PDF" aria-label="Export staff attendance to PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
-                                </div>
-                            </div>
-                            {attendanceSummary && <div className="flex flex-wrap items-center gap-2 border-b border-[#EEE7F2] bg-[#FFFCF7] px-5 py-2.5 text-xs">
-                                <span className="mr-1 font-semibold text-[#5F4E75]">Today · {attendanceSummary.total} {attendanceSummary.total === 1 ? "staff member" : "staff members"}</span>
-                                <SMAttendanceCount label="Present" value={attendanceSummary.present} tone="green"/>
-                                <SMAttendanceCount label="On Leave" value={attendanceSummary.onLeave} tone="gold"/>
-                                <SMAttendanceCount label="Absent" value={attendanceSummary.absent} tone="red"/>
-                                <SMAttendanceCount label="Not Recorded" value={attendanceSummary.notRecorded} tone="gray"/>
-                            </div>}
-                            {attendanceError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{attendanceError}</p>}
-                            <div className="max-h-[360px] overflow-auto"><table className="w-full min-w-[860px] text-left text-xs"><thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee ID", "Staff Name", "Date", "Time In", "Time Out", "Hours Worked", "Status"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
-                                <tbody>{visibleStaffAttendance.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={`${row.employeeId}-${row.id}-${row.date}`}>
-                                    <td className="whitespace-nowrap px-4 py-3 font-semibold text-[#4E2C66]">{row.employeeCode || "—"}</td>
-                                    <td className="px-4 py-3 font-semibold text-[#2B174C]">{row.employeeName}</td>
-                                    <td className="whitespace-nowrap px-4 py-3">{smFormatDate(row.date)}</td>
-                                    <td className="whitespace-nowrap px-4 py-3">{smClockTime(row.timeIn)}</td>
-                                    <td className="whitespace-nowrap px-4 py-3">{smClockTime(row.timeOut)}</td>
-                                    <td className="whitespace-nowrap px-4 py-3">{smHours(row.hoursWorked)}</td>
-                                    <td className="px-4 py-3"><SMAttendanceBadge status={row.status}/></td>
-                                </tr>)}{visibleStaffAttendance.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-[#8A7D92]">{requestLoading && teamAttendance.length === 0 ? "Loading staff attendance..." : attendanceStatusFilter !== "all" ? "No attendance records match the selected status." : attendancePeriod === "today" ? "No staff attendance recorded today yet. Time In records from staff dashboards will appear here." : "No staff attendance or approved leave for this period."}</td></tr>}</tbody>
-                            </table></div>
-                            <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {visibleStaffAttendance.length} {visibleStaffAttendance.length === 1 ? "record" : "records"} · Hours are shown after Time Out</div>
+                        {/* Compact navigation preserves the detailed records in their original tables. */}
+                        <section aria-label="Team records" className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                            <button type="button" onClick={(event) => openTeamDetail("attendance", event.currentTarget)}
+                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
+                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Staff Attendance</span><span className="block text-xs text-[#7A6A84]">Daily time records and attendance status</span></span></span>
+                                <span className="text-xs font-semibold text-[#5F4E75]">{`Present ${attendanceSummary?.present ?? 0} · Not recorded ${attendanceSummary?.notRecorded ?? 0}`}</span>
+                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Attendance <ArrowUpRight size={15}/></span>
+                            </button>
+                            <button type="button" onClick={(event) => openTeamDetail("requests", event.currentTarget)}
+                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
+                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Employee Requests</span><span className="block text-xs text-[#7A6A84]">Review staff leave and absence requests</span></span></span>
+                                <span className="text-xs font-semibold text-[#A56607]">{pendingApplications} pending</span>
+                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Requests <ArrowUpRight size={15}/></span>
+                            </button>
+                            <button type="button" onClick={(event) => openTeamDetail("invites", event.currentTarget)}
+                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
+                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Pending Invites</span><span className="block text-xs text-[#7A6A84]">Staff awaiting account activation</span></span></span>
+                                <span className="text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
+                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Invites <ArrowUpRight size={15}/></span>
+                            </button>
                         </section>
 
-                        <section id="employee-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span>
-                                    <div><h2 className="text-[18px] font-bold text-[#1A1220]">Employee Requests</h2><p className="text-xs text-[#7A6A84]">Review staff leave and absence requests for {branchName}.</p></div>
-                                    <span className="rounded-full bg-[#FFF3D8] px-2.5 py-1 text-[10px] font-bold text-[#A56607]">{pendingApplications} pending</span>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <select aria-label="Filter leave requests by status" value={requestStatusFilter} onChange={e => setRequestStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] px-2 text-xs text-[#2B174C]"><option value="all">All Statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
-                                    <select aria-label="Filter leave requests by type" value={requestTypeFilter} onChange={e => setRequestTypeFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] px-2 text-xs text-[#2B174C]"><option value="all">All Leave Types</option>{types.map(type => <option key={type} value={type}>{type}</option>)}</select>
-                                    <button type="button" onClick={exportRequestsAsPdf} title="Export employee requests to PDF" aria-label="Export employee requests to PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
-                                </div>
-                            </div>
-                            {requestError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestError}</p>}
-                            <div className="max-h-[360px] overflow-auto"><table className="w-full min-w-[730px] text-left text-xs"><thead className="sticky top-0 z-10 bg-[#FBF8FF] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee", "Employee ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-4 py-3" key={label}>{label}</th>)}</tr></thead>
-                                <tbody>{filteredApplications.map(request => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={request.key}>
-                                    <td className="px-4 py-3 font-semibold text-[#2B174C]">{request.employeeName}</td><td className="px-4 py-3">{request.employeeNumber}</td><td className="px-4 py-3">{request.leaveType}</td><td className="px-4 py-3">{smDatesLabel(request)}</td>
-                                    <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${request.status === "Approved" ? "bg-green-50 text-green-700" : request.status === "Rejected" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{request.status}</span></td>
-                                    <td className="px-4 py-3"><button type="button" onClick={() => { setReviewingRequest(request); setRequestDecisionNote(""); setRequestDecisionError(""); }} className="rounded-lg border border-[#D7C7E8] bg-[#F7F1FF] px-3 py-1.5 font-semibold text-[#5D2DAB] hover:bg-[#ECE3F8]">Review</button></td>
-                                </tr>)}{filteredApplications.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center text-[#8A7D92]">{requestLoading ? "Loading employee requests..." : "No matching leave requests."}</td></tr>}</tbody>
-                            </table></div>
-                            <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {filteredApplications.length} of {leaveApplications.length} requests</div>
-                        </section>
-
-                        <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                <div className="flex min-w-0 items-center gap-3">
+                        {activeTeamDetail && (
+                            <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-3 backdrop-blur-[2px] sm:p-5"
+                                 onMouseDown={(event) => { if (event.target === event.currentTarget && !reviewingRequest && !savingDecision) closeTeamDetail(); }}
+                                 onKeyDown={(event) => { if (event.key === "Escape" && !reviewingRequest && !savingDecision) { event.stopPropagation(); closeTeamDetail(); } }}>
+                                <div role="dialog" aria-modal="true" aria-labelledby="staff-team-detail-title"
+                                     className="flex max-h-[90vh] w-full max-w-[1120px] flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-[#FFFDF8] shadow-2xl">
+                                    <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#E6DDF0] bg-white px-5 py-4">
+                                        <h2 id="staff-team-detail-title" className="text-[18px] font-bold text-[#1A1220]">{activeTeamDetail === "attendance" ? "Staff Attendance" : activeTeamDetail === "requests" ? "Employee Requests" : "Pending Invites"}</h2>
+                                        <button ref={teamDetailCloseRef} type="button" aria-label="Close details" onClick={closeTeamDetail}
+                                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] hover:bg-[#F7F1FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#6D35D4]"><X size={19}/></button>
+                                    </div>
+                                    <div className="min-h-0 overflow-y-auto p-3 sm:p-5">
+                                        {activeTeamDetail === "attendance" && (
+                                            <section id="staff-attendance" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                                    <div className="flex items-center gap-3"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span>
+                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Staff Attendance</h2><p className="text-xs text-[#7A6A84]">Time In and Time Out recorded by staff of {branchName} from their dashboards.</p></div>
+                                                    </div>
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <select aria-label="Filter staff attendance by period" value={attendancePeriod} onChange={e => setAttendancePeriod(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]"><option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Last 90 Days</option></select>
+                                                        <select aria-label="Filter staff attendance by status" value={attendanceStatusFilter} onChange={e => setAttendanceStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]"><option value="all">All Statuses</option><option value="On Duty">On Duty</option><option value="Completed">Completed</option><option value="On Leave">On Leave</option><option value="Absent">Absent</option></select>
+                                                        <button type="button" onClick={exportStaffAttendanceAsPdf} title="Export staff attendance to PDF" aria-label="Export staff attendance to PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                                    </div>
+                                                </div>
+                                                {attendanceSummary && <div className="flex flex-wrap items-center gap-2 border-b border-[#EEE7F2] bg-[#FFFCF7] px-5 py-2.5 text-xs">
+                                                    <span className="mr-1 font-semibold text-[#5F4E75]">Today · {attendanceSummary.total} {attendanceSummary.total === 1 ? "staff member" : "staff members"}</span>
+                                                    <SMAttendanceCount label="Present" value={attendanceSummary.present} tone="green"/>
+                                                    <SMAttendanceCount label="On Leave" value={attendanceSummary.onLeave} tone="gold"/>
+                                                    <SMAttendanceCount label="Absent" value={attendanceSummary.absent} tone="red"/>
+                                                    <SMAttendanceCount label="Not Recorded" value={attendanceSummary.notRecorded} tone="gray"/>
+                                                </div>}
+                                                {attendanceError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{attendanceError}</p>}
+                                                <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]"><thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee ID", "Staff Name", "Date", "Time In", "Time Out", "Hours Worked", "Status"].map(label => <th className="px-2.5 py-2.5 text-center" key={label}>{label}</th>)}</tr></thead>
+                                                    <tbody>{visibleStaffAttendance.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={`${row.employeeId}-${row.id}-${row.date}`}>
+                                                        <td className="whitespace-nowrap px-2.5 py-2.5 font-semibold text-[#4E2C66]">{row.employeeCode || "—"}</td>
+                                                        <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{row.employeeName}</td>
+                                                        <td className="whitespace-nowrap px-2.5 py-2.5">{smFormatDate(row.date)}</td>
+                                                        <td className="whitespace-nowrap px-2.5 py-2.5">{smClockTime(row.timeIn)}</td>
+                                                        <td className="whitespace-nowrap px-2.5 py-2.5">{smClockTime(row.timeOut)}</td>
+                                                        <td className="whitespace-nowrap px-2.5 py-2.5">{smHours(row.hoursWorked)}</td>
+                                                        <td className="px-2.5 py-2.5"><SMAttendanceBadge status={row.status}/></td>
+                                                    </tr>)}{visibleStaffAttendance.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-[#8A7D92]">{requestLoading && teamAttendance.length === 0 ? "Loading staff attendance..." : attendanceStatusFilter !== "all" ? "No attendance records match the selected status." : attendancePeriod === "today" ? "No staff attendance recorded today yet. Time In records from staff dashboards will appear here." : "No staff attendance or approved leave for this period."}</td></tr>}</tbody>
+                                                </table></div>
+                                                <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {visibleStaffAttendance.length} {visibleStaffAttendance.length === 1 ? "record" : "records"} · Hours are shown after Time Out</div>
+                                            </section>
+                                        )}
+                                        {activeTeamDetail === "requests" && (
+                                            <section id="employee-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                                    <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span>
+                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Employee Requests</h2><p className="text-xs text-[#7A6A84]">Review staff leave and absence requests for {branchName}.</p></div>
+                                                        <span className="rounded-full bg-[#FFF3D8] px-2.5 py-1 text-[10px] font-bold text-[#A56607]">{pendingApplications} pending</span>
+                                                    </div>
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <select aria-label="Filter leave requests by status" value={requestStatusFilter} onChange={e => setRequestStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] px-2 text-xs text-[#2B174C]"><option value="all">All Statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+                                                        <select aria-label="Filter leave requests by type" value={requestTypeFilter} onChange={e => setRequestTypeFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] px-2 text-xs text-[#2B174C]"><option value="all">All Leave Types</option>{types.map(type => <option key={type} value={type}>{type}</option>)}</select>
+                                                        <button type="button" onClick={exportRequestsAsPdf} title="Export employee requests to PDF" aria-label="Export employee requests to PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                                    </div>
+                                                </div>
+                                                {requestError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestError}</p>}
+                                                <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]"><thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee", "Employee ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-2.5 py-2.5 text-center" key={label}>{label}</th>)}</tr></thead>
+                                                    <tbody>{filteredApplications.map(request => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={request.key}>
+                                                        <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{request.employeeName}</td><td className="px-2.5 py-2.5">{request.employeeNumber}</td><td className="px-2.5 py-2.5">{request.leaveType}</td><td className="px-2.5 py-2.5">{smDatesLabel(request)}</td>
+                                                        <td className="px-2.5 py-2.5"><span className={`text-[11px] font-semibold ${request.status === "Approved" ? "text-green-700" : request.status === "Rejected" ? "text-red-700" : "text-amber-700"}`}>{request.status}</span></td>
+                                                        <td className="px-2.5 py-2.5"><button type="button" onClick={() => { setReviewingRequest(request); setRequestDecisionNote(""); setRequestDecisionError(""); }} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF]">Review</button></td>
+                                                    </tr>)}{filteredApplications.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-[#8A7D92]">{requestLoading ? "Loading employee requests..." : "No matching leave requests."}</td></tr>}</tbody>
+                                                </table></div>
+                                                <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {filteredApplications.length} of {leaveApplications.length} requests</div>
+                                            </section>
+                                        )}
+                                        {activeTeamDetail === "invites" && (
+                                            <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
+                                                    <div className="flex min-w-0 items-center gap-3">
                                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]">
                                     <Clock3 size={20} />
                                 </span>
-                                    <div className="min-w-0">
-                                        <h2 className="text-[18px] font-bold text-[#1A1220]">
-                                            Pending Invites
-                                        </h2>
-                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                            Invitations waiting to be accepted.
-                                        </p>
+                                                        <div className="min-w-0">
+                                                            <h2 className="text-[18px] font-bold text-[#1A1220]">
+                                                                Pending Invites
+                                                            </h2>
+                                                            <p className="mt-0.5 text-xs text-[#7A6A84]">
+                                                                Invitations waiting to be accepted.
+                                                            </p>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="inline-flex items-center rounded-full bg-[#FFF7E8] px-3 py-1.5 text-xs font-semibold text-[#A56607]">
+                                                            {filteredPendingInvites.length} pending
+                                                        </span>
+                                                        <button type="button" onClick={exportPendingStaffInvitesAsPdf} title="Download pending staff invites as PDF" aria-label="Download pending staff invites as PDF" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]"><Download size={17}/></button>
+                                                    </div>
+                                                </div>
+
+                                                <div className="p-4">
+                                                    {pageLoading ? (
+                                                        <EmptyState text="Loading invites..." />
+                                                    ) : filteredPendingInvites.length === 0 ? (
+                                                        <EmptyState
+                                                            text={
+                                                                staffSearch || statusFilter === "pending"
+                                                                    ? "No pending invite matched your filter."
+                                                                    : "No pending invites yet."
+                                                            }
+                                                        />
+                                                    ) : (
+                                                        <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain">
+                                                            <div
+                                                                className="overflow-hidden rounded-[14px]"
+                                                                style={{
+                                                                    boxShadow:
+                                                                        "inset 0 0 0 1px #EAE2F0",
+                                                                }}
+                                                            >
+                                                                <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                                                    <thead className="bg-[#FFFCF8]">
+                                                                    <tr className="border-b border-[#E6DDF0]">
+                                                                        <TableHeader align="center">Email</TableHeader>
+                                                                        <TableHeader>Invitation</TableHeader>
+                                                                        <TableHeader>Access</TableHeader>
+                                                                        <TableHeader align="center">
+                                                                            Actions
+                                                                        </TableHeader>
+                                                                    </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                    {filteredPendingInvites.map(
+                                                                        (invite) => (
+                                                                            <tr
+                                                                                key={invite.id}
+                                                                                className="border-b border-[#EEE7F2] bg-white last:border-b-0"
+                                                                            >
+                                                                                <td className="px-2.5 py-2.5 text-sm font-semibold text-[#1A1220]">
+                                                                                    {invite.email}
+                                                                                </td>
+                                                                                <td className="px-2.5 py-2.5 text-xs text-[#7A6A84]">
+                                                                                    Invited {invite.invitedAt}
+                                                                                    <br />
+                                                                                    Expires {invite.expiresAt}
+                                                                                </td>
+                                                                                <td className="max-w-[420px] px-2.5 py-2.5 text-xs text-[#806A8C]">
+                                                                                    <p className="truncate">
+                                                                                        {formatPermissions(
+                                                                                            invite.permissions
+                                                                                        )}
+                                                                                    </p>
+                                                                                </td>
+                                                                                <td className="px-2.5 py-2.5 text-center">
+                                                                                    <div className="inline-flex items-center gap-2">
+                                                                                        <StatusBadge
+                                                                                            label="Pending"
+                                                                                            tone="gold"
+                                                                                        />
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={() =>
+                                                                                                handleResendInvite(
+                                                                                                    invite.email
+                                                                                                )
+                                                                                            }
+                                                                                            className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg bg-[#F1EBFF] px-3 text-xs font-semibold text-[#6D35D4] transition hover:bg-[#E6DCFF]"
+                                                                                        >
+                                                                                            <Send size={14} />
+                                                                                            Resend
+                                                                                        </button>
+                                                                                    </div>
+                                                                                </td>
+                                                                            </tr>
+                                                                        )
+                                                                    )}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </section>
+                                        )}
                                     </div>
                                 </div>
-
-                                <span className="inline-flex items-center rounded-full bg-[#FFF7E8] px-3 py-1.5 text-xs font-semibold text-[#A56607]">
-                                {filteredPendingInvites.length} pending
-                            </span>
                             </div>
+                        )}
 
-                            <div className="p-4">
-                                {pageLoading ? (
-                                    <EmptyState text="Loading invites..." />
-                                ) : filteredPendingInvites.length === 0 ? (
-                                    <EmptyState
-                                        text={
-                                            staffSearch || statusFilter === "pending"
-                                                ? "No pending invite matched your filter."
-                                                : "No pending invites yet."
-                                        }
-                                    />
-                                ) : (
-                                    <div className="overflow-x-auto">
-                                        <div
-                                            className="overflow-hidden rounded-[14px]"
-                                            style={{
-                                                boxShadow:
-                                                    "inset 0 0 0 1px #EAE2F0",
-                                            }}
-                                        >
-                                            <table className="w-full min-w-[820px] border-collapse font-sans">
-                                                <thead className="bg-[#FBF8FF]">
-                                                <tr className="border-b border-[#E6DDF0]">
-                                                    <TableHeader>Email</TableHeader>
-                                                    <TableHeader>Invitation</TableHeader>
-                                                    <TableHeader>Access</TableHeader>
-                                                    <TableHeader align="right">
-                                                        Actions
-                                                    </TableHeader>
-                                                </tr>
-                                                </thead>
-                                                <tbody>
-                                                {filteredPendingInvites.map(
-                                                    (invite) => (
-                                                        <tr
-                                                            key={invite.id}
-                                                            className="border-b border-[#EEE7F2] bg-white last:border-b-0"
-                                                        >
-                                                            <td className="px-5 py-3 text-sm font-semibold text-[#1A1220]">
-                                                                {invite.email}
-                                                            </td>
-                                                            <td className="px-5 py-3 text-xs text-[#7A6A84]">
-                                                                Invited {invite.invitedAt}
-                                                                <br />
-                                                                Expires {invite.expiresAt}
-                                                            </td>
-                                                            <td className="max-w-[420px] px-5 py-3 text-xs text-[#806A8C]">
-                                                                <p className="truncate">
-                                                                    {formatPermissions(
-                                                                        invite.permissions
-                                                                    )}
-                                                                </p>
-                                                            </td>
-                                                            <td className="px-5 py-3 text-right">
-                                                                <div className="inline-flex items-center gap-2">
-                                                                    <StatusBadge
-                                                                        label="Pending"
-                                                                        tone="gold"
-                                                                    />
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() =>
-                                                                            handleResendInvite(
-                                                                                invite.email
-                                                                            )
-                                                                        }
-                                                                        className="inline-flex h-[38px] items-center justify-center gap-2 rounded-xl border border-[#D7C7E8] bg-white px-4 text-xs font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
-                                                                    >
-                                                                        <Send size={14} />
-                                                                        Resend
-                                                                    </button>
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    )
-                                                )}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </section>
                     </section>
                 </main>
 
@@ -1566,24 +1638,10 @@ export default function ManagerStaffManagementPage() {
                                     value={editPermissions.inventory_access}
                                     onChange={(value) => updateEditFeatureAccess("inventory", value as AccessMode)}
                                 />
-                                <label className="flex items-start gap-3 rounded-xl border border-[#E6DDF0] bg-[#F9F6FF] px-4 py-3 text-sm">
-                                    <input type="checkbox" className="mt-1 accent-[#2B174C]"
-                                           checked={editPermissions.inventory_stock_receive && editPermissions.inventory_access === "full"}
-                                           disabled={editPermissions.inventory_access !== "full"}
-                                           onChange={event=>setEditPermissions(prev=>({...prev, inventory_stock_receive:event.target.checked}))}/>
-                                    <span><strong>Authorized Stock Receiver</strong>
-                                        <span className="mt-1 block text-xs text-[#806A8C]">Can confirm Manager-authorized stock deliveries. Requires full Inventory access; cannot buy products or change prices.</span></span>
-                                </label>
                                 <AccessModeRow
                                     label="Packages"
                                     value={editPermissions.package_access}
                                     onChange={(value) => updateEditFeatureAccess("packages", value as AccessMode)}
-                                />
-                                <AccessModeRow
-                                    label="Reports"
-                                    value={editPermissions.reports_access}
-                                    allowView={false}
-                                    onChange={(value) => updateEditReportsAccess(value as ReportsAccessMode)}
                                 />
                                 <AccessModeRow
                                     label="Analytics"
@@ -1784,15 +1842,15 @@ function SummaryCard({
 
 function TableHeader({
                          children,
-                         align = "left",
+                         align = "center",
                      }: {
     children: ReactNode;
-    align?: "left" | "right";
+    align?: "left" | "center";
 }) {
     return (
         <th
-            className={`px-5 py-3.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C] ${
-                align === "right" ? "text-right" : "text-left"
+            className={`px-2.5 py-2.5 text-[10px] font-semibold uppercase leading-tight tracking-normal text-[#806A8C] ${
+                align === "left" ? "text-left" : "text-center"
             }`}
         >
             {children}
@@ -1905,12 +1963,12 @@ function StatusBadge({
 }) {
     const style =
         tone === "green"
-            ? "border border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]"
+            ? "text-[#138342]"
             : tone === "red"
-                ? "border border-[#F1CACA] bg-[#FFF0F0] text-[#D4443A]"
-                : "border border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]";
+                ? "text-[#D4443A]"
+                : "text-[#A56607]";
 
-    return <span className={`inline-flex rounded-full px-4 py-1.5 text-sm font-semibold ${style}`}>{label}</span>;
+    return <span className={`inline-flex text-xs font-semibold ${style}`}>{label}</span>;
 }
 
 function EmptyState({ text }: { text: string }) {
@@ -2053,10 +2111,10 @@ function smHours(value?: number | string | null) {
 function SMAttendanceBadge({ status }: { status: string }) {
     const label = String(status || "Not Recorded");
     const classes = label === "On Duty" || label === "Completed" || label === "Present"
-        ? "bg-[#E6F7EE] text-[#16834A]"
-        : label === "On Leave" ? "bg-[#FFF3D8] text-[#A56607]"
-            : label === "Absent" ? "bg-[#FFF0F0] text-[#D52B2B]" : "bg-[#F2EFF5] text-[#806A8C]";
-    return <span className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-bold ${classes}`}>{label}</span>;
+        ? "text-[#16834A]"
+        : label === "On Leave" ? "text-[#A56607]"
+            : label === "Absent" ? "text-[#D52B2B]" : "text-[#806A8C]";
+    return <span className={`inline-flex whitespace-nowrap text-[11px] font-semibold ${classes}`}>{label}</span>;
 }
 function SMAttendanceCount({ label, value, tone }: { label: string; value: number; tone: "green" | "gold" | "red" | "gray" }) {
     const classes = { green: "bg-[#E6F7EE] text-[#16834A]", gold: "bg-[#FFF3D8] text-[#A56607]",

@@ -1,17 +1,17 @@
 "use client";
 
-import { Search } from "lucide-react";
+import { Download, Search } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useEffect, useMemo, useState } from "react";
 import {
     getToken,
+    downloadPackagesPdf,
     formatText,
     getSavedPackageAccess,
     getPackageCategory,
     buildPackageSelectableItems,
     PACKAGE_CATEGORY_OPTIONS,
     Card,
-    CardHeader,
     PackageCard,
     EmptyState,
     PackageFormModal,
@@ -232,13 +232,29 @@ export default function StaffPackages() {
                 <div className="space-y-3">
                     <Card className="min-h-[420px]">
                         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                            <CardHeader title="Branch Package List" action={`${filteredPackages.length} packages`} />
-                            {canManage && (
-                                <button type="button" onClick={form.openAdd}
-                                        className="inline-flex h-[38px] items-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]">
-                                    + Add Package
+                            <h2 className="text-[16px] font-bold text-[#1A1220]">Branch Package List</h2>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => void downloadPackagesPdf(filteredPackages, {
+                                        scopeLabel: branchName,
+                                        branchNameForPackage: () => branchName,
+                                        fileName: `stocknbook-packages-branch-${branchId || "assigned"}.pdf`,
+                                    }).catch((reason) => alert(reason instanceof Error ? reason.message : "Unable to download package PDF."))}
+                                    disabled={!canView || loading || filteredPackages.length === 0}
+                                    className="inline-flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] shadow-sm transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
+                                    title="Download all matching branch packages as PDF"
+                                    aria-label="Download all matching branch packages as PDF"
+                                >
+                                    <Download size={18} />
                                 </button>
-                            )}
+                                {canManage && (
+                                    <button type="button" onClick={form.openAdd}
+                                            className="inline-flex h-[38px] items-center rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]">
+                                        + Add Package
+                                    </button>
+                                )}
+                            </div>
                         </div>
 
                         <div className="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_210px_180px]">
@@ -320,6 +336,7 @@ export default function StaffPackages() {
                                             ),
                                         }}
                                         canManage={canManage}
+                                        branchName={branchName}
                                         onEdit={() => canManage && form.openEdit(pkg)}
                                         onDelete={() => handleDelete(pkg.id)}
                                     />

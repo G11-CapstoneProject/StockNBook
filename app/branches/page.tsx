@@ -1137,7 +1137,7 @@ export default function BranchesPage() {
                 <main className="min-w-0 flex-1 overflow-y-auto">
                     <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
                         <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 px-6 py-3">
-                            <h1 className="text-[27px] font-bold tracking-[-0.025em] text-[#1A1220]">
+                            <h1 className="text-[25px] font-bold tracking-[-0.025em] text-[#1A1220]">
                                 Branches
                             </h1>
 
@@ -1201,136 +1201,93 @@ export default function BranchesPage() {
                             />
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-3">
-                            <div className="relative w-full min-w-0 flex-1 sm:w-auto sm:min-w-[260px]">
-                                <Search
-                                    size={16}
-                                    className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                                />
-                                <input
-                                    value={search}
-                                    onChange={(event) =>
-                                        setSearch(event.target.value)
-                                    }
-                                    placeholder="Search branch, manager, address, or contact..."
-                                    className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                                />
-
-                                {search && (
-                                    <button
-                                        type="button"
-                                        onClick={() => setSearch("")}
-                                        aria-label="Clear branch search"
-                                        className="absolute right-3 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
-                                    >
-                                        <X size={14} />
-                                    </button>
-                                )}
-                            </div>
-
-                            <button
-                                type="button"
-                                onClick={openAddModal}
-                                className="inline-flex h-[48px] shrink-0 items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                            >
-                                <Plus size={16} />
-                                Add branch
-                            </button>
-                        </div>
-
                         {error && (
                             <div className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2.5 text-sm font-medium text-[#9B1C1C]">
                                 {error}
                             </div>
                         )}
 
-                        {loading && branches.length === 0 ? (
-                            <ModuleSkeleton variant="branches" />
-                        ) : branches.length === 0 ? (
-                            <EmptyBranches
-                                title="No branches added yet."
-                                detail="Add your first branch to start assigning managers and staff."
-                                actionLabel="Add branch"
-                                onAction={openAddModal}
-                            />
-                        ) : filteredBranches.length === 0 ? (
-                            <EmptyBranches
-                                title="No matching branches found."
-                                detail="Try another branch name, manager, address, or contact number."
-                                actionLabel="Clear search"
-                                onAction={() => setSearch("")}
-                            />
-                        ) : (
-                            <section
-                                className="overflow-hidden rounded-[20px] border bg-white"
-                                style={{
-                                    borderColor: "#E8E0EF",
-                                    boxShadow:
-                                        "0 3px 14px rgba(45, 27, 78, 0.08)",
-                                }}
-                            >
-                                <div
-                                    className="flex flex-wrap items-center justify-between gap-4 border-b px-5 py-4"
-                                    style={{ borderColor: "#EEE7F2" }}
-                                >
-                                    <div className="flex min-w-0 items-center gap-3.5">
-                                    <span
-                                        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl shadow-sm"
-                                        style={{
-                                            backgroundColor: "#F2ECFF",
-                                            color: "#6D3CC7",
-                                        }}
-                                    >
-                                        <Building2
-                                            size={23}
-                                            strokeWidth={2}
-                                            aria-hidden="true"
-                                        />
-                                    </span>
+                        <section className="overflow-hidden rounded-[20px] border border-[#E8E0EF] bg-white shadow-[0_2px_6px_rgba(45,27,78,0.10)]">
+                            <div className="flex flex-wrap items-center justify-between gap-3 px-5 pb-3 pt-5">
+                                <div className="min-w-0">
+                                    <h2 className="text-[18px] font-bold tracking-[-0.02em] text-[#1A1220]">
+                                        Branch Directory
+                                    </h2>
+                                    <p className="mt-1 text-[13px] leading-5 text-[#806A8C]">
+                                        View branch performance and assigned manager details.
+                                    </p>
+                                </div>
 
-                                        <div className="min-w-0">
-                                            <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                                                Branch Directory
-                                            </h2>
-                                            <p className="mt-1 text-[13px] leading-5 text-[#7A6A84]">
-                                                View branch performance and assigned manager details.
-                                            </p>
-                                        </div>
-                                    </div>
-
-                                    <span
-                                        className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold"
-                                        style={{
-                                            backgroundColor: "#F5EEFF",
-                                            color: "#6736B6",
-                                        }}
-                                    >
-                                    <Building2
-                                        size={13}
-                                        strokeWidth={2}
-                                        aria-hidden="true"
-                                    />
-                                        {filteredBranches.length}{" "}
-                                        {filteredBranches.length === 1
-                                            ? "branch"
-                                            : "branches"}
+                                <span className="text-[13px] font-medium text-[#806A8C]">
+                                    {filteredBranches.length} {filteredBranches.length === 1 ? "branch" : "branches"}
                                 </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-3 px-5 pb-4">
+                                <div className="relative min-w-0 flex-1 basis-full sm:basis-[260px]">
+                                    <Search
+                                        size={16}
+                                        className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
+                                    />
+                                    <input
+                                        value={search}
+                                        onChange={(event) => setSearch(event.target.value)}
+                                        placeholder="Search branch, manager, address, or contact..."
+                                        className="h-[46px] w-full rounded-xl border border-[#E6DDF0] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                    />
+                                    {search && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearch("")}
+                                            aria-label="Clear branch search"
+                                            className="absolute right-3 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
+                                        >
+                                            <X size={14} />
+                                        </button>
+                                    )}
                                 </div>
 
-                                <div className="grid gap-4 p-4 xl:grid-cols-2">
-                                    {filteredBranches.map((branch) => (
-                                        <BranchCard
-                                            key={branch.id}
-                                            branch={branch}
-                                            onEdit={() => openEditModal(branch)}
-                                            onDelete={() =>
-                                                void handleDeleteBranch(branch)
-                                            }
-                                        />
-                                    ))}
-                                </div>
-                            </section>
-                        )}
+                                <button
+                                    type="button"
+                                    onClick={openAddModal}
+                                    className="inline-flex h-[46px] shrink-0 items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                >
+                                    <Plus size={16} />
+                                    Add Branch
+                                </button>
+                            </div>
+
+                            <div className="border-t border-[#EEE7F2] p-4">
+                                {loading && branches.length === 0 ? (
+                                    <ModuleSkeleton variant="branches" />
+                                ) : branches.length === 0 ? (
+                                    <EmptyBranches
+                                        title="No branches added yet."
+                                        detail="Add your first branch to start assigning managers and staff."
+                                        actionLabel="Add branch"
+                                        onAction={openAddModal}
+                                    />
+                                ) : filteredBranches.length === 0 ? (
+                                    <EmptyBranches
+                                        title="No matching branches found."
+                                        detail="Try another branch name, manager, address, or contact number."
+                                        actionLabel="Clear search"
+                                        onAction={() => setSearch("")}
+                                    />
+                                ) : (
+                                    <div className="grid gap-4 xl:grid-cols-2">
+                                        {filteredBranches.map((branch) => (
+                                            <BranchCard
+                                                key={branch.id}
+                                                branch={branch}
+                                                onEdit={() => openEditModal(branch)}
+                                                onDelete={() => void handleDeleteBranch(branch)}
+                                            />
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </section>
                     </section>
                 </main>
 
@@ -1961,26 +1918,23 @@ function SummaryCard({
     iconClassName: string;
 }) {
     return (
-        <div className="min-h-[145px] rounded-[18px] border border-[#E6DDF0] bg-white px-4 py-4 shadow-[0_2px_6px_rgba(45,27,78,0.10)]">
-            <div className="flex items-start justify-between gap-3">
-                <p className="pt-1 text-[15px] font-medium text-[#1A1220]">
-                    {title}
-                </p>
-
-                <span
-                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
-                >
+        <div className="min-h-[142px] rounded-[20px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-[0_2px_6px_rgba(45,27,78,0.10)]">
+            <div className="flex h-full items-center gap-4">
+                <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`}>
                     {icon}
                 </span>
+                <div className="min-w-0">
+                    <p className="text-[15px] font-medium text-[#2B174C]">
+                        {title}
+                    </p>
+                    <p className="mt-1 text-[28px] font-bold leading-none tracking-[-0.02em] text-[#1A1220]">
+                        {value}
+                    </p>
+                    <p className="mt-2 text-[12px] leading-5 text-[#806A8C]">
+                        {description}
+                    </p>
+                </div>
             </div>
-
-            <p className="mt-4 text-[28px] font-bold leading-none tracking-[-0.02em] text-[#1A1220]">
-                {value}
-            </p>
-
-            <p className="mt-2 text-[12px] leading-5 text-[#8A7A94]">
-                {description}
-            </p>
         </div>
     );
 }

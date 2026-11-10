@@ -1158,8 +1158,7 @@ export default function CustomerBookingPage() {
         .filter(line => {
             if (!rentalAvailabilityReady) return false;
             const rental = rentalCatalog.find(item => item.id === Number(line.equipmentId));
-            const extras = selectedRentalItems.find(item => item.id === Number(line.equipmentId))?.quantity || 0;
-            return (rental?.availableForDates ?? 0) < Number(line.quantity || 0) + extras;
+            return (rental?.availableForDates ?? 0) < Number(line.quantity || 0);
         });
     // Preserve a customer's requested quantity when dates change, but flag it
     // rather than allowing an overbooked request to be submitted.
@@ -1186,9 +1185,9 @@ export default function CustomerBookingPage() {
     const estimatedSetup = serviceSetup && !(bookingType === "package" && feePolicy.setupIncludedPackage) ? feePolicy.setupFee : 0;
     const estimatedBase = bookingType === "package" ? Number(selectedPackageData?.package_price || 0) : 0;
     // The custom product subtotal is a request estimate; Manager confirms its agreed price.
-    const selectedRentalTotal = selectedRentalItems.reduce(
-        (sum, item) => sum + item.dailyRate * item.quantity * rentalDuration, 0
-    );
+    const selectedRentalTotal = bookingType === "custom"
+        ? selectedRentalItems.reduce((sum, item) => sum + item.dailyRate * item.quantity * rentalDuration, 0)
+        : 0;
 
     const customInventoryCategories = useMemo(() => {
         const uniqueCategories = Array.from(
@@ -1328,9 +1327,9 @@ export default function CustomerBookingPage() {
             errors.selection = `${consumableSelectionConflict.selected.displayName} needs ${consumableSelectionConflict.selected.quantity} unit(s), but only ${consumableSelectionConflict.current?.stock ?? 0} are available for the selected event date.`;
         else if (bookingType === "custom" && consumablePriceChanged)
             errors.selection = `The price of ${consumablePriceChanged.displayName} changed. Review your selection before submitting.`;
-        if (selectedRentalItems.length && (!rentalDuration || !rentalAvailabilityReady))
+        if (bookingType === "custom" && selectedRentalItems.length && (!rentalDuration || !rentalAvailabilityReady))
             errors.selection = 'Select valid event dates and wait for rental availability to load.';
-        else if (rentalSelectionConflict)
+        else if (bookingType === "custom" && rentalSelectionConflict)
             errors.selection = `${rentalSelectionConflict.name} exceeds the available units for your event dates.`;
         if (bookingType === "custom" && !eventType.trim()) errors.eventType = "Event type is required.";
         if (!customBranchId || !branches.some(b => b.id === customBranchId))
@@ -1707,6 +1706,9 @@ export default function CustomerBookingPage() {
     function handleSelectPackage(pkg: PackageItem) {
         setBookingType("package");
         setSelectedPackage(String(pkg.id));
+        // Package contents are fixed; do not carry custom goods into package checkout.
+        setSelectedCustomItems([]);
+        setSelectedRentalItems([]);
         clearError("selection");
         formRef.current?.scrollIntoView({ behavior: "smooth" });
     }
@@ -1788,7 +1790,7 @@ export default function CustomerBookingPage() {
             }
             // Recheck immediately before submission; no inventory is held here.
             // Confirmation will repeat this check transactionally.
-            if (selectedRentalItems.length) {
+            if (bookingType === "custom" && selectedRentalItems.length) {
                 const check = await fetch('/api/bookings', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({action: 'get_public_rental_catalog',
@@ -1824,9 +1826,11 @@ export default function CustomerBookingPage() {
                     branchId: selectedBranchId,
                     ...newBooking,
                     ...(bookingType === 'package' ? {packageId:Number(selectedPackageData?.id)} : {}),
-                    rentalItems: selectedRentalItems.map(item => ({equipmentId:item.id,quantity:item.quantity,expectedDailyRate:item.dailyRate})),
+                    rentalItems: bookingType === "custom"
+                        ? selectedRentalItems.map(item => ({equipmentId:item.id,quantity:item.quantity,expectedDailyRate:item.dailyRate}))
+                        : [],
                     eventEndDate: eventEndDate || undefined,
-                    rentalEndDate: selectedRentalItems.length ? eventEndDate : undefined,
+                    rentalEndDate: bookingType === "custom" && selectedRentalItems.length ? eventEndDate : undefined,
                     requestedServices:{delivery:serviceDelivery,setup:serviceSetup},
                     expectedFeePolicy:feePolicy,
                     expectedPackagePrice:bookingType==='package'?Number(selectedPackageData?.package_price||0):undefined,
@@ -1969,7 +1973,7 @@ export default function CustomerBookingPage() {
         );
     }
 
-    function renderRentalPicker(isPackageExtra = false) {
+    function renderRentalPicker() {
         const matching = rentalCatalog.filter(item =>
             (rentalCategory === "All" || (item.category || "Other") === rentalCategory) &&
             item.name.toLowerCase().includes(rentalSearch.toLowerCase())
@@ -1977,10 +1981,9 @@ export default function CustomerBookingPage() {
         return (
             <div className="min-w-0">
                 <div className="mb-3">
-                    <h4 className="text-sm font-bold text-[#2B174C]">{isPackageExtra ? "Additional Rental Goods (optional)" : "Rental Goods"}</h4>
+                    <h4 className="text-sm font-bold text-[#2B174C]">Rental Goods</h4>
                     <p className="mt-1 text-xs leading-5 text-[#806A8C]">
-                        {isPackageExtra ? "Add equipment beyond the items already included in your package. " : "Choose rental equipment for your event. "}
-                        Rates are per item, per day. Items are only reserved after confirmation.
+                        Choose rental equipment for your event. Rates are per item, per day. Items are only reserved after confirmation.
                     </p>
                     <p className="mt-2 text-xs font-medium text-[#5A35A5]" aria-live="polite">
                         {!date ? `Showing today's available units (${rentalPreviewTodayLabel}). Choose event dates above for the quantity available on your event date.`
@@ -1999,8 +2002,8 @@ export default function CustomerBookingPage() {
                                placeholder="Search rental goods..." className="h-11 w-full rounded-xl border border-[#E6DDF0] bg-white pl-9 pr-3 text-sm outline-none focus:border-[#2B174C]" />
                     </label>
                     <div className="flex items-center gap-2">
-                        <label className="sr-only" htmlFor={isPackageExtra ? "package-rental-category" : "rental-category"}>Rental category</label>
-                        <select id={isPackageExtra ? "package-rental-category" : "rental-category"} value={rentalCategory}
+                        <label className="sr-only" htmlFor="rental-category">Rental category</label>
+                        <select id="rental-category" value={rentalCategory}
                                 onChange={event => setRentalCategory(event.target.value)}
                                 className="h-11 min-w-0 flex-1 rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs text-[#2B174C] sm:w-48">
                             <option value="All">Filter by category</option>
@@ -2051,6 +2054,80 @@ export default function CustomerBookingPage() {
                     </div>
                 </div>
 
+            </div>
+        );
+    }
+
+    // Package bookings show only their fixed inclusions, in the same goods-table
+    // layout as Custom Booking. Quantity and item selection are read-only.
+    function renderPackageIncludedGoods() {
+        const isRental = activeGoodsTab === "rental";
+        const included = (selectedPackageData?.inclusions || []).filter(item =>
+            isRental ? item.itemType === "rental" : item.itemType !== "rental"
+        );
+        const label = isRental ? "Rental Goods" : "Consumable Goods";
+        return (
+            <div className="min-w-0">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                        <h4 className="text-sm font-bold text-[#2B174C]">{label}</h4>
+                        <p className="mt-1 text-xs text-[#806A8C]">
+                            Included in your selected package. Items and quantities cannot be changed.
+                        </p>
+                    </div>
+                    <span className="rounded-full bg-[#F7F1FF] px-3 py-1 text-xs font-semibold text-[#4E2C66]">
+                        {included.length} {included.length === 1 ? "item" : "items"}
+                    </span>
+                </div>
+                <div className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
+                    <div className="hidden grid-cols-[minmax(0,1.6fr)_100px_120px_162px] gap-3 border-b border-[#E6DDF0] bg-[#FBF8FD] px-4 py-3 text-[11px] font-bold text-[#806A8C] md:grid">
+                        <span>Product</span><span>{isRental ? "Rate" : "Price"}</span><span>Availability</span><span>Quantity</span>
+                    </div>
+                    <div className="max-h-[420px] divide-y divide-[#F1EAF5] overflow-y-auto overscroll-contain">
+                        {!selectedPackageData ? (
+                            <p className="p-5 text-center text-sm text-[#806A8C]">Choose a package to view its included goods.</p>
+                        ) : included.length === 0 ? (
+                            <p className="p-5 text-center text-sm text-[#806A8C]">No {label.toLowerCase()} are included in this package.</p>
+                        ) : included.map((item, index) => {
+                            const inventoryKey = item.variantId
+                                ? `product:${item.productId}:variant:${item.variantId}`
+                                : `product:${item.productId}:regular`;
+                            const rentalItem = item.equipmentId != null
+                                ? rentalCatalog.find(entry => entry.id === Number(item.equipmentId))
+                                : undefined;
+                            const available = isRental
+                                ? (rentalItem?.availableForDates ?? null)
+                                : (liveConsumablesByKey.get(inventoryKey)?.stock ?? null);
+                            const verified = isRental
+                                ? rentalAvailabilityReady
+                                : !loadingInventory && !inventoryError;
+                            const needsReview = verified && available !== null && available < Number(item.quantity || 0);
+                            return (
+                                <div key={`${item.itemType || "consumable"}-${item.equipmentId ?? item.productId}-${item.variantId ?? 0}-${index}`}
+                                     className="grid min-w-0 gap-3 px-4 py-3 md:grid-cols-[minmax(0,1.6fr)_100px_120px_162px] md:items-center">
+                                    <div className="min-w-0">
+                                        <p className="break-words text-sm font-semibold text-[#24153B]">
+                                            {item.productName}{item.variantName ? ` — ${item.variantName}` : ""}
+                                        </p>
+                                        <p className="mt-0.5 text-xs text-[#806A8C]">Included in package</p>
+                                    </div>
+                                    <p className="text-xs font-semibold text-[#2B174C] md:text-sm">
+                                        {peso(item.unitSalesPrice)} <span className="font-normal text-[#806A8C]">{isRental ? "/ day" : "/ item"}</span>
+                                    </p>
+                                    <div>
+                                        <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${needsReview ? "bg-amber-50 text-amber-800" : verified && available !== null ? "bg-green-50 text-green-700" : "bg-[#F7F1FF] text-[#806A8C]"}`}>
+                                            {needsReview ? "Needs review" : verified && available !== null ? `Available (${available})` : "To be confirmed"}
+                                        </span>
+                                    </div>
+                                    <span className="inline-flex h-9 max-w-[162px] items-center justify-center gap-2 rounded-lg border border-[#E6DDF0] bg-[#FBF8FD] px-3 text-xs font-semibold text-[#2B174C]">
+                                        × {item.quantity} <span className="font-normal text-[#806A8C]">included</span>
+                                    </span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+                <p className="mt-3 text-xs text-[#806A8C]">Inclusion rates are informational only; the package price already includes these goods. Availability is checked before confirmation.</p>
             </div>
         );
     }
@@ -2471,7 +2548,7 @@ export default function CustomerBookingPage() {
                                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                                         <button
                                             type="button"
-                                            onClick={() => { setBookingType("package"); clearError("selection"); }}
+                                            onClick={() => { setBookingType("package"); setSelectedCustomItems([]); setSelectedRentalItems([]); clearError("selection"); }}
                                             className={`rounded-xl border p-4 text-left transition ${
                                                 bookingType === "package"
                                                     ? "border-[#2B174C] bg-[#F7F1FF] shadow-sm"
@@ -2618,11 +2695,11 @@ export default function CustomerBookingPage() {
                             <section className="min-w-0 rounded-2xl border border-[#E6DDF0] bg-white p-4 sm:p-6" aria-labelledby="choose-products-heading">
                                 <h3 id="choose-products-heading" className="mb-2 text-lg font-bold text-[#2B174C]">4. Choose products or packages</h3>
                                 {bookingType === "package" ? (
-                                    <div className="space-y-4">
+                                    <div className="mb-4 space-y-3">
                                         <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FD] p-3">
                                             <label htmlFor="booking-package-choice" className="mb-2 block text-sm font-semibold text-[#1A1220]">Select package</label>
                                             <select id="booking-package-choice" value={selectedPackage}
-                                                    onChange={event => {setSelectedPackage(event.target.value);clearError("selection");}}
+                                                    onChange={event => {setSelectedPackage(event.target.value);setSelectedCustomItems([]);setSelectedRentalItems([]);clearError("selection");}}
                                                     className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] ${fieldErrors.selection ? "border-red-300" : "border-[#E6DDF0]"}`}>
                                                 <option value="">Choose a package</option>
                                                 {packages.filter(pkg => effectivePackageBranchFilter === "all" ||
@@ -2641,43 +2718,65 @@ export default function CustomerBookingPage() {
                                                 </p>}
                                             {fieldErrors.selection && <p className="mt-2 text-xs text-red-600">{fieldErrors.selection}</p>}
                                         </div>
-                                        <p className="text-xs text-[#806A8C]">You can also select a package from the Available packages cards above.</p>
-                                        {renderRentalPicker(true)}
+                                        <p className="text-xs text-[#806A8C]">You can also select a package from the Available packages cards above. Only the goods already included in your package are shown below.</p>
                                     </div>
                                 ) : (
-                                    <div>
-                                        <p className="mb-4 text-sm text-[#806A8C]">Add items to your custom event booking. Choose Consumable Goods or Rental Goods below.</p>
-                                        <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-[#F7F1FF] p-1.5" role="tablist" aria-label="Choose inventory type">
-                                            <button type="button" role="tab" aria-selected={activeGoodsTab === "consumable"}
-                                                    onClick={() => setActiveGoodsTab("consumable")}
-                                                    className={`min-h-10 rounded-lg px-3 py-2 text-sm font-semibold transition ${activeGoodsTab === "consumable" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#5F4E75] hover:bg-white"}`}>
-                                                Consumable Goods
-                                            </button>
-                                            <button type="button" role="tab" aria-selected={activeGoodsTab === "rental"}
-                                                    onClick={() => setActiveGoodsTab("rental")}
-                                                    className={`min-h-10 rounded-lg px-3 py-2 text-sm font-semibold transition ${activeGoodsTab === "rental" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#5F4E75] hover:bg-white"}`}>
-                                                Rental Goods
-                                            </button>
-                                        </div>
-                                        <div role="tabpanel" aria-label={activeGoodsTab === "consumable" ? "Consumable goods" : "Rental goods"}>
-                                            {activeGoodsTab === "consumable" ? renderConsumablePicker() : renderRentalPicker()}
-                                        </div>
-                                        <p className="mt-4 text-xs text-[#806A8C]">Selected items from both tabs appear in the Selected Booking Items section below.</p>
-                                    </div>
+                                    <p className="mb-4 text-sm text-[#806A8C]">Add items to your custom event booking. Choose Consumable Goods or Rental Goods below.</p>
                                 )}
+                                <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-[#F7F1FF] p-1.5" role="tablist" aria-label="Choose inventory type">
+                                    <button type="button" role="tab" aria-selected={activeGoodsTab === "consumable"}
+                                            onClick={() => setActiveGoodsTab("consumable")}
+                                            className={`min-h-10 rounded-lg px-3 py-2 text-sm font-semibold transition ${activeGoodsTab === "consumable" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#5F4E75] hover:bg-white"}`}>
+                                        Consumable Goods
+                                    </button>
+                                    <button type="button" role="tab" aria-selected={activeGoodsTab === "rental"}
+                                            onClick={() => setActiveGoodsTab("rental")}
+                                            className={`min-h-10 rounded-lg px-3 py-2 text-sm font-semibold transition ${activeGoodsTab === "rental" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#5F4E75] hover:bg-white"}`}>
+                                        Rental Goods
+                                    </button>
+                                </div>
+                                <div role="tabpanel" aria-label={activeGoodsTab === "consumable" ? "Consumable goods" : "Rental goods"}>
+                                    {bookingType === "package"
+                                        ? renderPackageIncludedGoods()
+                                        : activeGoodsTab === "consumable" ? renderConsumablePicker() : renderRentalPicker()}
+                                </div>
+                                {bookingType === "custom" &&
+                                    <p className="mt-4 text-xs text-[#806A8C]">Selected items from both tabs appear in the Selected Booking Items section below.</p>}
                             </section>
 
                             {/* 5. Selected booking items */}
                             <section className="rounded-2xl border border-[#E6DDF0] bg-white p-4 sm:p-6" aria-labelledby="selected-items-heading">
                                 <h3 id="selected-items-heading" className="mb-4 text-lg font-bold text-[#2B174C]">5. Selected booking items</h3>
                                 {bookingType === "package" ? (
-                                    <div className="rounded-xl border border-[#E6DDF0] p-4 text-sm">
-                                        <strong>{selectedPackageData?.name || "No package selected"}</strong>
-                                        {(selectedPackageData?.inclusions || []).map((item, index) =>
-                                            <p key={`${item.itemType || "consumable"}-${item.equipmentId || item.productId}-${index}`} className="mt-2 text-xs">
-                                                {item.itemType === "rental" ? "Rental · " : "Consumable · "}{item.productName}{item.variantName ? ` — ${item.variantName}` : ""} × {item.quantity}
-                                            </p>
-                                        )}
+                                    <div className="space-y-3">
+                                        <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FD] px-4 py-3">
+                                            <p className="text-sm font-bold text-[#2B174C]">{selectedPackageData?.name || "No package selected"}</p>
+                                            <p className="mt-1 text-xs text-[#806A8C]">Fixed package inclusions — already covered by the package price.</p>
+                                        </div>
+                                        {([{"kind":"consumable", "title":"Consumable Goods"}, {"kind":"rental", "title":"Rental Goods"}] as const).map(group => {
+                                            const included = (selectedPackageData?.inclusions || []).filter(item =>
+                                                group.kind === "rental" ? item.itemType === "rental" : item.itemType !== "rental"
+                                            );
+                                            if (!included.length) return null;
+                                            return (
+                                                <div key={group.kind} className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
+                                                    <div className="border-b border-[#E6DDF0] bg-[#FBF8FD] px-3 py-2.5">
+                                                        <h4 className="text-sm font-bold text-[#1A1220]">{group.title}</h4>
+                                                    </div>
+                                                    <div className="divide-y divide-[#EFE7F4]">
+                                                        {included.map((item, index) => (
+                                                            <div key={`${item.equipmentId ?? item.productId}-${item.variantId ?? 0}-${index}`} className="flex flex-wrap items-center justify-between gap-3 px-3 py-3">
+                                                                <div className="min-w-0">
+                                                                    <p className="break-words text-sm font-semibold text-[#1A1220]">{item.productName}{item.variantName ? ` — ${item.variantName}` : ""}</p>
+                                                                    <p className="mt-0.5 text-xs text-[#806A8C]">Included in package</p>
+                                                                </div>
+                                                                <span className="shrink-0 text-sm font-bold text-[#2B174C]">× {item.quantity}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 ) : (
                                     <div className="overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
@@ -2707,35 +2806,37 @@ export default function CustomerBookingPage() {
                                         )}
                                     </div>
                                 )}
-                                <div className="mt-4 overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
-                                    <div className="border-b border-[#E6DDF0] px-3 py-2.5">
-                                        <h4 className="text-sm font-bold text-[#1A1220]">Selected rental goods</h4>
-                                        <p className="mt-0.5 text-xs text-[#7A6A84]">Type a quantity or use + / − above to update your selection.</p>
-                                    </div>
-                                    {selectedRentalItems.length === 0 ? (
-                                        <p className="px-3 py-5 text-center text-xs text-[#7A6A84]">No rental equipment selected yet.</p>
-                                    ) : (
-                                        <div className="divide-y divide-[#EFE7F4]">
-                                            {selectedRentalItems.map(item => (
-                                                <div key={item.id} className="grid gap-3 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_110px_34px] sm:items-center">
-                                                    <div className="min-w-0">
-                                                        <p className="break-words text-sm font-bold text-[#1A1220]">{item.name}</p>
-                                                        <p className="mt-0.5 text-xs text-[#7A6A84]">{peso(item.dailyRate)} / item / day · {rentalDuration} day(s)</p>
-                                                    </div>
-                                                    <QuantityStepper value={item.quantity}
-                                                                     max={Math.max(0, rentalCatalog.find(x => x.id === item.id)?.availableForDates ?? 0)}
-                                                                     label={`${item.name} selected quantity`}
-                                                                     onChange={quantity => updateRentalQuantity(rentalCatalog.find(x => x.id === item.id) ?? item, quantity)}
-                                                                     inputDisabled={!rentalAvailabilityReady} />
-                                                    <p className="text-sm font-bold text-[#2B174C]">{peso(item.dailyRate * item.quantity * rentalDuration)}</p>
-                                                    <button type="button" aria-label={`Remove ${item.name}`}
-                                                            onClick={() => setSelectedRentalItems(prev => prev.filter(x => x.id !== item.id))}
-                                                            className="flex h-8 w-8 items-center justify-center rounded-lg text-red-500 hover:bg-[#FFF0F0]"><Trash2 size={15} /></button>
-                                                </div>
-                                            ))}
+                                {bookingType === "custom" && (
+                                    <div className="mt-4 overflow-hidden rounded-xl border border-[#E6DDF0] bg-white">
+                                        <div className="border-b border-[#E6DDF0] px-3 py-2.5">
+                                            <h4 className="text-sm font-bold text-[#1A1220]">Selected rental goods</h4>
+                                            <p className="mt-0.5 text-xs text-[#7A6A84]">Type a quantity or use + / − above to update your selection.</p>
                                         </div>
-                                    )}
-                                </div>
+                                        {selectedRentalItems.length === 0 ? (
+                                            <p className="px-3 py-5 text-center text-xs text-[#7A6A84]">No rental equipment selected yet.</p>
+                                        ) : (
+                                            <div className="divide-y divide-[#EFE7F4]">
+                                                {selectedRentalItems.map(item => (
+                                                    <div key={item.id} className="grid gap-3 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_110px_34px] sm:items-center">
+                                                        <div className="min-w-0">
+                                                            <p className="break-words text-sm font-bold text-[#1A1220]">{item.name}</p>
+                                                            <p className="mt-0.5 text-xs text-[#7A6A84]">{peso(item.dailyRate)} / item / day · {rentalDuration} day(s)</p>
+                                                        </div>
+                                                        <QuantityStepper value={item.quantity}
+                                                                         max={Math.max(0, rentalCatalog.find(x => x.id === item.id)?.availableForDates ?? 0)}
+                                                                         label={`${item.name} selected quantity`}
+                                                                         onChange={quantity => updateRentalQuantity(rentalCatalog.find(x => x.id === item.id) ?? item, quantity)}
+                                                                         inputDisabled={!rentalAvailabilityReady} />
+                                                        <p className="text-sm font-bold text-[#2B174C]">{peso(item.dailyRate * item.quantity * rentalDuration)}</p>
+                                                        <button type="button" aria-label={`Remove ${item.name}`}
+                                                                onClick={() => setSelectedRentalItems(prev => prev.filter(x => x.id !== item.id))}
+                                                                className="flex h-8 w-8 items-center justify-center rounded-lg text-red-500 hover:bg-[#FFF0F0]"><Trash2 size={15} /></button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </section>
 
                             {/* 6. Customization & requests */}
@@ -2856,14 +2957,21 @@ export default function CustomerBookingPage() {
                                             <section className="rounded-xl border border-[#E6DDF0] bg-white p-4" aria-label="Summary selected booking items">
                                                 <h4 className="mb-3 text-sm font-bold text-[#2B174C]">5. Selected booking items</h4>
                                                 {bookingType === "package" && (
-                                                    <div className="mb-3 rounded-lg bg-[#FBF9FD] p-3">
-                                                        <p className="text-xs font-bold text-[#2B174C]">Package inclusions</p>
-                                                        {!selectedPackageData?.inclusions?.length ? <p className="mt-2 text-xs text-[#806A8C]">No package selected.</p> :
-                                                            selectedPackageData.inclusions.map((item, index) =>
-                                                                <div key={`${item.itemType || "consumable"}-${item.equipmentId || item.productId}-${index}`} className="mt-2 flex justify-between gap-3 text-xs">
-                                                                    <span className="break-words">{item.itemType === "rental" ? "Rental · " : "Consumable · "}{item.productName}{item.variantName ? ` — ${item.variantName}` : ""}</span>
-                                                                    <span className="shrink-0 font-semibold">× {item.quantity}</span>
-                                                                </div>)}
+                                                    <div className="mb-3 space-y-3 rounded-lg bg-[#FBF9FD] p-3">
+                                                        {!selectedPackageData?.inclusions?.length ? <p className="text-xs text-[#806A8C]">No package selected.</p> :
+                                                            ([{"kind":"consumable", "title":"Consumable Goods"}, {"kind":"rental", "title":"Rental Goods"}] as const).map(group => {
+                                                                const included = (selectedPackageData?.inclusions || []).filter(item =>
+                                                                    group.kind === "rental" ? item.itemType === "rental" : item.itemType !== "rental"
+                                                                );
+                                                                if (!included.length) return null;
+                                                                return <div key={group.kind}>
+                                                                    <p className="mb-2 text-xs font-bold text-[#2B174C]">{group.title}</p>
+                                                                    {included.map((item, index) => <div key={`${item.equipmentId ?? item.productId}-${index}`} className="mt-2 flex justify-between gap-3 text-xs">
+                                                                        <span className="break-words">{item.productName}{item.variantName ? ` — ${item.variantName}` : ""}</span>
+                                                                        <span className="shrink-0 font-semibold">× {item.quantity}</span>
+                                                                    </div>)}
+                                                                </div>;
+                                                            })}
                                                     </div>
                                                 )}
                                                 {bookingType === "custom" && (
@@ -2884,18 +2992,20 @@ export default function CustomerBookingPage() {
                                                         </div>
                                                     </div>
                                                 )}
-                                                <div className={bookingType === "custom" ? "border-t border-[#E6DDF0] pt-3" : ""}>
-                                                    <p className="mb-2 text-xs font-bold text-[#2B174C]">Rental goods</p>
-                                                    {!selectedRentalItems.length ? <p className="text-xs text-[#806A8C]">No rental goods selected.</p> :
-                                                        <div className="max-h-40 space-y-2 overflow-y-auto pr-1">
-                                                            {selectedRentalItems.map(item =>
-                                                                <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-[#EFE7F4] px-3 py-2 text-xs">
-                                                                    <div className="min-w-0"><p className="break-words font-semibold">{item.name}</p>
-                                                                        <p className="text-[#806A8C]">{item.quantity} × {rentalDuration} day(s) · {peso(item.dailyRate)} / day</p></div>
-                                                                    <strong className="shrink-0 text-[#2B174C]">{peso(item.dailyRate * item.quantity * rentalDuration)}</strong>
-                                                                </div>)}
-                                                        </div>}
-                                                </div>
+                                                {bookingType === "custom" && (
+                                                    <div className="border-t border-[#E6DDF0] pt-3">
+                                                        <p className="mb-2 text-xs font-bold text-[#2B174C]">Rental goods</p>
+                                                        {!selectedRentalItems.length ? <p className="text-xs text-[#806A8C]">No rental goods selected.</p> :
+                                                            <div className="max-h-40 space-y-2 overflow-y-auto pr-1">
+                                                                {selectedRentalItems.map(item =>
+                                                                    <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-[#EFE7F4] px-3 py-2 text-xs">
+                                                                        <div className="min-w-0"><p className="break-words font-semibold">{item.name}</p>
+                                                                            <p className="text-[#806A8C]">{item.quantity} × {rentalDuration} day(s) · {peso(item.dailyRate)} / day</p></div>
+                                                                        <strong className="shrink-0 text-[#2B174C]">{peso(item.dailyRate * item.quantity * rentalDuration)}</strong>
+                                                                    </div>)}
+                                                            </div>}
+                                                    </div>
+                                                )}
                                             </section>
 
                                             <section className="rounded-xl border border-[#E6DDF0] bg-white p-4" aria-label="Summary customization requests">
@@ -2912,8 +3022,8 @@ export default function CustomerBookingPage() {
                                                 <div className="space-y-2 text-xs text-[#4E2C66]">
                                                     {bookingType === "package" && <div className="flex justify-between gap-3"><span>Package price</span><strong>{peso(estimatedBase)}</strong></div>}
                                                     {bookingType === "custom" && <div className="flex justify-between gap-3"><span>Consumable goods subtotal</span><strong>{peso(selectedCustomTotal)}</strong></div>}
-                                                    <div className="flex justify-between gap-3"><span>Rental goods subtotal</span><strong>{peso(selectedRentalTotal)}</strong></div>
-                                                    {selectedRentalItems.length > 0 && !rentalDuration && <p className="text-[#806A8C]">Choose event dates to calculate the rental estimate.</p>}
+                                                    {bookingType === "custom" && <div className="flex justify-between gap-3"><span>Rental goods subtotal</span><strong>{peso(selectedRentalTotal)}</strong></div>}
+                                                    {bookingType === "custom" && selectedRentalItems.length > 0 && !rentalDuration && <p className="text-[#806A8C]">Choose event dates to calculate the rental estimate.</p>}
                                                     <div className="flex justify-between gap-3 border-t border-[#E6DDF0] pt-3 text-sm font-bold text-[#2B174C]">
                                                         <span>Estimated booking total</span>
                                                         <span>{peso(estimatedBase + (bookingType === "custom" ? selectedCustomTotal : 0) + selectedRentalTotal + estimatedDelivery + estimatedSetup)}</span>

@@ -9,7 +9,7 @@ const JWT_SECRET = "stocknbook-secret-key";
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "BTA5EYVWLfWcebF",
+    password: "020820@Steph",
     database: "stocknbook",
     ssl: { rejectUnauthorized: false },
 };
@@ -3071,7 +3071,36 @@ exports.handler = async (event) => {
                                                                        FROM rental_maintenance_records WHERE store_id=? AND branch_id=? AND booking_reference=?
                                                                                                          AND start_reason LIKE 'Recovered missing equipment (report #%'
                                                                                                          AND quantity_remaining>0`,[store_id,book.branch_id,book.booking_reference]);
-                return response(200,{missing,damage,recoveryInspectionPending:Number(recoveredInspections[0]?.pending||0)>0});
+                // Return inspection records entered by Staff. Keep this read-only;
+                // only the Manager's existing settlement transaction can make a
+                // customer charge/refund decision. Use workflow.* to retain older
+                // installations whose notes/actor column names differ.
+                const [returnRows]=await connection.execute(`SELECT a.id AS allocationId,
+                                                                      a.quantity AS issuedQuantity,
+                                                                      a.status AS allocationStatus,
+                                                                      COALESCE(e.name,CONCAT('Equipment #',a.equipment_id)) AS equipmentName,
+                                                                      w.*
+                                                               FROM rental_booking_allocations a
+                                                                        LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id
+                                                                        LEFT JOIN rental_equipment e ON e.id=a.equipment_id
+                                                                            AND e.store_id=a.store_id AND e.branch_id=a.branch_id
+                                                               WHERE a.store_id=? AND a.branch_id=?
+                                                                 AND a.booking_reference COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
+                                                               ORDER BY a.id`,[store_id,book.branch_id,book.booking_reference]);
+                const returnReports=returnRows.map(row=>{
+                    const first=(...fields)=>fields.map(field=>row[field]).find(value=>value!==undefined&&value!==null&&String(value).trim()!=='')??null;
+                    return {
+                        allocationId:Number(row.allocationId),equipmentName:String(row.equipmentName),
+                        issuedQuantity:Number(row.issuedQuantity),allocationStatus:String(row.allocationStatus),
+                        returnedReceivedUnits:first('returned_received_units'),
+                        inspectionStatus:first('inspection_status'),inspectedAt:first('inspected_at'),
+                        inspectedBy:first('inspected_by','inspector_name','inspection_actor','inspected_by_name'),
+                        receivedBy:first('received_by','returned_received_by','receiver_name'),
+                        notes:first('inspection_notes','condition_notes','return_notes','notes','inspection_remarks'),
+                    };
+                });
+                return response(200,{missing,damage,returnReports,
+                    recoveryInspectionPending:Number(recoveredInspections[0]?.pending||0)>0});
             }
             // Manager settlement from Booking Quick Actions. The whole decision,
             // deposit application, optional customer claim payment, and refund are
@@ -3281,6 +3310,8 @@ exports.handler = async (event) => {
                         if(Array.isArray(body.missingResolutions)&&body.missingResolutions.some(
                             r=>String(r?.resolution||'')!=='writeoff'))
                             throw rentalError('Missing items are treated as permanent loss. Refresh the booking page.');
+                        if(pendingLosses.length>0 && body.confirmPermanentLoss!==true)
+                            throw rentalError('Manager must explicitly confirm permanent loss of Staff-reported missing units before settlement.');
                         // Reuse the combined-charge reason; already-reviewed claims may
                         // have no new charge field, so retain a clear audit fallback.
                         const decisionNotes=(reason?reason:

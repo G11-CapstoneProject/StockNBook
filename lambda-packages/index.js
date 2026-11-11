@@ -8,7 +8,7 @@ const dbConfig = {
     host: "127.0.0.1",
     user: "root",
     password: "BTA5EYVWLfWcebF",
-    database: "stocknbook",
+    database: "stocknbook_v2",
     ssl: { rejectUnauthorized: false },
 };
 
@@ -20,6 +20,268 @@ const dbPool = mysql.createPool({
     connectionLimit: 5,
     queueLimit: 0,
 });
+
+// ===== BEGIN StockNBook v2 catalog (identical in lambda-products, lambda-pos, lambda-bookings, lambda-packages) =====
+/*
+ * stocknbook_v2 keeps ONE catalog row per product (products) and the prices on
+ * product_variants. Every product has one hidden default variant
+ * (is_default = 1) that carries the product-level price and, for a product
+ * without variants, its stock. Real variants have is_default = 0.
+ * Physical stock exists only in branch_inventory, and a product belongs to the
+ * branch that holds the branch_inventory row of its default variant.
+ *
+ * Rental equipment follows the same rule with equipment / equipment_variants.
+ *
+ * The read models below expose the column names this Lambda already returns,
+ * so API responses and the UI stay exactly the same.
+ */
+const V2_PRODUCT_STOCK_SQL = (p, bi) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.on_hand_quantity)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.on_hand_quantity END`;
+const V2_PRODUCT_ALERT_SQL = (p, bi) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.reorder_level)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.reorder_level END`;
+
+// Product rows exactly as the inventory screens use them (one row per product).
+const V2_PRODUCTS = `(SELECT
+        p.id, p.store_id, base_bi.branch_id, p.product_number,
+        p.product_name AS name, COALESCE(cat.category_name, '') AS category, p.category_id,
+        p.description,
+        ${V2_PRODUCT_STOCK_SQL("p", "base_bi")} AS stock,
+        ${V2_PRODUCT_ALERT_SQL("p", "base_bi")} AS alert_level,
+        dv.cost_price AS original_price, dv.selling_price AS sales_price,
+        dv.pricing_method, dv.markup_percentage,
+        base_bi.expiration_date, p.has_variants, p.next_variant_sequence, p.status,
+        p.created_at, p.updated_at, p.deleted_at,
+        dv.id AS default_variant_id, base_bi.id AS base_inventory_id
+    FROM products p
+             JOIN product_variants dv ON dv.product_id = p.id AND dv.is_default = 1
+             JOIN branch_inventory base_bi ON base_bi.variant_id = dv.id
+             LEFT JOIN categories cat ON cat.id = p.category_id)`;
+
+// Real (selectable) variants with their branch stock.
+const V2_PRODUCT_VARIANTS = `(SELECT
+        v.id, v.store_id, v.product_id, v.variant_number, v.variant_name,
+        v.attributes AS variant_values,
+        COALESCE(vbi.on_hand_quantity, 0) AS stock, COALESCE(vbi.reorder_level, 0) AS alert_level,
+        v.cost_price AS original_price, v.selling_price AS sales_price,
+        v.pricing_method, v.markup_percentage, vbi.expiration_date,
+        vbi.branch_id, vbi.id AS inventory_id, v.status, v.created_at, v.updated_at, v.deleted_at
+    FROM product_variants v
+             LEFT JOIN branch_inventory vbi ON vbi.variant_id = v.id
+    WHERE v.is_default = 0)`;
+
+// Consumable branch stock keyed by (product_id, variant_id); variant_id is NULL
+// for a product without variants.
+const V2_BRANCH_INVENTORY = `(SELECT
+        bi.id, bi.store_id, bi.branch_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE v.id END AS variant_id,
+        bi.variant_id AS catalog_variant_id,
+        bi.on_hand_quantity AS quantity_on_hand, bi.reserved_quantity, bi.unavailable_quantity,
+        bi.reorder_level, v.cost_price, v.selling_price AS sales_price, bi.expiration_date,
+        bi.status, bi.created_at, bi.updated_at
+    FROM branch_inventory bi
+             JOIN product_variants v ON v.id = bi.variant_id)`;
+
+// Batch tracking is not part of stocknbook_v2: each branch_inventory row is
+// its own (single) batch with one expiration date.
+const V2_INVENTORY_BATCHES = `(SELECT
+        bi.id, bi.store_id, bi.branch_id, bi.id AS branch_inventory_id,
+        CONCAT('INV-', bi.id) AS batch_code, bi.on_hand_quantity AS received_quantity,
+        bi.on_hand_quantity AS remaining_quantity, v.cost_price AS unit_cost,
+        bi.updated_at AS received_at, bi.expiration_date,
+        CASE WHEN bi.on_hand_quantity > 0 THEN 'active' ELSE 'depleted' END AS status
+    FROM branch_inventory bi
+             JOIN product_variants v ON v.id = bi.variant_id)`;
+
+// Movement history with the legacy reference/actor fields.
+const V2_INVENTORY_MOVEMENTS = `(SELECT
+        m.id, m.store_id, m.branch_id, m.branch_inventory_id, m.movement_type,
+        m.quantity_change AS quantity_delta, m.quantity_before, m.quantity_after, m.unit_cost,
+        m.reference_type,
+        CASE WHEN m.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING_INDEX(SUBSTRING(m.reason, 5), ': ', 1)
+             ELSE CAST(m.reference_id AS CHAR) END AS reference_id,
+        m.performed_by AS actor_id, mu.role AS actor_role, COALESCE(mu.full_name, 'System') AS actor_name,
+        CASE WHEN m.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING(m.reason, LOCATE(': ', m.reason) + 2)
+             ELSE m.reason END AS notes,
+        m.created_at
+    FROM inventory_movements m
+             LEFT JOIN users mu ON mu.id = m.performed_by)`;
+
+// POS lines keyed by (product_id, variant_id).
+const V2_ORDER_ITEMS = `(SELECT
+        oi.id, oi.store_id, oi.order_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE oi.variant_id END AS variant_id,
+        oi.variant_id AS catalog_variant_id,
+        oi.product_name_snapshot AS product_name, oi.quantity, oi.unit_price,
+        oi.cost_price_at_sale, oi.discount_amount, oi.line_total
+    FROM order_items oi
+             JOIN product_variants v ON v.id = oi.variant_id)`;
+
+// Consumable booking lines keyed by (product_id, variant_id).
+const V2_PRODUCT_BOOKING_ITEMS = `(SELECT
+        bki.id, bki.store_id, bki.booking_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE bki.variant_id END AS variant_id,
+        bki.variant_id AS catalog_variant_id, bki.item_type, bki.quantity,
+        bki.unit_price_snapshot, bki.line_total, bki.item_status, bki.created_at
+    FROM booking_items bki
+             JOIN product_variants v ON v.id = bki.variant_id
+    WHERE bki.item_type = 'consumable')`;
+
+// Consumable package lines keyed by (product_id, variant_id).
+const V2_PRODUCT_PACKAGE_ITEMS = `(SELECT
+        pki.id, pki.store_id, pki.package_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE pki.variant_id END AS variant_id,
+        pki.variant_id AS catalog_variant_id, pki.quantity, pki.unit_price_snapshot, pki.sort_order
+    FROM package_items pki
+             JOIN product_variants v ON v.id = pki.variant_id
+    WHERE pki.item_type = 'consumable')`;
+
+async function v2DefaultVariantId(connection, productId) {
+    const [rows] = await connection.execute(
+        "SELECT id FROM product_variants WHERE product_id = ? AND is_default = 1 LIMIT 1",
+        [productId]
+    );
+    return rows.length ? Number(rows[0].id) : null;
+}
+
+// (product_id, variant_id|null) -> product_variants.id used by stocknbook_v2.
+async function v2CatalogVariantId(connection, productId, variantId) {
+    if (variantId !== null && variantId !== undefined && variantId !== "") return Number(variantId);
+    return v2DefaultVariantId(connection, productId);
+}
+
+// Locks the branch stock row of a product/variant (FOR UPDATE).
+async function v2LockInventory(connection, { storeId, branchId, productId, variantId = null }) {
+    const catalogVariantId = await v2CatalogVariantId(connection, productId, variantId);
+    if (!catalogVariantId) return null;
+    const [rows] = await connection.execute(
+        `SELECT bi.id, bi.variant_id, bi.on_hand_quantity, bi.reserved_quantity,
+                bi.unavailable_quantity, bi.reorder_level, bi.expiration_date
+         FROM branch_inventory bi
+                  JOIN product_variants v ON v.id = bi.variant_id
+         WHERE bi.store_id = ? AND bi.branch_id = ? AND bi.variant_id = ?
+           AND v.product_id = ? AND bi.status = 'active'
+             LIMIT 1
+         FOR UPDATE`,
+        [storeId, branchId, catalogVariantId, productId]
+    );
+    if (!rows.length) return null;
+    return {
+        ...rows[0],
+        id: Number(rows[0].id),
+        quantity_on_hand: Number(rows[0].on_hand_quantity),
+        catalog_variant_id: catalogVariantId,
+    };
+}
+
+// Creates the branch stock row for a catalog variant when it does not exist yet.
+async function v2EnsureInventoryRow(connection, { storeId, branchId, catalogVariantId, reorderLevel = 0, expirationDate = null }) {
+    const [found] = await connection.execute(
+        "SELECT id FROM branch_inventory WHERE branch_id = ? AND variant_id = ? LIMIT 1",
+        [branchId, catalogVariantId]
+    );
+    if (found.length) return Number(found[0].id);
+    const [insert] = await connection.execute(
+        `INSERT INTO branch_inventory
+         (store_id, branch_id, variant_id, on_hand_quantity, reorder_level, expiration_date, status)
+         VALUES (?, ?, ?, 0, ?, ?, 'active')`,
+        [storeId, branchId, catalogVariantId, Math.max(0, Number(reorderLevel) || 0), expirationDate || null]
+    );
+    return Number(insert.insertId);
+}
+
+// inventory_movements.performed_by must be a user of the same store.
+async function v2ActorUserId(connection, storeId, actorId) {
+    const id = Number(actorId);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    const [rows] = await connection.execute(
+        "SELECT id FROM users WHERE id = ? AND store_id = ? LIMIT 1",
+        [id, storeId]
+    );
+    return rows.length ? id : null;
+}
+
+// A text reference (receipt key, request key ...) is kept at the start of the
+// movement reason so it can be read back as reference_id.
+function v2MovementReason(reference, notes) {
+    const ref = String(reference ?? "").replace(/: /g, " ").trim();
+    const text = String(notes ?? "").trim();
+    if (!ref) return text || null;
+    return `Ref ${ref}: ${text}`;
+}
+
+async function v2RecordMovement(connection, {
+    storeId, branchId, inventoryId, movementType, delta, before, after,
+    referenceType = null, referenceId = null, reference = null, unitCost = null,
+    actorId = null, notes = null, bucket = "on_hand",
+}) {
+    const numericReference = Number(referenceId);
+    const [result] = await connection.execute(
+        `INSERT INTO inventory_movements
+         (store_id, branch_id, branch_inventory_id, movement_type, quantity_bucket, quantity_change,
+          quantity_before, quantity_after, unit_cost, reference_type, reference_id, reason, performed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            storeId, branchId, inventoryId, movementType, bucket, Number(delta),
+            Number(before), Number(after),
+            unitCost === null || unitCost === undefined ? null : Number(unitCost),
+            referenceType,
+            Number.isSafeInteger(numericReference) && numericReference > 0 ? numericReference : null,
+            v2MovementReason(reference, notes),
+            await v2ActorUserId(connection, storeId, actorId),
+        ]
+    );
+    return Number(result.insertId);
+}
+
+// Category text -> categories.id (created on first use, like the old free-text category).
+async function v2CategoryId(connection, storeId, categoryName, categoryType = "product") {
+    const name = String(categoryName || "").trim();
+    if (!name) return null;
+    const [rows] = await connection.execute(
+        `SELECT id FROM categories
+         WHERE store_id = ? AND category_type = ? AND LOWER(category_name) = LOWER(?)
+             LIMIT 1`,
+        [storeId, categoryType, name]
+    );
+    if (rows.length) return Number(rows[0].id);
+    const [insert] = await connection.execute(
+        "INSERT INTO categories (store_id, category_name, category_type, status) VALUES (?, ?, ?, 'active')",
+        [storeId, name.slice(0, 150), categoryType]
+    );
+    return Number(insert.insertId);
+}
+
+function v2VariantName(values, fallback) {
+    const name = Object.values(values || {})
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .join(", ");
+    return (name || fallback || "Default").slice(0, 150);
+}
+// ===== END StockNBook v2 catalog =====
+
+// ===== BEGIN StockNBook v2 packages read model =====
+// Packages with the legacy column names (name, original_value, cover_image).
+// Package contents are read from package_items by attachV2Inclusions().
+const V2_PACKAGES = `(SELECT
+        pk.id, pk.store_id, pk.branch_id, pk.package_code, pk.package_name AS name, pk.description,
+        COALESCE((SELECT SUM(pki.quantity * pki.unit_price_snapshot)
+                  FROM package_items pki WHERE pki.package_id = pk.id), 0) AS original_value,
+        pk.discount_type, pk.discount_value, pk.package_price, pk.down_payment_amount, pk.duration,
+        pk.status, pk.category, pk.cover_image_url AS cover_image, NULL AS inclusions,
+        pk.created_at, pk.updated_at
+    FROM packages pk)`;
+// ===== END StockNBook v2 packages read model =====
 
 function jsonResponse(statusCode, headers, body) {
     return { statusCode, headers, body: JSON.stringify(body) };
@@ -117,7 +379,7 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "manager" && decoded?.manager_id) {
         const [rows] = await connection.execute(
-            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS manager_name FROM users WHERE id = ? AND store_id = ? AND role = 'manager' LIMIT 1`,
             [Number(decoded.manager_id), storeId]
         );
 
@@ -130,7 +392,7 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "staff" && decoded?.staff_id) {
         const [rows] = await connection.execute(
-            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS staff_name FROM users WHERE id = ? AND store_id = ? AND role = 'staff' LIMIT 1`,
             [Number(decoded.staff_id), storeId]
         );
 
@@ -143,12 +405,12 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "owner") {
         const [rows] = await connection.execute(
-            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            `SELECT id AS owner_user_id, full_name AS owner_name FROM users WHERE store_id = ? AND role = 'owner' ORDER BY id ASC LIMIT 1`,
             [storeId]
         );
 
         return {
-            id: null,
+            id: rows[0]?.owner_user_id ? Number(rows[0].owner_user_id) : null,
             name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
             role: "Owner",
         };
@@ -163,22 +425,28 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
  * action succeed or fail together.
  */
 async function logEmployeeAction(connection, entry) {
+    // employee_actions.user_id references users.id (owners included).
+    const userId = Number(entry?.employee?.id);
+    if (!Number.isSafeInteger(userId) || userId <= 0) return;
+    const entityId = Number(entry.referenceId);
     await connection.execute(
         `INSERT INTO employee_actions
-         (store_id, branch_id, employee_id, employee_name, employee_role,
-          module, reference_number, action, reference_id, details)
+         (store_id, branch_id, user_id, user_name, user_role,
+          module, reference_number, action, entity_id, details)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             entry.storeId,
             entry.branchId ?? null,
-            entry.employee.id,
-            entry.employee.name,
+            userId,
+            String(entry.employee.name || "Unknown").slice(0, 150),
             entry.employee.role,
             entry.module,
             entry.referenceNumber ?? null,
             entry.action,
-            entry.referenceId ?? null,
-            entry.details ?? null,
+            Number.isSafeInteger(entityId) && entityId > 0 ? entityId : null,
+            entry.details === undefined || entry.details === null
+                ? null
+                : JSON.stringify(entry.details),
         ]
     );
 }
@@ -356,6 +624,65 @@ function normalizePackageRow(row) {
     };
 }
 
+async function attachV2Inclusions(connection, rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return rows || [];
+    const ids = rows.map((row) => Number(row.id)).filter(Boolean);
+    if (!ids.length) return rows;
+    const [items] = await connection.execute(
+        `SELECT pi.package_id AS packageId, pi.item_type AS itemType, pi.quantity,
+                pi.unit_price_snapshot AS unitPrice,
+                v.product_id AS productId,
+                CASE WHEN v.is_default = 1 THEN NULL ELSE v.id END AS variantId,
+                p.product_name AS productName,
+                CASE WHEN v.is_default = 1 THEN '' ELSE v.variant_name END AS variantName,
+                ev.equipment_id AS equipmentId, e.equipment_name AS equipmentName,
+                CASE WHEN pi.item_type = 'rental'
+                         THEN GREATEST(COALESCE(bi.on_hand_quantity, 0) - COALESCE(bi.unavailable_quantity, 0), 0)
+                     ELSE GREATEST(COALESCE(bi.on_hand_quantity, 0) - COALESCE(bi.reserved_quantity, 0)
+                                       - COALESCE(bi.unavailable_quantity, 0), 0) END AS availableStock
+         FROM package_items pi
+                  JOIN packages pk ON pk.id = pi.package_id
+                  LEFT JOIN product_variants v ON v.id = pi.variant_id
+                  LEFT JOIN products p ON p.id = v.product_id
+                  LEFT JOIN equipment_variants ev ON ev.id = pi.equipment_variant_id
+                  LEFT JOIN equipment e ON e.id = ev.equipment_id
+                  LEFT JOIN branch_inventory bi ON bi.branch_id = pk.branch_id
+             AND ((pi.variant_id IS NOT NULL AND bi.variant_id = pi.variant_id)
+                 OR (pi.equipment_variant_id IS NOT NULL AND bi.equipment_variant_id = pi.equipment_variant_id))
+         WHERE pi.package_id IN (${ids.map(() => "?").join(",")})
+         ORDER BY pi.package_id, pi.sort_order, pi.id`,
+        ids
+    );
+    const byPackage = new Map();
+    for (const item of items) {
+        const key = Number(item.packageId);
+        if (!byPackage.has(key)) byPackage.set(key, []);
+        const quantity = Number(item.quantity || 0);
+        const unitPrice = Number(item.unitPrice || 0);
+        byPackage.get(key).push(item.itemType === "rental"
+            ? {
+                itemType: "rental",
+                equipmentId: Number(item.equipmentId),
+                productName: item.equipmentName || "",
+                quantity,
+                unitSalesPrice: unitPrice,
+                availableStock: Number(item.availableStock || 0),
+            }
+            : {
+                productId: Number(item.productId),
+                variantId: item.variantId == null ? null : Number(item.variantId),
+                productName: item.productName || "",
+                variantName: item.variantName || "",
+                quantity,
+                unitSalesPrice: unitPrice,
+                lineValue: unitPrice * quantity,
+                availableStock: Number(item.availableStock || 0),
+            });
+    }
+    return rows.map((row) => ({ ...row, inclusions: byPackage.get(Number(row.id)) || [] }));
+}
+
+
 async function getPackageById(
     connection,
     storeId,
@@ -363,25 +690,20 @@ async function getPackageById(
     packageId
 ) {
     let query = `
-        SELECT *
-        FROM packages
-        WHERE id = ?
-          AND store_id = ?
+        SELECT packages.*
+        FROM ${V2_PACKAGES} packages
+        WHERE packages.id = ?
+          AND packages.store_id = ?
     `;
-
     const params = [packageId, storeId];
-
     if (branchId) {
-        query += " AND branch_id = ?";
+        query += " AND packages.branch_id = ?";
         params.push(branchId);
     }
-
     query += " LIMIT 1";
-
     const [rows] = await connection.execute(query, params);
-
     return rows.length > 0
-        ? normalizePackageRow(rows[0])
+        ? normalizePackageRow((await attachV2Inclusions(connection, rows))[0])
         : null;
 }
 
@@ -434,47 +756,51 @@ function getIncomingPackage(body) {
 async function replacePackageItemsV2(connection, packageId, storeId, branchId, inclusions) {
     // Validate rental equipment against the live, branch-scoped rental catalog.
     // This is NOT a reservation; availability for event dates is checked by Bookings.
+    const rentalLines = [];
     for (const inclusion of inclusions.filter(i => i.itemType === "rental")) {
         const [rows] = await connection.execute(
-            `SELECT id, name, rental_rate_per_day, total_units, maintenance_units, missing_units
-             FROM rental_equipment WHERE id = ? AND store_id = ? AND branch_id = ?
-             AND archived_at IS NULL LIMIT 1`, [inclusion.equipmentId, storeId, branchId]);
+            `SELECT e.id, e.equipment_name AS name, ev.id AS equipmentVariantId, ev.rental_rate_per_day,
+                    bi.on_hand_quantity AS total_units, bi.unavailable_quantity AS held_units
+             FROM equipment e
+                      JOIN equipment_variants ev ON ev.equipment_id = e.id AND ev.is_default = 1
+                      JOIN branch_inventory bi ON bi.equipment_variant_id = ev.id
+             WHERE e.id = ? AND e.store_id = ? AND bi.branch_id = ?
+               AND e.deleted_at IS NULL LIMIT 1`, [inclusion.equipmentId, storeId, branchId]);
         if (!rows.length) throw new Error(`Rental equipment ${inclusion.equipmentId} is not available in this branch.`);
         const equipment = rows[0];
-        const physical = Number(equipment.total_units) - Number(equipment.maintenance_units) - Number(equipment.missing_units);
+        const physical = Number(equipment.total_units) - Number(equipment.held_units);
         if (inclusion.quantity > physical) throw new Error(`${equipment.name}: not enough physical rental units.`);
         if (Number(equipment.rental_rate_per_day) <= 0 ||
             Math.abs(Number(equipment.rental_rate_per_day) - Number(inclusion.unitSalesPrice)) > 0.005)
             throw new Error(`${equipment.name}: rental rate has changed. Refresh the catalog before saving.`);
+        rentalLines.push({ ...inclusion, equipmentVariantId: Number(equipment.equipmentVariantId) });
     }
     const consumableInclusions = inclusions.filter(i => i.itemType !== "rental");
+    const consumableLines = [];
     // Validate tenant/branch ownership before writing normalized package relations.
     for (const inclusion of consumableInclusions) {
-        const params = [inclusion.productId, storeId, branchId];
-        let query = `
-            SELECT p.id, p.has_variants
-            FROM products p
-            WHERE p.id = ?
-              AND p.store_id = ?
-              AND p.branch_id = ?
-              AND p.deleted_at IS NULL
-        `;
-
-        if (inclusion.variantId) {
-            query += `
-              AND EXISTS (
-                  SELECT 1
-                  FROM product_variants pv
-                  WHERE pv.id = ?
-                    AND pv.product_id = p.id
-                    AND pv.deleted_at IS NULL
-              )`;
-            params.push(inclusion.variantId);
+        const [rows] = await connection.execute(
+            `SELECT p.id, p.has_variants
+             FROM products p
+                      JOIN product_variants dv ON dv.product_id = p.id AND dv.is_default = 1
+                      JOIN branch_inventory base_bi ON base_bi.variant_id = dv.id
+             WHERE p.id = ?
+               AND p.store_id = ?
+               AND base_bi.branch_id = ?
+               AND p.deleted_at IS NULL
+                 LIMIT 1`,
+            [inclusion.productId, storeId, branchId]
+        );
+        let variantOk = true;
+        if (rows.length && inclusion.variantId) {
+            const [variants] = await connection.execute(
+                `SELECT id FROM product_variants
+                 WHERE id = ? AND product_id = ? AND is_default = 0 AND deleted_at IS NULL LIMIT 1`,
+                [inclusion.variantId, inclusion.productId]
+            );
+            variantOk = variants.length > 0;
         }
-
-        query += " LIMIT 1";
-        const [rows] = await connection.execute(query, params);
-        if (!rows.length) {
+        if (!rows.length || !variantOk) {
             throw new Error(
                 `Package inclusion references a product/variant that does not belong to this store branch (product ${inclusion.productId}).`
             );
@@ -483,28 +809,33 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
             throw new Error(`Package product ${inclusion.productId} requires a specific variant.`);
         if (Number(rows[0].has_variants)!==1 && inclusion.variantId)
             throw new Error(`Package product ${inclusion.productId} is not variant-based.`);
+        consumableLines.push({
+            ...inclusion,
+            catalogVariantId: await v2CatalogVariantId(connection, inclusion.productId, inclusion.variantId),
+        });
     }
-
     await connection.execute(
         "DELETE FROM package_items WHERE package_id = ?",
         [packageId]
     );
-
-    if (!consumableInclusions.length) return;
-
-    const placeholders = consumableInclusions.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
-    const params = consumableInclusions.flatMap((inclusion, index) => [
+    const lines = inclusions.map((inclusion) => inclusion.itemType === "rental"
+        ? rentalLines.shift()
+        : consumableLines.shift());
+    if (!lines.length) return;
+    const placeholders = lines.map(() => "(?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+    const params = lines.flatMap((line, index) => [
+        storeId,
         packageId,
-        inclusion.productId,
-        inclusion.variantId || null,
-        Number(inclusion.quantity || 1),
-        Number(inclusion.unitSalesPrice || inclusion.unit_price || 0),
+        line.itemType === "rental" ? null : line.catalogVariantId,
+        line.itemType === "rental" ? line.equipmentVariantId : null,
+        line.itemType === "rental" ? "rental" : "consumable",
+        Number(line.quantity || 1),
+        Number(line.unitSalesPrice || line.unit_price || 0),
         index,
     ]);
-
     await connection.execute(
         `INSERT INTO package_items
-         (package_id, product_id, variant_id, quantity, unit_price_snapshot, sort_order)
+         (store_id, package_id, variant_id, equipment_variant_id, item_type, quantity, unit_price_snapshot, sort_order)
          VALUES ${placeholders}`,
         params
     );
@@ -586,19 +917,16 @@ function validatePackageInput(pkg) {
 async function getPackageAccess(connection, decoded, role, storeId) {
     if (role === "owner") return "full";
     if (role !== "manager" && role !== "staff") return "none";
-
     const isManager = role === "manager";
     const accountId = Number(isManager ? decoded?.manager_id : decoded?.staff_id);
     const branchId = Number(decoded?.branch_id);
     if (!Number.isInteger(accountId) || accountId <= 0 ||
         !Number.isInteger(branchId) || branchId <= 0) return "none";
-
-    const table = isManager ? "managers" : "staff";
     const [rows] = await connection.execute(
-        `SELECT permissions FROM ${table}
-         WHERE id = ? AND store_id = ? AND branch_id = ? AND status = 'active'
+        `SELECT permissions FROM users
+         WHERE id = ? AND store_id = ? AND branch_id = ? AND role = ? AND status = 'active'
              LIMIT 1`,
-        [accountId, storeId, branchId]
+        [accountId, storeId, branchId, role]
     );
     if (!rows.length) return "none";
     let permissions = rows[0].permissions || {};
@@ -724,13 +1052,13 @@ exports.handler = async (event) => {
             }
 
             let query = `
-                SELECT *
-                FROM packages
-                WHERE store_id = ?
+                SELECT packages.*
+                FROM ${V2_PACKAGES} packages
+                WHERE packages.store_id = ?
                   AND (
-                    status IS NULL
-                        OR TRIM(status) = ''
-                        OR LOWER(TRIM(status)) = 'active'
+                    packages.status IS NULL
+                        OR TRIM(packages.status) = ''
+                        OR LOWER(TRIM(packages.status)) = 'active'
                     )
             `;
 
@@ -740,7 +1068,7 @@ exports.handler = async (event) => {
 
             if (publicBranchId) {
                 query += `
-            AND branch_id = ?
+            AND packages.branch_id = ?
         `;
 
                 params.push(
@@ -749,7 +1077,7 @@ exports.handler = async (event) => {
             }
 
             query += `
-        ORDER BY id DESC
+        ORDER BY packages.id DESC
     `;
 
             console.log(
@@ -783,7 +1111,7 @@ exports.handler = async (event) => {
              * internal package response identical.
              */
             const packages =
-                rows.map(normalizePackageRow);
+                (await attachV2Inclusions(connection, rows)).map(normalizePackageRow);
 
             return jsonResponse(
                 200,
@@ -888,25 +1216,25 @@ exports.handler = async (event) => {
 
         if (action === "get_packages") {
             let query = `
-                SELECT *
-                FROM packages
-                WHERE store_id = ?
+                SELECT packages.*
+                FROM ${V2_PACKAGES} packages
+                WHERE packages.store_id = ?
             `;
 
             const params = [storeId];
 
             if (activeBranchId) {
-                query += " AND branch_id = ?";
+                query += " AND packages.branch_id = ?";
                 params.push(activeBranchId);
             }
 
-            query += " ORDER BY id DESC";
+            query += " ORDER BY packages.id DESC";
 
             const [rows] = await connection.execute(query, params);
 
             return jsonResponse(200, headers, {
                 success: true,
-                packages: rows.map(normalizePackageRow),
+                packages: (await attachV2Inclusions(connection, rows)).map(normalizePackageRow),
             });
         }
 
@@ -927,7 +1255,7 @@ exports.handler = async (event) => {
                  FROM packages
                  WHERE store_id = ?
                    AND branch_id = ?
-                   AND LOWER(TRIM(name)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(package_name)) = LOWER(TRIM(?))
                      LIMIT 1`,
                 [storeId, activeBranchId, pkg.name]
             );
@@ -947,9 +1275,9 @@ exports.handler = async (event) => {
                      (
                          store_id,
                          branch_id,
-                         name,
+                         package_code,
+                         package_name,
                          description,
-                         original_value,
                          discount_type,
                          discount_value,
                          package_price,
@@ -957,16 +1285,16 @@ exports.handler = async (event) => {
                          duration,
                          status,
                          category,
-                         cover_image,
-                         inclusions
+                         cover_image_url,
+                         updated_by
                      )
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                     [
                         storeId,
                         activeBranchId,
+                        `PKG-NEW-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
                         pkg.name,
                         pkg.description || null,
-                        pkg.originalValue,
                         pkg.discountType,
                         pkg.discountValue,
                         pkg.packagePrice,
@@ -975,11 +1303,17 @@ exports.handler = async (event) => {
                         pkg.status,
                         pkg.category || null,
                         pkg.coverImage || null,
-                        JSON.stringify(pkg.inclusions),
+                        await v2ActorUserId(connection, storeId,
+                            (await getActingEmployee(connection, decoded, tokenRole, storeId)).id),
                     ]
                 );
 
                 const packageId = Number(result.insertId);
+                // The package code is its permanent reference number (PKG-000123).
+                await connection.execute(
+                    "UPDATE packages SET package_code = ? WHERE id = ?",
+                    [buildPackageReference(packageId), packageId]
+                );
 
                 await replacePackageItemsV2(
                     connection,
@@ -1059,7 +1393,7 @@ exports.handler = async (event) => {
                  FROM packages
                  WHERE store_id = ?
                    AND branch_id = ?
-                   AND LOWER(TRIM(name)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(package_name)) = LOWER(TRIM(?))
                    AND id <> ?
                      LIMIT 1`,
                 [storeId, branchId, pkg.name, packageId]
@@ -1078,9 +1412,8 @@ exports.handler = async (event) => {
                 let query = `
                     UPDATE packages
                     SET
-                        name = ?,
+                        package_name = ?,
                         description = ?,
-                        original_value = ?,
                         discount_type = ?,
                         discount_value = ?,
                         package_price = ?,
@@ -1088,8 +1421,7 @@ exports.handler = async (event) => {
                         duration = ?,
                         status = ?,
                         category = ?,
-                        cover_image = ?,
-                        inclusions = ?
+                        cover_image_url = ?
                     WHERE id = ?
                       AND store_id = ?
                 `;
@@ -1097,7 +1429,6 @@ exports.handler = async (event) => {
                 const params = [
                     pkg.name,
                     pkg.description || null,
-                    pkg.originalValue,
                     pkg.discountType,
                     pkg.discountValue,
                     pkg.packagePrice,
@@ -1106,7 +1437,6 @@ exports.handler = async (event) => {
                     pkg.status,
                     pkg.category || null,
                     pkg.coverImage || null,
-                    JSON.stringify(pkg.inclusions),
                     packageId,
                     storeId,
                 ];
@@ -1191,6 +1521,11 @@ exports.handler = async (event) => {
             await connection.beginTransaction();
 
             try {
+                // Package contents go first (package_items references packages).
+                await connection.execute(
+                    "DELETE FROM package_items WHERE package_id = ? AND store_id = ?",
+                    [packageId, storeId]
+                );
                 let query = `
                     DELETE FROM packages
                     WHERE id = ?
@@ -1234,6 +1569,12 @@ exports.handler = async (event) => {
                 return jsonResponse(200, headers, { success: true });
             } catch (error) {
                 await safeRollback(connection);
+                // Bookings keep a reference to the package they were made from.
+                if (String(error?.code || "").startsWith("ER_ROW_IS_REFERENCED")) {
+                    return jsonResponse(409, headers, {
+                        error: "This package is used by existing bookings and cannot be deleted. Set it to Inactive instead.",
+                    });
+                }
                 throw error;
             }
         }

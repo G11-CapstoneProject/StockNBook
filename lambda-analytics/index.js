@@ -25,7 +25,7 @@ const dbConfig = {
     host: process.env.DB_HOST || "127.0.0.1",
     user: process.env.DB_USER || "root",
     password: process.env.DB_PASSWORD || "BTA5EYVWLfWcebF",
-    database: process.env.DB_NAME || "stocknbook",
+    database: process.env.DB_NAME || "stocknbook_v2",
     port: Number(process.env.DB_PORT || 3306),
     ssl: { rejectUnauthorized: false },
 };

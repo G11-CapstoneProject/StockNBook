@@ -56,7 +56,7 @@ function ownerDatabase(): Pool {
             port: Number(process.env.DB_PORT || process.env.MYSQL_PORT || 3306),
             user: process.env.DB_USER || process.env.MYSQL_USER || "root",
             password: process.env.DB_PASSWORD || process.env.MYSQL_PASSWORD! || "BTA5EYVWLfWcebF",
-            database: process.env.DB_NAME || process.env.MYSQL_DATABASE || "stocknbook",
+            database: process.env.DB_NAME || process.env.MYSQL_DATABASE || "stocknbook_v2",
             waitForConnections: true,
             connectionLimit: 6,
             timezone: "+08:00",
@@ -90,8 +90,9 @@ async function verifyOwner(req: NextRequest, db: Pool): Promise<number> {
     const storeId = validId(claims.store_id);
     const email = String(claims.email || "").trim();
     if (!storeId || !email) throw new ManagerAccessError(403, "Invalid owner identity.");
+    // The owner is the store's users row with role 'owner'.
     const [stores] = await db.query<RowDataPacket[]>(
-        "SELECT id FROM stores WHERE id=? AND LOWER(email)=LOWER(?) LIMIT 1", [storeId, email]
+        "SELECT store_id AS id FROM users WHERE store_id=? AND role='owner' AND LOWER(email)=LOWER(?) LIMIT 1", [storeId, email]
     );
     if (!stores.length) throw new ManagerAccessError(403, "Owner account could not be verified.");
     return storeId;
@@ -111,134 +112,34 @@ function handleOwnerError(error: unknown) {
 async function listManagerRequests(req: NextRequest) {
     try {
         const db = ownerDatabase();
-        const storeId = await verifyOwner(req, db);
-        const employeeCode = (await hasEmployeeCodes(db)) ? "m.employee_code" : "NULL";
-        const [rows] = await db.query<RowDataPacket[]>(`
-            SELECT l.id, l.employee_id AS managerId,
-                   ${employeeCode} AS employeeCode,
-                   COALESCE(m.manager_name, l.employee_name) AS managerName,
-                   COALESCE(b.branch_name, l.branch_name) AS branchName,
-                   l.branch_id AS branchId,
-                   DATE_FORMAT(l.leave_date,'%Y-%m-%d') AS leaveDate,
-                   l.leave_type AS leaveType, l.reason,
-                   l.approval_status AS approvalStatus,
-                   l.decision_reason AS decisionReason,
-                   DATE_FORMAT(l.created_at,'%Y-%m-%d %H:%i:%s') AS createdAt
-            FROM stocknbook_staff_leave_requests l
-                     JOIN managers m ON m.id = l.employee_id AND m.store_id = l.store_id AND m.branch_id = l.branch_id
-                     JOIN branches b ON b.id = l.branch_id AND b.store_id = l.store_id
-            WHERE l.store_id=? AND l.employee_role='manager'
-            ORDER BY (l.approval_status='Pending') DESC, l.created_at DESC, l.leave_date ASC
-                LIMIT 1500`, [storeId]);
-        return NextResponse.json({ success: true, requests: rows },
+        await verifyOwner(req, db);
+        // Employee attendance and leave requests are not part of stocknbook_v2.
+        return NextResponse.json({ success: true, requests: [] },
             { headers: { "Cache-Control": "private, no-store" } });
     } catch (error) { return handleOwnerError(error); }
 }
 
-// Employee IDs live in managers/staff.employee_code (added automatically by the
-// app). Until that column exists, Employee ID is shown as empty.
-let employeeCodeCheck: Promise<boolean> | null = null;
-function hasEmployeeCodes(db: Pool): Promise<boolean> {
-    employeeCodeCheck ||= Promise.all(["managers", "staff"].map(table => db.query<RowDataPacket[]>(
-        `SELECT 1 AS x FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`, [table, "employee_code"])))
-        .then(results => results.every(([rows]) => rows.length > 0))
-        .catch(() => false)
-        .then(ready => { if (!ready) employeeCodeCheck = null; return ready; });
-    return employeeCodeCheck;
-}
-
-// Owner-only, read-only view of the attendance managers record from their own
-// dashboards (stocknbook_staff_attendance, employee_role='manager'). Scoped to the
-// verified owner's store across all branches. Hours and status use the same SQL
-// as the manager's own Attendance Log, so both views always agree.
+// Owner-only manager attendance view (attendance is not part of stocknbook_v2).
 async function listManagerAttendance(req: NextRequest) {
     try {
         const db = ownerDatabase();
-        const storeId = await verifyOwner(req, db);
-        const employeeCode = (await hasEmployeeCodes(db)) ? "m.employee_code" : "NULL";
-        const [rows] = await db.query<RowDataPacket[]>(`
-            SELECT a.id, a.employee_id AS managerId,
-                   ${employeeCode} AS employeeCode,
-                   COALESCE(m.manager_name, a.employee_name) AS managerName,
-                   a.branch_id AS branchId,
-                   COALESCE(b.branch_name, a.branch_name) AS branchName,
-                   DATE_FORMAT(a.attendance_date,'%Y-%m-%d') AS date,
-                   DATE_FORMAT(a.time_in,'%Y-%m-%dT%H:%i:%s') AS timeIn,
-                   DATE_FORMAT(a.time_out,'%Y-%m-%dT%H:%i:%s') AS timeOut,
-                   CASE WHEN a.time_in IS NOT NULL AND a.time_out IS NOT NULL
-                        THEN ROUND(TIMESTAMPDIFF(MINUTE,a.time_in,a.time_out)/60,2) ELSE NULL END AS hoursWorked,
-                   CASE WHEN a.attendance_status='Present' AND a.time_out IS NULL THEN 'On Duty'
-                        WHEN a.attendance_status='Present' THEN 'Completed'
-                        ELSE a.attendance_status END AS status
-            FROM stocknbook_staff_attendance a
-                     JOIN managers m ON m.id = a.employee_id AND m.store_id = a.store_id
-                     LEFT JOIN branches b ON b.id = a.branch_id AND b.store_id = a.store_id
-            WHERE a.store_id=? AND a.employee_role='manager'
-              AND a.attendance_date >= DATE_SUB(DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+08:00')), INTERVAL 90 DAY)
-            ORDER BY a.attendance_date DESC, a.id DESC
-                LIMIT 1500`, [storeId]);
-        return NextResponse.json({ success: true, attendance: rows },
+        await verifyOwner(req, db);
+        // Employee attendance (time in / time out) is not part of stocknbook_v2.
+        return NextResponse.json({ success: true, attendance: [] },
             { headers: { "Cache-Control": "private, no-store" } });
     } catch (error) { return handleOwnerError(error); }
 }
 
 async function reviewManagerRequest(req: NextRequest, body: Record<string, unknown>) {
-    let connection: Awaited<ReturnType<Pool["getConnection"]>> | undefined;
     try {
         const db = ownerDatabase();
-        const storeId = await verifyOwner(req, db);
-        const ids = Array.isArray(body.requestIds) ? body.requestIds.map(validId) : [];
-        const decision = String(body.decision || "");
-        const note = String(body.decisionReason || "").trim();
-        if (!ids.length || ids.length > 90 || new Set(ids).size !== ids.length || ids.some(id => !id) ||
-            !["Approved", "Rejected"].includes(decision) || note.length > 500 ||
-            (decision === "Rejected" && note.length < 3)) {
-            throw new ManagerAccessError(400, "Select one valid manager request. Provide a reason when rejecting.");
-        }
-        connection = await db.getConnection();
-        await connection.beginTransaction();
-        const placeholders = ids.map(() => "?").join(",");
-        const [rows] = await connection.query<RowDataPacket[]>(`
-            SELECT id, employee_id AS managerId, branch_id AS branchId,
-                   leave_type AS leaveType, reason, approval_status AS status,
-                   DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s') AS createdAt,
-                   DATE_FORMAT(leave_date,'%Y-%m-%d') AS leaveDate
-            FROM stocknbook_staff_leave_requests
-            WHERE id IN (${placeholders}) AND store_id=? AND employee_role='manager'
-            ORDER BY leave_date FOR UPDATE`, [...ids, storeId]);
-        if (rows.length !== ids.length) throw new ManagerAccessError(404, "Manager request not found in your store.");
-        if (rows.some(row => row.status !== "Pending")) throw new ManagerAccessError(409, "The manager request was already reviewed.");
-        if (rows.some(row => Number(row.managerId) !== Number(rows[0].managerId) ||
-            Number(row.branchId) !== Number(rows[0].branchId) ||
-            row.leaveType !== rows[0].leaveType || row.reason !== rows[0].reason ||
-            row.createdAt !== rows[0].createdAt)) {
-            throw new ManagerAccessError(400, "Only dates from the same manager request can be reviewed together.");
-        }
-        if (decision === "Approved") {
-            const dates = rows.map(row => String(row.leaveDate));
-            const [attendance] = await connection.query<RowDataPacket[]>(`
-                SELECT DATE_FORMAT(attendance_date,'%Y-%m-%d') AS day
-                FROM stocknbook_staff_attendance
-                WHERE store_id=? AND branch_id=? AND employee_id=? AND employee_role='manager'
-                  AND attendance_date IN (${dates.map(() => "?").join(",")})
-                    LIMIT 1 FOR UPDATE`, [storeId, rows[0].branchId, rows[0].managerId, ...dates]);
-            if (attendance.length) throw new ManagerAccessError(409,
-                `Manager attendance is already recorded for ${attendance[0].day}.`);
-        }
-        const [result] = await connection.execute<ResultSetHeader>(`
-                    UPDATE stocknbook_staff_leave_requests
-                    SET approval_status=?, decision_reason=?, approved_by=?,
-                        reviewed_at=CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+08:00')
-                    WHERE id IN (${placeholders}) AND store_id=? AND employee_role='manager' AND approval_status='Pending'`,
-            [decision, note || null, storeId, ...ids, storeId]);
-        if (result.affectedRows !== ids.length) throw new ManagerAccessError(409, "Request changed. Please refresh.");
-        await connection.commit();
-        return NextResponse.json({ success: true, updated: ids.length });
+        await verifyOwner(req, db);
+        void body;
+        // Leave requests are not part of stocknbook_v2.
+        throw new ManagerAccessError(410, "Manager leave requests are no longer available.");
     } catch (error) {
-        if (connection) await connection.rollback().catch(() => undefined);
         return handleOwnerError(error);
-    } finally { connection?.release(); }
+    }
 }
 
 async function setManagerAccess(req: NextRequest, body: Record<string, unknown>, action: string) {
@@ -249,8 +150,8 @@ async function setManagerAccess(req: NextRequest, body: Record<string, unknown>,
         if (!managerId) throw new ManagerAccessError(400, "A valid manager ID is required.");
         const activate = action === "reactivate_manager";
         const [result] = await db.execute<ResultSetHeader>(`
-                    UPDATE managers SET status=?
-                    WHERE id=? AND store_id=? AND status=?`,
+                    UPDATE users SET status=?
+                    WHERE id=? AND store_id=? AND role='manager' AND status=?`,
             [activate ? "active" : "inactive", managerId, storeId,
                 activate ? "inactive" : "active"]);
         if (result.affectedRows !== 1) throw new ManagerAccessError(409,

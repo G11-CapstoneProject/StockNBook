@@ -27,7 +27,7 @@ const dbConfig = {
     host: "127.0.0.1",
     user: "root",
     password: "BTA5EYVWLfWcebF",
-    database: "stocknbook",
+    database: "stocknbook_v2",
     ssl: { rejectUnauthorized: false },
 };
 
@@ -200,31 +200,6 @@ function changeTypeForPlanChange(oldPlan, newPlan) {
         : "downgrade";
 }
 
-async function ensureSubscriptionPlanChangesTable(connection) {
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS subscription_plan_changes (
-                                                                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                                 subscription_id BIGINT NULL,
-                                                                 store_id BIGINT NOT NULL,
-                                                                 current_plan_id BIGINT NOT NULL,
-                                                                 target_plan_id BIGINT NOT NULL,
-                                                                 change_type VARCHAR(20) NOT NULL DEFAULT 'DOWNGRADE',
-            status VARCHAR(30) NOT NULL DEFAULT 'SCHEDULED',
-            requested_by_role VARCHAR(30) NOT NULL DEFAULT 'owner',
-            requested_by_email VARCHAR(255) NULL,
-            requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            effective_at DATE NOT NULL,
-            cancelled_at DATETIME NULL,
-            applied_at DATETIME NULL,
-            notes VARCHAR(500) NULL,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_subscription_plan_changes_store_status (store_id, status),
-            INDEX idx_subscription_plan_changes_subscription_status (subscription_id, status),
-            INDEX idx_subscription_plan_changes_effective (status, effective_at)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-}
-
 function getBearerToken(headers = {}) {
     const value = headers.Authorization || headers.authorization || "";
     return value.replace(/^Bearer\s+/i, "").trim();
@@ -251,9 +226,10 @@ async function requirePlatformAdmin(event, connection) {
     );
 
     const [rows] = await connection.execute(
-        `SELECT platform_admin_id, full_name, email, role, status, is_active
+        `SELECT id AS platform_admin_id, full_name, email, role, status,
+                CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END AS is_active
          FROM platform_admins
-         WHERE platform_admin_id = ?
+         WHERE id = ?
              LIMIT 1`,
         [adminId]
     );
@@ -272,30 +248,40 @@ async function requirePlatformAdmin(event, connection) {
     return admin;
 }
 
-async function getPaymentColumns(connection) {
-    const [rows] = await connection.query("SHOW COLUMNS FROM payments");
-    const names = new Set(rows.map((row) => row.Field));
-
-    const pick = (candidates, required = true) => {
-        const found = candidates.find((candidate) => names.has(candidate));
-        if (!found && required) {
-            throw new Error(`payments table is missing a required column. Expected one of: ${candidates.join(", ")}`);
-        }
-        return found || null;
-    };
-
+// Subscription payment submissions are stored in subscription_payments.
+async function getPaymentColumns() {
     return {
-        id: pick(["id", "payment_id"]),
-        storeId: pick(["store_id"]),
-        planId: pick(["plan_id", "requested_plan_id"]),
-        amount: pick(["amount", "amount_remitted", "amount_submitted"]),
-        reference: pick(["reference_no", "reference_number", "gcash_reference_no", "gcash_reference"]),
-        receipt: pick(["receipt_url", "proof_file_url", "receipt_file_url"], false),
-        status: pick(["status"]),
-        reviewer: pick(["reviewed_by_admin_id", "verified_by_admin_id", "reviewing_admin_id"], false),
-        createdAt: pick(["created_at", "submitted_at", "payment_date"], false),
-        reviewedAt: pick(["reviewed_at", "verified_at"], false),
+        id: "id",
+        storeId: "store_id",
+        planId: "plan_id",
+        amount: "amount",
+        reference: "reference_number",
+        receipt: "receipt_storage_key",
+        status: "status",
+        reviewer: "reviewed_by",
+        createdAt: "submitted_at",
+        reviewedAt: "reviewed_at",
     };
+}
+
+// plans.plan_code is required and unique; derive it from the plan name.
+async function nextPlanCode(connection, name) {
+    const base = String(name || "plan")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 32) || "plan";
+    const [rows] = await connection.execute(
+        "SELECT plan_code FROM plans WHERE plan_code = ? OR plan_code LIKE ?",
+        [base, `${base}_%`]
+    );
+    const used = new Set(rows.map((row) => String(row.plan_code)));
+    if (!used.has(base)) return base;
+    for (let suffix = 2; suffix < 1000; suffix += 1) {
+        const candidate = `${base}_${suffix}`;
+        if (!used.has(candidate)) return candidate;
+    }
+    throw httpError(409, "Unable to create a unique plan code.");
 }
 
 async function listPaymentSubmissions(connection, status, search) {
@@ -313,7 +299,7 @@ async function listPaymentSubmissions(connection, status, search) {
     const cleanSearch = text(search, 120);
     if (cleanSearch) {
         const like = `%${cleanSearch}%`;
-        filters.push(`(s.store_name LIKE ? OR s.owner_name LIKE ? OR s.email LIKE ? OR p.${c.reference} LIKE ?)`);
+        filters.push(`(s.store_name LIKE ? OR ou.full_name LIKE ? OR s.email LIKE ? OR p.${c.reference} LIKE ?)`);
         values.push(like, like, like, like);
     }
 
@@ -336,12 +322,13 @@ async function listPaymentSubmissions(connection, status, search) {
              ${reviewedSelect} AS reviewed_at,
              ${reviewerSelect} AS reviewed_by_admin_id,
              s.store_name,
-             s.owner_name,
+             ou.full_name AS owner_name,
              s.email AS owner_email,
-             pl.name AS requested_plan_name,
+             pl.plan_name AS requested_plan_name,
              pl.price AS plan_price
-         FROM payments p
+         FROM subscription_payments p
                   INNER JOIN stores s ON s.id = p.${c.storeId}
+                  LEFT JOIN users ou ON ou.store_id = s.id AND ou.role = 'owner'
                   LEFT JOIN plans pl ON pl.id = p.${c.planId}
              ${where}
          ORDER BY
@@ -398,18 +385,19 @@ async function getPaymentSubmission(connection, paymentId) {
              ${reviewedSelect} AS reviewed_at,
              ${reviewerSelect} AS reviewed_by_admin_id,
              s.store_name,
-             s.owner_name,
+             ou.full_name AS owner_name,
              s.email AS owner_email,
-             pl.name AS requested_plan_name,
+             pl.plan_name AS requested_plan_name,
              pl.price AS plan_price,
              sub.id AS subscription_id,
              sub.status AS subscription_status,
              sub.started_at,
              sub.expires_at,
-             cur.name AS current_plan_name,
+             cur.plan_name AS current_plan_name,
              cur.id AS current_plan_id
-         FROM payments p
+         FROM subscription_payments p
                   INNER JOIN stores s ON s.id = p.${c.storeId}
+                  LEFT JOIN users ou ON ou.store_id = s.id AND ou.role = 'owner'
                   LEFT JOIN plans pl ON pl.id = p.${c.planId}
                   LEFT JOIN subscriptions sub ON sub.store_id = s.id
                   LEFT JOIN plans cur ON cur.id = sub.plan_id
@@ -455,7 +443,7 @@ async function getSubscriptionSummary(connection) {
              SUM(CASE WHEN UPPER(${c.status}) = 'PENDING' THEN 1 ELSE 0 END) AS pending_verification,
              SUM(CASE WHEN UPPER(${c.status}) = 'APPROVED' THEN 1 ELSE 0 END) AS approved_payments,
              SUM(CASE WHEN UPPER(${c.status}) = 'REJECTED' THEN 1 ELSE 0 END) AS rejected_payments
-         FROM payments`
+         FROM subscription_payments`
     );
 
     const [subscriptionRows] = await connection.execute(
@@ -484,7 +472,7 @@ async function listBusinesses(connection, search) {
 
     if (cleanSearch) {
         const like = `%${cleanSearch}%`;
-        where = `WHERE (s.store_name LIKE ? OR s.owner_name LIKE ? OR s.email LIKE ?)`;
+        where = `WHERE (s.store_name LIKE ? OR ou.full_name LIKE ? OR s.email LIKE ?)`;
         values.push(like, like, like);
     }
 
@@ -492,18 +480,20 @@ async function listBusinesses(connection, search) {
         `SELECT
              s.id AS business_id,
              s.store_name,
-             s.owner_name,
+             ou.full_name AS owner_name,
              s.email AS owner_email,
+             s.status AS store_status,
              sub.id AS subscription_id,
              sub.status AS raw_subscription_status,
              sub.started_at,
              sub.expires_at,
-             sub.auto_renew,
+             0 AS auto_renew,
              pl.id AS plan_id,
-             pl.name AS plan_name,
-             COALESCE((SELECT SUM(p2.${c.amount}) FROM payments p2 WHERE p2.${c.storeId} = s.id AND UPPER(p2.${c.status}) = 'APPROVED'), 0) AS lifetime_paid,
+             pl.plan_name AS plan_name,
+             COALESCE((SELECT SUM(p2.${c.amount}) FROM subscription_payments p2 WHERE p2.${c.storeId} = s.id AND UPPER(p2.${c.status}) = 'APPROVED'), 0) AS lifetime_paid,
              (SELECT COUNT(*) FROM products prod WHERE prod.store_id = s.id) AS inventory_item_count
          FROM stores s
+                  LEFT JOIN users ou ON ou.store_id = s.id AND ou.role = 'owner'
                   LEFT JOIN subscriptions sub ON sub.store_id = s.id
                   LEFT JOIN plans pl ON pl.id = sub.plan_id
              ${where}
@@ -535,7 +525,6 @@ async function listBusinesses(connection, search) {
 }
 
 async function listSubscriptions(connection, search, statusFilter) {
-    await ensureSubscriptionPlanChangesTable(connection);
 
     const values = [];
     const filters = [];
@@ -543,7 +532,7 @@ async function listSubscriptions(connection, search, statusFilter) {
 
     if (cleanSearch) {
         const like = `%${cleanSearch}%`;
-        filters.push("(s.store_name LIKE ? OR s.owner_name LIKE ? OR s.email LIKE ?)");
+        filters.push("(s.store_name LIKE ? OR ou.full_name LIKE ? OR s.email LIKE ?)");
         values.push(like, like, like);
     }
 
@@ -567,37 +556,34 @@ async function listSubscriptions(connection, search, statusFilter) {
              sub.store_id,
              sub.plan_id,
              sub.status AS raw_status,
-             sub.auto_renew,
+             0 AS auto_renew,
              sub.started_at,
              sub.expires_at,
              sub.created_at,
              s.store_name,
-             s.owner_name,
+             s.status AS store_status,
+             ou.full_name AS owner_name,
              s.email AS owner_email,
-             pl.name AS plan_name,
+             pl.plan_name AS plan_name,
              pl.price AS plan_price,
-             spc.id AS plan_change_id,
-             spc.status AS plan_change_status,
-             spc.effective_at AS plan_change_effective_at,
-             spc.target_plan_id AS plan_change_target_plan_id,
-             target_plan.name AS plan_change_target_plan_name,
+             CASE WHEN sub.scheduled_plan_id IS NULL THEN NULL ELSE sub.id END AS plan_change_id,
+             CASE
+                 WHEN sub.scheduled_plan_id IS NULL THEN NULL
+                 WHEN DATE(sub.scheduled_change_at) <= UTC_DATE() AND COALESCE(target_plan.price, 0) > 0 THEN 'AWAITING_PAYMENT'
+             ELSE 'SCHEDULED'
+        END AS plan_change_status,
+             sub.scheduled_change_at AS plan_change_effective_at,
+             sub.scheduled_plan_id AS plan_change_target_plan_id,
+             target_plan.plan_name AS plan_change_target_plan_name,
              target_plan.price AS plan_change_target_plan_price,
-             (SELECT COUNT(*) FROM subscription_history sh WHERE sh.subscription_id = sub.id) AS history_count
+             (SELECT COUNT(*) FROM subscription_payments sh WHERE sh.store_id = sub.store_id AND UPPER(sh.status) = 'APPROVED') AS history_count
          FROM subscriptions sub
                   INNER JOIN stores s ON s.id = sub.store_id
+                  LEFT JOIN users ou ON ou.store_id = s.id AND ou.role = 'owner'
                   INNER JOIN plans pl ON pl.id = sub.plan_id
-                  LEFT JOIN subscription_plan_changes spc
-                            ON spc.id = (
-                                SELECT spc2.id
-                                FROM subscription_plan_changes spc2
-                                WHERE spc2.store_id = sub.store_id
-                                  AND UPPER(spc2.status) IN ('SCHEDULED', 'AWAITING_PAYMENT')
-                                ORDER BY spc2.id DESC
-             LIMIT 1
-             )
-             LEFT JOIN plans target_plan ON target_plan.id = spc.target_plan_id
-             ${where}
-         ORDER BY sub.expires_at ASC, s.store_name ASC`,
+                  LEFT JOIN plans target_plan ON target_plan.id = sub.scheduled_plan_id
+        ${where}
+        ORDER BY sub.expires_at ASC, s.store_name ASC`,
         values
     );
 
@@ -634,23 +620,41 @@ async function listSubscriptions(connection, search, statusFilter) {
 async function getSubscriptionHistory(connection, subscriptionId) {
     const [rows] = await connection.execute(
         `SELECT
-             sh.id,
-             sh.subscription_id,
-             sh.store_id,
-             sh.old_plan_id,
-             old_plan.name AS old_plan_name,
-             sh.new_plan_id,
-             new_plan.name AS new_plan_name,
-             sh.change_type,
-             sh.changed_by,
+             h.id,
+             h.subscription_id,
+             h.store_id,
+             h.old_plan_id,
+             old_plan.plan_name AS old_plan_name,
+             h.new_plan_id,
+             new_plan.plan_name AS new_plan_name,
+             CASE
+                 WHEN h.old_plan_id IS NULL THEN 'upgrade'
+                 WHEN h.old_plan_id = h.new_plan_id THEN 'renewal'
+                 WHEN COALESCE(new_plan.price, 0) > COALESCE(old_plan.price, 0) THEN 'upgrade'
+                 ELSE 'downgrade'
+                 END AS change_type,
+             h.changed_by,
              pa.full_name AS changed_by_name,
-             sh.created_at
-         FROM subscription_history sh
-                  LEFT JOIN plans old_plan ON old_plan.id = sh.old_plan_id
-                  LEFT JOIN plans new_plan ON new_plan.id = sh.new_plan_id
-                  LEFT JOIN platform_admins pa ON pa.platform_admin_id = sh.changed_by
-         WHERE sh.subscription_id = ?
-         ORDER BY sh.created_at DESC, sh.id DESC`,
+             h.created_at
+         FROM (
+                  SELECT
+                      sh.id,
+                      sub.id AS subscription_id,
+                      sh.store_id,
+                      LAG(sh.plan_id) OVER (PARTITION BY sh.store_id ORDER BY sh.reviewed_at, sh.id) AS old_plan_id,
+                      sh.plan_id AS new_plan_id,
+                      sh.reviewed_by AS changed_by,
+                      sh.reviewed_at AS created_at
+                  FROM subscriptions sub
+                           INNER JOIN subscription_payments sh
+                                      ON sh.store_id = sub.store_id
+                                          AND UPPER(sh.status) = 'APPROVED'
+                  WHERE sub.id = ?
+              ) h
+                  LEFT JOIN plans old_plan ON old_plan.id = h.old_plan_id
+                  LEFT JOIN plans new_plan ON new_plan.id = h.new_plan_id
+                  LEFT JOIN platform_admins pa ON pa.id = h.changed_by
+         ORDER BY h.created_at DESC, h.id DESC`,
         [subscriptionId]
     );
     return rows.map((row) => ({
@@ -670,27 +674,33 @@ async function getSubscriptionHistory(connection, subscriptionId) {
 
 async function listAuditLogs(connection, businessId) {
     const values = [];
-    const where = businessId ? "WHERE sal.business_id = ?" : "";
+    const where = businessId ? "AND sal.store_id = ?" : "";
     if (businessId) values.push(positiveId(businessId, "business_id"));
 
     const [rows] = await connection.execute(
         `SELECT
-             sal.audit_log_id,
-             sal.business_id,
+             sal.id AS audit_log_id,
+             sal.store_id AS business_id,
              sal.subscription_id,
-             sal.payment_submission_id,
-             sal.action,
-             sal.previous_status,
-             sal.new_status,
-             sal.performed_by_admin_id,
-             sal.reason,
-             sal.created_at,
+             sal.id AS payment_submission_id,
+             CASE WHEN UPPER(sal.status) = 'APPROVED' THEN 'PAYMENT_APPROVED' ELSE 'PAYMENT_REJECTED' END AS action,
+             'PENDING' AS previous_status,
+             CASE WHEN UPPER(sal.status) = 'APPROVED' THEN 'ACTIVE' ELSE 'REJECTED' END AS new_status,
+             sal.reviewed_by AS performed_by_admin_id,
+             CASE
+                 WHEN UPPER(sal.status) = 'APPROVED' THEN CONCAT('Approved ', COALESCE(pl.plan_name, ''), ' plan payment.')
+                 ELSE sal.rejection_reason
+        END AS reason,
+             sal.reviewed_at AS created_at,
              pa.full_name AS performed_by
-         FROM subscription_audit_logs sal
-                  LEFT JOIN platform_admins pa ON pa.platform_admin_id = sal.performed_by_admin_id
-             ${where}
-         ORDER BY sal.created_at DESC, sal.audit_log_id DESC
-             LIMIT 200`,
+         FROM subscription_payments sal
+                  LEFT JOIN plans pl ON pl.id = sal.plan_id
+                  LEFT JOIN platform_admins pa ON pa.id = sal.reviewed_by
+         WHERE sal.reviewed_at IS NOT NULL
+           AND UPPER(sal.status) IN ('APPROVED', 'REJECTED')
+        ${where}
+        ORDER BY sal.reviewed_at DESC, sal.id DESC
+        LIMIT 200`,
         values
     );
 
@@ -712,7 +722,7 @@ async function getPublicPlans() {
     const [rows] = await pool.execute(
         `SELECT
              p.id,
-             p.name,
+             p.plan_name AS name,
              p.price,
              p.max_inventory,
              p.max_bookings,
@@ -746,7 +756,7 @@ async function getPlans(connection) {
     const [rows] = await connection.execute(
         `SELECT
              p.id,
-             p.name,
+             p.plan_name AS name,
              p.price,
              p.max_inventory,
              p.max_bookings,
@@ -802,10 +812,11 @@ async function createPlan(connection, body) {
 
     const [result] = await connection.execute(
         `INSERT INTO plans
-         (name, price, max_inventory, max_bookings, max_staff, max_branches,
+         (plan_code, plan_name, price, max_inventory, max_bookings, max_staff, max_branches,
           is_archived, has_low_stock_alerts, has_analytics, has_forecasting, has_multi_store)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
         [
+            await nextPlanCode(connection, name),
             name,
             price,
             limits.max_inventory,
@@ -837,7 +848,7 @@ async function updatePlan(connection, body) {
 
     const [result] = await connection.execute(
         `UPDATE plans SET
-                          name = ?, price = ?, max_inventory = ?, max_bookings = ?, max_staff = ?, max_branches = ?,
+                          plan_name = ?, price = ?, max_inventory = ?, max_bookings = ?, max_staff = ?, max_branches = ?,
                           has_low_stock_alerts = ?, has_analytics = ?, has_forecasting = ?, has_multi_store = ?
          WHERE id = ?`,
         [
@@ -1052,38 +1063,15 @@ async function sendSubscriptionDecisionEmail(toEmail, details) {
         socket.end();
     }
 }
-
-
-// Local/deployed scheduler entry point. Run once daily (for example with Windows
-// Task Scheduler). Do NOT invoke this from each dashboard render; an email must
-// be generated even when the owner is not logged in.
-async function ensureExpiryNotificationTable(connection) {
-    await connection.query(`CREATE TABLE IF NOT EXISTS subscription_expiry_notices (
-                                                                                       id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                                                       subscription_id BIGINT NOT NULL,
-                                                                                       expires_on DATE NOT NULL,
-                                                                                       notice_type VARCHAR(24) NOT NULL,
-        delivery_status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
-        attempts INT NOT NULL DEFAULT 0,
-        last_attempt_at DATETIME NULL,
-        sent_at DATETIME NULL,
-        last_error VARCHAR(500) NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY uniq_expiry_notice (subscription_id, expires_on, notice_type)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-}
-
 async function runExpiryNotificationJob() {
     const connection = await pool.getConnection();
     const results = { candidates: 0, sent: 0, failed: 0, skipped: 0 };
     try {
-        await ensureExpiryNotificationTable(connection);
-        await reconcileAllStorePlanLabels(connection);
         // Only non-cancelled paid plans. The seven-day email is sent at most
         // once per subscription/expiration date; missed job days are recovered.
         const [subscriptions] = await connection.execute(`
             SELECT sub.id AS subscription_id, sub.expires_at,
-                   s.store_name, s.email AS owner_email, p.name AS plan_name,
+                   s.store_name, s.email AS owner_email, p.plan_name AS plan_name,
                    DATEDIFF(DATE(sub.expires_at), CURDATE()) AS days_remaining
             FROM subscriptions sub
                      INNER JOIN stores s ON s.id = sub.store_id
@@ -1151,65 +1139,14 @@ async function runExpiryNotificationJob() {
         connection.release();
     }
 }
-
-// The paid subscription is the authority; stores.plan is kept in sync for
-// legacy views and the store directory. Writes only when a label differs.
-async function syncStorePlanLabel(connection, storeId, effectivePlanName) {
-    if (!effectivePlanName) return;
-    await connection.execute(
-        "UPDATE stores SET plan = ? WHERE id = ? AND (plan IS NULL OR plan <> ?)",
-        [effectivePlanName, Number(storeId), effectivePlanName]
-    );
-}
-
-// Called by the existing daily expiration notification job so legacy plan
-// labels change even when a business owner is not signed in. Reuses the
-// existing paid-access and 48-hour pre-expiry payment grace rules.
-async function reconcileAllStorePlanLabels(connection) {
-    const c = await getPaymentColumns(connection);
-    const pendingGrace = c.createdAt
-        ? `EXISTS (
-              SELECT 1 FROM payments pm
-              WHERE pm.${c.storeId} = s.id
-                AND UPPER(pm.${c.status}) = 'PENDING'
-                AND DATE(pm.${c.createdAt}) <= DATE(sub.expires_at)
-                AND CURDATE() <= DATE_ADD(DATE(sub.expires_at), INTERVAL 2 DAY)
-          )`
-        : '0';
-    const [rows] = await connection.execute(`
-        SELECT s.id AS store_id, p.name AS paid_plan_name,
-            CASE WHEN LOWER(sub.status) IN ('active', 'expiring')
-                     AND (sub.expires_at IS NULL OR DATE(sub.expires_at) >= CURDATE())
-                 THEN 1 ELSE 0 END AS has_paid_access,
-            CASE WHEN LOWER(sub.status) IN ('active', 'expiring')
-                     AND p.price > 0 AND sub.expires_at IS NOT NULL
-                     AND DATE(sub.expires_at) < CURDATE()
-                     AND ${pendingGrace}
-                 THEN 1 ELSE 0 END AS has_review_grace
-        FROM stores s
-        LEFT JOIN subscriptions sub ON sub.id = (
-            SELECT s2.id FROM subscriptions s2
-            WHERE s2.store_id = s.id ORDER BY s2.id DESC LIMIT 1
-        )
-        LEFT JOIN plans p ON p.id = sub.plan_id
-    `);
-    for (const row of rows) {
-        const effectiveName =
-            (Number(row.has_paid_access) === 1 || Number(row.has_review_grace) === 1)
-                ? (row.paid_plan_name || 'Starter') : 'Starter';
-        await syncStorePlanLabel(connection, row.store_id, effectiveName);
-    }
-}
-
 async function approvePayment(connection, paymentId, admin) {
     const c = await getPaymentColumns(connection);
-    await ensureSubscriptionPlanChangesTable(connection);
     await connection.beginTransaction();
 
     try {
         const [paymentRows] = await connection.execute(
-            `SELECT p.*, pl.name AS plan_name, pl.price AS plan_price, s.store_name, s.email AS owner_email
-             FROM payments p
+            `SELECT p.*, pl.plan_name AS plan_name, pl.price AS plan_price, s.store_name, s.email AS owner_email
+             FROM subscription_payments p
                       INNER JOIN plans pl ON pl.id = p.${c.planId}
                       INNER JOIN stores s ON s.id = p.${c.storeId}
              WHERE p.${c.id} = ?
@@ -1220,7 +1157,7 @@ async function approvePayment(connection, paymentId, admin) {
         if (!payment) throw httpError(404, "Payment not found.");
         if (normalizeStatus(payment[c.status]) !== "PENDING") throw httpError(409, "Only pending payments can be approved.");
 
-        const [planRows] = await connection.execute("SELECT * FROM plans WHERE id = ? LIMIT 1", [payment[c.planId]]);
+        const [planRows] = await connection.execute(`SELECT *, plan_name AS name FROM plans WHERE id = ? LIMIT 1`, [payment[c.planId]]);
         const plan = planRows[0];
         if (!plan || Number(plan.is_archived) === 1) throw httpError(409, "The requested plan is unavailable or archived.");
 
@@ -1229,7 +1166,7 @@ async function approvePayment(connection, paymentId, admin) {
         }
 
         const [duplicates] = await connection.execute(
-            `SELECT ${c.id} AS payment_id FROM payments
+            `SELECT ${c.id} AS payment_id FROM subscription_payments
              WHERE ${c.reference} = ? AND UPPER(${c.status}) = 'APPROVED' AND ${c.id} <> ?
                  LIMIT 1`,
             [payment[c.reference], paymentId]
@@ -1254,7 +1191,7 @@ async function approvePayment(connection, paymentId, admin) {
             previousStatus = normalizeStatus(existing.status);
             oldPlanId = Number(existing.plan_id);
             const [oldPlanRows] = await connection.execute(
-                "SELECT * FROM plans WHERE id = ? LIMIT 1",
+                `SELECT *, plan_name AS name FROM plans WHERE id = ? LIMIT 1`,
                 [oldPlanId]
             );
             oldPlan = oldPlanRows[0] || null;
@@ -1274,85 +1211,41 @@ async function approvePayment(connection, paymentId, admin) {
 
             await connection.execute(
                 `UPDATE subscriptions
-                 SET plan_id = ?, status = 'active', auto_renew = auto_renew, started_at = ?, expires_at = ?
+                 SET plan_id = ?, status = 'active', started_at = ?, expires_at = ?,
+                     last_renewed_at = NOW(), scheduled_plan_id = NULL, scheduled_change_at = NULL
                  WHERE id = ?`,
                 [payment[c.planId], startDate, expiresAt, existing.id]
             );
             subscriptionId = Number(existing.id);
         } else {
             const [result] = await connection.execute(
-                `INSERT INTO subscriptions (store_id, plan_id, status, auto_renew, started_at, expires_at)
-                 VALUES (?, ?, 'active', 0, ?, ?)`,
+                `INSERT INTO subscriptions (store_id, plan_id, status, started_at, expires_at, last_renewed_at)
+                 VALUES (?, ?, 'active', ?, ?, NOW())`,
                 [payment[c.storeId], payment[c.planId], startDate, expiresAt]
             );
             subscriptionId = Number(result.insertId);
         }
 
-        const [activePlanChangeRows] = await connection.execute(
-            `SELECT id, target_plan_id, status
-             FROM subscription_plan_changes
-             WHERE store_id = ?
-               AND UPPER(status) IN ('SCHEDULED', 'AWAITING_PAYMENT')
-             ORDER BY id DESC
-                 LIMIT 1
-             FOR UPDATE`,
-            [payment[c.storeId]]
-        );
+        // Any scheduled plan change is resolved by the approved payment: the
+        // subscriptions UPDATE above clears scheduled_plan_id/scheduled_change_at.
 
-        const activePlanChange = activePlanChangeRows[0] || null;
-        if (activePlanChange) {
-            if (Number(activePlanChange.target_plan_id) === Number(payment[c.planId])) {
-                await connection.execute(
-                    `UPDATE subscription_plan_changes
-                     SET status = 'APPLIED', applied_at = NOW()
-                     WHERE id = ?`,
-                    [activePlanChange.id]
-                );
-            } else {
-                await connection.execute(
-                    `UPDATE subscription_plan_changes
-                     SET status = 'CANCELLED',
-                         cancelled_at = NOW(),
-                         notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE ' ' END, 'Cancelled because another paid plan was approved.')
-                     WHERE id = ?`,
-                    [activePlanChange.id]
-                );
-            }
-        }
+
 
         await connection.execute(
-            `UPDATE payments SET
+            `UPDATE subscription_payments SET
                 ${c.status} = 'approved'
                 ${c.reviewer ? `, ${c.reviewer} = ?` : ""}
                 ${c.reviewedAt ? `, ${c.reviewedAt} = NOW()` : ""}
+                                            , subscription_id = COALESCE(subscription_id, ?)
              WHERE ${c.id} = ?`,
-            c.reviewer ? [admin.platform_admin_id, paymentId] : [paymentId]
+            [admin.platform_admin_id, subscriptionId, paymentId]
         );
 
-        await connection.execute(
-            `INSERT INTO subscription_history
-             (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [subscriptionId, payment[c.storeId], oldPlanId, payment[c.planId], changeType, admin.platform_admin_id]
-        );
-
-        await connection.execute(
-            `INSERT INTO subscription_audit_logs
-             (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
-             VALUES (?, ?, ?, 'PAYMENT_APPROVED', ?, 'ACTIVE', ?, ?)`,
-            [
-                payment[c.storeId],
-                subscriptionId,
-                paymentId,
-                previousStatus,
-                admin.platform_admin_id,
-                `Approved ${payment.plan_name} plan payment.`,
-            ]
-        );
+        // The approved subscription_payments row (reviewed_by, reviewed_at)
+        // is the subscription history and audit record in stocknbook_v2.
 
         // Approval also updates the store-level label atomically with the
         // paid subscription. The payment and audit records remain unchanged.
-        await syncStorePlanLabel(connection, payment[c.storeId], plan.name);
         await connection.commit();
 
         // Once committed, an email outage must not undo a genuine approval.
@@ -1400,8 +1293,8 @@ async function rejectPayment(connection, paymentId, admin, rejectionReason, expl
 
     try {
         const [rows] = await connection.execute(
-            `SELECT p.*, s.store_name, s.email AS owner_email, pl.name AS plan_name
-             FROM payments p
+            `SELECT p.*, s.store_name, s.email AS owner_email, pl.plan_name AS plan_name
+             FROM subscription_payments p
                       INNER JOIN stores s ON s.id = p.${c.storeId}
                       LEFT JOIN plans pl ON pl.id = p.${c.planId}
              WHERE p.${c.id} = ?
@@ -1413,21 +1306,19 @@ async function rejectPayment(connection, paymentId, admin, rejectionReason, expl
         if (normalizeStatus(payment[c.status]) !== "PENDING") throw httpError(409, "Only pending payments can be rejected.");
 
         await connection.execute(
-            `UPDATE payments SET
+            `UPDATE subscription_payments SET
                 ${c.status} = 'rejected'
                 ${c.reviewer ? `, ${c.reviewer} = ?` : ""}
                 ${c.reviewedAt ? `, ${c.reviewedAt} = NOW()` : ""}
+                                            , rejection_reason = ?
              WHERE ${c.id} = ?`,
-            c.reviewer ? [admin.platform_admin_id, paymentId] : [paymentId]
+            [
+                admin.platform_admin_id,
+                [rejectionReason, text(explanation, 500)].filter(Boolean).join(": "),
+                paymentId,
+            ]
         );
 
-        const reason = [rejectionReason, text(explanation, 500)].filter(Boolean).join(": ");
-        await connection.execute(
-            `INSERT INTO subscription_audit_logs
-             (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
-             VALUES (?, NULL, ?, 'PAYMENT_REJECTED', 'PENDING', 'REJECTED', ?, ?)`,
-            [payment[c.storeId], paymentId, admin.platform_admin_id, reason]
-        );
 
         await connection.commit();
 
@@ -1489,28 +1380,6 @@ async function changeSubscriptionStatus(connection, subscriptionId, admin, nextS
 
         const previousStatus = normalizeStatus(sub.status);
         await connection.execute("UPDATE subscriptions SET status = ? WHERE id = ?", [lowerStatus(nextStatus), subscriptionId]);
-        if (nextStatus === 'ACTIVE' || nextStatus === 'EXPIRING') {
-            const [planRows] = await connection.execute(
-                "SELECT name FROM plans WHERE id = ? LIMIT 1", [sub.plan_id]
-            );
-            if (planRows[0]) await syncStorePlanLabel(connection, sub.store_id, planRows[0].name);
-        } else {
-            await syncStorePlanLabel(connection, sub.store_id, 'Starter');
-        }
-
-        await connection.execute(
-            `INSERT INTO subscription_history
-             (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [subscriptionId, sub.store_id, sub.plan_id, sub.plan_id, nextStatus === "CANCELLED" ? "cancellation" : "admin_override", admin.platform_admin_id]
-        );
-
-        await connection.execute(
-            `INSERT INTO subscription_audit_logs
-             (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
-             VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
-            [sub.store_id, subscriptionId, `SUBSCRIPTION_${nextStatus}`, previousStatus, nextStatus, admin.platform_admin_id, reason]
-        );
 
         await connection.commit();
         return { message: `Subscription status changed to ${nextStatus}.`, status: nextStatus };
@@ -1538,24 +1407,6 @@ async function extendSubscription(connection, subscriptionId, admin, extensionDa
 
         await connection.execute("UPDATE subscriptions SET expires_at = ?, status = 'active' WHERE id = ?", [expiresAt, subscriptionId]);
         await connection.execute("UPDATE stores SET status = 'active' WHERE id = ?", [sub.store_id]);
-        const [planRows] = await connection.execute(
-            "SELECT name FROM plans WHERE id = ? LIMIT 1", [sub.plan_id]
-        );
-        if (planRows[0]) await syncStorePlanLabel(connection, sub.store_id, planRows[0].name);
-
-        await connection.execute(
-            `INSERT INTO subscription_history
-             (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
-             VALUES (?, ?, ?, ?, 'admin_override', ?)`,
-            [subscriptionId, sub.store_id, sub.plan_id, sub.plan_id, admin.platform_admin_id]
-        );
-
-        await connection.execute(
-            `INSERT INTO subscription_audit_logs
-             (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
-             VALUES (?, ?, NULL, 'SUBSCRIPTION_EXTENDED', ?, 'ACTIVE', ?, ?)`,
-            [sub.store_id, subscriptionId, previousStatus, admin.platform_admin_id, `${days} day(s): ${reason}`]
-        );
 
         await connection.commit();
         return { message: "Subscription extended.", expires_at: expiresAt };
@@ -1617,11 +1468,11 @@ async function listStores(connection, search, planName, storeStatus) {
 
     if (cleanSearch) {
         const like = `%${cleanSearch}%`;
-        filters.push("(s.store_name LIKE ? OR s.owner_name LIKE ? OR s.email LIKE ?)");
+        filters.push("(s.store_name LIKE ? OR ou.full_name LIKE ? OR s.email LIKE ?)");
         values.push(like, like, like);
     }
     if (planName && planName !== "All plans") {
-        filters.push("pl.name = ?");
+        filters.push("pl.plan_name = ?");
         values.push(planName);
     }
     if (storeStatus && storeStatus !== "All statuses") {
@@ -1645,18 +1496,20 @@ async function listStores(connection, search, planName, storeStatus) {
         `SELECT
              s.id,
              s.store_name,
-             s.owner_name,
+             ou.full_name AS owner_name,
              s.email,
+             s.status AS store_status,
              s.created_at AS signup_date,
              sub.id AS subscription_id,
              sub.status AS raw_subscription_status,
              sub.started_at,
              sub.expires_at,
-             sub.auto_renew,
+             0 AS auto_renew,
              pl.id AS plan_id,
-             pl.name AS plan_name,
-             COALESCE((SELECT SUM(p2.${c.amount}) FROM payments p2 WHERE p2.${c.storeId} = s.id AND UPPER(p2.${c.status}) = 'APPROVED'), 0) AS lifetime_paid
+             pl.plan_name AS plan_name,
+             COALESCE((SELECT SUM(p2.${c.amount}) FROM subscription_payments p2 WHERE p2.${c.storeId} = s.id AND UPPER(p2.${c.status}) = 'APPROVED'), 0) AS lifetime_paid
          FROM stores s
+                  LEFT JOIN users ou ON ou.store_id = s.id AND ou.role = 'owner'
                   LEFT JOIN subscriptions sub ON sub.store_id = s.id
                   LEFT JOIN plans pl ON pl.id = sub.plan_id
              ${where}
@@ -1697,7 +1550,7 @@ async function getStorePlanDetails(connection, storeId) {
     const [planRows] = await connection.execute(
         `SELECT
              pl.id,
-             pl.name,
+             pl.plan_name AS name,
              pl.max_inventory,
              pl.max_bookings,
              pl.max_staff,
@@ -1723,7 +1576,7 @@ async function getStorePlanDetails(connection, storeId) {
         const [starterRows] = await connection.execute(
             `SELECT
                  id,
-                 name,
+                 plan_name AS name,
                  max_inventory,
                  max_bookings,
                  max_staff,
@@ -1734,7 +1587,7 @@ async function getStorePlanDetails(connection, storeId) {
                  has_multi_store
              FROM plans
              WHERE is_archived = 0
-               AND (LOWER(name) = 'starter' OR price = 0)
+               AND (LOWER(plan_code) = 'starter' OR LOWER(plan_name) = 'starter' OR price = 0)
              ORDER BY price ASC, id ASC
                  LIMIT 1`
         );
@@ -1750,7 +1603,7 @@ async function getStorePlanDetails(connection, storeId) {
     const maxBranches = limitOrNull(plan?.max_branches);
 
     const [inventoryRows] = await connection.execute(
-        "SELECT COUNT(*) AS total FROM products WHERE store_id = ?",
+        `SELECT COUNT(*) AS total FROM products WHERE store_id = ? AND deleted_at IS NULL`,
         [storeId]
     );
 
@@ -1769,7 +1622,7 @@ async function getStorePlanDetails(connection, storeId) {
     let staffCount = 0;
     try {
         const [staffRows] = await connection.execute(
-            "SELECT COUNT(*) AS total FROM staff WHERE store_id = ? AND status = 'active'",
+            `SELECT COUNT(*) AS total FROM users WHERE store_id = ? AND role = 'staff' AND status = 'active'`,
             [storeId]
         );
         staffCount = Number(staffRows[0]?.total || 0);
@@ -1830,10 +1683,8 @@ async function setStoreStatus(connection, storeId, status, admin, reason) {
     const previous = "UNKNOWN";
 
     await connection.execute(
-        `INSERT INTO subscription_audit_logs
-         (business_id, subscription_id, payment_submission_id, action, previous_status, new_status, performed_by_admin_id, reason)
-         VALUES (?, NULL, NULL, 'STORE_STATUS_CHANGED', ?, ?, ?, ?)`,
-        [storeId, previous, normalized.toUpperCase(), admin.platform_admin_id, reason]
+        "UPDATE stores SET status = ? WHERE id = ?",
+        [normalized, storeId]
     );
     return { message: `Store status changed to ${normalized}.` };
 }
@@ -1985,18 +1836,9 @@ async function tryPlatformAdminLogin({
     }
 
     const [rows] = await connection.execute(
-        `
-            SELECT
-                platform_admin_id,
-                full_name,
-                email,
-                password,
-                role,
-                is_active
-            FROM platform_admins
-            WHERE email = ?
-                LIMIT 1
-        `,
+        `SELECT id AS platform_admin_id, full_name, email, password_hash AS password, role,
+                CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END AS is_active
+         FROM platform_admins WHERE email = ? LIMIT 1`,
         [normalizedEmail]
     );
 

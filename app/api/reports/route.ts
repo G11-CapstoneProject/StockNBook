@@ -7,6 +7,112 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+// ===== BEGIN StockNBook v2 read models (reports) =====
+// stocknbook_v2 tables shown with the column names this report already uses.
+const V2_PRODUCT_STOCK_SQL = (p: string, bi: string) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.on_hand_quantity)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.on_hand_quantity END`;
+
+const V2_PRODUCT_ALERT_SQL = (p: string, bi: string) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.reorder_level)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.reorder_level END`;
+
+// Product rows exactly as the inventory screens use them (one row per product).
+const V2_PRODUCTS = `(SELECT
+        p.id, p.store_id, base_bi.branch_id, p.product_number,
+        p.product_name AS name, COALESCE(cat.category_name, '') AS category, p.category_id,
+        p.description,
+        ${V2_PRODUCT_STOCK_SQL("p", "base_bi")} AS stock,
+        ${V2_PRODUCT_ALERT_SQL("p", "base_bi")} AS alert_level,
+        dv.cost_price AS original_price, dv.selling_price AS sales_price,
+        dv.pricing_method, dv.markup_percentage,
+        base_bi.expiration_date, p.has_variants, p.next_variant_sequence, p.status,
+        p.created_at, p.updated_at, p.deleted_at,
+        dv.id AS default_variant_id, base_bi.id AS base_inventory_id
+    FROM products p
+             JOIN product_variants dv ON dv.product_id = p.id AND dv.is_default = 1
+             JOIN branch_inventory base_bi ON base_bi.variant_id = dv.id
+             LEFT JOIN categories cat ON cat.id = p.category_id)`;
+
+// Real (selectable) variants with their branch stock.
+const V2_PRODUCT_VARIANTS = `(SELECT
+        v.id, v.store_id, v.product_id, v.variant_number, v.variant_name,
+        v.attributes AS variant_values,
+        COALESCE(vbi.on_hand_quantity, 0) AS stock, COALESCE(vbi.reorder_level, 0) AS alert_level,
+        v.cost_price AS original_price, v.selling_price AS sales_price,
+        v.pricing_method, v.markup_percentage, vbi.expiration_date,
+        vbi.branch_id, vbi.id AS inventory_id, v.status, v.created_at, v.updated_at, v.deleted_at
+    FROM product_variants v
+             LEFT JOIN branch_inventory vbi ON vbi.variant_id = v.id
+    WHERE v.is_default = 0)`;
+
+// Consumable branch stock keyed by (product_id, variant_id); variant_id is NULL
+// for a product without variants.
+const V2_BRANCH_INVENTORY = `(SELECT
+        bi.id, bi.store_id, bi.branch_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE v.id END AS variant_id,
+        bi.variant_id AS catalog_variant_id,
+        bi.on_hand_quantity AS quantity_on_hand, bi.reserved_quantity, bi.unavailable_quantity,
+        bi.reorder_level, v.cost_price, v.selling_price AS sales_price, bi.expiration_date,
+        bi.status, bi.created_at, bi.updated_at
+    FROM branch_inventory bi
+             JOIN product_variants v ON v.id = bi.variant_id)`;
+
+const V2_POS_ORDERS = `(SELECT
+        po.order_id AS order_pk, po.order_number AS order_id, po.store_id, po.branch_id,
+        po.processed_by AS cashier_id, 'WALK_IN' AS customer_type, po.customer_id,
+        po.payment_mode, po.tax_type, po.subtotal, po.discount_amount,
+        po.vatable_sales, po.vat_amount, po.amount_tendered AS customer_payment, po.change_due,
+        po.total, DATE(po.order_date) AS order_date, po.created_at, po.status
+    FROM orders po)`;
+
+const V2_POS_ORDER_ITEMS = `(SELECT
+        poi.id, poi.store_id, pio.branch_id, pio.order_number AS order_id, poi.order_id AS order_pk,
+        piv.product_id, CASE WHEN piv.is_default = 1 THEN NULL ELSE poi.variant_id END AS variant_id,
+        poi.variant_id AS catalog_variant_id,
+        poi.product_name_snapshot AS product_name, poi.quantity, poi.unit_price, poi.line_total,
+        poi.cost_price_at_sale, poi.discount_amount
+    FROM order_items poi
+             JOIN orders pio ON pio.order_id = poi.order_id
+             JOIN product_variants piv ON piv.id = poi.variant_id)`;
+
+// Booking bill payments (security deposits and damage/loss charge payments are separate).
+const V2_BOOKING_PAID_SQL = (b: string) => `(COALESCE((SELECT SUM(bp.amount) FROM payments bp
+        WHERE bp.booking_id = ${b}.id AND bp.status <> 'voided'
+          AND bp.payment_type NOT IN ('Security Deposit','Additional Charge')), 0)
+    - COALESCE((SELECT SUM(br.amount) FROM refunds br JOIN payments brp ON brp.id = br.payment_id
+        WHERE brp.booking_id = ${b}.id AND br.status = 'completed'
+          AND brp.payment_type NOT IN ('Security Deposit','Additional Charge')), 0))`;
+
+// Bookings with the legacy customer/package/payment columns.
+const V2_BOOKINGS = `(SELECT
+        b.id, b.store_id, b.branch_id, b.booking_reference, b.customer_id, b.package_id,
+        b.booking_type, b.event_type, b.theme, b.event_date, b.event_end_date, b.event_time,
+        b.venue, b.rental_start_date, b.rental_end_date, b.custom_order, b.notes, b.status,
+        bc.full_name AS name, bc.facebook_name, bc.phone, bc.email,
+        COALESCE(bpk.package_name, '') AS package_name,
+        b.package_price_snapshot AS package_price, b.agreed_price, b.required_down_payment,
+        b.down_payment_deadline, b.refundable_deposit_required, b.vat_amount,
+        b.final_additional_charges, b.deposit_applied_amount, b.approved_refund_amount,
+        b.settlement_status, b.settlement_notes, b.cancellation_reason,
+        b.approved_by, b.approved_at, b.created_by,
+        ${V2_BOOKING_PAID_SQL("b")} AS amount_paid,
+        GREATEST(COALESCE(b.agreed_price, 0) - ${V2_BOOKING_PAID_SQL("b")}, 0) AS balance,
+        CASE WHEN ${V2_BOOKING_PAID_SQL("b")} <= 0 THEN 'Unpaid'
+             WHEN ${V2_BOOKING_PAID_SQL("b")} + 0.005 >= COALESCE(b.agreed_price, 0) THEN 'Paid'
+             ELSE 'Partially Paid' END AS payment_status,
+        b.created_at, b.updated_at
+    FROM bookings b
+             JOIN customers bc ON bc.id = b.customer_id
+             LEFT JOIN packages bpk ON bpk.id = b.package_id)`;
+// ===== END StockNBook v2 read models (reports) =====
+
 type Role = "owner" | "manager" | "staff";
 type TokenPayload = jwt.JwtPayload & {
     store_id?: number | string;
@@ -25,10 +131,6 @@ type DateRange = {
     endDate: string;
     label: string;
 };
-
-// Avoid running CREATE TABLE IF NOT EXISTS on every Reports request.
-// The schema check is only needed once per warm server process.
-let restockHistoryTableEnsured = false;
 
 function asPositiveInteger(value: unknown) {
     const parsed = Number(value);
@@ -110,7 +212,7 @@ function databaseConfig() {
         host: "127.0.0.1",
         user: "root",
         password: "BTA5EYVWLfWcebF",
-        database: "stocknbook",
+        database: "stocknbook_v2",
         port: 3306,
     };
 }
@@ -206,7 +308,7 @@ async function loadBranches(
     branchId: number | null
 ) {
     let query = `
-        SELECT id, branch_name, address, contact_number
+        SELECT id, branch_name, address, phone AS contact_number
         FROM branches
         WHERE store_id = ?
     `;
@@ -248,14 +350,14 @@ async function loadInventory(
             br.branch_name,
             bi.variant_id AS variant_id,
             pv.variant_values
-        FROM branch_inventory bi
-                 INNER JOIN products p
+        FROM ${V2_BRANCH_INVENTORY} bi
+                 INNER JOIN ${V2_PRODUCTS} p
                             ON p.id = bi.product_id
                                 AND p.store_id = bi.store_id
                                 AND p.branch_id = bi.branch_id
                  LEFT JOIN branches br
                            ON br.id = bi.branch_id AND br.store_id = bi.store_id
-                 LEFT JOIN product_variants pv
+                 LEFT JOIN ${V2_PRODUCT_VARIANTS} pv
                            ON pv.id = bi.variant_id AND pv.product_id = p.id
         WHERE bi.store_id = ?
           AND bi.status = 'active'
@@ -365,60 +467,39 @@ async function loadInventory(
 }
 
 
-async function ensureRestockHistoryTable(connection: Connection) {
-    if (restockHistoryTableEnsured) return;
-
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS restock_history (
-                                                       id BIGINT NOT NULL AUTO_INCREMENT,
-                                                       store_id BIGINT NOT NULL,
-                                                       branch_id BIGINT NOT NULL,
-                                                       product_id BIGINT NOT NULL,
-                                                       product_name VARCHAR(255) NOT NULL,
-            variant_name VARCHAR(255) NULL,
-            stock_before INT NOT NULL DEFAULT 0,
-            quantity_added INT NOT NULL DEFAULT 0,
-            current_stock INT NOT NULL DEFAULT 0,
-            received_by VARCHAR(255) NULL,
-            notes VARCHAR(500) NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            INDEX idx_restock_store (store_id),
-            INDEX idx_restock_branch (branch_id),
-            INDEX idx_restock_product (product_id),
-            INDEX idx_restock_created_at (created_at)
-            )
-    `);
-
-    restockHistoryTableEnsured = true;
-}
-
 async function loadRestockHistory(
     connection: Connection,
     storeId: number,
     branchId: number | null,
     range: DateRange
 ) {
-    await ensureRestockHistoryTable(connection);
-
+    // Stock-ins are the positive receiving movements in inventory_movements.
     let query = `
         SELECT
             rh.id,
             rh.branch_id,
-            rh.product_name,
-            rh.variant_name,
-            rh.stock_before,
-            rh.quantity_added,
-            rh.current_stock,
-            rh.received_by,
-            rh.notes,
+            p.product_name,
+            CASE WHEN v.is_default = 1 THEN NULL ELSE v.variant_name END AS variant_name,
+            rh.quantity_before AS stock_before,
+            rh.quantity_change AS quantity_added,
+            rh.quantity_after AS current_stock,
+            u.full_name AS received_by,
+            CASE WHEN rh.reason LIKE 'Ref %: %'
+                     THEN SUBSTRING(rh.reason, LOCATE(': ', rh.reason) + 2)
+                 ELSE rh.reason END AS notes,
             DATE_FORMAT(rh.created_at, '%Y-%m-%d') AS restock_date,
             br.branch_name
-        FROM restock_history rh
+        FROM inventory_movements rh
+                 JOIN branch_inventory sbi ON sbi.id = rh.branch_inventory_id
+                 JOIN product_variants v ON v.id = sbi.variant_id
+                 JOIN products p ON p.id = v.product_id
+                 LEFT JOIN users u ON u.id = rh.performed_by
                  LEFT JOIN branches br
                            ON br.id = rh.branch_id
                                AND br.store_id = rh.store_id
         WHERE rh.store_id = ?
+          AND rh.quantity_change > 0
+          AND rh.movement_type IN ('OPENING_STOCK','MANAGER_RECEIPT','STAFF_RECEIPT')
           AND rh.created_at >= CONCAT(?, ' 00:00:00')
           AND rh.created_at < DATE_ADD(CONCAT(?, ' 00:00:00'), INTERVAL 1 DAY)
     `;
@@ -477,10 +558,10 @@ async function loadSales(
                     )
                         ORDER BY oi.id SEPARATOR ', '
             ) AS items_text
-        FROM orders o
+        FROM ${V2_POS_ORDERS} o
                  LEFT JOIN branches br
                            ON br.id = o.branch_id AND br.store_id = o.store_id
-                 LEFT JOIN order_items oi
+                 LEFT JOIN ${V2_POS_ORDER_ITEMS} oi
                            ON oi.order_id = o.order_id
         WHERE o.store_id = ?
           AND o.order_date BETWEEN ? AND ?
@@ -561,8 +642,9 @@ async function loadBookings(
             b.required_down_payment,
             b.amount_paid,
             b.balance,
-            b.created_by_name
-        FROM bookings b
+            cu.full_name AS created_by_name
+        FROM ${V2_BOOKINGS} b
+                 LEFT JOIN users cu ON cu.id = b.created_by
                  LEFT JOIN branches br
                            ON br.id = b.branch_id AND br.store_id = b.store_id
         WHERE b.store_id = ?
@@ -655,14 +737,14 @@ async function loadEmployeeActions(
         SELECT
             ea.id,
             ea.branch_id,
-            ea.employee_id,
-            ea.employee_name,
-            ea.employee_role,
+            ea.user_id AS employee_id,
+            ea.user_name AS employee_name,
+            ea.user_role AS employee_role,
             ea.module,
             ea.reference_number,
             ea.action,
-            ea.reference_id,
-            ea.details,
+            ea.entity_id AS reference_id,
+            JSON_UNQUOTE(ea.details) AS details,
             br.branch_name,
 
             DATE_FORMAT(
@@ -756,12 +838,11 @@ async function canReadAuditLogs(
 ) {
     if (role === "owner") return true;
     if (!branchId || !employeeId) return false;
-    const table = role === "manager" ? "managers" : "staff";
     const [rows] = await connection.execute(
-        `SELECT permissions FROM ${table}
-         WHERE id = ? AND store_id = ? AND branch_id = ?
+        `SELECT permissions FROM users
+         WHERE id = ? AND store_id = ? AND branch_id = ? AND role = ?
            AND LOWER(status) = 'active' LIMIT 1`,
-        [employeeId, storeId, branchId]
+        [employeeId, storeId, branchId, role]
     );
     const account = (rows as Array<{ permissions?: unknown }>)[0];
     if (!account) return false;

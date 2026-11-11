@@ -98,8 +98,8 @@ const identifiers = (() => {
     /*   Branch 4 Retail Branch -> B4   (numbered branch)                 */
     /*   Main Retail Branch     -> MAIN (one-syllable word kept whole)    */
     /* Generic words such as Branch/Retail/Store are ignored. Initials are */
-    /* saved in identifier_prefixes the first time a branch needs an ID   */
-    /* and never change afterwards, even if the branch is renamed.        */
+    /* saved in branches.branch_code when the branch is created and      */
+    /* never change afterwards, even if the branch is renamed.            */
     /* ------------------------------------------------------------------ */
 
     const BRANCH_INITIAL_STOP_WORDS = new Set([
@@ -217,162 +217,65 @@ const identifiers = (() => {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Schema (also created by the migration). Runs outside transactions. */
+    /* Codes and sequences (stocknbook_v2)                                 */
+    /* Store and branch initials are stored in stores.store_code and       */
+    /* branches.branch_code. Sequences are derived from the identifiers    */
+    /* already saved; a row lock on the branch serializes allocation and   */
+    /* the unique keys on each identifier column reject any duplicate.     */
     /* ------------------------------------------------------------------ */
 
-    const SCHEMA_STEPS = [
-        {
-            table: "id_number_sequences",
-            create: `CREATE TABLE IF NOT EXISTS id_number_sequences (
-                                                                        store_id BIGINT NOT NULL,
-                                                                        branch_id BIGINT NOT NULL,
-                                                                        entity_type VARCHAR(10) NOT NULL,
-                scope_key VARCHAR(10) NOT NULL DEFAULT '',
-                last_sequence INT UNSIGNED NOT NULL DEFAULT 0,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                PRIMARY KEY (store_id, branch_id, entity_type, scope_key)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-        },
-        {
-            table: "identifier_prefixes",
-            create: `CREATE TABLE IF NOT EXISTS identifier_prefixes (
-                                                                        branch_id BIGINT NOT NULL,
-                                                                        store_id BIGINT NOT NULL,
-                                                                        store_initials VARCHAR(8) NOT NULL,
-                branch_initials VARCHAR(8) NOT NULL,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (branch_id),
-                UNIQUE KEY uq_identifier_prefixes_initials (store_id, branch_initials)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-        },
-        {
-            table: "rental_equipment_units",
-            create: `CREATE TABLE IF NOT EXISTS rental_equipment_units (
-                                                                           id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                                                                           store_id BIGINT NOT NULL,
-                                                                           branch_id BIGINT NOT NULL,
-                                                                           equipment_id BIGINT NOT NULL,
-                                                                           equipment_number VARCHAR(40) NOT NULL,
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                retired_at DATETIME NULL DEFAULT NULL,
-                PRIMARY KEY (id),
-                UNIQUE KEY uq_rental_equipment_units_number (equipment_number),
-                KEY idx_rental_equipment_units_equipment (equipment_id, retired_at),
-                KEY idx_rental_equipment_units_branch (store_id, branch_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-        },
-        {
-            table: "managers", column: "employee_code",
-            add: "ALTER TABLE managers ADD COLUMN employee_code VARCHAR(40) NULL",
-            index: "ALTER TABLE managers ADD UNIQUE INDEX uq_managers_employee_code (employee_code)",
-        },
-        {
-            table: "staff", column: "employee_code",
-            add: "ALTER TABLE staff ADD COLUMN employee_code VARCHAR(40) NULL",
-            index: "ALTER TABLE staff ADD UNIQUE INDEX uq_staff_employee_code (employee_code)",
-        },
-    ];
-
-    const schemaState = { ready: false, pending: null };
-    const IGNORABLE_DDL_ERRORS = new Set(["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME", "ER_TABLE_EXISTS_ERROR"]);
-
-    async function probe(connection, sql) {
-        try {
-            await connection.execute(sql);
-            return true;
-        } catch (error) {
-            if (["ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"].includes(error?.code)) return false;
-            throw error;
-        }
+    // stocknbook_v2 already contains every column these identifiers use.
+    async function ensureIdentifierSchema() {
+        return true;
     }
 
-    async function runDdl(connection, sql) {
-        try {
-            await connection.query(sql);
-        } catch (error) {
-            if (!IGNORABLE_DDL_ERRORS.has(error?.code)) throw error;
-        }
+    async function lockBranch(connection, storeId, branchId) {
+        const [rows] = await connection.execute(
+            "SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE",
+            [branchId, storeId]
+        );
+        if (!rows.length) throw new Error("The branch does not belong to this store.");
     }
 
-    // Idempotent. Never call inside an open transaction: MySQL DDL commits implicitly.
-    async function ensureIdentifierSchema(connection) {
-        if (schemaState.ready) return true;
-        if (!schemaState.pending) {
-            schemaState.pending = (async () => {
-                for (const step of SCHEMA_STEPS) {
-                    if (step.create) {
-                        if (!(await probe(connection, `SELECT 1 FROM ${step.table} LIMIT 0`))) await runDdl(connection, step.create);
-                    } else if (!(await probe(connection, `SELECT ${step.column} FROM ${step.table} LIMIT 0`))) {
-                        await runDdl(connection, step.add);
-                        await runDdl(connection, step.index);
-                    }
-                }
-                schemaState.ready = true;
-                return true;
-            })().catch((error) => {
-                console.error("StockNBook identifier schema check failed:", error?.message || error);
-                return false;
-            }).finally(() => { schemaState.pending = null; });
-        }
-        return schemaState.pending;
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* Codes and sequences                                                 */
-    /* ------------------------------------------------------------------ */
-
-    // Store + branch initials for a branch. Decided once (first ID for that branch),
-    // saved in identifier_prefixes, and reused forever. stores/branches are only read.
     async function getIdentifierCodes(connection, storeId, branchId) {
-        const readSaved = async () => {
-            const [rows] = await connection.execute(
-                "SELECT store_initials AS storeCode, branch_initials AS branchCode FROM identifier_prefixes WHERE branch_id = ? AND store_id = ? LIMIT 1",
-                [branchId, storeId]
-            );
-            return rows[0] || null;
-        };
-        let saved = await readSaved();
-        if (!saved) {
-            const [rows] = await connection.execute(
-                `SELECT s.store_code AS storeCode, s.store_name AS storeName, s.slug, b.branch_name AS branchName
-                 FROM branches b
-                          JOIN stores s ON s.id = b.store_id
-                 WHERE b.id = ? AND b.store_id = ?
-                     LIMIT 1`,
-                [branchId, storeId]
-            );
-            if (!rows.length) throw new Error("The branch does not belong to this store.");
-            const info = rows[0];
-            // Store initials: this store's saved initials, else its existing store code
-            // (e.g. SPS), else derived from the name without writing to the store record.
-            const [storeRows] = await connection.execute(
-                "SELECT store_initials AS code FROM identifier_prefixes WHERE store_id = ? LIMIT 1", [storeId]);
-            let storeCode = String(storeRows[0]?.code || info.storeCode || "").trim().toUpperCase();
-            if (!CODE_PATTERN.test(storeCode)) {
-                const [usedRows] = await connection.execute(
-                    `SELECT store_code AS code FROM stores WHERE id <> ? AND store_code IS NOT NULL
-                     UNION SELECT store_initials AS code FROM identifier_prefixes WHERE store_id <> ?`,
-                    [storeId, storeId]
-                );
-                const used = new Set(usedRows.map((row) => String(row.code || "").toUpperCase()));
-                storeCode = storeCodeCandidates(info.storeName, info.slug, storeId).find((code) => !used.has(code));
-            }
-            // INSERT IGNORE + the unique key settles races: when another branch of this
-            // store already holds the initials, the next candidate (MW2, MW3 ...) is tried.
-            for (const candidate of branchCodeCandidates(info.branchName)) {
-                await connection.execute(
-                    "INSERT IGNORE INTO identifier_prefixes (branch_id, store_id, store_initials, branch_initials) VALUES (?, ?, ?, ?)",
-                    [branchId, storeId, storeCode, candidate]
-                );
-                saved = await readSaved();
-                if (saved) break;
-            }
-            if (!saved) throw new Error("Unable to allocate unique branch initials.");
-        }
-        const storeCode = String(saved.storeCode || "").trim().toUpperCase();
-        const branchCode = String(saved.branchCode || "").trim().toUpperCase();
+        const [rows] = await connection.execute(
+            `SELECT s.store_code AS storeCode, b.branch_code AS branchCode
+             FROM branches b
+                      JOIN stores s ON s.id = b.store_id
+             WHERE b.id = ? AND b.store_id = ?
+                 LIMIT 1`,
+            [branchId, storeId]
+        );
+        if (!rows.length) throw new Error("The branch does not belong to this store.");
+        const storeCode = String(rows[0].storeCode || "").trim().toUpperCase();
+        const branchCode = String(rows[0].branchCode || "").trim().toUpperCase();
         assertCodes(storeCode, branchCode);
         return { storeCode, branchCode };
+    }
+
+    // stores.store_code for a newly registered store (unique across StockNBook).
+    async function allocateStoreCode(connection, storeName, slug) {
+        const [rows] = await connection.execute("SELECT store_code AS code FROM stores");
+        const used = new Set(rows.map((row) => String(row.code || "").toUpperCase()));
+        const code = storeCodeCandidates(storeName, slug, "").find(
+            (candidate) => CODE_PATTERN.test(candidate) && !used.has(candidate)
+        );
+        if (!code) throw new Error("Unable to allocate a unique store code.");
+        return code;
+    }
+
+    // branches.branch_code for a new branch (unique within its store).
+    async function allocateBranchCode(connection, storeId, branchName) {
+        const [rows] = await connection.execute(
+            "SELECT branch_code AS code FROM branches WHERE store_id = ?",
+            [storeId]
+        );
+        const used = new Set(rows.map((row) => String(row.code || "").toUpperCase()));
+        const code = branchCodeCandidates(branchName).find(
+            (candidate) => CODE_PATTERN.test(candidate) && !used.has(candidate)
+        );
+        if (!code) throw new Error("Unable to allocate unique branch initials.");
+        return code;
     }
 
     async function maxSequenceFrom(connection, sql, params, pattern) {
@@ -384,41 +287,27 @@ const identifiers = (() => {
     }
 
     /*
-     * Reserves `count` consecutive numbers atomically. The UPDATE row-locks the
-     * sequence row and LAST_INSERT_ID(expr) hands the new value back on this
-     * connection only, so concurrent requests can never receive the same number
-     * (with or without an open transaction). `floor` self-heals the sequence from
-     * identifiers already stored.
+     * Reserves `count` consecutive numbers after `floor` (the highest number already
+     * stored). Callers lock the branch row first so concurrent requests inside a
+     * transaction are serialized; the unique keys still reject any duplicate.
      */
-    async function reserveSequenceBlock(connection, { storeId, branchId, entityType, scopeKey = "", count = 1, floor = 0 }) {
+    async function reserveSequenceBlock(connection, { storeId, branchId, count = 1, floor = 0 }) {
         const size = Number(count);
         if (!Number.isSafeInteger(size) || size < 1) throw new Error("Invalid identification sequence request.");
-        await connection.execute(
-            `INSERT INTO id_number_sequences (store_id, branch_id, entity_type, scope_key, last_sequence)
-             VALUES (?, ?, ?, ?, 0)
-                 ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
-            [storeId, branchId, entityType, scopeKey]
-        );
-        await connection.execute(
-            `UPDATE id_number_sequences
-             SET last_sequence = LAST_INSERT_ID(GREATEST(last_sequence, ?) + ?)
-             WHERE store_id = ? AND branch_id = ? AND entity_type = ? AND scope_key = ?`,
-            [Number(floor) || 0, size, storeId, branchId, entityType, scopeKey]
-        );
-        const [rows] = await connection.execute("SELECT LAST_INSERT_ID() AS lastSequence");
-        const last = Number(rows[0]?.lastSequence);
-        if (!Number.isSafeInteger(last) || last < size) throw new Error("Identification sequence could not be reserved.");
-        return { first: last - size + 1, last };
+        await lockBranch(connection, storeId, branchId);
+        const first = (Number(floor) || 0) + 1;
+        return { first, last: first + size - 1 };
     }
 
     async function generateOrderId(connection, { storeId, branchId, orderDate }) {
+        await lockBranch(connection, storeId, branchId);
         const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
         const datePart = orderDatePart(orderDate);
         const prefix = `${storeCode}-${branchCode}-${datePart}-`;
         const floor = await maxSequenceFrom(connection,
-            "SELECT order_id AS value FROM orders WHERE order_id LIKE ?", [`${prefix}%`], PATTERNS.order);
-        const { last } = await reserveSequenceBlock(connection,
-            { storeId, branchId, entityType: "ORDER", scopeKey: datePart, floor });
+            "SELECT order_number AS value FROM orders WHERE store_id = ? AND order_number LIKE ?",
+            [storeId, `${prefix}%`], PATTERNS.order);
+        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, floor });
         return buildOrderId(storeCode, branchCode, orderDate, last);
     }
 
@@ -428,128 +317,58 @@ const identifiers = (() => {
         if (roleCode !== "MN" && roleCode !== "SF") {
             throw new Error("Employee ID role must be MN (manager) or SF (staff).");
         }
+        await lockBranch(connection, storeId, branchId);
         const prefix = `${Number(storeId)}-${Number(branchId)}-${roleCode}-`;
-        const table = roleCode === "MN" ? "managers" : "staff";
         const floor = await maxSequenceFrom(connection,
-            `SELECT employee_code AS value FROM ${table}
+            `SELECT employee_code AS value FROM users
              WHERE store_id = ? AND branch_id = ? AND employee_code LIKE ?`,
             [storeId, branchId, `${prefix}%`], PATTERNS.employee);
-        const { last } = await reserveSequenceBlock(connection,
-            { storeId, branchId, entityType: "EMP", scopeKey: roleCode, floor });
+        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, floor });
         return buildEmployeeCode(storeId, branchId, roleCode, last);
     }
 
-    // Highest Product No. already issued with this exact prefix (products or rental types).
+    // Highest Product No. already issued with this exact prefix (products or rental equipment).
     async function maxProductPrefixSequence(connection, storeCode, branchCode) {
         const prefix = `${storeCode}-${branchCode}-PRD-%`;
         const fromProducts = await maxSequenceFrom(connection,
             "SELECT product_number AS value FROM products WHERE product_number LIKE ?", [prefix], PATTERNS.product);
-        let fromRental = 0;
-        try {
-            fromRental = await maxSequenceFrom(connection,
-                "SELECT equipment_number AS value FROM rental_equipment WHERE equipment_number LIKE ?", [prefix], PATTERNS.product);
-        } catch (error) {
-            if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
-        }
+        const fromRental = await maxSequenceFrom(connection,
+            "SELECT equipment_number AS value FROM equipment WHERE equipment_number LIKE ?", [prefix], PATTERNS.product);
         return Math.max(fromProducts, fromRental);
     }
 
     /*
-     * Product Nos. for sales products and rental product types share
-     * product_number_sequences, so a rental type can never reuse a sales product's
-     * number. Caller must be inside a transaction; the branch row lock serializes
-     * allocation exactly like lambda-products create_product.
+     * Product Nos. for sales products (products.product_number) and rental
+     * equipment (equipment.equipment_number) share one sequence per branch, so a
+     * rental item can never reuse a sales product's number. Caller must be inside
+     * a transaction; the branch row lock serializes allocation.
      */
     async function allocateProductNumber(connection, { storeId, branchId }) {
-        await connection.execute("SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE", [branchId, storeId]);
+        await lockBranch(connection, storeId, branchId);
         const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
-        const [sequenceRows] = await connection.execute(
-            "SELECT last_sequence AS lastSequence FROM product_number_sequences WHERE store_id = ? AND branch_id = ? FOR UPDATE",
-            [storeId, branchId]
-        );
+        const branchPrefix = `${storeCode}-${branchCode}-%`;
         const fromProducts = await maxSequenceFrom(connection,
-            "SELECT product_number AS value FROM products WHERE store_id = ? AND branch_id = ? AND product_number IS NOT NULL",
-            [storeId, branchId]);
+            "SELECT product_number AS value FROM products WHERE store_id = ? AND product_number LIKE ?",
+            [storeId, branchPrefix]);
         const fromRental = await maxSequenceFrom(connection,
-            "SELECT equipment_number AS value FROM rental_equipment WHERE store_id = ? AND branch_id = ? AND equipment_number LIKE '%-PRD-%'",
-            [storeId, branchId], PATTERNS.product);
+            "SELECT equipment_number AS value FROM equipment WHERE store_id = ? AND equipment_number LIKE ?",
+            [storeId, branchPrefix], PATTERNS.product);
         const fromPrefix = await maxProductPrefixSequence(connection, storeCode, branchCode);
-        const next = Math.max(Number(sequenceRows[0]?.lastSequence || 0), fromProducts, fromRental, fromPrefix) + 1;
-        await connection.execute(
-            `INSERT INTO product_number_sequences (store_id, branch_id, last_sequence)
-             VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
-            [storeId, branchId, next]
-        );
+        const next = Math.max(fromProducts, fromRental, fromPrefix) + 1;
         return buildProductNumber(storeCode, branchCode, next);
     }
 
     /*
-     * One Equipment No. per physical rental unit ADDED from now on (units that existed
-     * before are left exactly as they are). Rental workflows stay quantity-based:
-     * delta > 0 issues new numbers; delta < 0 (correction, write-off, retirement)
-     * retires the most recently numbered units still active. Numbers are never reused.
-     * delta = -Infinity retires all of a rental product's numbers.
+     * stocknbook_v2 tracks rental equipment by quantity per branch
+     * (branch_inventory); individual physical units are not numbered.
+     * These helpers are kept so existing callers keep working.
      */
-    async function adjustEquipmentUnits(connection, { storeId, branchId, equipmentId, delta }) {
-        const change = Number(delta);
-        if (!change) return { issued: [], retired: 0 };
-        if (change < 0) {
-            const [active] = await connection.execute(
-                "SELECT id FROM rental_equipment_units WHERE equipment_id = ? AND retired_at IS NULL ORDER BY id DESC",
-                [equipmentId]
-            );
-            const count = Number.isFinite(change) ? Math.min(active.length, -change) : active.length;
-            const ids = active.slice(0, count).map((row) => Number(row.id));
-            for (let i = 0; i < ids.length; i += 500) {
-                const chunk = ids.slice(i, i + 500);
-                await connection.execute(
-                    `UPDATE rental_equipment_units SET retired_at = CURRENT_TIMESTAMP WHERE id IN (${chunk.map(() => "?").join(",")})`,
-                    chunk
-                );
-            }
-            return { issued: [], retired: ids.length };
-        }
-        const needed = Math.trunc(change);
-        const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
-        const prefix = `${storeCode}-${branchCode}-EQP-`;
-        const floor = await maxSequenceFrom(connection,
-            "SELECT equipment_number AS value FROM rental_equipment_units WHERE equipment_number LIKE ?",
-            [`${prefix}%`], PATTERNS.equipment);
-        const { first } = await reserveSequenceBlock(connection,
-            { storeId, branchId, entityType: "EQP", count: needed, floor });
-        const issued = Array.from({ length: needed }, (_, i) => buildEquipmentNumber(storeCode, branchCode, first + i));
-        for (let i = 0; i < issued.length; i += 500) {
-            const chunk = issued.slice(i, i + 500);
-            await connection.execute(
-                `INSERT INTO rental_equipment_units (store_id, branch_id, equipment_id, equipment_number)
-                 VALUES ${chunk.map(() => "(?, ?, ?, ?)").join(", ")}`,
-                chunk.flatMap((number) => [storeId, branchId, equipmentId, number])
-            );
-        }
-        return { issued, retired: 0 };
+    async function adjustEquipmentUnits() {
+        return { issued: [], retired: 0 };
     }
 
-    // Active Equipment Nos. for a branch, grouped by rental product type.
-    async function listEquipmentUnitNumbers(connection, { storeId, branchId }) {
-        const grouped = new Map();
-        try {
-            const [rows] = await connection.execute(
-                `SELECT equipment_id AS equipmentId, equipment_number AS equipmentNumber
-                 FROM rental_equipment_units
-                 WHERE store_id = ? AND branch_id = ? AND retired_at IS NULL
-                 ORDER BY equipment_id, equipment_number`,
-                [storeId, branchId]
-            );
-            for (const row of rows) {
-                const key = Number(row.equipmentId);
-                if (!grouped.has(key)) grouped.set(key, []);
-                grouped.get(key).push(String(row.equipmentNumber));
-            }
-        } catch (error) {
-            if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
-        }
-        return grouped;
+    async function listEquipmentUnitNumbers() {
+        return new Map();
     }
 
     return {
@@ -572,6 +391,9 @@ const identifiers = (() => {
         generateOrderId,
         generateEmployeeCode,
         allocateProductNumber,
+        allocateStoreCode,
+        allocateBranchCode,
+        lockBranch,
         adjustEquipmentUnits,
         maxProductPrefixSequence,
         listEquipmentUnitNumbers,
@@ -597,24 +419,13 @@ function normalizeLimit(value) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
 }
-
-// Legacy stores.plan is a display cache, not the source of subscription entitlement.
-// Reconcile it only if it differs from the currently effective (paid/grace/free) plan.
-async function syncStorePlanLabel(connection, storeId, effectivePlanName) {
-    if (!effectivePlanName) return;
-    await connection.execute(
-        "UPDATE stores SET plan = ? WHERE id = ? AND (plan IS NULL OR plan <> ?)",
-        [effectivePlanName, Number(storeId), effectivePlanName]
-    );
-}
-
 // Paid subscriptions remain usable through their displayed expiration date.
 // A single eligible payment submitted before expiry can retain paid access for
 // up to 48 hours while the administrator reviews it. No records are deleted.
 async function getActivePlan(connection, storeId) {
     await processDueSubscriptionPlanChange(connection, Number(storeId));
     const [rows] = await connection.execute(
-        `SELECT p.id, p.name, p.price, p.max_inventory, p.max_bookings,
+        `SELECT p.id, p.plan_name AS name, p.price, p.max_inventory, p.max_bookings,
                 p.max_staff, p.max_branches, p.has_low_stock_alerts,
                 p.has_analytics, p.has_forecasting, p.has_multi_store,
                 s.expires_at, s.status,
@@ -639,7 +450,6 @@ async function getActivePlan(connection, storeId) {
         access_status: accessStatus,
     });
     if (paid && !Number(paid.is_past_expiry)) {
-        await syncStorePlanLabel(connection, storeId, paid.name);
         return normalized(paid, 'PAID');
     }
     if (paid && Number(paid.price) > 0) {
@@ -650,7 +460,7 @@ async function getActivePlan(connection, storeId) {
         // Never grant grace without verifiable pre-expiry submission time.
         if (paymentColumns.createdAt) {
             const [eligible] = await connection.execute(
-                `SELECT p.id FROM payments p
+                `SELECT p.id FROM subscription_payments p
                  WHERE p.store_id = ? AND UPPER(p.status) = 'PENDING'
                    AND DATE(p.${paymentColumns.createdAt}) <= DATE(?)
                    AND CURDATE() <= DATE_ADD(DATE(?), INTERVAL 2 DAY)
@@ -658,20 +468,18 @@ async function getActivePlan(connection, storeId) {
                 [Number(storeId), paid.expires_at, paid.expires_at]
             );
             if (eligible.length > 0) {
-                await syncStorePlanLabel(connection, storeId, paid.name);
                 return normalized(paid, 'GRACE');
             }
         }
     }
     const [starterRows] = await connection.execute(
-        `SELECT id, name, price, max_inventory, max_bookings, max_staff,
+        `SELECT id, plan_name AS name, price, max_inventory, max_bookings, max_staff,
                 max_branches, has_low_stock_alerts, has_analytics,
                 has_forecasting, has_multi_store
-         FROM plans WHERE is_archived = 0 AND (LOWER(name) = 'starter' OR price = 0)
+         FROM plans WHERE is_archived = 0 AND (LOWER(plan_code) = 'starter' OR LOWER(plan_name) = 'starter' OR price = 0)
          ORDER BY price ASC, id ASC LIMIT 1`
     );
     if (!starterRows.length) return null;
-    await syncStorePlanLabel(connection, storeId, starterRows[0].name);
     return normalized(starterRows[0], 'STARTER_FALLBACK');
 }
 
@@ -693,8 +501,9 @@ async function getStoreUsage(connection, storeId) {
 
     const [staffRows] = await connection.execute(
         `SELECT COUNT(*) AS total
-         FROM staff
+         FROM users
          WHERE store_id = ?
+           AND role = 'staff'
            AND status IN ('active', 'pending')`,
         [Number(storeId)]
     );
@@ -843,12 +652,12 @@ function logDevelopmentInvitationFallback({
     );
 }
 
-const SMTP_USER = "noreplystocknbook@gmail.com";
+const SMTP_USER = "stocknbook@gmail.com";
 
 // Replace this value with a CURRENT 16-character Google App Password
 // generated for the same Gmail account used in SMTP_USER.
 // Do not use the normal Gmail account password.
-const SMTP_PASS = "hked wrge cdlh bmep"
+const SMTP_PASS = "rrmk ivgo ojgg nkqw"
     .replace(/\s/g, "");
 
 const EMAIL_FROM =
@@ -876,65 +685,6 @@ function hashOtp(otp) {
         .update(String(otp))
         .digest("hex");
 }
-
-async function ensureSignupOtpsTable(connection) {
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS signup_otps (
-                                                   id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                   email VARCHAR(255) NOT NULL,
-            otp_hash CHAR(64) NOT NULL,
-            expires_at DATETIME NOT NULL,
-            used TINYINT(1) NOT NULL DEFAULT 0,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_signup_otps_email (email),
-            INDEX idx_signup_otps_lookup (
-                                             email,
-                                             otp_hash,
-                                             used,
-                                             expires_at
-                                         )
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-}
-
-
-async function ensurePaymentOtpsTable(connection) {
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS payment_otps (
-                                                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                    store_id BIGINT NOT NULL,
-                                                    email VARCHAR(255) NOT NULL,
-            otp_hash CHAR(64) NOT NULL,
-            expires_at DATETIME NOT NULL,
-            used TINYINT(1) NOT NULL DEFAULT 0,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_payment_otps_store (store_id),
-            INDEX idx_payment_otps_lookup (
-                                              store_id,
-                                              otp_hash,
-                                              used,
-                                              expires_at
-                                          )
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-}
-
-
-// Track SMTP failures separately so undelivered OTPs do not exhaust the
-// five-email allowance, while repeated failed attempts remain rate-limited.
-// Auto-created on first payment-OTP request; no changes to existing tables.
-async function ensurePaymentOtpEmailFailuresTable(connection) {
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS payment_otp_email_failures (
-                                                                  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                                  store_id BIGINT NOT NULL,
-                                                                  smtp_error_code VARCHAR(50) NOT NULL,
-            attempted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_payment_otp_email_failures_store_time (store_id, attempted_at)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-}
-
 function paymentOtpRetrySeconds(value) {
     const seconds = Number(value);
     return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : 60;
@@ -971,33 +721,6 @@ function hashInviteToken(inviteToken) {
         .digest("hex");
 }
 
-async function ensureManagerInviteOtpsTable(connection) {
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS manager_invite_otps (
-                                                           id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                           invite_token_hash CHAR(64) NOT NULL,
-            email VARCHAR(255) NOT NULL,
-            otp_hash CHAR(64) NOT NULL,
-            expires_at DATETIME NOT NULL,
-            verified_at DATETIME NULL,
-            used TINYINT(1) NOT NULL DEFAULT 0,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_manager_invite_otp_email (email),
-            INDEX idx_manager_invite_otp_lookup (
-                                                    invite_token_hash,
-                                                    email,
-                                                    used,
-                                                    expires_at
-                                                ),
-            INDEX idx_manager_invite_otp_verified (
-                                                      invite_token_hash,
-                                                      email,
-                                                      verified_at
-                                                  )
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-}
-
 async function getManagerInviteRecord(connection, inviteToken) {
     if (!inviteToken) {
         const error = new Error("Missing invitation token.");
@@ -1023,23 +746,24 @@ async function getManagerInviteRecord(connection, inviteToken) {
 
     const [rows] = await connection.execute(
         `SELECT
-             managers.id AS manager_id,
-             managers.manager_name,
-             managers.manager_email,
-             managers.permissions,
-             managers.status,
-             managers.store_id,
-             managers.branch_id,
+             users.id AS manager_id,
+             users.full_name AS manager_name,
+             users.email AS manager_email,
+             users.permissions,
+             users.status,
+             users.store_id,
+             users.branch_id,
              branches.branch_name,
              stores.store_name
-         FROM managers
-                  JOIN branches ON managers.branch_id = branches.id
-                  JOIN stores ON managers.store_id = stores.id
-         WHERE managers.invite_token = ?
-           AND managers.manager_email = ?
-           AND managers.store_id = ?
-           AND managers.branch_id = ?
-           AND managers.status = 'pending'
+         FROM users
+                  JOIN branches ON users.branch_id = branches.id
+                  JOIN stores ON users.store_id = stores.id
+         WHERE users.role = 'manager'
+           AND users.invite_token_hash = SHA2(?, 256)
+           AND users.email = ?
+           AND users.store_id = ?
+           AND users.branch_id = ?
+           AND users.status = 'pending'
              LIMIT 1`,
         [
             inviteToken,
@@ -1078,13 +802,13 @@ async function getManagerInviteRecord(connection, inviteToken) {
 }
 
 async function requireVerifiedManagerInvite(connection, inviteToken, email) {
-    await ensureManagerInviteOtpsTable(connection);
 
     const inviteTokenHash = hashInviteToken(inviteToken);
     const [rows] = await connection.execute(
         `SELECT id
-         FROM manager_invite_otps
-         WHERE invite_token_hash = ?
+         FROM otp_codes
+         WHERE purpose = 'manager_invite'
+           AND invite_token_hash = ?
            AND email = ?
            AND verified_at IS NOT NULL
            AND verified_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 MINUTE)
@@ -1102,60 +826,6 @@ async function requireVerifiedManagerInvite(connection, inviteToken, email) {
     }
 }
 
-
-async function ensureStaffInviteOtpsTable(connection) {
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS staff_invite_otps (
-                                                         id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                         invite_token_hash CHAR(64) NOT NULL,
-            email VARCHAR(255) NOT NULL,
-            otp_hash CHAR(64) NOT NULL,
-            expires_at DATETIME NOT NULL,
-            verified_at DATETIME NULL,
-            used TINYINT(1) NOT NULL DEFAULT 0,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_staff_invite_otp_email (email),
-            INDEX idx_staff_invite_otp_lookup (
-                                                  invite_token_hash,
-                                                  email,
-                                                  used,
-                                                  expires_at
-                                              ),
-            INDEX idx_staff_invite_otp_verified (
-                                                    invite_token_hash,
-                                                    email,
-                                                    verified_at
-                                                )
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-}
-
-async function ensureBranchOperationalColumns(connection) {
-    const [statusColumns] = await connection.execute(
-        "SHOW COLUMNS FROM branches LIKE 'status'"
-    );
-
-    if (statusColumns.length === 0) {
-        await connection.execute(
-            `ALTER TABLE branches
-                ADD COLUMN status ENUM('active', 'inactive')
-             NOT NULL DEFAULT 'active'
-             AFTER address`
-        );
-    }
-
-    const [reasonColumns] = await connection.execute(
-        "SHOW COLUMNS FROM branches LIKE 'inactive_reason'"
-    );
-
-    if (reasonColumns.length === 0) {
-        await connection.execute(
-            `ALTER TABLE branches
-                ADD COLUMN inactive_reason VARCHAR(255) NULL
-             AFTER status`
-        );
-    }
-}
 
 async function getStaffInviteRecord(connection, inviteToken) {
     if (!inviteToken) {
@@ -1183,8 +853,8 @@ async function getStaffInviteRecord(connection, inviteToken) {
     const [rows] = await connection.execute(
         `SELECT
              staff.id AS staff_id,
-             staff.staff_name,
-             staff.staff_email,
+             staff.full_name AS staff_name,
+             staff.email AS staff_email,
              staff.permissions,
              staff.status,
              staff.store_id,
@@ -1192,13 +862,14 @@ async function getStaffInviteRecord(connection, inviteToken) {
              staff.manager_id,
              branches.branch_name,
              stores.store_name,
-             COALESCE(managers.manager_name, '') AS manager_name
-         FROM staff
+             COALESCE(managers.full_name, '') AS manager_name
+         FROM users staff
                   JOIN branches ON staff.branch_id = branches.id
                   JOIN stores ON staff.store_id = stores.id
-                  LEFT JOIN managers ON staff.manager_id = managers.id
-         WHERE staff.invite_token = ?
-           AND staff.staff_email = ?
+                  LEFT JOIN users managers ON staff.manager_id = managers.id AND managers.role = 'manager'
+         WHERE staff.role = 'staff'
+           AND staff.invite_token_hash = SHA2(?, 256)
+           AND staff.email = ?
            AND staff.store_id = ?
            AND staff.branch_id = ?
            AND staff.manager_id = ?
@@ -1244,13 +915,13 @@ async function getStaffInviteRecord(connection, inviteToken) {
 }
 
 async function requireVerifiedStaffInvite(connection, inviteToken, email) {
-    await ensureStaffInviteOtpsTable(connection);
 
     const inviteTokenHash = hashInviteToken(inviteToken);
     const [rows] = await connection.execute(
         `SELECT id
-         FROM staff_invite_otps
-         WHERE invite_token_hash = ?
+         FROM otp_codes
+         WHERE purpose = 'staff_invite'
+           AND invite_token_hash = ?
            AND email = ?
            AND verified_at IS NOT NULL
            AND verified_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 MINUTE)
@@ -2188,7 +1859,7 @@ const dbConfig = {
     host: "127.0.0.1",
     user: "root",
     password: "BTA5EYVWLfWcebF",
-    database: "stocknbook",
+    database: "stocknbook_v2",
     ssl: { rejectUnauthorized: false },
 };
 
@@ -2209,30 +1880,17 @@ function getBearerTokenFromEvent(event) {
     return String(authHeader).replace(/^Bearer\s+/i, "").trim();
 }
 
-async function getPlanColumnsForOwner(connection) {
-    const [rows] = await connection.query("SHOW COLUMNS FROM payments");
-    const names = new Set(rows.map((row) => row.Field));
-    const pick = (candidates, required = true) => {
-        const found = candidates.find((candidate) => names.has(candidate));
-        if (!found && required) {
-            const error = new Error(
-                `payments table is missing a required column. Expected one of: ${candidates.join(", ")}`
-            );
-            error.statusCode = 500;
-            throw error;
-        }
-        return found || null;
-    };
-
+// Subscription payment submissions are stored in subscription_payments.
+async function getPlanColumnsForOwner() {
     return {
-        id: pick(["id", "payment_id"]),
-        storeId: pick(["store_id"]),
-        planId: pick(["plan_id", "requested_plan_id"]),
-        amount: pick(["amount", "amount_remitted", "amount_submitted"]),
-        reference: pick(["reference_no", "reference_number", "gcash_reference_no", "gcash_reference"]),
-        receipt: pick(["receipt_url", "proof_file_url", "receipt_file_url"], false),
-        status: pick(["status"]),
-        createdAt: pick(["created_at", "submitted_at", "payment_date"], false),
+        id: "id",
+        storeId: "store_id",
+        planId: "plan_id",
+        amount: "amount",
+        reference: "reference_number",
+        receipt: "receipt_storage_key",
+        status: "status",
+        createdAt: "submitted_at",
     };
 }
 
@@ -2331,63 +1989,41 @@ function addUtcDays(dateOnly, days) {
     return date.toISOString().slice(0, 10);
 }
 
-async function ensureSubscriptionPlanChangesTable(connection) {
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS subscription_plan_changes (
-                                                                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                                                 subscription_id BIGINT NULL,
-                                                                 store_id BIGINT NOT NULL,
-                                                                 current_plan_id BIGINT NOT NULL,
-                                                                 target_plan_id BIGINT NOT NULL,
-                                                                 change_type VARCHAR(20) NOT NULL DEFAULT 'DOWNGRADE',
-            status VARCHAR(30) NOT NULL DEFAULT 'SCHEDULED',
-            requested_by_role VARCHAR(30) NOT NULL DEFAULT 'owner',
-            requested_by_email VARCHAR(255) NULL,
-            requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            effective_at DATE NOT NULL,
-            cancelled_at DATETIME NULL,
-            applied_at DATETIME NULL,
-            notes VARCHAR(500) NULL,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_subscription_plan_changes_store_status (store_id, status),
-            INDEX idx_subscription_plan_changes_subscription_status (subscription_id, status),
-            INDEX idx_subscription_plan_changes_effective (status, effective_at)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-}
-
 async function getPendingSubscriptionPlanChange(connection, storeId) {
-    await ensureSubscriptionPlanChangesTable(connection);
 
     const [rows] = await connection.execute(
         `SELECT
-             spc.id,
-             spc.subscription_id,
-             spc.store_id,
-             spc.current_plan_id,
-             spc.target_plan_id,
-             spc.change_type,
-             spc.status,
-             spc.requested_by_role,
-             spc.requested_by_email,
-             spc.requested_at,
-             spc.effective_at,
-             spc.cancelled_at,
-             spc.applied_at,
-             spc.notes,
-             current_plan.name AS current_plan_name,
-             target_plan.name AS target_plan_name,
+             s.id,
+             s.id AS subscription_id,
+             s.store_id,
+             s.plan_id AS current_plan_id,
+             s.scheduled_plan_id AS target_plan_id,
+             'DOWNGRADE' AS change_type,
+             CASE
+                 WHEN DATE(s.scheduled_change_at) <= UTC_DATE() AND COALESCE(target_plan.price, 0) > 0
+             THEN 'AWAITING_PAYMENT'
+             ELSE 'SCHEDULED'
+        END AS status,
+             'owner' AS requested_by_role,
+             NULL AS requested_by_email,
+             s.updated_at AS requested_at,
+             s.scheduled_change_at AS effective_at,
+             NULL AS cancelled_at,
+             NULL AS applied_at,
+             NULL AS notes,
+             current_plan.plan_name AS current_plan_name,
+             target_plan.plan_name AS target_plan_name,
              target_plan.price AS target_plan_price,
              target_plan.max_inventory AS target_max_inventory,
              target_plan.max_bookings AS target_max_bookings,
              target_plan.max_staff AS target_max_staff,
              target_plan.max_branches AS target_max_branches
-         FROM subscription_plan_changes spc
-                  LEFT JOIN plans current_plan ON current_plan.id = spc.current_plan_id
-                  LEFT JOIN plans target_plan ON target_plan.id = spc.target_plan_id
-         WHERE spc.store_id = ?
-           AND UPPER(spc.status) IN ('SCHEDULED', 'AWAITING_PAYMENT')
-         ORDER BY spc.id DESC
+         FROM subscriptions s
+                  LEFT JOIN plans current_plan ON current_plan.id = s.plan_id
+                  LEFT JOIN plans target_plan ON target_plan.id = s.scheduled_plan_id
+         WHERE s.store_id = ?
+           AND s.scheduled_plan_id IS NOT NULL
+         ORDER BY s.id DESC
              LIMIT 1`,
         [storeId]
     );
@@ -2432,19 +2068,18 @@ async function processDueSubscriptionPlanChange(connection, storeId) {
     }
 
     const [targetRows] = await connection.execute(
-        `SELECT * FROM plans WHERE id = ? LIMIT 1`,
+        `SELECT *, plan_name AS name FROM plans WHERE id = ? LIMIT 1`,
         [change.target_plan_id]
     );
     const targetPlan = targetRows[0] || null;
 
     if (!targetPlan || Number(targetPlan.is_archived) === 1) {
         await connection.execute(
-            `UPDATE subscription_plan_changes
-             SET status = 'CANCELLED',
-                 cancelled_at = NOW(),
-                 notes = ?
-             WHERE id = ? AND UPPER(status) = 'SCHEDULED'`,
-            ["Scheduled downgrade cancelled because the target plan is no longer available.", change.id]
+            `UPDATE subscriptions
+             SET scheduled_plan_id = NULL,
+                 scheduled_change_at = NULL
+             WHERE id = ? AND scheduled_plan_id IS NOT NULL`,
+            [change.id]
         );
         return null;
     }
@@ -2452,13 +2087,8 @@ async function processDueSubscriptionPlanChange(connection, storeId) {
     // Paid lower-tier plans still require the owner's normal GCash payment and
     // platform-admin verification. The scheduled record simply makes that lower
     // plan eligible for payment after the current paid period ends.
+    // The awaiting-payment state is derived from subscriptions.scheduled_change_at.
     if (Number(targetPlan.price || 0) > 0) {
-        await connection.execute(
-            `UPDATE subscription_plan_changes
-             SET status = 'AWAITING_PAYMENT'
-             WHERE id = ? AND UPPER(status) = 'SCHEDULED'`,
-            [change.id]
-        );
         return getPendingSubscriptionPlanChange(connection, storeId);
     }
 
@@ -2489,44 +2119,13 @@ async function processDueSubscriptionPlanChange(connection, storeId) {
                  status = 'active',
                  started_at = ?,
                  expires_at = NULL,
-                 auto_renew = 0
+                 scheduled_plan_id = NULL,
+                 scheduled_change_at = NULL
              WHERE id = ?`,
             [targetPlan.id, effectiveAt, subscription.id]
         );
 
-        await syncStorePlanLabel(connection, storeId, targetPlan.name);
-
-        await connection.execute(
-            `UPDATE subscription_plan_changes
-             SET status = 'APPLIED',
-                 applied_at = NOW()
-             WHERE id = ? AND UPPER(status) = 'SCHEDULED'`,
-            [change.id]
-        );
-
-        // subscription_plan_changes is the authoritative downgrade audit record.
-        // Also write to the existing history table when its schema allows a
-        // system-generated (NULL admin) entry, but never fail the downgrade just
-        // because an older history table requires an administrator ID.
-        try {
-            await connection.execute(
-                `INSERT INTO subscription_history
-                 (subscription_id, store_id, old_plan_id, new_plan_id, change_type, changed_by)
-                 VALUES (?, ?, ?, ?, 'downgrade', NULL)`,
-                [
-                    subscription.id,
-                    storeId,
-                    subscription.plan_id,
-                    targetPlan.id,
-                ]
-            );
-        } catch (historyError) {
-            console.warn(
-                "Unable to add automatic downgrade to subscription_history:",
-                historyError.message
-            );
-        }
-
+        // The UPDATE above applied the plan and cleared the scheduled change.
         await connection.commit();
         return null;
     } catch (error) {
@@ -2577,7 +2176,7 @@ async function getStoreSubscriptionSnapshot(connection, storeId) {
              s.started_at,
              s.expires_at,
              p.id AS plan_id_joined,
-             p.name,
+             p.plan_name AS name,
              p.price,
              p.max_inventory,
              p.max_bookings,
@@ -2602,7 +2201,7 @@ async function getStoreSubscriptionSnapshot(connection, storeId) {
         const [starterRows] = await connection.execute(
             `SELECT
                  id AS plan_id,
-                 name,
+                 plan_name AS name,
                  price,
                  max_inventory,
                  max_bookings,
@@ -2615,7 +2214,7 @@ async function getStoreSubscriptionSnapshot(connection, storeId) {
                  is_archived
              FROM plans
              WHERE is_archived = 0
-               AND (LOWER(name) = 'starter' OR price = 0)
+               AND (LOWER(plan_code) = 'starter' OR LOWER(plan_name) = 'starter' OR price = 0)
              ORDER BY price ASC, id ASC
                  LIMIT 1`
         );
@@ -2644,7 +2243,7 @@ async function getStoreSubscriptionSnapshot(connection, storeId) {
 
     const [pendingPaymentRows] = await connection.execute(
         `SELECT COUNT(*) AS total
-         FROM payments
+         FROM subscription_payments
          WHERE store_id = ?
            AND UPPER(status) = 'PENDING'`,
         [storeId]
@@ -2695,7 +2294,6 @@ async function getStoreSubscriptionSnapshot(connection, storeId) {
 }
 
 async function getOwnerSubscription(connection, storeId) {
-    await ensureSubscriptionPlanChangesTable(connection);
     await processDueSubscriptionPlanChange(connection, storeId);
 
     const snapshot = await getStoreSubscriptionSnapshot(connection, storeId);
@@ -2704,7 +2302,7 @@ async function getOwnerSubscription(connection, storeId) {
     const [planRows] = await connection.execute(
         `SELECT
              id,
-             name,
+             plan_name AS name,
              price,
              max_inventory,
              max_bookings,
@@ -2717,7 +2315,7 @@ async function getOwnerSubscription(connection, storeId) {
          FROM plans
          WHERE is_archived = 0
          ORDER BY
-             CASE LOWER(name)
+             CASE LOWER(plan_name)
                  WHEN 'starter' THEN 1
                  WHEN 'growth' THEN 2
                  WHEN 'scale' THEN 3
@@ -2776,7 +2374,6 @@ async function requestOwnerSubscriptionDowngrade(connection, decoded, body) {
         throw error;
     }
 
-    await ensureSubscriptionPlanChangesTable(connection);
     await processDueSubscriptionPlanChange(connection, storeId);
 
     const snapshot = await getStoreSubscriptionSnapshot(connection, storeId);
@@ -2793,7 +2390,7 @@ async function requestOwnerSubscriptionDowngrade(connection, decoded, body) {
     }
 
     const [targetRows] = await connection.execute(
-        `SELECT * FROM plans WHERE id = ? AND is_archived = 0 LIMIT 1`,
+        `SELECT *, plan_name AS name FROM plans WHERE id = ? AND is_archived = 0 LIMIT 1`,
         [targetPlanId]
     );
     const targetPlan = targetRows[0] || null;
@@ -2847,19 +2444,16 @@ async function requestOwnerSubscriptionDowngrade(connection, decoded, body) {
         : dateOnlyUtc();
 
     const [result] = await connection.execute(
-        `INSERT INTO subscription_plan_changes
-         (subscription_id, store_id, current_plan_id, target_plan_id,
-          change_type, status, requested_by_role, requested_by_email,
-          effective_at, notes)
-         VALUES (?, ?, ?, ?, 'DOWNGRADE', 'SCHEDULED', 'owner', ?, ?, ?)`,
+        `UPDATE subscriptions
+         SET scheduled_plan_id = ?,
+             scheduled_change_at = ?
+         WHERE id = ?
+           AND store_id = ?`,
         [
+            targetPlan.id,
+            effectiveAt,
             snapshot.subscription_id,
             storeId,
-            snapshot.plan.id,
-            targetPlan.id,
-            String(decoded.email || "").trim() || null,
-            effectiveAt,
-            `Owner requested downgrade from ${snapshot.plan.name} to ${targetPlan.name}.`,
         ]
     );
 
@@ -2873,7 +2467,7 @@ async function requestOwnerSubscriptionDowngrade(connection, decoded, body) {
             Number(targetPlan.price || 0) > 0
                 ? `Downgrade to ${targetPlan.name} scheduled. Your current plan remains active through its paid period; payment for ${targetPlan.name} will be requested when the downgrade becomes effective.`
                 : `Downgrade to ${targetPlan.name} scheduled. It will apply automatically after the current paid period ends.`,
-        change_id: Number(result.insertId),
+        change_id: Number(result.affectedRows ? snapshot.subscription_id : 0),
         scheduled_change: serializeSubscriptionPlanChange(scheduled),
     };
 }
@@ -2886,7 +2480,6 @@ async function cancelOwnerSubscriptionDowngrade(connection, decoded) {
     }
 
     const storeId = Number(decoded.store_id);
-    await ensureSubscriptionPlanChangesTable(connection);
     await processDueSubscriptionPlanChange(connection, storeId);
 
     const change = await getPendingSubscriptionPlanChange(connection, storeId);
@@ -2909,7 +2502,7 @@ async function cancelOwnerSubscriptionDowngrade(connection, decoded) {
 
     const [pendingPaymentRows] = await connection.execute(
         `SELECT COUNT(*) AS total
-         FROM payments
+         FROM subscription_payments
          WHERE store_id = ?
            AND UPPER(status) = 'PENDING'`,
         [storeId]
@@ -2922,12 +2515,11 @@ async function cancelOwnerSubscriptionDowngrade(connection, decoded) {
     }
 
     await connection.execute(
-        `UPDATE subscription_plan_changes
-         SET status = 'CANCELLED',
-             cancelled_at = NOW(),
-             notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE ' ' END, 'Cancelled by owner.')
+        `UPDATE subscriptions
+         SET scheduled_plan_id = NULL,
+             scheduled_change_at = NULL
          WHERE id = ?
-           AND UPPER(status) = 'SCHEDULED'`,
+           AND scheduled_plan_id IS NOT NULL`,
         [change.id]
     );
 
@@ -2961,11 +2553,10 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
         throw error;
     }
 
-    await ensureSubscriptionPlanChangesTable(connection);
     await processDueSubscriptionPlanChange(connection, storeId);
 
     const [planRows] = await connection.execute(
-        `SELECT * FROM plans WHERE id = ? AND is_archived = 0 LIMIT 1`,
+        `SELECT *, plan_name AS name FROM plans WHERE id = ? AND is_archived = 0 LIMIT 1`,
         [planId]
     );
     const targetPlan = planRows[0];
@@ -3011,7 +2602,7 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
 
     const [pendingRows] = await connection.execute(
         `SELECT ${columns.id} AS payment_id
-         FROM payments
+         FROM subscription_payments
          WHERE ${columns.storeId} = ?
            AND UPPER(${columns.status}) = 'PENDING'
              LIMIT 1`,
@@ -3026,7 +2617,7 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
 
     const [duplicateRows] = await connection.execute(
         `SELECT ${columns.id} AS payment_id
-         FROM payments
+         FROM subscription_payments
          WHERE ${columns.reference} = ?
            AND UPPER(${columns.status}) IN ('PENDING', 'APPROVED')
              LIMIT 1`,
@@ -3039,7 +2630,6 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
         throw error;
     }
 
-    await ensurePaymentOtpsTable(connection);
 
     const otp = String(body.otp || "").trim();
 
@@ -3052,20 +2642,22 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
     const otpHash = hashOtp(otp);
 
     await connection.execute(
-        `UPDATE payment_otps
-         SET used = 1
-         WHERE store_id = ?
-           AND used = 0
+        `UPDATE otp_codes
+         SET used_at = UTC_TIMESTAMP()
+         WHERE purpose = 'subscription_payment'
+           AND store_id = ?
+           AND used_at IS NULL
            AND expires_at <= UTC_TIMESTAMP()`,
         [storeId]
     );
 
     const [otpRows] = await connection.execute(
         `SELECT id
-         FROM payment_otps
-         WHERE store_id = ?
+         FROM otp_codes
+         WHERE purpose = 'subscription_payment'
+           AND store_id = ?
            AND otp_hash = ?
-           AND used = 0
+           AND used_at IS NULL
            AND expires_at > UTC_TIMESTAMP()
          ORDER BY id DESC
              LIMIT 1`,
@@ -3078,19 +2670,23 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
         throw error;
     }
 
-    await connection.execute(`UPDATE payment_otps SET used = 1 WHERE id = ?`, [otpRows[0].id]);
+    await connection.execute(`UPDATE otp_codes SET used_at = UTC_TIMESTAMP() WHERE id = ?`, [otpRows[0].id]);
 
     const insertColumns = [
         columns.storeId,
         columns.planId,
+        "subscription_id",
         columns.amount,
+        "payment_method",
         columns.reference,
         columns.status,
     ];
     const insertValues = [
         storeId,
         planId,
+        snapshot.subscription_id || null,
         Number(targetPlan.price),
+        "GCash",
         referenceNumber,
         "pending",
     ];
@@ -3107,7 +2703,7 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
 
     const placeholders = insertColumns.map(() => "?").join(", ");
     const [result] = await connection.execute(
-        `INSERT INTO payments (${insertColumns.join(", ")}) VALUES (${placeholders})`,
+        `INSERT INTO subscription_payments (${insertColumns.join(", ")}) VALUES (${placeholders})`,
         insertValues
     );
 
@@ -3255,12 +2851,11 @@ module.exports.handler = async (event) => {
             }
 
             const storeId = Number(decoded.store_id);
-            await ensurePaymentOtpsTable(connection);
 
             let ownerEmail = String(decoded.email || "").trim().toLowerCase();
             if (!ownerEmail) {
                 const [storeRows] = await connection.execute(
-                    "SELECT email FROM stores WHERE id = ? LIMIT 1",
+                    `SELECT email FROM users WHERE store_id = ? AND role = 'owner' LIMIT 1`,
                     [storeId]
                 );
                 ownerEmail = String(storeRows[0]?.email || "").trim().toLowerCase();
@@ -3274,7 +2869,6 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            await ensurePaymentOtpEmailFailuresTable(connection);
 
             // Count accepted or still-in-progress OTP requests. A failed SMTP
             // request deletes its pending OTP and is counted separately below.
@@ -3282,8 +2876,9 @@ module.exports.handler = async (event) => {
                 `SELECT COUNT(*) AS total,
                         TIMESTAMPDIFF(SECOND, NOW(),
                                               DATE_ADD(MIN(created_at), INTERVAL ? MINUTE)) AS retry_after_seconds
-                 FROM payment_otps
-                 WHERE store_id = ?
+                 FROM otp_codes
+                 WHERE purpose = 'subscription_payment'
+                   AND store_id = ?
                    AND created_at > DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
                 [PAYMENT_OTP_RATE_WINDOW_MINUTES, storeId, PAYMENT_OTP_RATE_WINDOW_MINUTES]
             );
@@ -3302,11 +2897,12 @@ module.exports.handler = async (event) => {
             // Failed attempts have their own independent 10-minute allowance.
             const [failureRows] = await connection.execute(
                 `SELECT COUNT(*) AS total,
-                        TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(),
-                                              DATE_ADD(MIN(attempted_at), INTERVAL ? MINUTE)) AS retry_after_seconds
-                 FROM payment_otp_email_failures
-                 WHERE store_id = ?
-                   AND attempted_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? MINUTE)`,
+                        TIMESTAMPDIFF(SECOND, NOW(),
+                                              DATE_ADD(MIN(created_at), INTERVAL ? MINUTE)) AS retry_after_seconds
+                 FROM otp_codes
+                 WHERE purpose = 'subscription_payment_email_failure'
+                   AND store_id = ?
+                   AND created_at > DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
                 [PAYMENT_OTP_RATE_WINDOW_MINUTES, storeId, PAYMENT_OTP_RATE_WINDOW_MINUTES]
             );
 
@@ -3323,7 +2919,7 @@ module.exports.handler = async (event) => {
             let planName = null;
             if (body.plan_id) {
                 const [planRows] = await connection.execute(
-                    "SELECT name FROM plans WHERE id = ? LIMIT 1",
+                    `SELECT plan_name AS name FROM plans WHERE id = ? LIMIT 1`,
                     [Number(body.plan_id)]
                 );
                 planName = planRows[0]?.name || null;
@@ -3336,8 +2932,8 @@ module.exports.handler = async (event) => {
             // In particular, do not invalidate the owner's previous active code
             // when delivery of this replacement code fails.
             const [insertResult] = await connection.execute(
-                `INSERT INTO payment_otps (store_id, email, otp_hash, expires_at, used)
-                 VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 1)`,
+                `INSERT INTO otp_codes (purpose, store_id, email, otp_hash, expires_at, used_at)
+                 VALUES ('subscription_payment', ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), UTC_TIMESTAMP())`,
                 [storeId, ownerEmail, otpHash, PAYMENT_OTP_EXPIRY_SECONDS]
             );
             const newOtpId = Number(insertResult.insertId);
@@ -3349,7 +2945,7 @@ module.exports.handler = async (event) => {
                 // toward the five accepted-email OTP requests.
                 try {
                     await connection.execute(
-                        "DELETE FROM payment_otps WHERE id = ? AND store_id = ? AND used = 1",
+                        `DELETE FROM otp_codes WHERE id = ? AND store_id = ? AND purpose = 'subscription_payment' AND used_at IS NOT NULL`,
                         [newOtpId, storeId]
                     );
                 } catch (cleanupError) {
@@ -3363,10 +2959,10 @@ module.exports.handler = async (event) => {
                     .replace(/[^A-Za-z0-9_]/g, "_").slice(0, 50);
                 try {
                     await connection.execute(
-                        `INSERT INTO payment_otp_email_failures
-                             (store_id, smtp_error_code, attempted_at)
-                         VALUES (?, ?, UTC_TIMESTAMP())`,
-                        [storeId, smtpErrorCode]
+                        `INSERT INTO otp_codes
+                             (purpose, store_id, email, otp_hash, expires_at, used_at)
+                         VALUES ('subscription_payment_email_failure', ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
+                        [storeId, ownerEmail, smtpErrorCode]
                     );
                 } catch (trackingError) {
                     console.error("[stocknbook-auth] Unable to track OTP email failure:", {
@@ -3396,13 +2992,13 @@ module.exports.handler = async (event) => {
             await connection.beginTransaction();
             try {
                 await connection.execute(
-                    "UPDATE payment_otps SET used = 1 WHERE store_id = ? AND used = 0",
+                    `UPDATE otp_codes SET used_at = UTC_TIMESTAMP() WHERE purpose = 'subscription_payment' AND store_id = ? AND used_at IS NULL`,
                     [storeId]
                 );
                 const [activation] = await connection.execute(
-                    `UPDATE payment_otps
-                     SET used = 0, expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND)
-                     WHERE id = ? AND store_id = ? AND used = 1`,
+                    `UPDATE otp_codes
+                     SET used_at = NULL, expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND)
+                     WHERE id = ? AND store_id = ? AND purpose = 'subscription_payment' AND used_at IS NOT NULL`,
                     [PAYMENT_OTP_EXPIRY_SECONDS, newOtpId, storeId]
                 );
                 if (Number(activation.affectedRows || 0) !== 1) {
@@ -3459,7 +3055,11 @@ module.exports.handler = async (event) => {
             let confirmationEmailStatus = "failed";
             try {
                 const [storeRows] = await connection.execute(
-                    "SELECT store_name, email FROM stores WHERE id = ? LIMIT 1",
+                    `SELECT s.store_name, u.email
+                     FROM stores s
+                              LEFT JOIN users u ON u.store_id = s.id AND u.role = 'owner'
+                     WHERE s.id = ?
+                         LIMIT 1`,
                     [Number(decoded.store_id)]
                 );
                 const store = storeRows[0];
@@ -3532,7 +3132,6 @@ module.exports.handler = async (event) => {
 
         // SEND SIGNUP OTP
         if (action === "send_signup_otp") {
-            await ensureSignupOtpsTable(connection);
 
             const ownerName = String(
                 body.owner_name ?? body.ownerName ?? ""
@@ -3595,22 +3194,8 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            const [phoneColumnRows] = await connection.execute(
-                "SHOW COLUMNS FROM stores LIKE 'phone_number'"
-            );
-
-            if (phoneColumnRows.length === 0) {
-                return {
-                    statusCode: 500,
-                    headers,
-                    body: JSON.stringify({
-                        error: "Database setup is incomplete. Add stores.phone_number before creating new accounts.",
-                    }),
-                };
-            }
-
             const [existing] = await connection.execute(
-                "SELECT id FROM stores WHERE email = ? LIMIT 1",
+                `SELECT id FROM users WHERE email = ? LIMIT 1`,
                 [emailAddress]
             );
 
@@ -3626,18 +3211,19 @@ module.exports.handler = async (event) => {
             const otpHash = hashOtp(otp);
 
             await connection.execute(
-                `UPDATE signup_otps
-                 SET used = 1
-                 WHERE email = ?
-                   AND used = 0`,
+                `UPDATE otp_codes
+                 SET used_at = UTC_TIMESTAMP()
+                 WHERE purpose = 'signup'
+                   AND email = ?
+                   AND used_at IS NULL`,
                 [emailAddress]
             );
 
             await connection.execute(
-                `INSERT INTO signup_otps
-                     (email, otp_hash, expires_at, used)
+                `INSERT INTO otp_codes
+                     (purpose, email, otp_hash, expires_at)
                  VALUES
-                     (?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
+                     ('signup', ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
                 [emailAddress, otpHash, OTP_EXPIRY_SECONDS]
             );
 
@@ -3645,11 +3231,12 @@ module.exports.handler = async (event) => {
                 await sendSignupOtpEmail(emailAddress, otp);
             } catch (emailError) {
                 await connection.execute(
-                    `UPDATE signup_otps
-                     SET used = 1
-                     WHERE email = ?
+                    `UPDATE otp_codes
+                     SET used_at = UTC_TIMESTAMP()
+                     WHERE purpose = 'signup'
+                       AND email = ?
                        AND otp_hash = ?
-                       AND used = 0`,
+                       AND used_at IS NULL`,
                     [emailAddress, otpHash]
                 );
 
@@ -3668,7 +3255,6 @@ module.exports.handler = async (event) => {
 
         // VERIFY SIGNUP OTP AND CREATE OWNER ACCOUNT
         if (action === "verify_signup_otp") {
-            await ensureSignupOtpsTable(connection);
 
             const otp = String(body.otp ?? "").trim();
             const otpEmail = String(body.email ?? "").trim().toLowerCase();
@@ -3693,10 +3279,11 @@ module.exports.handler = async (event) => {
 
             // Explicitly invalidate every expired OTP for this email.
             await connection.execute(
-                `UPDATE signup_otps
-                 SET used = 1
-                 WHERE email = ?
-                   AND used = 0
+                `UPDATE otp_codes
+                 SET used_at = UTC_TIMESTAMP()
+                 WHERE purpose = 'signup'
+                   AND email = ?
+                   AND used_at IS NULL
                    AND expires_at <= UTC_TIMESTAMP()`,
                 [otpEmail]
             );
@@ -3704,10 +3291,11 @@ module.exports.handler = async (event) => {
             // Accept only an unused OTP that has not expired.
             const [otpRows] = await connection.execute(
                 `SELECT id
-                 FROM signup_otps
-                 WHERE email = ?
+                 FROM otp_codes
+                 WHERE purpose = 'signup'
+                   AND email = ?
                    AND otp_hash = ?
-                   AND used = 0
+                   AND used_at IS NULL
                    AND expires_at > UTC_TIMESTAMP()
                  ORDER BY id DESC
                      LIMIT 1`,
@@ -3781,23 +3369,8 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            // The migration in database/01_add_phone_number.sql must be run once.
-            const [phoneColumnRows] = await connection.execute(
-                "SHOW COLUMNS FROM stores LIKE 'phone_number'"
-            );
-
-            if (phoneColumnRows.length === 0) {
-                return {
-                    statusCode: 500,
-                    headers,
-                    body: JSON.stringify({
-                        error: "Database setup is incomplete. Add stores.phone_number before creating new accounts.",
-                    }),
-                };
-            }
-
             const [existing] = await connection.execute(
-                "SELECT id FROM stores WHERE email = ? LIMIT 1",
+                `SELECT id FROM users WHERE email = ? LIMIT 1`,
                 [emailAddress]
             );
 
@@ -3810,25 +3383,45 @@ module.exports.handler = async (event) => {
             }
 
             await connection.execute(
-                `UPDATE signup_otps
-                 SET used = 1
-                 WHERE email = ?
-                   AND used = 0`,
+                `UPDATE otp_codes
+                 SET used_at = UTC_TIMESTAMP(), verified_at = COALESCE(verified_at, UTC_TIMESTAMP())
+                 WHERE purpose = 'signup'
+                   AND email = ?
+                   AND used_at IS NULL`,
                 [emailAddress]
             );
 
             const hashed = await bcrypt.hash(accountPassword, 10);
 
-            const [result] = await connection.execute(
-                `INSERT INTO stores
-                     (store_name, owner_name, phone_number, email, password, slug)
-                 VALUES (?, ?, ?, ?, ?, ?)`,
-                [storeName, ownerName, phoneNumber, emailAddress, hashed, slug]
-            );
+            // The store and its owner account are created together.
+            let result;
+            let ownerUserId;
+            await connection.beginTransaction();
+            try {
+                const storeCode = await identifiers.allocateStoreCode(connection, storeName, slug);
+                [result] = await connection.execute(
+                    `INSERT INTO stores
+                         (store_code, slug, store_name, business_name, email, phone)
+                     VALUES (?, ?, ?, ?, ?, ?)`,
+                    [storeCode, slug, storeName, storeName, emailAddress, phoneNumber]
+                );
+                const [ownerResult] = await connection.execute(
+                    `INSERT INTO users
+                     (store_id, role, full_name, email, password_hash, phone, status, email_verified_at)
+                     VALUES (?, 'owner', ?, ?, ?, ?, 'active', UTC_TIMESTAMP())`,
+                    [result.insertId, ownerName, emailAddress, hashed, phoneNumber]
+                );
+                ownerUserId = ownerResult.insertId;
+                await connection.commit();
+            } catch (signupError) {
+                await connection.rollback();
+                throw signupError;
+            }
 
             const token = jwt.sign(
                 {
                     store_id: result.insertId,
+                    user_id: ownerUserId,
                     email: emailAddress,
                     role: "owner",
                 },
@@ -3930,7 +3523,7 @@ module.exports.handler = async (event) => {
                 `SELECT
                      id,
                      branch_name,
-                     contact_number,
+                     phone AS contact_number,
                      address
                  FROM branches
                  WHERE store_id = ?
@@ -3954,7 +3547,6 @@ module.exports.handler = async (event) => {
         }
         // SAVE ONBOARDING
         if (action === "save_onboarding") {
-            await ensureBranchOperationalColumns(connection);
 
             const authHeader =
                 event.headers?.Authorization || event.headers?.authorization || "";
@@ -4131,20 +3723,20 @@ module.exports.handler = async (event) => {
                         `INSERT INTO branches
                          (
                              store_id,
+                             branch_code,
                              branch_name,
-                             contact_number,
+                             phone,
                              address,
-                             status,
-                             inactive_reason
+                             status
                          )
                          VALUES (?, ?, ?, ?, ?, ?)`,
                         [
                             storeId,
+                            await identifiers.allocateBranchCode(connection, storeId, branchName),
                             branchName,
                             contactNumber || null,
                             address || null,
                             branchStatus,
-                            inactiveReason || null,
                         ]
                     );
 
@@ -4157,12 +3749,11 @@ module.exports.handler = async (event) => {
                     if (managerEmail) {
                         const [existingManagerRows] =
                             await connection.execute(
-                                `SELECT id
-                                 FROM managers
-                                 WHERE manager_email = ?
-                                   AND store_id = ?
+                                `SELECT id, store_id
+                                 FROM users
+                                 WHERE email = ?
                                      LIMIT 1`,
-                                [managerEmail, storeId]
+                                [managerEmail]
                             );
 
                         if (existingManagerRows.length > 0) {
@@ -4195,18 +3786,19 @@ module.exports.handler = async (event) => {
                         });
 
                         await connection.execute(
-                            `INSERT INTO managers
+                            `INSERT INTO users
                              (
                                  store_id,
                                  branch_id,
-                                 manager_name,
-                                 manager_email,
-                                 invite_token,
+                                 role,
+                                 full_name,
+                                 email,
+                                 invite_token_hash,
                                  permissions,
                                  status,
                                  employee_code
                              )
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                             VALUES (?, ?, 'manager', COALESCE(?, ''), ?, SHA2(?, 256), ?, ?, ?)`,
                             [
                                 storeId,
                                 branchId,
@@ -4314,7 +3906,6 @@ module.exports.handler = async (event) => {
         // SEND MANAGER INVITATION OTP
         if (action === "send_manager_invite_otp") {
             try {
-                await ensureManagerInviteOtpsTable(connection);
 
                 const inviteToken = String(body.invite_token || "");
                 const { manager } = await getManagerInviteRecord(
@@ -4337,24 +3928,25 @@ module.exports.handler = async (event) => {
                 const inviteTokenHash = hashInviteToken(inviteToken);
 
                 await connection.execute(
-                    `UPDATE manager_invite_otps
-                     SET used = 1
-                     WHERE invite_token_hash = ?
+                    `UPDATE otp_codes
+                     SET used_at = UTC_TIMESTAMP()
+                     WHERE purpose = 'manager_invite'
+                       AND invite_token_hash = ?
                        AND email = ?
-                       AND used = 0`,
+                       AND used_at IS NULL`,
                     [inviteTokenHash, manager.manager_email]
                 );
 
                 await connection.execute(
-                    `INSERT INTO manager_invite_otps
+                    `INSERT INTO otp_codes
                      (
+                         purpose,
                          invite_token_hash,
                          email,
                          otp_hash,
-                         expires_at,
-                         used
+                         expires_at
                      )
-                     VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
+                     VALUES ('manager_invite', ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
                     [
                         inviteTokenHash,
                         manager.manager_email,
@@ -4393,12 +3985,13 @@ module.exports.handler = async (event) => {
                         );
                     } else {
                         await connection.execute(
-                            `UPDATE manager_invite_otps
-                             SET used = 1
-                             WHERE invite_token_hash = ?
+                            `UPDATE otp_codes
+                             SET used_at = UTC_TIMESTAMP()
+                             WHERE purpose = 'manager_invite'
+                               AND invite_token_hash = ?
                                AND email = ?
                                AND otp_hash = ?
-                               AND used = 0`,
+                               AND used_at IS NULL`,
                             [inviteTokenHash, manager.manager_email, otpHash]
                         );
                         throw emailError;
@@ -4432,7 +4025,6 @@ module.exports.handler = async (event) => {
         // VERIFY MANAGER INVITATION OTP
         if (action === "verify_manager_invite_otp") {
             try {
-                await ensureManagerInviteOtpsTable(connection);
 
                 const inviteToken = String(body.invite_token || "");
                 const otp = String(body.otp || "").replace(/\D/g, "");
@@ -4455,22 +4047,24 @@ module.exports.handler = async (event) => {
                 const otpHash = hashOtp(otp);
 
                 await connection.execute(
-                    `UPDATE manager_invite_otps
-                     SET used = 1
-                     WHERE invite_token_hash = ?
+                    `UPDATE otp_codes
+                     SET used_at = UTC_TIMESTAMP()
+                     WHERE purpose = 'manager_invite'
+                       AND invite_token_hash = ?
                        AND email = ?
-                       AND used = 0
+                       AND used_at IS NULL
                        AND expires_at <= UTC_TIMESTAMP()`,
                     [inviteTokenHash, manager.manager_email]
                 );
 
                 const [otpRows] = await connection.execute(
                     `SELECT id
-                     FROM manager_invite_otps
-                     WHERE invite_token_hash = ?
+                     FROM otp_codes
+                     WHERE purpose = 'manager_invite'
+                       AND invite_token_hash = ?
                        AND email = ?
                        AND otp_hash = ?
-                       AND used = 0
+                       AND used_at IS NULL
                        AND expires_at > UTC_TIMESTAMP()
                      ORDER BY id DESC
                          LIMIT 1`,
@@ -4492,8 +4086,8 @@ module.exports.handler = async (event) => {
                 }
 
                 await connection.execute(
-                    `UPDATE manager_invite_otps
-                     SET used = 1,
+                    `UPDATE otp_codes
+                     SET used_at = UTC_TIMESTAMP(),
                          verified_at = UTC_TIMESTAMP()
                      WHERE id = ?`,
                     [otpRows[0].id]
@@ -4546,10 +4140,11 @@ module.exports.handler = async (event) => {
                 }
 
                 await connection.execute(
-                    `UPDATE managers
-                     SET manager_name = ?
+                    `UPDATE users
+                     SET full_name = ?
                      WHERE id = ?
-                       AND invite_token = ?
+                       AND role = 'manager'
+                       AND invite_token_hash = SHA2(?, 256)
                        AND status = 'pending'`,
                     [managerName, manager.manager_id, inviteToken]
                 );
@@ -4622,14 +4217,16 @@ module.exports.handler = async (event) => {
                 );
 
                 const [result] = await connection.execute(
-                    `UPDATE managers
-                     SET manager_name = ?,
-                         password = ?,
+                    `UPDATE users
+                     SET full_name = ?,
+                         password_hash = ?,
                          status = 'active',
-                         invite_token = NULL
+                         email_verified_at = UTC_TIMESTAMP(),
+                         invite_token_hash = NULL
                      WHERE id = ?
-                       AND invite_token = ?
-                       AND manager_email = ?
+                       AND role = 'manager'
+                       AND invite_token_hash = SHA2(?, 256)
+                       AND email = ?
                        AND status = 'pending'`,
                     [
                         finalManagerName,
@@ -4650,12 +4247,12 @@ module.exports.handler = async (event) => {
                     };
                 }
 
-                await ensureManagerInviteOtpsTable(connection);
                 await connection.execute(
-                    `UPDATE manager_invite_otps
-                     SET used = 1,
+                    `UPDATE otp_codes
+                     SET used_at = UTC_TIMESTAMP(),
                          verified_at = NULL
-                     WHERE invite_token_hash = ?
+                     WHERE purpose = 'manager_invite'
+                       AND invite_token_hash = ?
                        AND email = ?`,
                     [
                         hashInviteToken(inviteToken),
@@ -4776,16 +4373,14 @@ module.exports.handler = async (event) => {
             const [managerRows] = await connection.execute(
                 `SELECT
                      managers.permissions,
-                     managers.manager_name,
+                     managers.full_name AS manager_name,
                      branches.branch_name,
                      stores.store_name
-                 FROM managers
-                          JOIN branches
-                               ON branches.id = managers.branch_id
-                                   AND branches.store_id = managers.store_id
-                          JOIN stores
-                               ON stores.id = managers.store_id
+                 FROM users managers
+                          JOIN branches ON branches.id = managers.branch_id AND branches.store_id = managers.store_id
+                          JOIN stores ON stores.id = managers.store_id
                  WHERE managers.id = ?
+                   AND managers.role = 'manager'
                    AND managers.store_id = ?
                    AND managers.branch_id = ?
                    AND managers.status = 'active'
@@ -4820,12 +4415,10 @@ module.exports.handler = async (event) => {
 
             const [existingStaff] = await connection.execute(
                 `SELECT id
-                 FROM staff
-                 WHERE staff_email = ?
-                   AND store_id = ?
-                   AND branch_id = ?
+                 FROM users
+                 WHERE email = ?
                      LIMIT 1`,
-                [staffEmail, storeId, branchId]
+                [staffEmail]
             );
 
             if (existingStaff.length > 0) {
@@ -4886,19 +4479,20 @@ module.exports.handler = async (event) => {
             });
 
             await connection.execute(
-                `INSERT INTO staff
+                `INSERT INTO users
                  (
                      store_id,
                      branch_id,
                      manager_id,
-                     staff_name,
-                     staff_email,
-                     invite_token,
+                     role,
+                     full_name,
+                     email,
+                     invite_token_hash,
                      status,
                      permissions,
                      employee_code
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, 'staff', COALESCE(?, ''), ?, SHA2(?, 256), ?, ?, ?)`,
                 [
                     storeId,
                     branchId,
@@ -4967,13 +4561,13 @@ module.exports.handler = async (event) => {
 
             const [adminRows] = await connection.execute(
                 `SELECT
-                     platform_admin_id,
+                     id AS platform_admin_id,
                      full_name,
                      email,
-                     password,
+                     password_hash AS password,
                      status,
                      role,
-                     is_active
+                     CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END AS is_active
                  FROM platform_admins
                  WHERE LOWER(email) = ?
                      LIMIT 1`,
@@ -5071,7 +4665,13 @@ module.exports.handler = async (event) => {
 
             // 1. Try owner login first
             const [storeRows] = await connection.execute(
-                "SELECT * FROM stores WHERE email = ?",
+                `SELECT s.id, s.store_name, s.slug, u.id AS user_id, u.full_name AS owner_name,
+                        u.email, u.password_hash AS password, u.status
+                 FROM users u
+                          JOIN stores s ON s.id = u.store_id
+                 WHERE u.email = ?
+                   AND u.role = 'owner'
+                     LIMIT 1`,
                 [email]
             );
 
@@ -5092,6 +4692,7 @@ module.exports.handler = async (event) => {
                 const token = jwt.sign(
                     {
                         store_id: store.id,
+                        user_id: store.user_id,
                         email: store.email,
                         role: "owner",
                     },
@@ -5116,13 +4717,22 @@ module.exports.handler = async (event) => {
             // 2. Try manager login
             const [managerRows] = await connection.execute(
                 `SELECT
-                     managers.*,
+                     managers.id,
+                     managers.store_id,
+                     managers.branch_id,
+                     managers.full_name AS manager_name,
+                     managers.email AS manager_email,
+                     managers.password_hash AS password,
+                     managers.permissions,
+                     managers.status,
+                     managers.employee_code,
                      branches.branch_name,
                      stores.store_name
-                 FROM managers
+                 FROM users managers
                           JOIN branches ON managers.branch_id = branches.id
                           JOIN stores ON managers.store_id = stores.id
-                 WHERE managers.manager_email = ?
+                 WHERE managers.email = ?
+                   AND managers.role = 'manager'
                      LIMIT 1`,
                 [email]
             );
@@ -5224,13 +4834,23 @@ module.exports.handler = async (event) => {
             // 3. Try staff login
             const [staffRows] = await connection.execute(
                 `SELECT
-                     staff.*,
+                     staff.id,
+                     staff.store_id,
+                     staff.branch_id,
+                     staff.manager_id,
+                     staff.full_name AS staff_name,
+                     staff.email AS staff_email,
+                     staff.password_hash AS password,
+                     staff.permissions,
+                     staff.status,
+                     staff.employee_code,
                      branches.branch_name,
                      stores.store_name
-                 FROM staff
+                 FROM users staff
                           JOIN branches ON staff.branch_id = branches.id
                           JOIN stores ON staff.store_id = stores.id
-                 WHERE staff.staff_email = ?
+                 WHERE staff.email = ?
+                   AND staff.role = 'staff'
                    AND staff.status = 'active'
                      LIMIT 1`,
                 [email]
@@ -5329,7 +4949,6 @@ module.exports.handler = async (event) => {
         // SEND STAFF INVITATION OTP
         if (action === "send_staff_invite_otp") {
             try {
-                await ensureStaffInviteOtpsTable(connection);
 
                 const inviteToken = String(body.invite_token || "");
                 const { staff } = await getStaffInviteRecord(
@@ -5352,24 +4971,25 @@ module.exports.handler = async (event) => {
                 const inviteTokenHash = hashInviteToken(inviteToken);
 
                 await connection.execute(
-                    `UPDATE staff_invite_otps
-                     SET used = 1
-                     WHERE invite_token_hash = ?
+                    `UPDATE otp_codes
+                     SET used_at = UTC_TIMESTAMP()
+                     WHERE purpose = 'staff_invite'
+                       AND invite_token_hash = ?
                        AND email = ?
-                       AND used = 0`,
+                       AND used_at IS NULL`,
                     [inviteTokenHash, staff.staff_email]
                 );
 
                 await connection.execute(
-                    `INSERT INTO staff_invite_otps
+                    `INSERT INTO otp_codes
                      (
+                         purpose,
                          invite_token_hash,
                          email,
                          otp_hash,
-                         expires_at,
-                         used
+                         expires_at
                      )
-                     VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), 0)`,
+                     VALUES ('staff_invite', ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
                     [
                         inviteTokenHash,
                         staff.staff_email,
@@ -5408,12 +5028,13 @@ module.exports.handler = async (event) => {
                         );
                     } else {
                         await connection.execute(
-                            `UPDATE staff_invite_otps
-                             SET used = 1
-                             WHERE invite_token_hash = ?
+                            `UPDATE otp_codes
+                             SET used_at = UTC_TIMESTAMP()
+                             WHERE purpose = 'staff_invite'
+                               AND invite_token_hash = ?
                                AND email = ?
                                AND otp_hash = ?
-                               AND used = 0`,
+                               AND used_at IS NULL`,
                             [inviteTokenHash, staff.staff_email, otpHash]
                         );
                         throw emailError;
@@ -5447,7 +5068,6 @@ module.exports.handler = async (event) => {
         // VERIFY STAFF INVITATION OTP
         if (action === "verify_staff_invite_otp") {
             try {
-                await ensureStaffInviteOtpsTable(connection);
 
                 const inviteToken = String(body.invite_token || "");
                 const otp = String(body.otp || "").replace(/\D/g, "");
@@ -5470,22 +5090,24 @@ module.exports.handler = async (event) => {
                 const otpHash = hashOtp(otp);
 
                 await connection.execute(
-                    `UPDATE staff_invite_otps
-                     SET used = 1
-                     WHERE invite_token_hash = ?
+                    `UPDATE otp_codes
+                     SET used_at = UTC_TIMESTAMP()
+                     WHERE purpose = 'staff_invite'
+                       AND invite_token_hash = ?
                        AND email = ?
-                       AND used = 0
+                       AND used_at IS NULL
                        AND expires_at <= UTC_TIMESTAMP()`,
                     [inviteTokenHash, staff.staff_email]
                 );
 
                 const [otpRows] = await connection.execute(
                     `SELECT id
-                     FROM staff_invite_otps
-                     WHERE invite_token_hash = ?
+                     FROM otp_codes
+                     WHERE purpose = 'staff_invite'
+                       AND invite_token_hash = ?
                        AND email = ?
                        AND otp_hash = ?
-                       AND used = 0
+                       AND used_at IS NULL
                        AND expires_at > UTC_TIMESTAMP()
                      ORDER BY id DESC
                          LIMIT 1`,
@@ -5507,8 +5129,8 @@ module.exports.handler = async (event) => {
                 }
 
                 await connection.execute(
-                    `UPDATE staff_invite_otps
-                     SET used = 1,
+                    `UPDATE otp_codes
+                     SET used_at = UTC_TIMESTAMP(),
                          verified_at = UTC_TIMESTAMP()
                      WHERE id = ?`,
                     [otpRows[0].id]
@@ -5561,10 +5183,11 @@ module.exports.handler = async (event) => {
                 }
 
                 await connection.execute(
-                    `UPDATE staff
-                     SET staff_name = ?
+                    `UPDATE users
+                     SET full_name = ?
                      WHERE id = ?
-                       AND invite_token = ?
+                       AND role = 'staff'
+                       AND invite_token_hash = SHA2(?, 256)
                        AND status = 'pending'`,
                     [staffName, staff.staff_id, inviteToken]
                 );
@@ -5666,14 +5289,16 @@ module.exports.handler = async (event) => {
                 }
 
                 const [result] = await connection.execute(
-                    `UPDATE staff
-                     SET staff_name = ?,
-                         password = ?,
+                    `UPDATE users
+                     SET full_name = ?,
+                         password_hash = ?,
                          status = 'active',
-                         invite_token = NULL
+                         email_verified_at = UTC_TIMESTAMP(),
+                         invite_token_hash = NULL
                      WHERE id = ?
-                       AND invite_token = ?
-                       AND staff_email = ?
+                       AND role = 'staff'
+                       AND invite_token_hash = SHA2(?, 256)
+                       AND email = ?
                        AND status = 'pending'`,
                     [
                         finalStaffName,
@@ -5694,12 +5319,12 @@ module.exports.handler = async (event) => {
                     };
                 }
 
-                await ensureStaffInviteOtpsTable(connection);
                 await connection.execute(
-                    `UPDATE staff_invite_otps
-                     SET used = 1,
+                    `UPDATE otp_codes
+                     SET used_at = UTC_TIMESTAMP(),
                          verified_at = NULL
-                     WHERE invite_token_hash = ?
+                     WHERE purpose = 'staff_invite'
+                       AND invite_token_hash = ?
                        AND email = ?`,
                     [
                         hashInviteToken(inviteToken),
@@ -5794,8 +5419,9 @@ module.exports.handler = async (event) => {
 
             const [managerRows] = await connection.execute(
                 `SELECT permissions
-                 FROM managers
+                 FROM users
                  WHERE id = ?
+                   AND role = 'manager'
                    AND store_id = ?
                    AND branch_id = ?
                    AND status = 'active'
@@ -5830,15 +5456,16 @@ module.exports.handler = async (event) => {
             const [staffRows] = await connection.execute(
                 `SELECT
                      id,
-                     staff_name,
-                     staff_email,
+                     full_name AS staff_name,
+                     email AS staff_email,
                      status,
                      permissions,
-                     invite_token,
-                     ${employeeCodeReady ? "employee_code" : "NULL"} AS employee_code,
+                     NULL AS invite_token,
+                     employee_code,
                      NULL AS created_at
-                 FROM staff
-                 WHERE store_id = ?
+                 FROM users
+                 WHERE role = 'staff'
+                   AND store_id = ?
                    AND branch_id = ?
                    AND manager_id = ?
                  ORDER BY id DESC`,
@@ -5962,8 +5589,9 @@ module.exports.handler = async (event) => {
             const [managerRows] =
                 await connection.execute(
                     `SELECT permissions
-                     FROM managers
+                     FROM users
                      WHERE id = ?
+                       AND role = 'manager'
                        AND store_id = ?
                        AND branch_id = ?
                        AND status = 'active'
@@ -6037,9 +5665,10 @@ module.exports.handler = async (event) => {
 
             if (staffId) {
                 [result] = await connection.execute(
-                    `UPDATE staff
+                    `UPDATE users
                      SET status = ?
                      WHERE id = ?
+                       AND role = 'staff'
                        AND store_id = ?
                        AND branch_id = ?
                        AND manager_id = ?
@@ -6054,9 +5683,10 @@ module.exports.handler = async (event) => {
                 );
             } else {
                 [result] = await connection.execute(
-                    `UPDATE staff
+                    `UPDATE users
                      SET status = ?
-                     WHERE staff_email = ?
+                     WHERE email = ?
+                       AND role = 'staff'
                        AND store_id = ?
                        AND branch_id = ?
                        AND manager_id = ?
@@ -6146,8 +5776,9 @@ module.exports.handler = async (event) => {
 
             const [managerRows] = await connection.execute(
                 `SELECT permissions
-                 FROM managers
+                 FROM users
                  WHERE id = ?
+                   AND role = 'manager'
                    AND store_id = ?
                    AND branch_id = ?
                    AND status = 'active'
@@ -6182,9 +5813,10 @@ module.exports.handler = async (event) => {
 
             if (staff_id) {
                 [result] = await connection.execute(
-                    `UPDATE staff
+                    `UPDATE users
                      SET permissions = ?
                      WHERE id = ?
+                       AND role = 'staff'
                        AND store_id = ?
                        AND branch_id = ?
                        AND manager_id = ?`,
@@ -6198,9 +5830,10 @@ module.exports.handler = async (event) => {
                 );
             } else {
                 [result] = await connection.execute(
-                    `UPDATE staff
+                    `UPDATE users
                      SET permissions = ?
-                     WHERE staff_email = ?
+                     WHERE email = ?
+                       AND role = 'staff'
                        AND store_id = ?
                        AND branch_id = ?
                        AND manager_id = ?`,
@@ -6287,16 +5920,14 @@ module.exports.handler = async (event) => {
             const [managerRows] = await connection.execute(
                 `SELECT
                      managers.permissions,
-                     managers.manager_name,
+                     managers.full_name AS manager_name,
                      branches.branch_name,
                      stores.store_name
-                 FROM managers
-                          JOIN branches
-                               ON branches.id = managers.branch_id
-                                   AND branches.store_id = managers.store_id
-                          JOIN stores
-                               ON stores.id = managers.store_id
+                 FROM users managers
+                          JOIN branches ON branches.id = managers.branch_id AND branches.store_id = managers.store_id
+                          JOIN stores ON stores.id = managers.store_id
                  WHERE managers.id = ?
+                   AND managers.role = 'manager'
                    AND managers.store_id = ?
                    AND managers.branch_id = ?
                    AND managers.status = 'active'
@@ -6330,14 +5961,10 @@ module.exports.handler = async (event) => {
             }
 
             const [staffRows] = await connection.execute(
-                `SELECT
-                     id,
-                     staff_name,
-                     staff_email,
-                     status,
-                     permissions
-                 FROM staff
-                 WHERE staff_email = ?
+                `SELECT id, full_name AS staff_name, email AS staff_email, status, permissions
+                 FROM users
+                 WHERE email = ?
+                   AND role = 'staff'
                    AND store_id = ?
                    AND branch_id = ?
                    AND manager_id = ?
@@ -6383,9 +6010,10 @@ module.exports.handler = async (event) => {
                 `${APP_BASE_URL}/accept-staff-invite?token=${encodeURIComponent(inviteToken)}`;
 
             await connection.execute(
-                `UPDATE staff
-                 SET invite_token = ?
+                `UPDATE users
+                 SET invite_token_hash = SHA2(?, 256)
                  WHERE id = ?
+                   AND role = 'staff'
                    AND store_id = ?
                    AND branch_id = ?
                    AND manager_id = ?`,
@@ -6561,9 +6189,10 @@ module.exports.handler = async (event) => {
             const [branchManagerRows] =
                 await connection.execute(
                     `SELECT id
-                     FROM managers
+                     FROM users
                      WHERE branch_id = ?
                        AND store_id = ?
+                       AND role = 'manager'
                          LIMIT 1`,
                     [branchId, storeId]
                 );
@@ -6582,11 +6211,10 @@ module.exports.handler = async (event) => {
             const [existingEmailRows] =
                 await connection.execute(
                     `SELECT id
-                     FROM managers
-                     WHERE manager_email = ?
-                       AND store_id = ?
+                     FROM users
+                     WHERE email = ?
                          LIMIT 1`,
-                    [managerEmail, storeId]
+                    [managerEmail]
                 );
 
             if (existingEmailRows.length > 0) {
@@ -6628,18 +6256,19 @@ module.exports.handler = async (event) => {
 
             const [managerResult] =
                 await connection.execute(
-                    `INSERT INTO managers
+                    `INSERT INTO users
                      (
                          store_id,
                          branch_id,
-                         manager_name,
-                         manager_email,
-                         invite_token,
+                         role,
+                         full_name,
+                         email,
+                         invite_token_hash,
                          permissions,
                          status,
                          employee_code
                      )
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                     VALUES (?, ?, 'manager', COALESCE(?, ''), ?, SHA2(?, 256), ?, ?, ?)`,
                     [
                         storeId,
                         branchId,
@@ -6762,20 +6391,18 @@ module.exports.handler = async (event) => {
             const [managerRows] = await connection.execute(
                 `SELECT
                      managers.id,
-                     managers.manager_name,
-                     managers.manager_email,
+                     managers.full_name AS manager_name,
+                     managers.email AS manager_email,
                      managers.permissions,
                      managers.status,
                      managers.branch_id,
                      branches.branch_name,
                      stores.store_name
-                 FROM managers
-                          JOIN branches
-                               ON branches.id = managers.branch_id
-                                   AND branches.store_id = managers.store_id
-                          JOIN stores
-                               ON stores.id = managers.store_id
-                 WHERE managers.store_id = ?
+                 FROM users managers
+                          JOIN branches ON branches.id = managers.branch_id AND branches.store_id = managers.store_id
+                          JOIN stores ON stores.id = managers.store_id
+                 WHERE managers.role = 'manager'
+                   AND managers.store_id = ?
                    AND ${whereClause}
                      LIMIT 1`,
                 [storeId, lookupValue]
@@ -6818,9 +6445,10 @@ module.exports.handler = async (event) => {
                 `${APP_BASE_URL}/accept-invite?token=${encodeURIComponent(inviteToken)}`;
 
             await connection.execute(
-                `UPDATE managers
-                 SET invite_token = ?
+                `UPDATE users
+                 SET invite_token_hash = SHA2(?, 256)
                  WHERE id = ?
+                   AND role = 'manager'
                    AND store_id = ?
                    AND status = 'pending'`,
                 [inviteToken, manager.id, storeId]
@@ -6909,16 +6537,17 @@ module.exports.handler = async (event) => {
             const [managerRows] = await connection.execute(
                 `SELECT
                      managers.id,
-                     ${employeeCodeReady ? "managers.employee_code" : "NULL"} AS employeeCode,
-                     managers.manager_name AS name,
-                     managers.manager_email AS email,
+                     managers.employee_code AS employeeCode,
+                     managers.full_name AS name,
+                     managers.email AS email,
                      managers.status,
                      managers.permissions,
                      branches.branch_name AS branch
-                 FROM managers
+                 FROM users managers
                           JOIN branches ON managers.branch_id = branches.id
                  WHERE managers.store_id = ?
-                 ORDER BY branches.branch_name ASC, managers.manager_name ASC`,
+                   AND managers.role = 'manager'
+                 ORDER BY branches.branch_name ASC, managers.full_name ASC`,
                 [storeId]
             );
 
@@ -6944,7 +6573,6 @@ module.exports.handler = async (event) => {
 
         // GET BRANCHES
         if (action === "get_branches") {
-            await ensureBranchOperationalColumns(connection);
 
             const authHeader =
                 event.headers?.Authorization || event.headers?.authorization || "";
@@ -6985,33 +6613,37 @@ module.exports.handler = async (event) => {
                 `SELECT
                      branches.id,
                      branches.branch_name,
-                     branches.contact_number,
+                     branches.phone AS contact_number,
                      branches.address,
                      COALESCE(branches.status, 'active') AS branch_status,
-                     COALESCE(branches.inactive_reason, '') AS inactive_reason,
-                     COALESCE(managers.manager_name, '') AS manager_name,
-                     COALESCE(managers.manager_email, '') AS manager_email,
+                     '' AS inactive_reason,
+                     COALESCE(managers.full_name, '') AS manager_name,
+                     COALESCE(managers.email, '') AS manager_email,
                      COALESCE(managers.status, 'setup_pending') AS manager_status,
                      managers.permissions,
                      COUNT(
                              DISTINCT CASE
-                                          WHEN staff.status = 'active' THEN staff.id
+                                          WHEN staff.status = 'active'
+                                              THEN staff.id
                                           ELSE NULL
                          END
                      ) AS staff_count
                  FROM branches
-                          LEFT JOIN managers ON managers.branch_id = branches.id
-                          LEFT JOIN staff ON staff.branch_id = branches.id
+                          LEFT JOIN users managers
+                                    ON managers.branch_id = branches.id
+                                        AND managers.role = 'manager'
+                          LEFT JOIN users staff
+                                    ON staff.branch_id = branches.id
+                                        AND staff.role = 'staff'
                  WHERE branches.store_id = ?
                  GROUP BY
                      branches.id,
                      branches.branch_name,
-                     branches.contact_number,
+                     branches.phone,
                      branches.address,
                      branches.status,
-                     branches.inactive_reason,
-                     managers.manager_name,
-                     managers.manager_email,
+                     managers.full_name,
+                     managers.email,
                      managers.status,
                      managers.permissions
                  ORDER BY branches.id ASC`,
@@ -7052,7 +6684,6 @@ module.exports.handler = async (event) => {
 
         // UPDATE BRANCH
         if (action === "update_branch") {
-            await ensureBranchOperationalColumns(connection);
 
             const authHeader =
                 event.headers?.Authorization || event.headers?.authorization || "";
@@ -7161,10 +6792,9 @@ module.exports.handler = async (event) => {
                 const [branchResult] = await connection.execute(
                     `UPDATE branches
                      SET branch_name = ?,
-                         contact_number = ?,
+                         phone = ?,
                          address = ?,
-                         status = ?,
-                         inactive_reason = ?
+                         status = ?
                      WHERE id = ?
                        AND store_id = ?`,
                     [
@@ -7172,7 +6802,6 @@ module.exports.handler = async (event) => {
                         contact_number || null,
                         address || null,
                         normalizedBranchStatus,
-                        normalizedInactiveReason || null,
                         branch_id,
                         storeId,
                     ]
@@ -7189,12 +6818,13 @@ module.exports.handler = async (event) => {
                 }
 
                 const [managerResult] = await connection.execute(
-                    `UPDATE managers
-                     SET manager_name = ?,
-                         manager_email = ?,
+                    `UPDATE users
+                     SET full_name = COALESCE(?, ''),
+                         email = COALESCE(?, email),
                          permissions = ?
                      WHERE branch_id = ?
-                       AND store_id = ?`,
+                       AND store_id = ?
+                       AND role = 'manager'`,
                     [
                         manager_name || null,
                         manager_email || null,
@@ -7281,23 +6911,17 @@ module.exports.handler = async (event) => {
 
             try {
                 await connection.execute(
-                    `DELETE FROM staff
-                     WHERE branch_id = ?
-                       AND store_id = ?`,
+                    `DELETE FROM users WHERE branch_id = ? AND store_id = ? AND role = 'staff'`,
                     [branch_id, storeId]
                 );
 
                 await connection.execute(
-                    `DELETE FROM managers
-                     WHERE branch_id = ?
-                       AND store_id = ?`,
+                    `DELETE FROM users WHERE branch_id = ? AND store_id = ? AND role = 'manager'`,
                     [branch_id, storeId]
                 );
 
                 const [branchResult] = await connection.execute(
-                    `DELETE FROM branches
-                     WHERE id = ?
-                       AND store_id = ?`,
+                    `DELETE FROM branches WHERE id = ? AND store_id = ?`,
                     [branch_id, storeId]
                 );
 
@@ -7375,14 +6999,14 @@ module.exports.handler = async (event) => {
 
                 const [adminRows] = await connection.execute(
                     `SELECT
-                         platform_admin_id,
+                         id AS platform_admin_id,
                          full_name,
                          email,
                          role,
                          status,
-                         is_active
+                         CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END AS is_active
                      FROM platform_admins
-                     WHERE platform_admin_id = ?
+                     WHERE id = ?
                          LIMIT 1`,
                     [platformAdminId]
                 );
@@ -7425,9 +7049,10 @@ module.exports.handler = async (event) => {
 
             if (decoded.role === "owner") {
                 const [storeRows] = await connection.execute(
-                    `SELECT id, store_name, owner_name, email, slug
-                     FROM stores
-                     WHERE id = ?
+                    `SELECT s.id, s.store_name, u.full_name AS owner_name, u.email, s.slug
+                     FROM stores s
+                              LEFT JOIN users u ON u.store_id = s.id AND u.role = 'owner'
+                     WHERE s.id = ?
                          LIMIT 1`,
                     [decoded.store_id]
                 );
@@ -7462,18 +7087,19 @@ module.exports.handler = async (event) => {
                 const [managerRows] = await connection.execute(
                     `SELECT
                          managers.id,
-                         managers.manager_name,
-                         managers.manager_email,
+                         managers.full_name AS manager_name,
+                         managers.email AS manager_email,
                          managers.permissions,
                          managers.status,
                          managers.store_id,
                          managers.branch_id,
                          branches.branch_name,
                          stores.store_name
-                     FROM managers
+                     FROM users managers
                               JOIN branches ON managers.branch_id = branches.id
                               JOIN stores ON managers.store_id = stores.id
                      WHERE managers.id = ?
+                       AND managers.role = 'manager'
                        AND managers.store_id = ?
                        AND managers.branch_id = ?
                          LIMIT 1`,
@@ -7527,18 +7153,19 @@ module.exports.handler = async (event) => {
                 const [staffRows] = await connection.execute(
                     `SELECT
                          staff.id,
-                         staff.staff_name,
-                         staff.staff_email,
+                         staff.full_name AS staff_name,
+                         staff.email AS staff_email,
                          staff.permissions,
                          staff.store_id,
                          staff.branch_id,
                          staff.manager_id,
                          branches.branch_name,
                          stores.store_name
-                     FROM staff
+                     FROM users staff
                               JOIN branches ON staff.branch_id = branches.id
                               JOIN stores ON staff.store_id = stores.id
                      WHERE staff.id = ?
+                       AND staff.role = 'staff'
                        AND staff.store_id = ?
                        AND staff.branch_id = ?
                        AND staff.status = 'active'
@@ -7643,9 +7270,10 @@ module.exports.handler = async (event) => {
             }
 
             const [managerRows] = await connection.execute(
-                `SELECT id, branch_id, manager_name, manager_email
-                 FROM managers
+                `SELECT id, branch_id, full_name AS manager_name, email AS manager_email
+                 FROM users
                  WHERE id = ?
+                   AND role = 'manager'
                    AND store_id = ?
                      LIMIT 1`,
                 [managerId, storeId]
@@ -7668,16 +7296,12 @@ module.exports.handler = async (event) => {
                 // Remove them first so the manager can be deleted cleanly and
                 // no staff account remains attached to a deleted manager.
                 const [staffDeleteResult] = await connection.execute(
-                    `DELETE FROM staff
-                     WHERE manager_id = ?
-                       AND store_id = ?`,
+                    `DELETE FROM users WHERE manager_id = ? AND store_id = ? AND role = 'staff'`,
                     [managerId, storeId]
                 );
 
                 const [managerDeleteResult] = await connection.execute(
-                    `DELETE FROM managers
-                     WHERE id = ?
-                       AND store_id = ?`,
+                    `DELETE FROM users WHERE id = ? AND store_id = ? AND role = 'manager'`,
                     [managerId, storeId]
                 );
 

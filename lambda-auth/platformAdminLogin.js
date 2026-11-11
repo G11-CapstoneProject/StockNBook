@@ -24,15 +24,15 @@ async function tryPlatformAdminLogin({
     const [rows] = await connection.execute(
         `
             SELECT
-                platform_admin_id,
+                id AS platform_admin_id,
                 full_name,
                 email,
                 password_hash,
                 role,
-                is_active
+                CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END AS is_active
             FROM platform_admins
             WHERE email = ?
-            LIMIT 1
+                LIMIT 1
         `,
         [normalizedEmail]
     );

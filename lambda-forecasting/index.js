@@ -38,7 +38,7 @@ const dbConfig = {
     host: "127.0.0.1",
     user: "root",
     password: "BTA5EYVWLfWcebF",
-    database: "stocknbook",
+    database: "stocknbook_v2",
     ssl: { rejectUnauthorized: false },
     waitForConnections: true,
     connectionLimit: 4,

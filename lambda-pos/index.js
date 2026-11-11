@@ -98,8 +98,8 @@ const identifiers = (() => {
     /*   Branch 4 Retail Branch -> B4   (numbered branch)                 */
     /*   Main Retail Branch     -> MAIN (one-syllable word kept whole)    */
     /* Generic words such as Branch/Retail/Store are ignored. Initials are */
-    /* saved in identifier_prefixes the first time a branch needs an ID   */
-    /* and never change afterwards, even if the branch is renamed.        */
+    /* saved in branches.branch_code when the branch is created and      */
+    /* never change afterwards, even if the branch is renamed.            */
     /* ------------------------------------------------------------------ */
 
     const BRANCH_INITIAL_STOP_WORDS = new Set([
@@ -212,162 +212,65 @@ const identifiers = (() => {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Schema (also created by the migration). Runs outside transactions. */
+    /* Codes and sequences (stocknbook_v2)                                 */
+    /* Store and branch initials are stored in stores.store_code and       */
+    /* branches.branch_code. Sequences are derived from the identifiers    */
+    /* already saved; a row lock on the branch serializes allocation and   */
+    /* the unique keys on each identifier column reject any duplicate.     */
     /* ------------------------------------------------------------------ */
 
-    const SCHEMA_STEPS = [
-        {
-            table: "id_number_sequences",
-            create: `CREATE TABLE IF NOT EXISTS id_number_sequences (
-                                                                        store_id BIGINT NOT NULL,
-                                                                        branch_id BIGINT NOT NULL,
-                                                                        entity_type VARCHAR(10) NOT NULL,
-                scope_key VARCHAR(10) NOT NULL DEFAULT '',
-                last_sequence INT UNSIGNED NOT NULL DEFAULT 0,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                PRIMARY KEY (store_id, branch_id, entity_type, scope_key)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-        },
-        {
-            table: "identifier_prefixes",
-            create: `CREATE TABLE IF NOT EXISTS identifier_prefixes (
-                                                                        branch_id BIGINT NOT NULL,
-                                                                        store_id BIGINT NOT NULL,
-                                                                        store_initials VARCHAR(8) NOT NULL,
-                branch_initials VARCHAR(8) NOT NULL,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (branch_id),
-                UNIQUE KEY uq_identifier_prefixes_initials (store_id, branch_initials)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-        },
-        {
-            table: "rental_equipment_units",
-            create: `CREATE TABLE IF NOT EXISTS rental_equipment_units (
-                                                                           id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                                                                           store_id BIGINT NOT NULL,
-                                                                           branch_id BIGINT NOT NULL,
-                                                                           equipment_id BIGINT NOT NULL,
-                                                                           equipment_number VARCHAR(40) NOT NULL,
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                retired_at DATETIME NULL DEFAULT NULL,
-                PRIMARY KEY (id),
-                UNIQUE KEY uq_rental_equipment_units_number (equipment_number),
-                KEY idx_rental_equipment_units_equipment (equipment_id, retired_at),
-                KEY idx_rental_equipment_units_branch (store_id, branch_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-        },
-        {
-            table: "managers", column: "employee_code",
-            add: "ALTER TABLE managers ADD COLUMN employee_code VARCHAR(40) NULL",
-            index: "ALTER TABLE managers ADD UNIQUE INDEX uq_managers_employee_code (employee_code)",
-        },
-        {
-            table: "staff", column: "employee_code",
-            add: "ALTER TABLE staff ADD COLUMN employee_code VARCHAR(40) NULL",
-            index: "ALTER TABLE staff ADD UNIQUE INDEX uq_staff_employee_code (employee_code)",
-        },
-    ];
-
-    const schemaState = { ready: false, pending: null };
-    const IGNORABLE_DDL_ERRORS = new Set(["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME", "ER_TABLE_EXISTS_ERROR"]);
-
-    async function probe(connection, sql) {
-        try {
-            await connection.execute(sql);
-            return true;
-        } catch (error) {
-            if (["ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"].includes(error?.code)) return false;
-            throw error;
-        }
+    // stocknbook_v2 already contains every column these identifiers use.
+    async function ensureIdentifierSchema() {
+        return true;
     }
 
-    async function runDdl(connection, sql) {
-        try {
-            await connection.query(sql);
-        } catch (error) {
-            if (!IGNORABLE_DDL_ERRORS.has(error?.code)) throw error;
-        }
+    async function lockBranch(connection, storeId, branchId) {
+        const [rows] = await connection.execute(
+            "SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE",
+            [branchId, storeId]
+        );
+        if (!rows.length) throw new Error("The branch does not belong to this store.");
     }
 
-    // Idempotent. Never call inside an open transaction: MySQL DDL commits implicitly.
-    async function ensureIdentifierSchema(connection) {
-        if (schemaState.ready) return true;
-        if (!schemaState.pending) {
-            schemaState.pending = (async () => {
-                for (const step of SCHEMA_STEPS) {
-                    if (step.create) {
-                        if (!(await probe(connection, `SELECT 1 FROM ${step.table} LIMIT 0`))) await runDdl(connection, step.create);
-                    } else if (!(await probe(connection, `SELECT ${step.column} FROM ${step.table} LIMIT 0`))) {
-                        await runDdl(connection, step.add);
-                        await runDdl(connection, step.index);
-                    }
-                }
-                schemaState.ready = true;
-                return true;
-            })().catch((error) => {
-                console.error("StockNBook identifier schema check failed:", error?.message || error);
-                return false;
-            }).finally(() => { schemaState.pending = null; });
-        }
-        return schemaState.pending;
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* Codes and sequences                                                 */
-    /* ------------------------------------------------------------------ */
-
-    // Store + branch initials for a branch. Decided once (first ID for that branch),
-    // saved in identifier_prefixes, and reused forever. stores/branches are only read.
     async function getIdentifierCodes(connection, storeId, branchId) {
-        const readSaved = async () => {
-            const [rows] = await connection.execute(
-                "SELECT store_initials AS storeCode, branch_initials AS branchCode FROM identifier_prefixes WHERE branch_id = ? AND store_id = ? LIMIT 1",
-                [branchId, storeId]
-            );
-            return rows[0] || null;
-        };
-        let saved = await readSaved();
-        if (!saved) {
-            const [rows] = await connection.execute(
-                `SELECT s.store_code AS storeCode, s.store_name AS storeName, s.slug, b.branch_name AS branchName
-                 FROM branches b
-                          JOIN stores s ON s.id = b.store_id
-                 WHERE b.id = ? AND b.store_id = ?
-                     LIMIT 1`,
-                [branchId, storeId]
-            );
-            if (!rows.length) throw new Error("The branch does not belong to this store.");
-            const info = rows[0];
-            // Store initials: this store's saved initials, else its existing store code
-            // (e.g. SPS), else derived from the name without writing to the store record.
-            const [storeRows] = await connection.execute(
-                "SELECT store_initials AS code FROM identifier_prefixes WHERE store_id = ? LIMIT 1", [storeId]);
-            let storeCode = String(storeRows[0]?.code || info.storeCode || "").trim().toUpperCase();
-            if (!CODE_PATTERN.test(storeCode)) {
-                const [usedRows] = await connection.execute(
-                    `SELECT store_code AS code FROM stores WHERE id <> ? AND store_code IS NOT NULL
-                     UNION SELECT store_initials AS code FROM identifier_prefixes WHERE store_id <> ?`,
-                    [storeId, storeId]
-                );
-                const used = new Set(usedRows.map((row) => String(row.code || "").toUpperCase()));
-                storeCode = storeCodeCandidates(info.storeName, info.slug, storeId).find((code) => !used.has(code));
-            }
-            // INSERT IGNORE + the unique key settles races: when another branch of this
-            // store already holds the initials, the next candidate (MW2, MW3 ...) is tried.
-            for (const candidate of branchCodeCandidates(info.branchName)) {
-                await connection.execute(
-                    "INSERT IGNORE INTO identifier_prefixes (branch_id, store_id, store_initials, branch_initials) VALUES (?, ?, ?, ?)",
-                    [branchId, storeId, storeCode, candidate]
-                );
-                saved = await readSaved();
-                if (saved) break;
-            }
-            if (!saved) throw new Error("Unable to allocate unique branch initials.");
-        }
-        const storeCode = String(saved.storeCode || "").trim().toUpperCase();
-        const branchCode = String(saved.branchCode || "").trim().toUpperCase();
+        const [rows] = await connection.execute(
+            `SELECT s.store_code AS storeCode, b.branch_code AS branchCode
+             FROM branches b
+                      JOIN stores s ON s.id = b.store_id
+             WHERE b.id = ? AND b.store_id = ?
+                 LIMIT 1`,
+            [branchId, storeId]
+        );
+        if (!rows.length) throw new Error("The branch does not belong to this store.");
+        const storeCode = String(rows[0].storeCode || "").trim().toUpperCase();
+        const branchCode = String(rows[0].branchCode || "").trim().toUpperCase();
         assertCodes(storeCode, branchCode);
         return { storeCode, branchCode };
+    }
+
+    // stores.store_code for a newly registered store (unique across StockNBook).
+    async function allocateStoreCode(connection, storeName, slug) {
+        const [rows] = await connection.execute("SELECT store_code AS code FROM stores");
+        const used = new Set(rows.map((row) => String(row.code || "").toUpperCase()));
+        const code = storeCodeCandidates(storeName, slug, "").find(
+            (candidate) => CODE_PATTERN.test(candidate) && !used.has(candidate)
+        );
+        if (!code) throw new Error("Unable to allocate a unique store code.");
+        return code;
+    }
+
+    // branches.branch_code for a new branch (unique within its store).
+    async function allocateBranchCode(connection, storeId, branchName) {
+        const [rows] = await connection.execute(
+            "SELECT branch_code AS code FROM branches WHERE store_id = ?",
+            [storeId]
+        );
+        const used = new Set(rows.map((row) => String(row.code || "").toUpperCase()));
+        const code = branchCodeCandidates(branchName).find(
+            (candidate) => CODE_PATTERN.test(candidate) && !used.has(candidate)
+        );
+        if (!code) throw new Error("Unable to allocate unique branch initials.");
+        return code;
     }
 
     async function maxSequenceFrom(connection, sql, params, pattern) {
@@ -379,168 +282,84 @@ const identifiers = (() => {
     }
 
     /*
-     * Reserves `count` consecutive numbers atomically. The UPDATE row-locks the
-     * sequence row and LAST_INSERT_ID(expr) hands the new value back on this
-     * connection only, so concurrent requests can never receive the same number
-     * (with or without an open transaction). `floor` self-heals the sequence from
-     * identifiers already stored.
+     * Reserves `count` consecutive numbers after `floor` (the highest number already
+     * stored). Callers lock the branch row first so concurrent requests inside a
+     * transaction are serialized; the unique keys still reject any duplicate.
      */
-    async function reserveSequenceBlock(connection, { storeId, branchId, entityType, scopeKey = "", count = 1, floor = 0 }) {
+    async function reserveSequenceBlock(connection, { storeId, branchId, count = 1, floor = 0 }) {
         const size = Number(count);
         if (!Number.isSafeInteger(size) || size < 1) throw new Error("Invalid identification sequence request.");
-        await connection.execute(
-            `INSERT INTO id_number_sequences (store_id, branch_id, entity_type, scope_key, last_sequence)
-             VALUES (?, ?, ?, ?, 0)
-                 ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
-            [storeId, branchId, entityType, scopeKey]
-        );
-        await connection.execute(
-            `UPDATE id_number_sequences
-             SET last_sequence = LAST_INSERT_ID(GREATEST(last_sequence, ?) + ?)
-             WHERE store_id = ? AND branch_id = ? AND entity_type = ? AND scope_key = ?`,
-            [Number(floor) || 0, size, storeId, branchId, entityType, scopeKey]
-        );
-        const [rows] = await connection.execute("SELECT LAST_INSERT_ID() AS lastSequence");
-        const last = Number(rows[0]?.lastSequence);
-        if (!Number.isSafeInteger(last) || last < size) throw new Error("Identification sequence could not be reserved.");
-        return { first: last - size + 1, last };
+        await lockBranch(connection, storeId, branchId);
+        const first = (Number(floor) || 0) + 1;
+        return { first, last: first + size - 1 };
     }
 
     async function generateOrderId(connection, { storeId, branchId, orderDate }) {
+        await lockBranch(connection, storeId, branchId);
         const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
         const datePart = orderDatePart(orderDate);
         const prefix = `${storeCode}-${branchCode}-${datePart}-`;
         const floor = await maxSequenceFrom(connection,
-            "SELECT order_id AS value FROM orders WHERE order_id LIKE ?", [`${prefix}%`], PATTERNS.order);
-        const { last } = await reserveSequenceBlock(connection,
-            { storeId, branchId, entityType: "ORDER", scopeKey: datePart, floor });
+            "SELECT order_number AS value FROM orders WHERE store_id = ? AND order_number LIKE ?",
+            [storeId, `${prefix}%`], PATTERNS.order);
+        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, floor });
         return buildOrderId(storeCode, branchCode, orderDate, last);
     }
 
     // Managers and staff share ONE sequence per branch, so their IDs never overlap.
     async function generateEmployeeCode(connection, { storeId, branchId }) {
+        await lockBranch(connection, storeId, branchId);
         const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
         const prefix = `${storeCode}-${branchCode}-EMP-`;
         const floor = await maxSequenceFrom(connection,
-            `SELECT employee_code AS value FROM managers WHERE employee_code LIKE ?
-             UNION ALL
-            SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
-            [`${prefix}%`, `${prefix}%`], PATTERNS.employee);
-        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, entityType: "EMP", floor });
+            "SELECT employee_code AS value FROM users WHERE store_id = ? AND employee_code LIKE ?",
+            [storeId, `${prefix}%`], PATTERNS.employee);
+        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, floor });
         return buildEmployeeCode(storeCode, branchCode, last);
     }
 
-    // Highest Product No. already issued with this exact prefix (products or rental types).
+    // Highest Product No. already issued with this exact prefix (products or rental equipment).
     async function maxProductPrefixSequence(connection, storeCode, branchCode) {
         const prefix = `${storeCode}-${branchCode}-PRD-%`;
         const fromProducts = await maxSequenceFrom(connection,
             "SELECT product_number AS value FROM products WHERE product_number LIKE ?", [prefix], PATTERNS.product);
-        let fromRental = 0;
-        try {
-            fromRental = await maxSequenceFrom(connection,
-                "SELECT equipment_number AS value FROM rental_equipment WHERE equipment_number LIKE ?", [prefix], PATTERNS.product);
-        } catch (error) {
-            if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
-        }
+        const fromRental = await maxSequenceFrom(connection,
+            "SELECT equipment_number AS value FROM equipment WHERE equipment_number LIKE ?", [prefix], PATTERNS.product);
         return Math.max(fromProducts, fromRental);
     }
 
     /*
-     * Product Nos. for sales products and rental product types share
-     * product_number_sequences, so a rental type can never reuse a sales product's
-     * number. Caller must be inside a transaction; the branch row lock serializes
-     * allocation exactly like lambda-products create_product.
+     * Product Nos. for sales products (products.product_number) and rental
+     * equipment (equipment.equipment_number) share one sequence per branch, so a
+     * rental item can never reuse a sales product's number. Caller must be inside
+     * a transaction; the branch row lock serializes allocation.
      */
     async function allocateProductNumber(connection, { storeId, branchId }) {
-        await connection.execute("SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE", [branchId, storeId]);
+        await lockBranch(connection, storeId, branchId);
         const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
-        const [sequenceRows] = await connection.execute(
-            "SELECT last_sequence AS lastSequence FROM product_number_sequences WHERE store_id = ? AND branch_id = ? FOR UPDATE",
-            [storeId, branchId]
-        );
+        const branchPrefix = `${storeCode}-${branchCode}-%`;
         const fromProducts = await maxSequenceFrom(connection,
-            "SELECT product_number AS value FROM products WHERE store_id = ? AND branch_id = ? AND product_number IS NOT NULL",
-            [storeId, branchId]);
+            "SELECT product_number AS value FROM products WHERE store_id = ? AND product_number LIKE ?",
+            [storeId, branchPrefix]);
         const fromRental = await maxSequenceFrom(connection,
-            "SELECT equipment_number AS value FROM rental_equipment WHERE store_id = ? AND branch_id = ? AND equipment_number LIKE '%-PRD-%'",
-            [storeId, branchId], PATTERNS.product);
+            "SELECT equipment_number AS value FROM equipment WHERE store_id = ? AND equipment_number LIKE ?",
+            [storeId, branchPrefix], PATTERNS.product);
         const fromPrefix = await maxProductPrefixSequence(connection, storeCode, branchCode);
-        const next = Math.max(Number(sequenceRows[0]?.lastSequence || 0), fromProducts, fromRental, fromPrefix) + 1;
-        await connection.execute(
-            `INSERT INTO product_number_sequences (store_id, branch_id, last_sequence)
-             VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
-            [storeId, branchId, next]
-        );
+        const next = Math.max(fromProducts, fromRental, fromPrefix) + 1;
         return buildProductNumber(storeCode, branchCode, next);
     }
 
     /*
-     * One Equipment No. per physical rental unit ADDED from now on (units that existed
-     * before are left exactly as they are). Rental workflows stay quantity-based:
-     * delta > 0 issues new numbers; delta < 0 (correction, write-off, retirement)
-     * retires the most recently numbered units still active. Numbers are never reused.
-     * delta = -Infinity retires all of a rental product's numbers.
+     * stocknbook_v2 tracks rental equipment by quantity per branch
+     * (branch_inventory); individual physical units are not numbered.
+     * These helpers are kept so existing callers keep working.
      */
-    async function adjustEquipmentUnits(connection, { storeId, branchId, equipmentId, delta }) {
-        const change = Number(delta);
-        if (!change) return { issued: [], retired: 0 };
-        if (change < 0) {
-            const [active] = await connection.execute(
-                "SELECT id FROM rental_equipment_units WHERE equipment_id = ? AND retired_at IS NULL ORDER BY id DESC",
-                [equipmentId]
-            );
-            const count = Number.isFinite(change) ? Math.min(active.length, -change) : active.length;
-            const ids = active.slice(0, count).map((row) => Number(row.id));
-            for (let i = 0; i < ids.length; i += 500) {
-                const chunk = ids.slice(i, i + 500);
-                await connection.execute(
-                    `UPDATE rental_equipment_units SET retired_at = CURRENT_TIMESTAMP WHERE id IN (${chunk.map(() => "?").join(",")})`,
-                    chunk
-                );
-            }
-            return { issued: [], retired: ids.length };
-        }
-        const needed = Math.trunc(change);
-        const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
-        const prefix = `${storeCode}-${branchCode}-EQP-`;
-        const floor = await maxSequenceFrom(connection,
-            "SELECT equipment_number AS value FROM rental_equipment_units WHERE equipment_number LIKE ?",
-            [`${prefix}%`], PATTERNS.equipment);
-        const { first } = await reserveSequenceBlock(connection,
-            { storeId, branchId, entityType: "EQP", count: needed, floor });
-        const issued = Array.from({ length: needed }, (_, i) => buildEquipmentNumber(storeCode, branchCode, first + i));
-        for (let i = 0; i < issued.length; i += 500) {
-            const chunk = issued.slice(i, i + 500);
-            await connection.execute(
-                `INSERT INTO rental_equipment_units (store_id, branch_id, equipment_id, equipment_number)
-                 VALUES ${chunk.map(() => "(?, ?, ?, ?)").join(", ")}`,
-                chunk.flatMap((number) => [storeId, branchId, equipmentId, number])
-            );
-        }
-        return { issued, retired: 0 };
+    async function adjustEquipmentUnits() {
+        return { issued: [], retired: 0 };
     }
 
-    // Active Equipment Nos. for a branch, grouped by rental product type.
-    async function listEquipmentUnitNumbers(connection, { storeId, branchId }) {
-        const grouped = new Map();
-        try {
-            const [rows] = await connection.execute(
-                `SELECT equipment_id AS equipmentId, equipment_number AS equipmentNumber
-                 FROM rental_equipment_units
-                 WHERE store_id = ? AND branch_id = ? AND retired_at IS NULL
-                 ORDER BY equipment_id, equipment_number`,
-                [storeId, branchId]
-            );
-            for (const row of rows) {
-                const key = Number(row.equipmentId);
-                if (!grouped.has(key)) grouped.set(key, []);
-                grouped.get(key).push(String(row.equipmentNumber));
-            }
-        } catch (error) {
-            if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
-        }
-        return grouped;
+    async function listEquipmentUnitNumbers() {
+        return new Map();
     }
 
     return {
@@ -563,6 +382,9 @@ const identifiers = (() => {
         generateOrderId,
         generateEmployeeCode,
         allocateProductNumber,
+        allocateStoreCode,
+        allocateBranchCode,
+        lockBranch,
         adjustEquipmentUnits,
         maxProductPrefixSequence,
         listEquipmentUnitNumbers,
@@ -570,13 +392,303 @@ const identifiers = (() => {
 })();
 // ===== END StockNBook identification numbers =====
 
+// ===== BEGIN StockNBook v2 catalog (identical in lambda-products, lambda-pos, lambda-bookings, lambda-packages) =====
+/*
+ * stocknbook_v2 keeps ONE catalog row per product (products) and the prices on
+ * product_variants. Every product has one hidden default variant
+ * (is_default = 1) that carries the product-level price and, for a product
+ * without variants, its stock. Real variants have is_default = 0.
+ * Physical stock exists only in branch_inventory, and a product belongs to the
+ * branch that holds the branch_inventory row of its default variant.
+ *
+ * Rental equipment follows the same rule with equipment / equipment_variants.
+ *
+ * The read models below expose the column names this Lambda already returns,
+ * so API responses and the UI stay exactly the same.
+ */
+const V2_PRODUCT_STOCK_SQL = (p, bi) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.on_hand_quantity)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.on_hand_quantity END`;
+const V2_PRODUCT_ALERT_SQL = (p, bi) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.reorder_level)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.reorder_level END`;
+
+// Product rows exactly as the inventory screens use them (one row per product).
+const V2_PRODUCTS = `(SELECT
+        p.id, p.store_id, base_bi.branch_id, p.product_number,
+        p.product_name AS name, COALESCE(cat.category_name, '') AS category, p.category_id,
+        p.description,
+        ${V2_PRODUCT_STOCK_SQL("p", "base_bi")} AS stock,
+        ${V2_PRODUCT_ALERT_SQL("p", "base_bi")} AS alert_level,
+        dv.cost_price AS original_price, dv.selling_price AS sales_price,
+        dv.pricing_method, dv.markup_percentage,
+        base_bi.expiration_date, p.has_variants, p.next_variant_sequence, p.status,
+        p.created_at, p.updated_at, p.deleted_at,
+        dv.id AS default_variant_id, base_bi.id AS base_inventory_id
+    FROM products p
+             JOIN product_variants dv ON dv.product_id = p.id AND dv.is_default = 1
+             JOIN branch_inventory base_bi ON base_bi.variant_id = dv.id
+             LEFT JOIN categories cat ON cat.id = p.category_id)`;
+
+// Real (selectable) variants with their branch stock.
+const V2_PRODUCT_VARIANTS = `(SELECT
+        v.id, v.store_id, v.product_id, v.variant_number, v.variant_name,
+        v.attributes AS variant_values,
+        COALESCE(vbi.on_hand_quantity, 0) AS stock, COALESCE(vbi.reorder_level, 0) AS alert_level,
+        v.cost_price AS original_price, v.selling_price AS sales_price,
+        v.pricing_method, v.markup_percentage, vbi.expiration_date,
+        vbi.branch_id, vbi.id AS inventory_id, v.status, v.created_at, v.updated_at, v.deleted_at
+    FROM product_variants v
+             LEFT JOIN branch_inventory vbi ON vbi.variant_id = v.id
+    WHERE v.is_default = 0)`;
+
+// Consumable branch stock keyed by (product_id, variant_id); variant_id is NULL
+// for a product without variants.
+const V2_BRANCH_INVENTORY = `(SELECT
+        bi.id, bi.store_id, bi.branch_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE v.id END AS variant_id,
+        bi.variant_id AS catalog_variant_id,
+        bi.on_hand_quantity AS quantity_on_hand, bi.reserved_quantity, bi.unavailable_quantity,
+        bi.reorder_level, v.cost_price, v.selling_price AS sales_price, bi.expiration_date,
+        bi.status, bi.created_at, bi.updated_at
+    FROM branch_inventory bi
+             JOIN product_variants v ON v.id = bi.variant_id)`;
+
+// Batch tracking is not part of stocknbook_v2: each branch_inventory row is
+// its own (single) batch with one expiration date.
+const V2_INVENTORY_BATCHES = `(SELECT
+        bi.id, bi.store_id, bi.branch_id, bi.id AS branch_inventory_id,
+        CONCAT('INV-', bi.id) AS batch_code, bi.on_hand_quantity AS received_quantity,
+        bi.on_hand_quantity AS remaining_quantity, v.cost_price AS unit_cost,
+        bi.updated_at AS received_at, bi.expiration_date,
+        CASE WHEN bi.on_hand_quantity > 0 THEN 'active' ELSE 'depleted' END AS status
+    FROM branch_inventory bi
+             JOIN product_variants v ON v.id = bi.variant_id)`;
+
+// Movement history with the legacy reference/actor fields.
+const V2_INVENTORY_MOVEMENTS = `(SELECT
+        m.id, m.store_id, m.branch_id, m.branch_inventory_id, m.movement_type,
+        m.quantity_change AS quantity_delta, m.quantity_before, m.quantity_after, m.unit_cost,
+        m.reference_type,
+        CASE WHEN m.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING_INDEX(SUBSTRING(m.reason, 5), ': ', 1)
+             ELSE CAST(m.reference_id AS CHAR) END AS reference_id,
+        m.performed_by AS actor_id, mu.role AS actor_role, COALESCE(mu.full_name, 'System') AS actor_name,
+        CASE WHEN m.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING(m.reason, LOCATE(': ', m.reason) + 2)
+             ELSE m.reason END AS notes,
+        m.created_at
+    FROM inventory_movements m
+             LEFT JOIN users mu ON mu.id = m.performed_by)`;
+
+// POS lines keyed by (product_id, variant_id).
+const V2_ORDER_ITEMS = `(SELECT
+        oi.id, oi.store_id, oi.order_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE oi.variant_id END AS variant_id,
+        oi.variant_id AS catalog_variant_id,
+        oi.product_name_snapshot AS product_name, oi.quantity, oi.unit_price,
+        oi.cost_price_at_sale, oi.discount_amount, oi.line_total
+    FROM order_items oi
+             JOIN product_variants v ON v.id = oi.variant_id)`;
+
+// Consumable booking lines keyed by (product_id, variant_id).
+const V2_PRODUCT_BOOKING_ITEMS = `(SELECT
+        bki.id, bki.store_id, bki.booking_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE bki.variant_id END AS variant_id,
+        bki.variant_id AS catalog_variant_id, bki.item_type, bki.quantity,
+        bki.unit_price_snapshot, bki.line_total, bki.item_status, bki.created_at
+    FROM booking_items bki
+             JOIN product_variants v ON v.id = bki.variant_id
+    WHERE bki.item_type = 'consumable')`;
+
+// Consumable package lines keyed by (product_id, variant_id).
+const V2_PRODUCT_PACKAGE_ITEMS = `(SELECT
+        pki.id, pki.store_id, pki.package_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE pki.variant_id END AS variant_id,
+        pki.variant_id AS catalog_variant_id, pki.quantity, pki.unit_price_snapshot, pki.sort_order
+    FROM package_items pki
+             JOIN product_variants v ON v.id = pki.variant_id
+    WHERE pki.item_type = 'consumable')`;
+
+async function v2DefaultVariantId(connection, productId) {
+    const [rows] = await connection.execute(
+        "SELECT id FROM product_variants WHERE product_id = ? AND is_default = 1 LIMIT 1",
+        [productId]
+    );
+    return rows.length ? Number(rows[0].id) : null;
+}
+
+// (product_id, variant_id|null) -> product_variants.id used by stocknbook_v2.
+async function v2CatalogVariantId(connection, productId, variantId) {
+    if (variantId !== null && variantId !== undefined && variantId !== "") return Number(variantId);
+    return v2DefaultVariantId(connection, productId);
+}
+
+// Locks the branch stock row of a product/variant (FOR UPDATE).
+async function v2LockInventory(connection, { storeId, branchId, productId, variantId = null }) {
+    const catalogVariantId = await v2CatalogVariantId(connection, productId, variantId);
+    if (!catalogVariantId) return null;
+    const [rows] = await connection.execute(
+        `SELECT bi.id, bi.variant_id, bi.on_hand_quantity, bi.reserved_quantity,
+                bi.unavailable_quantity, bi.reorder_level, bi.expiration_date
+         FROM branch_inventory bi
+                  JOIN product_variants v ON v.id = bi.variant_id
+         WHERE bi.store_id = ? AND bi.branch_id = ? AND bi.variant_id = ?
+           AND v.product_id = ? AND bi.status = 'active'
+             LIMIT 1
+         FOR UPDATE`,
+        [storeId, branchId, catalogVariantId, productId]
+    );
+    if (!rows.length) return null;
+    return {
+        ...rows[0],
+        id: Number(rows[0].id),
+        quantity_on_hand: Number(rows[0].on_hand_quantity),
+        catalog_variant_id: catalogVariantId,
+    };
+}
+
+// Creates the branch stock row for a catalog variant when it does not exist yet.
+async function v2EnsureInventoryRow(connection, { storeId, branchId, catalogVariantId, reorderLevel = 0, expirationDate = null }) {
+    const [found] = await connection.execute(
+        "SELECT id FROM branch_inventory WHERE branch_id = ? AND variant_id = ? LIMIT 1",
+        [branchId, catalogVariantId]
+    );
+    if (found.length) return Number(found[0].id);
+    const [insert] = await connection.execute(
+        `INSERT INTO branch_inventory
+         (store_id, branch_id, variant_id, on_hand_quantity, reorder_level, expiration_date, status)
+         VALUES (?, ?, ?, 0, ?, ?, 'active')`,
+        [storeId, branchId, catalogVariantId, Math.max(0, Number(reorderLevel) || 0), expirationDate || null]
+    );
+    return Number(insert.insertId);
+}
+
+// inventory_movements.performed_by must be a user of the same store.
+async function v2ActorUserId(connection, storeId, actorId) {
+    const id = Number(actorId);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    const [rows] = await connection.execute(
+        "SELECT id FROM users WHERE id = ? AND store_id = ? LIMIT 1",
+        [id, storeId]
+    );
+    return rows.length ? id : null;
+}
+
+// A text reference (receipt key, request key ...) is kept at the start of the
+// movement reason so it can be read back as reference_id.
+function v2MovementReason(reference, notes) {
+    const ref = String(reference ?? "").replace(/: /g, " ").trim();
+    const text = String(notes ?? "").trim();
+    if (!ref) return text || null;
+    return `Ref ${ref}: ${text}`;
+}
+
+async function v2RecordMovement(connection, {
+    storeId, branchId, inventoryId, movementType, delta, before, after,
+    referenceType = null, referenceId = null, reference = null, unitCost = null,
+    actorId = null, notes = null, bucket = "on_hand",
+}) {
+    const numericReference = Number(referenceId);
+    const [result] = await connection.execute(
+        `INSERT INTO inventory_movements
+         (store_id, branch_id, branch_inventory_id, movement_type, quantity_bucket, quantity_change,
+          quantity_before, quantity_after, unit_cost, reference_type, reference_id, reason, performed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            storeId, branchId, inventoryId, movementType, bucket, Number(delta),
+            Number(before), Number(after),
+            unitCost === null || unitCost === undefined ? null : Number(unitCost),
+            referenceType,
+            Number.isSafeInteger(numericReference) && numericReference > 0 ? numericReference : null,
+            v2MovementReason(reference, notes),
+            await v2ActorUserId(connection, storeId, actorId),
+        ]
+    );
+    return Number(result.insertId);
+}
+
+// Category text -> categories.id (created on first use, like the old free-text category).
+async function v2CategoryId(connection, storeId, categoryName, categoryType = "product") {
+    const name = String(categoryName || "").trim();
+    if (!name) return null;
+    const [rows] = await connection.execute(
+        `SELECT id FROM categories
+         WHERE store_id = ? AND category_type = ? AND LOWER(category_name) = LOWER(?)
+             LIMIT 1`,
+        [storeId, categoryType, name]
+    );
+    if (rows.length) return Number(rows[0].id);
+    const [insert] = await connection.execute(
+        "INSERT INTO categories (store_id, category_name, category_type, status) VALUES (?, ?, ?, 'active')",
+        [storeId, name.slice(0, 150), categoryType]
+    );
+    return Number(insert.insertId);
+}
+
+function v2VariantName(values, fallback) {
+    const name = Object.values(values || {})
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .join(", ");
+    return (name || fallback || "Default").slice(0, 150);
+}
+// ===== END StockNBook v2 catalog =====
+
+// ===== BEGIN StockNBook v2 POS read models =====
+/*
+ * POS sales live in orders (Order No. = orders.order_number) and order_items
+ * (one line per product_variants row; a product without variants uses its
+ * default variant). The read models below return the legacy column names, with
+ * order_id = the Order No. text shown in the app, so reports stay unchanged.
+ */
+const V2_POS_ORDERS = `(SELECT
+        po.order_id AS order_pk, po.order_number AS order_id, po.store_id, po.branch_id,
+        po.processed_by AS cashier_id, 'WALK_IN' AS customer_type, po.customer_id,
+        po.payment_mode, po.tax_type, po.subtotal, po.discount_amount,
+        po.vatable_sales, po.vat_amount, po.amount_tendered AS customer_payment, po.change_due,
+        po.total, DATE(po.order_date) AS order_date, po.created_at, po.status
+    FROM orders po)`;
+
+// Same as V2_POS_ORDERS plus the item summary text ("Name - Variant xQty, ...").
+const V2_POS_ORDERS_WITH_ITEM = `(SELECT
+        po.order_id AS order_pk, po.order_number AS order_id, po.store_id, po.branch_id,
+        po.processed_by AS cashier_id, 'WALK_IN' AS customer_type, po.customer_id,
+        po.payment_mode, po.tax_type, po.subtotal, po.discount_amount,
+        po.vatable_sales, po.vat_amount, po.amount_tendered AS customer_payment, po.change_due,
+        po.total, DATE(po.order_date) AS order_date, po.created_at, po.status,
+        (SELECT LEFT(GROUP_CONCAT(CONCAT(poi.product_name_snapshot,
+                    CASE WHEN piv.is_default = 1 THEN '' ELSE CONCAT(' - ', piv.variant_name) END,
+                    ' x', poi.quantity) ORDER BY poi.id SEPARATOR ', '), 255)
+         FROM order_items poi
+                  JOIN product_variants piv ON piv.id = poi.variant_id
+         WHERE poi.order_id = po.order_id) AS item
+    FROM orders po)`;
+
+const V2_POS_ORDER_ITEMS = `(SELECT
+        poi.id, poi.store_id, pio.branch_id, pio.order_number AS order_id, poi.order_id AS order_pk,
+        piv.product_id, CASE WHEN piv.is_default = 1 THEN NULL ELSE poi.variant_id END AS variant_id,
+        poi.variant_id AS catalog_variant_id,
+        poi.product_name_snapshot AS product_name, poi.quantity, poi.unit_price, poi.line_total,
+        poi.cost_price_at_sale, poi.discount_amount
+    FROM order_items poi
+             JOIN orders pio ON pio.order_id = poi.order_id
+             JOIN product_variants piv ON piv.id = poi.variant_id)`;
+// ===== END StockNBook v2 POS read models =====
+
 const JWT_SECRET = "stocknbook-secret-key";
 
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
     password: "BTA5EYVWLfWcebF",
-    database: "stocknbook",
+    database: "stocknbook_v2",
     ssl: { rejectUnauthorized: false },
 };
 
@@ -616,6 +728,7 @@ function serverError(headers, error) {
     });
 }
 
+
 // Resolve operational access from the current database row, not a cached browser permission.
 // Keep legacy access keys compatible with existing Manager/Staff records.
 function normalizeOperationalAccess(permissions, moduleName, role) {
@@ -644,16 +757,13 @@ async function getOperationalAccess(connection, decoded, moduleName) {
     const role = String(decoded?.role || "").trim().toLowerCase();
     if (role === "owner") return "full";
     if (role !== "manager" && role !== "staff") return "none";
-
     const storeId = Number(decoded?.store_id);
     const branchId = Number(decoded?.branch_id);
     const employeeId = Number(role === "manager" ? decoded?.manager_id : decoded?.staff_id);
     if (![storeId, branchId, employeeId].every((id) => Number.isSafeInteger(id) && id > 0)) return "none";
-
-    const table = role === "manager" ? "managers" : "staff";
     const [rows] = await connection.execute(
-        `SELECT permissions FROM ${table} WHERE id = ? AND store_id = ? AND branch_id = ? AND LOWER(status) = 'active' LIMIT 1`,
-        [employeeId, storeId, branchId]
+        `SELECT permissions FROM users WHERE id = ? AND store_id = ? AND branch_id = ? AND role = ? AND LOWER(status) = 'active' LIMIT 1`,
+        [employeeId, storeId, branchId, role]
     );
     if (!rows.length) return "none";
     return normalizeOperationalAccess(rows[0].permissions, moduleName, role);
@@ -752,12 +862,21 @@ const getOwnerSalesReport = (() => {
     const expr = (alias, column, fallback = 'NULL') => column ? `${alias}.${id(column)}` : fallback;
     const money = (value) => Number(Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100);
 
+    // stocknbook_v2 columns of the tables this report inspects.
+    const V2_REPORT_COLUMNS = {
+        orders: ['order_id', 'order_number', 'store_id', 'branch_id', 'customer_id', 'order_date', 'subtotal',
+            'discount_amount', 'vatable_sales', 'vat_amount', 'total', 'tax_type', 'payment_mode',
+            'amount_tendered', 'change_due', 'status', 'processed_by', 'created_at'],
+        bookings: ['id', 'store_id', 'branch_id', 'booking_reference', 'customer_id', 'package_id', 'booking_type',
+            'event_type', 'theme', 'event_date', 'event_end_date', 'event_time', 'venue', 'rental_start_date',
+            'rental_end_date', 'custom_order', 'notes', 'status', 'package_price_snapshot', 'agreed_price',
+            'required_down_payment', 'down_payment_deadline', 'refundable_deposit_required', 'vat_amount',
+            'approved_by', 'approved_at', 'final_additional_charges', 'deposit_applied_amount',
+            'approved_refund_amount', 'settlement_status', 'settlement_notes', 'settlement_reviewed_by',
+            'settlement_reviewed_at', 'cancellation_reason', 'created_by', 'created_at', 'updated_at'],
+    };
     async function listColumns(db, table) {
-        const [rows] = await db.execute(
-            'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
-            [table]
-        );
-        return new Set(rows.map((row) => String(row.name).toLowerCase()));
+        return new Set(V2_REPORT_COLUMNS[table] || []);
     }
 
     async function detectBookingSchema(db) {
@@ -826,21 +945,21 @@ const getOwnerSalesReport = (() => {
                                   THEN o.total - COALESCE(o.vat_amount,0) - ic.cost ELSE NULL END AS profit,
                          o.item AS item,
                          o.cashier_id AS cashierId,
-                         (SELECT ea.employee_name FROM employee_actions ea
-                          WHERE ea.store_id=o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
+                         (SELECT ea.user_name FROM employee_actions ea
+                          WHERE ea.store_id=o.store_id AND ea.reference_number = o.order_id
                             AND ea.action = 'Completed POS transaction' ORDER BY ea.id DESC LIMIT 1) AS cashierName,
-        (SELECT ea.employee_role FROM employee_actions ea
-         WHERE ea.store_id=o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
+        (SELECT ea.user_role FROM employee_actions ea
+         WHERE ea.store_id=o.store_id AND ea.reference_number = o.order_id
          AND ea.action = 'Completed POS transaction' ORDER BY ea.id DESC LIMIT 1) AS cashierRole,
         DATE_FORMAT(o.order_date, '%Y-%m-%d') AS reportDate,
         DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS transactionAt
-                     FROM orders o
+                     FROM ${V2_POS_ORDERS_WITH_ITEM} o
                          LEFT JOIN branches br ON br.store_id=o.store_id AND br.id=o.branch_id
                          LEFT JOIN (
                          SELECT store_id, order_id, COUNT(*) AS rowCount,
                          SUM(CASE WHEN cost_price_at_sale IS NULL THEN 1 ELSE 0 END) AS missingCount,
                          SUM(cost_price_at_sale * quantity) AS cost
-                         FROM order_items WHERE store_id = ? GROUP BY store_id, order_id
+                         FROM ${V2_POS_ORDER_ITEMS} order_items WHERE store_id = ? GROUP BY store_id, order_id
                          ) ic ON ic.store_id=o.store_id AND ic.order_id=o.order_id
                      WHERE ${where.join(' AND ')}`;
         return { sql, params };
@@ -1185,7 +1304,7 @@ const getOwnerSalesReport = (() => {
             const [stored] = await db.execute(
                 `SELECT product_name AS name, quantity, unit_price AS unitPrice,
                         line_total AS lineTotal
-                 FROM order_items WHERE store_id = ? AND order_id = ?
+                 FROM ${V2_POS_ORDER_ITEMS} order_items WHERE store_id = ? AND order_id = ?
                  ORDER BY id ASC LIMIT 501`,
                 [storeId, orderId]
             );
@@ -1295,12 +1414,12 @@ const getOwnerSalesReport = (() => {
 
 })();
 
-const POS_CASHIER_NAME_SQL = `(SELECT ea.employee_name FROM employee_actions ea
-    WHERE ea.store_id = o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
+const POS_CASHIER_NAME_SQL = `(SELECT ea.user_name FROM employee_actions ea
+    WHERE ea.store_id = o.store_id AND ea.reference_number = o.order_id
       AND ea.action = 'Completed POS transaction'
     ORDER BY ea.id DESC LIMIT 1)`;
-const POS_CASHIER_ROLE_SQL = `(SELECT ea.employee_role FROM employee_actions ea
-    WHERE ea.store_id = o.store_id AND ea.reference_id COLLATE utf8mb4_unicode_ci = o.order_id
+const POS_CASHIER_ROLE_SQL = `(SELECT ea.user_role FROM employee_actions ea
+    WHERE ea.store_id = o.store_id AND ea.reference_number = o.order_id
       AND ea.action = 'Completed POS transaction'
     ORDER BY ea.id DESC LIMIT 1)`;
 
@@ -1488,15 +1607,14 @@ async function getSellableBatchQuantity(
     saleDate
 ) {
     const [rows] = await connection.execute(
-        `SELECT COALESCE(SUM(remaining_quantity), 0) AS sellableQuantity
-         FROM inventory_batches
-         WHERE branch_inventory_id = ?
-           AND remaining_quantity > 0
-           AND status = 'active'
-           AND (expiration_date IS NULL OR expiration_date >= ?)`,
-        [inventoryId, saleDate]
+        `SELECT CASE WHEN expiration_date IS NULL OR expiration_date >= ?
+                         THEN GREATEST(on_hand_quantity - reserved_quantity - unavailable_quantity, 0)
+                     ELSE 0 END AS sellableQuantity
+         FROM branch_inventory
+         WHERE id = ?
+           AND status = 'active'`,
+        [saleDate, inventoryId]
     );
-
     return Math.max(0, Number(rows[0]?.sellableQuantity || 0));
 }
 
@@ -1508,112 +1626,109 @@ async function resolveAuthoritativeOrderLines(
     saleDate
 ) {
     const resolved = [];
-
     for (const rawLine of rawItems) {
         const productId = getProductId(rawLine);
         const variantId = getVariantId(rawLine);
         const quantity = toPositiveInteger(rawLine.quantity ?? rawLine.qty);
-
         if (!productId) {
             throw new Error("Each POS item must include a valid product_id.");
         }
-
         if (!quantity) {
             throw new Error("Each POS item must include a valid quantity.");
         }
-
         let rows;
-
         if (variantId) {
             [rows] = await connection.execute(
                 `SELECT
                      p.id AS productId,
-                     p.name AS productName,
+                     p.product_name AS productName,
                      pv.id AS variantId,
-                     pv.variant_values AS variantValues,
-                     COALESCE(NULLIF(bi.sales_price, 0), NULLIF(pv.sales_price, 0), NULLIF(p.sales_price, 0), 0) AS salesPrice,
+                     pv.attributes AS variantValues,
+                     COALESCE(NULLIF(pv.selling_price, 0), NULLIF(dv.selling_price, 0), 0) AS salesPrice,
                      bi.id AS inventoryId,
-                     bi.quantity_on_hand AS quantityOnHand
+                     bi.on_hand_quantity AS quantityOnHand
                  FROM products p
+                          INNER JOIN product_variants dv
+                                     ON dv.product_id = p.id
+                                         AND dv.is_default = 1
+                          INNER JOIN branch_inventory base_bi
+                                     ON base_bi.variant_id = dv.id
+                                         AND base_bi.branch_id = ?
                           INNER JOIN product_variants pv
                                      ON pv.product_id = p.id
                                          AND pv.id = ?
+                                         AND pv.is_default = 0
+                                         AND pv.deleted_at IS NULL
                           LEFT JOIN branch_inventory bi
                                     ON bi.store_id = p.store_id
-                                        AND bi.branch_id = p.branch_id
-                                        AND bi.product_id = p.id
+                                        AND bi.branch_id = base_bi.branch_id
                                         AND bi.variant_id = pv.id
                                         AND bi.status = 'active'
                  WHERE p.id = ?
                    AND p.store_id = ?
-                   AND p.branch_id = ?
+                   AND p.deleted_at IS NULL
                      LIMIT 1`,
-                [variantId, productId, storeId, branchId]
+                [branchId, variantId, productId, storeId]
             );
         } else {
             [rows] = await connection.execute(
                 `SELECT
                      p.id AS productId,
-                     p.name AS productName,
+                     p.product_name AS productName,
                      NULL AS variantId,
                      NULL AS variantValues,
-                     COALESCE(NULLIF(bi.sales_price, 0), NULLIF(p.sales_price, 0), 0) AS salesPrice,
+                     COALESCE(NULLIF(dv.selling_price, 0), 0) AS salesPrice,
                      bi.id AS inventoryId,
-                     bi.quantity_on_hand AS quantityOnHand
+                     bi.on_hand_quantity AS quantityOnHand
                  FROM products p
-                          LEFT JOIN branch_inventory bi
-                                    ON bi.store_id = p.store_id
-                                        AND bi.branch_id = p.branch_id
-                                        AND bi.product_id = p.id
-                                        AND bi.variant_id IS NULL
-                                        AND bi.status = 'active'
+                          INNER JOIN product_variants dv
+                                     ON dv.product_id = p.id
+                                         AND dv.is_default = 1
+                          INNER JOIN branch_inventory bi
+                                     ON bi.store_id = p.store_id
+                                         AND bi.branch_id = ?
+                                         AND bi.variant_id = dv.id
+                                         AND bi.status = 'active'
                  WHERE p.id = ?
                    AND p.store_id = ?
-                   AND p.branch_id = ?
+                   AND p.deleted_at IS NULL
+                   AND p.has_variants = 0
                      LIMIT 1`,
-                [productId, storeId, branchId]
+                [branchId, productId, storeId]
             );
         }
-
         if (!rows.length) {
             throw new Error(
                 `Product ${productId}${variantId ? ` variant ${variantId}` : ""} is not available in this branch.`
             );
         }
-
         const row = rows[0];
         const inventoryId = toPositiveInteger(row.inventoryId);
-
         if (!inventoryId) {
             throw new Error(
-                `Database V2 inventory is missing for ${row.productName || `product ${productId}`}. Run the V2 backfill/verification.`
+                `Branch inventory is missing for ${row.productName || `product ${productId}`}.`
             );
         }
-
         const quantityOnHand = Math.max(0, Number(row.quantityOnHand || 0));
         if (quantityOnHand < quantity) {
             throw new Error(
                 `Not enough stock for ${row.productName || `product ${productId}`}. Available: ${quantityOnHand}, needed: ${quantity}.`
             );
         }
-
         const sellableQuantity = await getSellableBatchQuantity(
             connection,
             inventoryId,
             saleDate
         );
-
         if (sellableQuantity < quantity) {
             throw new Error(
                 `Not enough non-expired stock for ${row.productName || `product ${productId}`}. Sellable: ${sellableQuantity}, needed: ${quantity}.`
             );
         }
-
         const unitPrice = roundMoney(row.salesPrice);
         const variantName = variantId
             ? formatVariantValues(row.variantValues) || getVariantName(rawLine) || `Variant #${variantId}`
             : "";
-
         resolved.push({
             product_id: productId,
             variant_id: variantId || null,
@@ -1624,7 +1739,6 @@ async function resolveAuthoritativeOrderLines(
             item_name: `${toSafeString(row.productName, 150) || `Product #${productId}`}${variantName ? `/${variantName}` : ""}`,
         });
     }
-
     return resolved;
 }
 
@@ -1674,9 +1788,17 @@ async function insertOrderItems(
     branchId,
     items
 ) {
+    // order_items.order_id references orders.order_id (the numeric key of the Order No.).
+    const [orderRows] = await connection.execute(
+        `SELECT order_id AS orderPk FROM orders WHERE store_id = ? AND order_number = ? LIMIT 1`,
+        [storeId, orderId]
+    );
+    if (!orderRows.length) {
+        throw new Error("POS order header was not found for its items.");
+    }
+    const orderPk = Number(orderRows[0].orderPk);
     const dashboardItems = [];
     let totalCost = 0;
-
     for (const line of items) {
         const productId = getProductId(line);
         const variantId = getVariantId(line);
@@ -1690,62 +1812,47 @@ async function insertOrderItems(
                 line.sales_price ??
                 line.salesPrice
             ) ?? 0;
-
         if (!productId) {
             throw new Error("Each POS item must include a valid product_id.");
         }
         if (!quantity) {
             throw new Error("Each POS item must include a valid quantity.");
         }
-
-        let costPriceAtSale = 0;
-
-        if (variantId) {
-            const [costRows] = await connection.execute(
-                `SELECT COALESCE(pv.original_price, p.original_price, 0) AS costPrice
-                 FROM product_variants pv
-                          INNER JOIN products p
-                                     ON p.id = pv.product_id
-                                         AND p.store_id = ?
-                                         AND p.branch_id = ?
-                 WHERE pv.id = ?
-                   AND pv.product_id = ?
-                     LIMIT 1`,
-                [storeId, branchId, variantId, productId]
-            );
-            costPriceAtSale = roundMoney(costRows[0]?.costPrice ?? 0);
-        } else {
-            const [costRows] = await connection.execute(
-                `SELECT COALESCE(original_price, 0) AS costPrice
-                 FROM products
-                 WHERE id = ? AND store_id = ? AND branch_id = ?
-                     LIMIT 1`,
-                [productId, storeId, branchId]
-            );
-            costPriceAtSale = roundMoney(costRows[0]?.costPrice ?? 0);
+        const catalogVariantId = await v2CatalogVariantId(connection, productId, variantId);
+        if (!catalogVariantId) {
+            throw new Error(`Product ${productId} is not available in this branch.`);
         }
-
+        const [costRows] = await connection.execute(
+            `SELECT COALESCE(NULLIF(pv.cost_price, 0), dv.cost_price, 0) AS costPrice
+             FROM product_variants pv
+                      INNER JOIN product_variants dv
+                                 ON dv.product_id = pv.product_id
+                                     AND dv.is_default = 1
+             WHERE pv.id = ?
+               AND pv.product_id = ?
+               AND pv.store_id = ?
+                 LIMIT 1`,
+            [catalogVariantId, productId, storeId]
+        );
+        const costPriceAtSale = roundMoney(costRows[0]?.costPrice ?? 0);
         const lineTotal = roundMoney(unitPrice * quantity);
-
         await connection.execute(
             `INSERT INTO order_items
-             (order_id, store_id, branch_id, product_id, variant_id, product_name,
-              quantity, unit_price, line_total, cost_price_at_sale)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (store_id, order_id, variant_id, product_name_snapshot,
+              quantity, unit_price, cost_price_at_sale, discount_amount, line_total)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
             [
-                orderId,
                 storeId,
-                branchId,
-                productId,
-                variantId || null,
-                productName,
+                orderPk,
+                catalogVariantId,
+                String(productName).slice(0, 180),
                 quantity,
                 unitPrice,
-                lineTotal,
                 costPriceAtSale,
+                lineTotal,
             ]
         );
-
+        void branchId;
         const lineCost = roundMoney(costPriceAtSale * quantity);
         totalCost = roundMoney(totalCost + lineCost);
         dashboardItems.push({
@@ -1755,7 +1862,6 @@ async function insertOrderItems(
             lineTotal,
         });
     }
-
     return {
         totalCost,
         items: dashboardItems,
@@ -1771,25 +1877,17 @@ async function loadOrderItemsForOrders(connection, storeId, orderIds) {
                 .filter(Boolean)
         )
     );
-
     if (safeOrderIds.length === 0) {
         return new Map();
     }
-
     const byOrderId = new Map();
-
     /*
      * IMPORTANT:
      * Do not send thousands of order IDs in one huge IN (...) query.
-     * MySQL may create large temporary files for that query and can fail
-     * with OS errno 28: "No space left on device".
-     *
      * Loading the items in small batches keeps the SQL statement and
-     * MySQL temporary-file usage under control while preserving the
-     * exact same result.
+     * MySQL temporary-file usage under control.
      */
     const CHUNK_SIZE = 200;
-
     for (
         let start = 0;
         start < safeOrderIds.length;
@@ -1799,11 +1897,9 @@ async function loadOrderItemsForOrders(connection, storeId, orderIds) {
             start,
             start + CHUNK_SIZE
         );
-
         const placeholders = chunk
             .map(() => "?")
             .join(",");
-
         const [rows] = await connection.execute(
             `SELECT
                  oi.order_id AS orderId,
@@ -1813,136 +1909,65 @@ async function loadOrderItemsForOrders(connection, storeId, orderIds) {
                  oi.quantity,
                  oi.unit_price AS unitPrice,
                  oi.line_total AS lineTotal,
-                 COALESCE(
-                         oi.cost_price_at_sale,
-                         CASE
-                             WHEN oi.variant_id IS NOT NULL
-                                 THEN COALESCE(pv.original_price, p.original_price, 0)
-                             ELSE COALESCE(p.original_price, 0)
-                             END,
-                         0
-                 ) AS costPrice
-             FROM order_items oi
-                      LEFT JOIN products p
-                                ON p.id = oi.product_id
-                                    AND p.store_id = oi.store_id
-                      LEFT JOIN product_variants pv
-                                ON pv.id = oi.variant_id
-                                    AND pv.product_id = oi.product_id
+                 COALESCE(oi.cost_price_at_sale, 0) AS costPrice
+             FROM ${V2_POS_ORDER_ITEMS} oi
              WHERE oi.store_id = ?
                AND oi.order_id IN (${placeholders})
              ORDER BY oi.order_id ASC, oi.id ASC`,
             [storeId, ...chunk]
         );
-
         for (const row of rows) {
             const orderId = String(
                 row.orderId || ""
             );
-
             if (!byOrderId.has(orderId)) {
                 byOrderId.set(
                     orderId,
                     []
                 );
             }
-
             byOrderId.get(orderId).push({
                 productId:
                     row.productId == null
                         ? null
                         : Number(row.productId),
-
                 variantId:
                     row.variantId == null
                         ? null
                         : Number(row.variantId),
-
                 name: String(
                     row.name || ""
                 ),
-
                 quantity: Number(
                     row.quantity || 0
                 ),
-
                 unitPrice: Number(
                     row.unitPrice || 0
                 ),
-
                 lineTotal: Number(
                     row.lineTotal || 0
                 ),
-
                 costPrice: Number(
                     row.costPrice || 0
                 ),
             });
         }
     }
-
     return byOrderId;
 }
 
 
 async function getV2InventoryForUpdate(connection, storeId, branchId, productId, variantId) {
-    const [rows] = await connection.execute(
-        `SELECT id, store_id, branch_id, product_id, variant_id,
-                quantity_on_hand, cost_price
-         FROM branch_inventory
-         WHERE store_id = ?
-           AND branch_id = ?
-           AND product_id = ?
-           AND variant_id <=> ?
-           AND status = 'active'
-         LIMIT 1
-         FOR UPDATE`,
-        [storeId, branchId, productId, variantId || null]
-    );
-
-    return rows[0] || null;
+    return v2LockInventory(connection, { storeId, branchId, productId, variantId: variantId || null });
 }
 
 async function consumeV2Batches(connection, inventoryId, quantity, saleDate) {
-    let remaining = Math.max(0, Number(quantity || 0));
+    const remaining = Math.max(0, Number(quantity || 0));
     if (remaining <= 0) return;
-
-    const [batches] = await connection.execute(
-        `SELECT id, remaining_quantity
-         FROM inventory_batches
-         WHERE branch_inventory_id = ?
-           AND remaining_quantity > 0
-           AND status = 'active'
-           AND (expiration_date IS NULL OR expiration_date >= ?)
-         ORDER BY (expiration_date IS NULL) ASC,
-                  expiration_date ASC,
-                  received_at ASC,
-                  id ASC
-             FOR UPDATE`,
-        [inventoryId, saleDate]
-    );
-
-    for (const batch of batches) {
-        if (remaining <= 0) break;
-        const available = Math.max(0, Number(batch.remaining_quantity || 0));
-        const take = Math.min(available, remaining);
-        if (take <= 0) continue;
-
-        await connection.execute(
-            `UPDATE inventory_batches
-             SET remaining_quantity = remaining_quantity - ?,
-                 status = CASE WHEN remaining_quantity - ? <= 0 THEN 'depleted' ELSE status END,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?`,
-            [take, take, batch.id]
-        );
-        remaining -= take;
-    }
-
-    if (remaining > 0) {
+    const sellable = await getSellableBatchQuantity(connection, inventoryId, saleDate);
+    if (sellable < remaining) {
         throw new Error(
-            `Database V2 batch balance is short by ${remaining} unit(s) for inventory #${inventoryId}. ` +
-            `Run the V2 verification/backfill before processing POS transactions.`
+            `Sellable stock is short by ${remaining - sellable} unit(s) for inventory #${inventoryId}.`
         );
     }
 }
@@ -1955,63 +1980,48 @@ async function decreaseV2Inventory(connection, options) {
         options.productId,
         options.variantId
     );
-
     if (!row) {
         throw new Error(
-            `Database V2 inventory row is missing for product ${options.productId}` +
-            `${options.variantId ? ` variant ${options.variantId}` : ""}. Run the V2 backfill/verification.`
+            `Branch inventory row is missing for product ${options.productId}` +
+            `${options.variantId ? ` variant ${options.variantId}` : ""}.`
         );
     }
-
     const before = Number(row.quantity_on_hand || 0);
     const quantity = Math.max(0, Number(options.quantity || 0));
-
     if (before < quantity) {
         throw new Error(
-            `Database V2 stock mismatch for product ${options.productId}. Available: ${before}, needed: ${quantity}.`
+            `Stock mismatch for product ${options.productId}. Available: ${before}, needed: ${quantity}.`
         );
     }
-
     const after = before - quantity;
     const saleDate =
         toISODate(options.saleDate) || getManilaISODate();
-
     await consumeV2Batches(
         connection,
         row.id,
         quantity,
         saleDate
     );
-
     await connection.execute(
         `UPDATE branch_inventory
-         SET quantity_on_hand = ?, updated_at = CURRENT_TIMESTAMP
+         SET on_hand_quantity = ?
          WHERE id = ?`,
         [after, row.id]
     );
-
     const actor = options.actor || { id: null, role: "SYSTEM", name: "StockNBook" };
-    await connection.execute(
-        `INSERT INTO inventory_movements
-         (store_id, branch_id, branch_inventory_id, movement_type,
-          quantity_delta, quantity_before, quantity_after,
-          reference_type, reference_id, actor_id, actor_role, actor_name, notes)
-         VALUES (?, ?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-            options.storeId,
-            options.branchId,
-            row.id,
-            -quantity,
-            before,
-            after,
-            options.referenceType || "POS_ORDER",
-            options.referenceId != null ? String(options.referenceId) : null,
-            actor.id ?? null,
-            actor.role || null,
-            actor.name || null,
-            options.notes || "POS inventory deduction during Database V2 dual-write.",
-        ]
-    );
+    await v2RecordMovement(connection, {
+        storeId: options.storeId,
+        branchId: options.branchId,
+        inventoryId: row.id,
+        movementType: "SALE",
+        delta: -quantity,
+        before,
+        after,
+        referenceType: options.referenceType || "POS_ORDER",
+        reference: options.referenceId != null ? String(options.referenceId) : null,
+        actorId: actor.id ?? null,
+        notes: options.notes || "POS inventory deduction.",
+    });
 }
 
 async function decreaseStockForOrder(
@@ -2024,95 +2034,38 @@ async function decreaseStockForOrder(
     for (const line of items) {
         const quantity =
             toPositiveInteger(line.quantity ?? line.qty) || 1;
-
         const productId = getProductId(line);
         const variantId = getVariantId(line);
         const productName = getProductName(line);
-
         if (!productId) {
             throw new Error(
                 `Missing product_id for "${productName || "POS item"}".`
             );
         }
-
-        if (variantId) {
-            const [result] = await connection.execute(
-                `UPDATE product_variants pv
-                     INNER JOIN products p
-                 ON p.id = pv.product_id
-                     SET
-                         pv.stock = pv.stock - ?,
-                         p.stock = p.stock - ?
-                 WHERE pv.id = ?
-                   AND p.id = ?
-                   AND p.store_id = ?
-                   AND p.branch_id = ?
-                   AND pv.stock >= ?
-                   AND p.stock >= ?`,
-                [
-                    quantity,
-                    quantity,
-                    variantId,
-                    productId,
-                    storeId,
-                    branchId,
-                    quantity,
-                    quantity,
-                ]
-            );
-
-            if (result.affectedRows === 0) {
-                throw new Error(
-                    `Insufficient stock or invalid variant for "${productName}".`
-                );
-            }
-
+        // branch_inventory is the only stock ledger in stocknbook_v2.
+        try {
             await decreaseV2Inventory(connection, {
                 storeId,
                 branchId,
                 productId,
-                variantId,
+                variantId: variantId || null,
                 quantity,
                 saleDate: movementContext.saleDate,
                 ...movementContext,
-                notes: `POS sale: ${productName || `Product #${productId}`} (variant ${variantId}) x${quantity}`,
+                notes: variantId
+                    ? `POS sale: ${productName || `Product #${productId}`} (variant ${variantId}) x${quantity}`
+                    : `POS sale: ${productName || `Product #${productId}`} x${quantity}`,
             });
-
-            continue;
+        } catch (error) {
+            if (/missing|mismatch|short/i.test(String(error.message || ""))) {
+                throw new Error(
+                    variantId
+                        ? `Insufficient stock or invalid variant for "${productName}".`
+                        : `Insufficient stock or invalid product for "${productName || productId}".`
+                );
+            }
+            throw error;
         }
-
-        const [result] = await connection.execute(
-            `UPDATE products
-             SET stock = stock - ?
-             WHERE id = ?
-               AND store_id = ?
-               AND branch_id = ?
-               AND stock >= ?`,
-            [
-                quantity,
-                productId,
-                storeId,
-                branchId,
-                quantity,
-            ]
-        );
-
-        if (result.affectedRows === 0) {
-            throw new Error(
-                `Insufficient stock or invalid product for "${productName || productId}".`
-            );
-        }
-
-        await decreaseV2Inventory(connection, {
-            storeId,
-            branchId,
-            productId,
-            variantId: null,
-            quantity,
-            saleDate: movementContext.saleDate,
-            ...movementContext,
-            notes: `POS sale: ${productName || `Product #${productId}`} x${quantity}`,
-        });
     }
 }
 
@@ -2128,7 +2081,7 @@ async function getActingEmployee(connection, decoded) {
 
     if (role === "manager" && toPositiveInteger(decoded?.manager_id)) {
         const [rows] = await connection.execute(
-            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS manager_name FROM users WHERE id = ? AND store_id = ? AND role = 'manager' LIMIT 1`,
             [toPositiveInteger(decoded.manager_id), storeId]
         );
 
@@ -2141,7 +2094,7 @@ async function getActingEmployee(connection, decoded) {
 
     if (role === "staff" && toPositiveInteger(decoded?.staff_id)) {
         const [rows] = await connection.execute(
-            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS staff_name FROM users WHERE id = ? AND store_id = ? AND role = 'staff' LIMIT 1`,
             [toPositiveInteger(decoded.staff_id), storeId]
         );
 
@@ -2154,12 +2107,12 @@ async function getActingEmployee(connection, decoded) {
 
     if (role === "owner" && storeId) {
         const [rows] = await connection.execute(
-            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            `SELECT id AS owner_user_id, full_name AS owner_name FROM users WHERE store_id = ? AND role = 'owner' ORDER BY id ASC LIMIT 1`,
             [storeId]
         );
 
         return {
-            id: null,
+            id: rows[0]?.owner_user_id ? Number(rows[0].owner_user_id) : null,
             name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
             role: "Owner",
         };
@@ -2175,22 +2128,28 @@ async function getActingEmployee(connection, decoded) {
  * the action already committed.
  */
 async function logEmployeeAction(connection, entry) {
+    // employee_actions.user_id references users.id (owners included).
+    const userId = Number(entry?.employee?.id);
+    if (!Number.isSafeInteger(userId) || userId <= 0) return;
+    const entityId = Number(entry.referenceId);
     await connection.execute(
         `INSERT INTO employee_actions
-         (store_id, branch_id, employee_id, employee_name, employee_role,
-          module, reference_number, action, reference_id, details)
+         (store_id, branch_id, user_id, user_name, user_role,
+          module, reference_number, action, entity_id, details)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             entry.storeId,
             entry.branchId ?? null,
-            entry.employee.id,
-            entry.employee.name,
+            userId,
+            String(entry.employee.name || "Unknown").slice(0, 150),
             entry.employee.role,
             entry.module,
             entry.referenceNumber ?? null,
             entry.action,
-            entry.referenceId ?? null,
-            entry.details ?? null,
+            Number.isSafeInteger(entityId) && entityId > 0 ? entityId : null,
+            entry.details === undefined || entry.details === null
+                ? null
+                : JSON.stringify(entry.details),
         ]
     );
 }
@@ -2547,32 +2506,44 @@ exports.handler = async (event) => {
 
                     // One completed sales header and itemized product lines.
                     // Record checkout in the shared employee_actions audit log.
-                    await connection.execute(
+                    // The item summary is derived from order_items in stocknbook_v2.
+                    void item;
+                    const cashierUserId = await v2ActorUserId(connection, storeId, actingEmployee.id);
+                    const [orderInsert] = await connection.execute(
                         `INSERT INTO orders
                          (
-                             order_id, store_id, branch_id,
-                             cashier_id, customer_type, payment_mode, tax_type,
-                             vatable_sales, vat_amount, customer_payment, change_due,
-                             item, total, order_date
+                             order_number, store_id, branch_id, order_date,
+                             subtotal, discount_amount, vatable_sales, vat_amount, total,
+                             tax_type, payment_mode, amount_tendered, change_due,
+                             status, processed_by
                          )
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)`,
                         [
                             orderId,
                             storeId,
                             tokenBranchId,
-                            actingEmployee.id,
-                            "WALK_IN",
-                            paymentMode,
-                            taxType,
+                            orderDate,
+                            total,
                             vatableSales,
                             vatAmount,
+                            total,
+                            taxType,
+                            paymentMode,
                             customerPayment,
                             changeDue,
-                            item,
-                            total,
-                            orderDate,
+                            cashierUserId,
                         ]
                     );
+                    // The customer payment for this sale (payments.order_id).
+                    if (total > 0) {
+                        await connection.execute(
+                            `INSERT INTO payments
+                             (store_id, branch_id, order_id, payment_type, amount, payment_method,
+                              status, recorded_by, paid_at)
+                             VALUES (?, ?, ?, 'POS', ?, ?, 'recorded', ?, NOW())`,
+                            [storeId, tokenBranchId, orderInsert.insertId, total, paymentMode, cashierUserId]
+                        );
+                    }
 
                     const orderItemSummary = await insertOrderItems(
                         connection,
@@ -2638,7 +2609,7 @@ exports.handler = async (event) => {
                              o.total AS grandTotal,
                              DATE_FORMAT(o.order_date, '%Y-%m-%d') AS orderDate,
                              DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS createdAt
-                         FROM orders o
+                         FROM ${V2_POS_ORDERS_WITH_ITEM} o
                                   LEFT JOIN branches b
                                             ON b.id = o.branch_id
                                                 AND b.store_id = o.store_id
@@ -2868,8 +2839,8 @@ exports.handler = async (event) => {
                      o.order_date,
                      o.total AS sales,
                      COALESCE(SUM(COALESCE(oi.cost_price_at_sale,0) * COALESCE(oi.quantity,0)),0) AS cost
-                     FROM orders o
-                     LEFT JOIN order_items oi
+                     FROM ${V2_POS_ORDERS} o
+                     LEFT JOIN ${V2_POS_ORDER_ITEMS} oi
                      ON oi.order_id = o.order_id
                      AND oi.store_id = o.store_id
                      WHERE o.store_id = ?
@@ -2899,7 +2870,7 @@ exports.handler = async (event) => {
                      SUM(CASE WHEN o.order_date >= ? THEN o.total ELSE 0 END) AS monthSales,
                      SUM(CASE WHEN o.order_date >= ? THEN o.total ELSE 0 END) AS quarterSales,
                      SUM(CASE WHEN o.order_date >= ? THEN o.total ELSE 0 END) AS yearSales
-                 FROM orders o
+                 FROM ${V2_POS_ORDERS} o
                           LEFT JOIN branches b
                                     ON b.id = o.branch_id
                                         AND b.store_id = o.store_id
@@ -2929,8 +2900,8 @@ exports.handler = async (event) => {
                      SUM(CASE WHEN o.order_date >= ? THEN oi.quantity ELSE 0 END) AS quarterUnits,
                      SUM(CASE WHEN o.order_date >= ? THEN oi.line_total ELSE 0 END) AS yearSales,
                      SUM(CASE WHEN o.order_date >= ? THEN oi.quantity ELSE 0 END) AS yearUnits
-                 FROM order_items oi
-                          INNER JOIN orders o
+                 FROM ${V2_POS_ORDER_ITEMS} oi
+                          INNER JOIN ${V2_POS_ORDERS} o
                                      ON o.order_id = oi.order_id
                                          AND o.store_id = oi.store_id
                  WHERE o.store_id = ?
@@ -3081,7 +3052,7 @@ exports.handler = async (event) => {
             const joinMetrics = includeFinancials ? `LEFT JOIN (
                 SELECT store_id, order_id,
                     SUM(COALESCE(cost_price_at_sale,0) * quantity) AS cost
-                FROM order_items GROUP BY store_id, order_id
+                FROM ${V2_POS_ORDER_ITEMS} order_items GROUP BY store_id, order_id
             ) AS item_cost ON item_cost.order_id = o.order_id AND item_cost.store_id = o.store_id` : '';
             let query = `SELECT
                              o.order_id AS orderId, o.store_id AS storeId, o.branch_id AS branchId,
@@ -3100,7 +3071,7 @@ exports.handler = async (event) => {
                              ${metrics}
                                  DATE_FORMAT(o.order_date,'%Y-%m-%d') AS orderDate,
                              DATE_FORMAT(o.created_at,'%Y-%m-%d %H:%i:%s') AS createdAt
-                         FROM orders o
+                         FROM ${V2_POS_ORDERS_WITH_ITEM} o
                                   LEFT JOIN branches b ON b.id=o.branch_id AND b.store_id=o.store_id
                              ${joinMetrics}
                          WHERE ${whereSql}
@@ -3115,7 +3086,7 @@ exports.handler = async (event) => {
             }
             let pagination = null;
             if (paginate) {
-                const [[count]] = await connection.execute(`SELECT COUNT(*) AS total FROM orders o WHERE ${whereSql}`,params);
+                const [[count]] = await connection.execute(`SELECT COUNT(*) AS total FROM ${V2_POS_ORDERS} o WHERE ${whereSql}`,params);
                 const total = Number(count.total || 0), totalPages = Math.max(1,Math.ceil(total/pageSize));
                 pagination = {page,pageSize,total,totalPages,hasPrevious:page>1,hasMore:page<totalPages};
             }
@@ -3127,7 +3098,7 @@ exports.handler = async (event) => {
                                                                  COUNT(*) AS transactions,
                                                                  COALESCE(SUM(o.total), 0) AS sales,
                                                                  COALESCE(SUM(o.vat_amount), 0) AS vat
-                                                             FROM orders o WHERE ${whereSql} AND ${POS_SALE_FILTER_SQL}`, params);
+                                                             FROM ${V2_POS_ORDERS} o WHERE ${whereSql} AND ${POS_SALE_FILTER_SQL}`, params);
                 summary = {
                     transactions: Number(totals.transactions || 0),
                     sales: roundMoney(totals.sales),
@@ -3139,9 +3110,9 @@ exports.handler = async (event) => {
                                                                  COUNT(*) AS transactions, COALESCE(SUM(o.total),0) AS sales,
                                                                  COALESCE(SUM(COALESCE(c.cost,0)),0) AS cost,
                                                                  COALESCE(SUM(o.total-COALESCE(o.vat_amount,0)-COALESCE(c.cost,0)),0) AS profit
-                                                             FROM orders o LEFT JOIN (
+                                                             FROM ${V2_POS_ORDERS} o LEFT JOIN (
                                                                  SELECT store_id,order_id,SUM(COALESCE(cost_price_at_sale,0)*quantity) AS cost
-                                                                 FROM order_items GROUP BY store_id,order_id
+                                                                 FROM ${V2_POS_ORDER_ITEMS} order_items GROUP BY store_id,order_id
                                                              ) c ON c.order_id=o.order_id AND c.store_id=o.store_id
                                                              WHERE ${whereSql} AND ${POS_SALE_FILTER_SQL}`,params);
                 summary = {transactions:Number(totals.transactions||0),sales:roundMoney(totals.sales),

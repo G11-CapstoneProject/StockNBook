@@ -99,8 +99,8 @@ const identifiers = (() => {
     /*   Branch 4 Retail Branch -> B4   (numbered branch)                 */
     /*   Main Retail Branch     -> MAIN (one-syllable word kept whole)    */
     /* Generic words such as Branch/Retail/Store are ignored. Initials are */
-    /* saved in identifier_prefixes the first time a branch needs an ID   */
-    /* and never change afterwards, even if the branch is renamed.        */
+    /* saved in branches.branch_code when the branch is created and      */
+    /* never change afterwards, even if the branch is renamed.            */
     /* ------------------------------------------------------------------ */
 
     const BRANCH_INITIAL_STOP_WORDS = new Set([
@@ -213,162 +213,65 @@ const identifiers = (() => {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Schema (also created by the migration). Runs outside transactions. */
+    /* Codes and sequences (stocknbook_v2)                                 */
+    /* Store and branch initials are stored in stores.store_code and       */
+    /* branches.branch_code. Sequences are derived from the identifiers    */
+    /* already saved; a row lock on the branch serializes allocation and   */
+    /* the unique keys on each identifier column reject any duplicate.     */
     /* ------------------------------------------------------------------ */
 
-    const SCHEMA_STEPS = [
-        {
-            table: "id_number_sequences",
-            create: `CREATE TABLE IF NOT EXISTS id_number_sequences (
-                                                                        store_id BIGINT NOT NULL,
-                                                                        branch_id BIGINT NOT NULL,
-                                                                        entity_type VARCHAR(10) NOT NULL,
-                scope_key VARCHAR(10) NOT NULL DEFAULT '',
-                last_sequence INT UNSIGNED NOT NULL DEFAULT 0,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                PRIMARY KEY (store_id, branch_id, entity_type, scope_key)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-        },
-        {
-            table: "identifier_prefixes",
-            create: `CREATE TABLE IF NOT EXISTS identifier_prefixes (
-                                                                        branch_id BIGINT NOT NULL,
-                                                                        store_id BIGINT NOT NULL,
-                                                                        store_initials VARCHAR(8) NOT NULL,
-                branch_initials VARCHAR(8) NOT NULL,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (branch_id),
-                UNIQUE KEY uq_identifier_prefixes_initials (store_id, branch_initials)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-        },
-        {
-            table: "rental_equipment_units",
-            create: `CREATE TABLE IF NOT EXISTS rental_equipment_units (
-                                                                           id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                                                                           store_id BIGINT NOT NULL,
-                                                                           branch_id BIGINT NOT NULL,
-                                                                           equipment_id BIGINT NOT NULL,
-                                                                           equipment_number VARCHAR(40) NOT NULL,
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                retired_at DATETIME NULL DEFAULT NULL,
-                PRIMARY KEY (id),
-                UNIQUE KEY uq_rental_equipment_units_number (equipment_number),
-                KEY idx_rental_equipment_units_equipment (equipment_id, retired_at),
-                KEY idx_rental_equipment_units_branch (store_id, branch_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-        },
-        {
-            table: "managers", column: "employee_code",
-            add: "ALTER TABLE managers ADD COLUMN employee_code VARCHAR(40) NULL",
-            index: "ALTER TABLE managers ADD UNIQUE INDEX uq_managers_employee_code (employee_code)",
-        },
-        {
-            table: "staff", column: "employee_code",
-            add: "ALTER TABLE staff ADD COLUMN employee_code VARCHAR(40) NULL",
-            index: "ALTER TABLE staff ADD UNIQUE INDEX uq_staff_employee_code (employee_code)",
-        },
-    ];
-
-    const schemaState = { ready: false, pending: null };
-    const IGNORABLE_DDL_ERRORS = new Set(["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME", "ER_TABLE_EXISTS_ERROR"]);
-
-    async function probe(connection, sql) {
-        try {
-            await connection.execute(sql);
-            return true;
-        } catch (error) {
-            if (["ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"].includes(error?.code)) return false;
-            throw error;
-        }
+    // stocknbook_v2 already contains every column these identifiers use.
+    async function ensureIdentifierSchema() {
+        return true;
     }
 
-    async function runDdl(connection, sql) {
-        try {
-            await connection.query(sql);
-        } catch (error) {
-            if (!IGNORABLE_DDL_ERRORS.has(error?.code)) throw error;
-        }
+    async function lockBranch(connection, storeId, branchId) {
+        const [rows] = await connection.execute(
+            "SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE",
+            [branchId, storeId]
+        );
+        if (!rows.length) throw new Error("The branch does not belong to this store.");
     }
 
-    // Idempotent. Never call inside an open transaction: MySQL DDL commits implicitly.
-    async function ensureIdentifierSchema(connection) {
-        if (schemaState.ready) return true;
-        if (!schemaState.pending) {
-            schemaState.pending = (async () => {
-                for (const step of SCHEMA_STEPS) {
-                    if (step.create) {
-                        if (!(await probe(connection, `SELECT 1 FROM ${step.table} LIMIT 0`))) await runDdl(connection, step.create);
-                    } else if (!(await probe(connection, `SELECT ${step.column} FROM ${step.table} LIMIT 0`))) {
-                        await runDdl(connection, step.add);
-                        await runDdl(connection, step.index);
-                    }
-                }
-                schemaState.ready = true;
-                return true;
-            })().catch((error) => {
-                console.error("StockNBook identifier schema check failed:", error?.message || error);
-                return false;
-            }).finally(() => { schemaState.pending = null; });
-        }
-        return schemaState.pending;
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* Codes and sequences                                                 */
-    /* ------------------------------------------------------------------ */
-
-    // Store + branch initials for a branch. Decided once (first ID for that branch),
-    // saved in identifier_prefixes, and reused forever. stores/branches are only read.
     async function getIdentifierCodes(connection, storeId, branchId) {
-        const readSaved = async () => {
-            const [rows] = await connection.execute(
-                "SELECT store_initials AS storeCode, branch_initials AS branchCode FROM identifier_prefixes WHERE branch_id = ? AND store_id = ? LIMIT 1",
-                [branchId, storeId]
-            );
-            return rows[0] || null;
-        };
-        let saved = await readSaved();
-        if (!saved) {
-            const [rows] = await connection.execute(
-                `SELECT s.store_code AS storeCode, s.store_name AS storeName, s.slug, b.branch_name AS branchName
-                 FROM branches b
-                          JOIN stores s ON s.id = b.store_id
-                 WHERE b.id = ? AND b.store_id = ?
-                     LIMIT 1`,
-                [branchId, storeId]
-            );
-            if (!rows.length) throw new Error("The branch does not belong to this store.");
-            const info = rows[0];
-            // Store initials: this store's saved initials, else its existing store code
-            // (e.g. SPS), else derived from the name without writing to the store record.
-            const [storeRows] = await connection.execute(
-                "SELECT store_initials AS code FROM identifier_prefixes WHERE store_id = ? LIMIT 1", [storeId]);
-            let storeCode = String(storeRows[0]?.code || info.storeCode || "").trim().toUpperCase();
-            if (!CODE_PATTERN.test(storeCode)) {
-                const [usedRows] = await connection.execute(
-                    `SELECT store_code AS code FROM stores WHERE id <> ? AND store_code IS NOT NULL
-                     UNION SELECT store_initials AS code FROM identifier_prefixes WHERE store_id <> ?`,
-                    [storeId, storeId]
-                );
-                const used = new Set(usedRows.map((row) => String(row.code || "").toUpperCase()));
-                storeCode = storeCodeCandidates(info.storeName, info.slug, storeId).find((code) => !used.has(code));
-            }
-            // INSERT IGNORE + the unique key settles races: when another branch of this
-            // store already holds the initials, the next candidate (MW2, MW3 ...) is tried.
-            for (const candidate of branchCodeCandidates(info.branchName)) {
-                await connection.execute(
-                    "INSERT IGNORE INTO identifier_prefixes (branch_id, store_id, store_initials, branch_initials) VALUES (?, ?, ?, ?)",
-                    [branchId, storeId, storeCode, candidate]
-                );
-                saved = await readSaved();
-                if (saved) break;
-            }
-            if (!saved) throw new Error("Unable to allocate unique branch initials.");
-        }
-        const storeCode = String(saved.storeCode || "").trim().toUpperCase();
-        const branchCode = String(saved.branchCode || "").trim().toUpperCase();
+        const [rows] = await connection.execute(
+            `SELECT s.store_code AS storeCode, b.branch_code AS branchCode
+             FROM branches b
+                      JOIN stores s ON s.id = b.store_id
+             WHERE b.id = ? AND b.store_id = ?
+                 LIMIT 1`,
+            [branchId, storeId]
+        );
+        if (!rows.length) throw new Error("The branch does not belong to this store.");
+        const storeCode = String(rows[0].storeCode || "").trim().toUpperCase();
+        const branchCode = String(rows[0].branchCode || "").trim().toUpperCase();
         assertCodes(storeCode, branchCode);
         return { storeCode, branchCode };
+    }
+
+    // stores.store_code for a newly registered store (unique across StockNBook).
+    async function allocateStoreCode(connection, storeName, slug) {
+        const [rows] = await connection.execute("SELECT store_code AS code FROM stores");
+        const used = new Set(rows.map((row) => String(row.code || "").toUpperCase()));
+        const code = storeCodeCandidates(storeName, slug, "").find(
+            (candidate) => CODE_PATTERN.test(candidate) && !used.has(candidate)
+        );
+        if (!code) throw new Error("Unable to allocate a unique store code.");
+        return code;
+    }
+
+    // branches.branch_code for a new branch (unique within its store).
+    async function allocateBranchCode(connection, storeId, branchName) {
+        const [rows] = await connection.execute(
+            "SELECT branch_code AS code FROM branches WHERE store_id = ?",
+            [storeId]
+        );
+        const used = new Set(rows.map((row) => String(row.code || "").toUpperCase()));
+        const code = branchCodeCandidates(branchName).find(
+            (candidate) => CODE_PATTERN.test(candidate) && !used.has(candidate)
+        );
+        if (!code) throw new Error("Unable to allocate unique branch initials.");
+        return code;
     }
 
     async function maxSequenceFrom(connection, sql, params, pattern) {
@@ -380,168 +283,84 @@ const identifiers = (() => {
     }
 
     /*
-     * Reserves `count` consecutive numbers atomically. The UPDATE row-locks the
-     * sequence row and LAST_INSERT_ID(expr) hands the new value back on this
-     * connection only, so concurrent requests can never receive the same number
-     * (with or without an open transaction). `floor` self-heals the sequence from
-     * identifiers already stored.
+     * Reserves `count` consecutive numbers after `floor` (the highest number already
+     * stored). Callers lock the branch row first so concurrent requests inside a
+     * transaction are serialized; the unique keys still reject any duplicate.
      */
-    async function reserveSequenceBlock(connection, { storeId, branchId, entityType, scopeKey = "", count = 1, floor = 0 }) {
+    async function reserveSequenceBlock(connection, { storeId, branchId, count = 1, floor = 0 }) {
         const size = Number(count);
         if (!Number.isSafeInteger(size) || size < 1) throw new Error("Invalid identification sequence request.");
-        await connection.execute(
-            `INSERT INTO id_number_sequences (store_id, branch_id, entity_type, scope_key, last_sequence)
-             VALUES (?, ?, ?, ?, 0)
-                 ON DUPLICATE KEY UPDATE last_sequence = last_sequence`,
-            [storeId, branchId, entityType, scopeKey]
-        );
-        await connection.execute(
-            `UPDATE id_number_sequences
-             SET last_sequence = LAST_INSERT_ID(GREATEST(last_sequence, ?) + ?)
-             WHERE store_id = ? AND branch_id = ? AND entity_type = ? AND scope_key = ?`,
-            [Number(floor) || 0, size, storeId, branchId, entityType, scopeKey]
-        );
-        const [rows] = await connection.execute("SELECT LAST_INSERT_ID() AS lastSequence");
-        const last = Number(rows[0]?.lastSequence);
-        if (!Number.isSafeInteger(last) || last < size) throw new Error("Identification sequence could not be reserved.");
-        return { first: last - size + 1, last };
+        await lockBranch(connection, storeId, branchId);
+        const first = (Number(floor) || 0) + 1;
+        return { first, last: first + size - 1 };
     }
 
     async function generateOrderId(connection, { storeId, branchId, orderDate }) {
+        await lockBranch(connection, storeId, branchId);
         const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
         const datePart = orderDatePart(orderDate);
         const prefix = `${storeCode}-${branchCode}-${datePart}-`;
         const floor = await maxSequenceFrom(connection,
-            "SELECT order_id AS value FROM orders WHERE order_id LIKE ?", [`${prefix}%`], PATTERNS.order);
-        const { last } = await reserveSequenceBlock(connection,
-            { storeId, branchId, entityType: "ORDER", scopeKey: datePart, floor });
+            "SELECT order_number AS value FROM orders WHERE store_id = ? AND order_number LIKE ?",
+            [storeId, `${prefix}%`], PATTERNS.order);
+        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, floor });
         return buildOrderId(storeCode, branchCode, orderDate, last);
     }
 
     // Managers and staff share ONE sequence per branch, so their IDs never overlap.
     async function generateEmployeeCode(connection, { storeId, branchId }) {
+        await lockBranch(connection, storeId, branchId);
         const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
         const prefix = `${storeCode}-${branchCode}-EMP-`;
         const floor = await maxSequenceFrom(connection,
-            `SELECT employee_code AS value FROM managers WHERE employee_code LIKE ?
-             UNION ALL
-            SELECT employee_code AS value FROM staff WHERE employee_code LIKE ?`,
-            [`${prefix}%`, `${prefix}%`], PATTERNS.employee);
-        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, entityType: "EMP", floor });
+            "SELECT employee_code AS value FROM users WHERE store_id = ? AND employee_code LIKE ?",
+            [storeId, `${prefix}%`], PATTERNS.employee);
+        const { last } = await reserveSequenceBlock(connection, { storeId, branchId, floor });
         return buildEmployeeCode(storeCode, branchCode, last);
     }
 
-    // Highest Product No. already issued with this exact prefix (products or rental types).
+    // Highest Product No. already issued with this exact prefix (products or rental equipment).
     async function maxProductPrefixSequence(connection, storeCode, branchCode) {
         const prefix = `${storeCode}-${branchCode}-PRD-%`;
         const fromProducts = await maxSequenceFrom(connection,
             "SELECT product_number AS value FROM products WHERE product_number LIKE ?", [prefix], PATTERNS.product);
-        let fromRental = 0;
-        try {
-            fromRental = await maxSequenceFrom(connection,
-                "SELECT equipment_number AS value FROM rental_equipment WHERE equipment_number LIKE ?", [prefix], PATTERNS.product);
-        } catch (error) {
-            if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
-        }
+        const fromRental = await maxSequenceFrom(connection,
+            "SELECT equipment_number AS value FROM equipment WHERE equipment_number LIKE ?", [prefix], PATTERNS.product);
         return Math.max(fromProducts, fromRental);
     }
 
     /*
-     * Product Nos. for sales products and rental product types share
-     * product_number_sequences, so a rental type can never reuse a sales product's
-     * number. Caller must be inside a transaction; the branch row lock serializes
-     * allocation exactly like lambda-products create_product.
+     * Product Nos. for sales products (products.product_number) and rental
+     * equipment (equipment.equipment_number) share one sequence per branch, so a
+     * rental item can never reuse a sales product's number. Caller must be inside
+     * a transaction; the branch row lock serializes allocation.
      */
     async function allocateProductNumber(connection, { storeId, branchId }) {
-        await connection.execute("SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE", [branchId, storeId]);
+        await lockBranch(connection, storeId, branchId);
         const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
-        const [sequenceRows] = await connection.execute(
-            "SELECT last_sequence AS lastSequence FROM product_number_sequences WHERE store_id = ? AND branch_id = ? FOR UPDATE",
-            [storeId, branchId]
-        );
+        const branchPrefix = `${storeCode}-${branchCode}-%`;
         const fromProducts = await maxSequenceFrom(connection,
-            "SELECT product_number AS value FROM products WHERE store_id = ? AND branch_id = ? AND product_number IS NOT NULL",
-            [storeId, branchId]);
+            "SELECT product_number AS value FROM products WHERE store_id = ? AND product_number LIKE ?",
+            [storeId, branchPrefix]);
         const fromRental = await maxSequenceFrom(connection,
-            "SELECT equipment_number AS value FROM rental_equipment WHERE store_id = ? AND branch_id = ? AND equipment_number LIKE '%-PRD-%'",
-            [storeId, branchId], PATTERNS.product);
+            "SELECT equipment_number AS value FROM equipment WHERE store_id = ? AND equipment_number LIKE ?",
+            [storeId, branchPrefix], PATTERNS.product);
         const fromPrefix = await maxProductPrefixSequence(connection, storeCode, branchCode);
-        const next = Math.max(Number(sequenceRows[0]?.lastSequence || 0), fromProducts, fromRental, fromPrefix) + 1;
-        await connection.execute(
-            `INSERT INTO product_number_sequences (store_id, branch_id, last_sequence)
-             VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
-            [storeId, branchId, next]
-        );
+        const next = Math.max(fromProducts, fromRental, fromPrefix) + 1;
         return buildProductNumber(storeCode, branchCode, next);
     }
 
     /*
-     * One Equipment No. per physical rental unit ADDED from now on (units that existed
-     * before are left exactly as they are). Rental workflows stay quantity-based:
-     * delta > 0 issues new numbers; delta < 0 (correction, write-off, retirement)
-     * retires the most recently numbered units still active. Numbers are never reused.
-     * delta = -Infinity retires all of a rental product's numbers.
+     * stocknbook_v2 tracks rental equipment by quantity per branch
+     * (branch_inventory); individual physical units are not numbered.
+     * These helpers are kept so existing callers keep working.
      */
-    async function adjustEquipmentUnits(connection, { storeId, branchId, equipmentId, delta }) {
-        const change = Number(delta);
-        if (!change) return { issued: [], retired: 0 };
-        if (change < 0) {
-            const [active] = await connection.execute(
-                "SELECT id FROM rental_equipment_units WHERE equipment_id = ? AND retired_at IS NULL ORDER BY id DESC",
-                [equipmentId]
-            );
-            const count = Number.isFinite(change) ? Math.min(active.length, -change) : active.length;
-            const ids = active.slice(0, count).map((row) => Number(row.id));
-            for (let i = 0; i < ids.length; i += 500) {
-                const chunk = ids.slice(i, i + 500);
-                await connection.execute(
-                    `UPDATE rental_equipment_units SET retired_at = CURRENT_TIMESTAMP WHERE id IN (${chunk.map(() => "?").join(",")})`,
-                    chunk
-                );
-            }
-            return { issued: [], retired: ids.length };
-        }
-        const needed = Math.trunc(change);
-        const { storeCode, branchCode } = await getIdentifierCodes(connection, storeId, branchId);
-        const prefix = `${storeCode}-${branchCode}-EQP-`;
-        const floor = await maxSequenceFrom(connection,
-            "SELECT equipment_number AS value FROM rental_equipment_units WHERE equipment_number LIKE ?",
-            [`${prefix}%`], PATTERNS.equipment);
-        const { first } = await reserveSequenceBlock(connection,
-            { storeId, branchId, entityType: "EQP", count: needed, floor });
-        const issued = Array.from({ length: needed }, (_, i) => buildEquipmentNumber(storeCode, branchCode, first + i));
-        for (let i = 0; i < issued.length; i += 500) {
-            const chunk = issued.slice(i, i + 500);
-            await connection.execute(
-                `INSERT INTO rental_equipment_units (store_id, branch_id, equipment_id, equipment_number)
-                 VALUES ${chunk.map(() => "(?, ?, ?, ?)").join(", ")}`,
-                chunk.flatMap((number) => [storeId, branchId, equipmentId, number])
-            );
-        }
-        return { issued, retired: 0 };
+    async function adjustEquipmentUnits() {
+        return { issued: [], retired: 0 };
     }
 
-    // Active Equipment Nos. for a branch, grouped by rental product type.
-    async function listEquipmentUnitNumbers(connection, { storeId, branchId }) {
-        const grouped = new Map();
-        try {
-            const [rows] = await connection.execute(
-                `SELECT equipment_id AS equipmentId, equipment_number AS equipmentNumber
-                 FROM rental_equipment_units
-                 WHERE store_id = ? AND branch_id = ? AND retired_at IS NULL
-                 ORDER BY equipment_id, equipment_number`,
-                [storeId, branchId]
-            );
-            for (const row of rows) {
-                const key = Number(row.equipmentId);
-                if (!grouped.has(key)) grouped.set(key, []);
-                grouped.get(key).push(String(row.equipmentNumber));
-            }
-        } catch (error) {
-            if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
-        }
-        return grouped;
+    async function listEquipmentUnitNumbers() {
+        return new Map();
     }
 
     return {
@@ -564,6 +383,9 @@ const identifiers = (() => {
         generateOrderId,
         generateEmployeeCode,
         allocateProductNumber,
+        allocateStoreCode,
+        allocateBranchCode,
+        lockBranch,
         adjustEquipmentUnits,
         maxProductPrefixSequence,
         listEquipmentUnitNumbers,
@@ -577,7 +399,7 @@ const dbConfig = {
     host: "127.0.0.1",
     user: "root",
     password: "BTA5EYVWLfWcebF",
-    database: "stocknbook",
+    database: "stocknbook_v2",
     ssl: { rejectUnauthorized: false },
 };
 
@@ -591,6 +413,257 @@ const dbPool = mysql.createPool({
     enableKeepAlive: true,
     keepAliveInitialDelay: 0,
 });
+
+// ===== BEGIN StockNBook v2 catalog (identical in lambda-products, lambda-pos, lambda-bookings, lambda-packages) =====
+/*
+ * stocknbook_v2 keeps ONE catalog row per product (products) and the prices on
+ * product_variants. Every product has one hidden default variant
+ * (is_default = 1) that carries the product-level price and, for a product
+ * without variants, its stock. Real variants have is_default = 0.
+ * Physical stock exists only in branch_inventory, and a product belongs to the
+ * branch that holds the branch_inventory row of its default variant.
+ *
+ * Rental equipment follows the same rule with equipment / equipment_variants.
+ *
+ * The read models below expose the column names this Lambda already returns,
+ * so API responses and the UI stay exactly the same.
+ */
+const V2_PRODUCT_STOCK_SQL = (p, bi) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.on_hand_quantity)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.on_hand_quantity END`;
+const V2_PRODUCT_ALERT_SQL = (p, bi) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.reorder_level)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.reorder_level END`;
+
+// Product rows exactly as the inventory screens use them (one row per product).
+const V2_PRODUCTS = `(SELECT
+        p.id, p.store_id, base_bi.branch_id, p.product_number,
+        p.product_name AS name, COALESCE(cat.category_name, '') AS category, p.category_id,
+        p.description,
+        ${V2_PRODUCT_STOCK_SQL("p", "base_bi")} AS stock,
+        ${V2_PRODUCT_ALERT_SQL("p", "base_bi")} AS alert_level,
+        dv.cost_price AS original_price, dv.selling_price AS sales_price,
+        dv.pricing_method, dv.markup_percentage,
+        base_bi.expiration_date, p.has_variants, p.next_variant_sequence, p.status,
+        p.created_at, p.updated_at, p.deleted_at,
+        dv.id AS default_variant_id, base_bi.id AS base_inventory_id
+    FROM products p
+             JOIN product_variants dv ON dv.product_id = p.id AND dv.is_default = 1
+             JOIN branch_inventory base_bi ON base_bi.variant_id = dv.id
+             LEFT JOIN categories cat ON cat.id = p.category_id)`;
+
+// Real (selectable) variants with their branch stock.
+const V2_PRODUCT_VARIANTS = `(SELECT
+        v.id, v.store_id, v.product_id, v.variant_number, v.variant_name,
+        v.attributes AS variant_values,
+        COALESCE(vbi.on_hand_quantity, 0) AS stock, COALESCE(vbi.reorder_level, 0) AS alert_level,
+        v.cost_price AS original_price, v.selling_price AS sales_price,
+        v.pricing_method, v.markup_percentage, vbi.expiration_date,
+        vbi.branch_id, vbi.id AS inventory_id, v.status, v.created_at, v.updated_at, v.deleted_at
+    FROM product_variants v
+             LEFT JOIN branch_inventory vbi ON vbi.variant_id = v.id
+    WHERE v.is_default = 0)`;
+
+// Consumable branch stock keyed by (product_id, variant_id); variant_id is NULL
+// for a product without variants.
+const V2_BRANCH_INVENTORY = `(SELECT
+        bi.id, bi.store_id, bi.branch_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE v.id END AS variant_id,
+        bi.variant_id AS catalog_variant_id,
+        bi.on_hand_quantity AS quantity_on_hand, bi.reserved_quantity, bi.unavailable_quantity,
+        bi.reorder_level, v.cost_price, v.selling_price AS sales_price, bi.expiration_date,
+        bi.status, bi.created_at, bi.updated_at
+    FROM branch_inventory bi
+             JOIN product_variants v ON v.id = bi.variant_id)`;
+
+// Batch tracking is not part of stocknbook_v2: each branch_inventory row is
+// its own (single) batch with one expiration date.
+const V2_INVENTORY_BATCHES = `(SELECT
+        bi.id, bi.store_id, bi.branch_id, bi.id AS branch_inventory_id,
+        CONCAT('INV-', bi.id) AS batch_code, bi.on_hand_quantity AS received_quantity,
+        bi.on_hand_quantity AS remaining_quantity, v.cost_price AS unit_cost,
+        bi.updated_at AS received_at, bi.expiration_date,
+        CASE WHEN bi.on_hand_quantity > 0 THEN 'active' ELSE 'depleted' END AS status
+    FROM branch_inventory bi
+             JOIN product_variants v ON v.id = bi.variant_id)`;
+
+// Movement history with the legacy reference/actor fields.
+const V2_INVENTORY_MOVEMENTS = `(SELECT
+        m.id, m.store_id, m.branch_id, m.branch_inventory_id, m.movement_type,
+        m.quantity_change AS quantity_delta, m.quantity_before, m.quantity_after, m.unit_cost,
+        m.reference_type,
+        CASE WHEN m.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING_INDEX(SUBSTRING(m.reason, 5), ': ', 1)
+             ELSE CAST(m.reference_id AS CHAR) END AS reference_id,
+        m.performed_by AS actor_id, mu.role AS actor_role, COALESCE(mu.full_name, 'System') AS actor_name,
+        CASE WHEN m.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING(m.reason, LOCATE(': ', m.reason) + 2)
+             ELSE m.reason END AS notes,
+        m.created_at
+    FROM inventory_movements m
+             LEFT JOIN users mu ON mu.id = m.performed_by)`;
+
+// POS lines keyed by (product_id, variant_id).
+const V2_ORDER_ITEMS = `(SELECT
+        oi.id, oi.store_id, oi.order_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE oi.variant_id END AS variant_id,
+        oi.variant_id AS catalog_variant_id,
+        oi.product_name_snapshot AS product_name, oi.quantity, oi.unit_price,
+        oi.cost_price_at_sale, oi.discount_amount, oi.line_total
+    FROM order_items oi
+             JOIN product_variants v ON v.id = oi.variant_id)`;
+
+// Consumable booking lines keyed by (product_id, variant_id).
+const V2_PRODUCT_BOOKING_ITEMS = `(SELECT
+        bki.id, bki.store_id, bki.booking_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE bki.variant_id END AS variant_id,
+        bki.variant_id AS catalog_variant_id, bki.item_type, bki.quantity,
+        bki.unit_price_snapshot, bki.line_total, bki.item_status, bki.created_at
+    FROM booking_items bki
+             JOIN product_variants v ON v.id = bki.variant_id
+    WHERE bki.item_type = 'consumable')`;
+
+// Consumable package lines keyed by (product_id, variant_id).
+const V2_PRODUCT_PACKAGE_ITEMS = `(SELECT
+        pki.id, pki.store_id, pki.package_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE pki.variant_id END AS variant_id,
+        pki.variant_id AS catalog_variant_id, pki.quantity, pki.unit_price_snapshot, pki.sort_order
+    FROM package_items pki
+             JOIN product_variants v ON v.id = pki.variant_id
+    WHERE pki.item_type = 'consumable')`;
+
+const V2_ACTIVE_BOOKING_STATUSES_SQL = `('pending review','approved','approved - awaiting payment','awaiting payment','confirmed','preparing','released','return inspection','pending settlement','event in progress')`;
+
+async function v2DefaultVariantId(connection, productId) {
+    const [rows] = await connection.execute(
+        "SELECT id FROM product_variants WHERE product_id = ? AND is_default = 1 LIMIT 1",
+        [productId]
+    );
+    return rows.length ? Number(rows[0].id) : null;
+}
+
+// (product_id, variant_id|null) -> product_variants.id used by stocknbook_v2.
+async function v2CatalogVariantId(connection, productId, variantId) {
+    if (variantId !== null && variantId !== undefined && variantId !== "") return Number(variantId);
+    return v2DefaultVariantId(connection, productId);
+}
+
+// Locks the branch stock row of a product/variant (FOR UPDATE).
+async function v2LockInventory(connection, { storeId, branchId, productId, variantId = null }) {
+    const catalogVariantId = await v2CatalogVariantId(connection, productId, variantId);
+    if (!catalogVariantId) return null;
+    const [rows] = await connection.execute(
+        `SELECT bi.id, bi.variant_id, bi.on_hand_quantity, bi.reserved_quantity,
+                bi.unavailable_quantity, bi.reorder_level, bi.expiration_date
+         FROM branch_inventory bi
+                  JOIN product_variants v ON v.id = bi.variant_id
+         WHERE bi.store_id = ? AND bi.branch_id = ? AND bi.variant_id = ?
+           AND v.product_id = ? AND bi.status = 'active'
+             LIMIT 1
+         FOR UPDATE`,
+        [storeId, branchId, catalogVariantId, productId]
+    );
+    if (!rows.length) return null;
+    return {
+        ...rows[0],
+        id: Number(rows[0].id),
+        quantity_on_hand: Number(rows[0].on_hand_quantity),
+        catalog_variant_id: catalogVariantId,
+    };
+}
+
+// Creates the branch stock row for a catalog variant when it does not exist yet.
+async function v2EnsureInventoryRow(connection, { storeId, branchId, catalogVariantId, reorderLevel = 0, expirationDate = null }) {
+    const [found] = await connection.execute(
+        "SELECT id FROM branch_inventory WHERE branch_id = ? AND variant_id = ? LIMIT 1",
+        [branchId, catalogVariantId]
+    );
+    if (found.length) return Number(found[0].id);
+    const [insert] = await connection.execute(
+        `INSERT INTO branch_inventory
+         (store_id, branch_id, variant_id, on_hand_quantity, reorder_level, expiration_date, status)
+         VALUES (?, ?, ?, 0, ?, ?, 'active')`,
+        [storeId, branchId, catalogVariantId, Math.max(0, Number(reorderLevel) || 0), expirationDate || null]
+    );
+    return Number(insert.insertId);
+}
+
+// inventory_movements.performed_by must be a user of the same store.
+async function v2ActorUserId(connection, storeId, actorId) {
+    const id = Number(actorId);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    const [rows] = await connection.execute(
+        "SELECT id FROM users WHERE id = ? AND store_id = ? LIMIT 1",
+        [id, storeId]
+    );
+    return rows.length ? id : null;
+}
+
+// A text reference (receipt key, request key ...) is kept at the start of the
+// movement reason so it can be read back as reference_id.
+function v2MovementReason(reference, notes) {
+    const ref = String(reference ?? "").replace(/: /g, " ").trim();
+    const text = String(notes ?? "").trim();
+    if (!ref) return text || null;
+    return `Ref ${ref}: ${text}`;
+}
+
+async function v2RecordMovement(connection, {
+    storeId, branchId, inventoryId, movementType, delta, before, after,
+    referenceType = null, referenceId = null, reference = null, unitCost = null,
+    actorId = null, notes = null, bucket = "on_hand",
+}) {
+    const numericReference = Number(referenceId);
+    const [result] = await connection.execute(
+        `INSERT INTO inventory_movements
+         (store_id, branch_id, branch_inventory_id, movement_type, quantity_bucket, quantity_change,
+          quantity_before, quantity_after, unit_cost, reference_type, reference_id, reason, performed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            storeId, branchId, inventoryId, movementType, bucket, Number(delta),
+            Number(before), Number(after),
+            unitCost === null || unitCost === undefined ? null : Number(unitCost),
+            referenceType,
+            Number.isSafeInteger(numericReference) && numericReference > 0 ? numericReference : null,
+            v2MovementReason(reference, notes),
+            await v2ActorUserId(connection, storeId, actorId),
+        ]
+    );
+    return Number(result.insertId);
+}
+
+// Category text -> categories.id (created on first use, like the old free-text category).
+async function v2CategoryId(connection, storeId, categoryName, categoryType = "product") {
+    const name = String(categoryName || "").trim();
+    if (!name) return null;
+    const [rows] = await connection.execute(
+        `SELECT id FROM categories
+         WHERE store_id = ? AND category_type = ? AND LOWER(category_name) = LOWER(?)
+             LIMIT 1`,
+        [storeId, categoryType, name]
+    );
+    if (rows.length) return Number(rows[0].id);
+    const [insert] = await connection.execute(
+        "INSERT INTO categories (store_id, category_name, category_type, status) VALUES (?, ?, ?, 'active')",
+        [storeId, name.slice(0, 150), categoryType]
+    );
+    return Number(insert.insertId);
+}
+
+function v2VariantName(values, fallback) {
+    const name = Object.values(values || {})
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .join(", ");
+    return (name || fallback || "Default").slice(0, 150);
+}
+// ===== END StockNBook v2 catalog =====
 
 function jsonResponse(statusCode, headers, body) {
     return {
@@ -872,9 +945,7 @@ function normalizeVariantRow(row) {
 
 async function attachVariants(connection, products) {
     if (!Array.isArray(products) || products.length === 0) return [];
-
     const productIds = products.map((product) => Number(product.id)).filter(Boolean);
-
     if (productIds.length === 0) {
         return products.map((product) => ({
             ...product,
@@ -883,45 +954,25 @@ async function attachVariants(connection, products) {
             variants: [],
         }));
     }
-
     const placeholders = productIds.map(() => "?").join(",");
-
     const [variantRows] = await connection.execute(
         `SELECT
-             id,
-             product_id AS productId,
-             variant_values AS variantValues,
-             variant_number AS variantNumber,
-             stock,
-             alert_level AS alertLevel,
-             original_price AS originalPrice,
-             sales_price AS salesPrice,
-             pricing_method AS pricingMethod,
-             markup_percentage AS markupPercentage,
-             CASE WHEN EXISTS (
-                 SELECT 1 FROM branch_inventory bi JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
-                 WHERE bi.variant_id=product_variants.id AND ib.status='active' AND ib.remaining_quantity>0
-                   AND (ib.expiration_date IS NULL OR ib.expiration_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR))
-             ) THEN (
-                 SELECT MIN(ib.expiration_date) FROM branch_inventory bi
-                                                         JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
-                 WHERE bi.variant_id=product_variants.id AND ib.status='active' AND ib.remaining_quantity>0
-                   AND (ib.expiration_date IS NULL OR ib.expiration_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR))
-             ) WHEN EXISTS (
-                 SELECT 1 FROM branch_inventory bi JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
-                 WHERE bi.variant_id=product_variants.id AND ib.remaining_quantity>0
-                   AND ib.expiration_date IS NOT NULL
-             ) THEN (
-                 SELECT MIN(ib.expiration_date) FROM branch_inventory bi
-                     JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
-                 WHERE bi.variant_id=product_variants.id AND ib.remaining_quantity>0
-                   AND ib.expiration_date IS NOT NULL
-             ) ELSE product_variants.expiration_date END AS expirationDate,
-             created_at AS createdAt
-         FROM product_variants
-         WHERE product_id IN (${placeholders})
-        AND deleted_at IS NULL
-        ORDER BY id ASC`,
+             product_variants.id,
+             product_variants.product_id AS productId,
+             product_variants.variant_values AS variantValues,
+             product_variants.variant_number AS variantNumber,
+             product_variants.stock,
+             product_variants.alert_level AS alertLevel,
+             product_variants.original_price AS originalPrice,
+             product_variants.sales_price AS salesPrice,
+             product_variants.pricing_method AS pricingMethod,
+             product_variants.markup_percentage AS markupPercentage,
+             product_variants.expiration_date AS expirationDate,
+             product_variants.created_at AS createdAt
+         FROM ${V2_PRODUCT_VARIANTS} product_variants
+         WHERE product_variants.product_id IN (${placeholders})
+           AND product_variants.deleted_at IS NULL
+         ORDER BY product_variants.id ASC`,
         productIds
     );
 
@@ -968,6 +1019,145 @@ function hideProductCostsForNonOwners(products, tokenRole) {
     }));
 }
 
+async function getOpeningVariantRows(connection, productId, incomingVariants) {
+    const [rows] = await connection.execute(
+        `SELECT id FROM product_variants
+         WHERE product_id=? AND is_default=0 AND deleted_at IS NULL ORDER BY id`,
+        [productId]);
+    return rows.map((row, index) => {
+        const source = incomingVariants[index] || {};
+        return {
+            id: Number(row.id),
+            stock: Number(source.stock || 0),
+            alertLevel: Number(source.alertLevel || 0),
+            originalPrice: Number(source.originalPrice || 0),
+            salesPrice: Number(source.salesPrice || 0),
+            expirationDate: source.expirationDate || null,
+        };
+    });
+}
+
+async function insertProductRecord(connection, {
+    storeId, branchId, productNumber, name, category, alertLevel, originalPrice, salesPrice,
+    pricingMethod, markupPercentage, expirationDate, hasVariants,
+}) {
+    const categoryId = await v2CategoryId(connection, storeId, category, "product");
+    const [product] = await connection.execute(
+        `INSERT INTO products
+         (store_id, category_id, product_number, product_name, has_variants, next_variant_sequence, status)
+         VALUES (?, ?, ?, ?, ?, 1, 'active')`,
+        [storeId, categoryId, productNumber, name, hasVariants ? 1 : 0]
+    );
+    const productId = Number(product.insertId);
+    const [variant] = await connection.execute(
+        `INSERT INTO product_variants
+         (store_id, product_id, variant_number, variant_name, attributes, is_default,
+          selling_price, cost_price, pricing_method, markup_percentage, status)
+         VALUES (?, ?, ?, ?, NULL, 1, ?, ?, ?, ?, 'active')`,
+        [storeId, productId, productNumber, String(name).slice(0, 150),
+            Number(salesPrice || 0), Number(originalPrice || 0), pricingMethod || "manual",
+            markupPercentage ?? null]
+    );
+    await v2EnsureInventoryRow(connection, {
+        storeId, branchId, catalogVariantId: Number(variant.insertId),
+        reorderLevel: hasVariants ? 0 : alertLevel,
+        expirationDate: hasVariants ? null : expirationDate,
+    });
+    return [{insertId: productId, affectedRows: 1}];
+}
+
+async function updateProductRecord(connection, {
+    productId, storeId, branchId, name, category, alertLevel, originalPrice, salesPrice,
+    pricingMethod, markupPercentage, expirationDate, hasVariants,
+}) {
+    const categoryId = await v2CategoryId(connection, storeId, category, "product");
+    let sql = `UPDATE products p
+                   JOIN product_variants dv ON dv.product_id = p.id AND dv.is_default = 1
+                   JOIN branch_inventory base_bi ON base_bi.variant_id = dv.id
+                   SET p.product_name = ?,
+                       p.category_id = ?,
+                       p.has_variants = ?,
+                       dv.variant_name = ?,
+                       dv.cost_price = ?,
+                       dv.selling_price = ?,
+                       dv.pricing_method = ?,
+                       dv.markup_percentage = ?,
+                       base_bi.reorder_level = ?,
+                       base_bi.expiration_date = ?
+               WHERE p.id = ?
+                 AND p.store_id = ?`;
+    const params = [name, categoryId, hasVariants ? 1 : 0, String(name).slice(0, 150),
+        Number(originalPrice || 0), Number(salesPrice || 0), pricingMethod || "manual",
+        markupPercentage ?? null, hasVariants ? 0 : Math.max(0, Number(alertLevel) || 0),
+        hasVariants ? null : expirationDate || null, productId, storeId];
+    if (branchId) {
+        sql += " AND base_bi.branch_id = ?";
+        params.push(branchId);
+    }
+    const [result] = await connection.execute(sql, params);
+    return [{affectedRows: Number(result.affectedRows || 0) > 0 ? 1 : 0}];
+}
+
+async function updateVariantRecord(connection, {productId, variant}) {
+    await connection.execute(
+        `UPDATE product_variants v
+             LEFT JOIN branch_inventory vbi ON vbi.variant_id = v.id
+             SET v.attributes = ?,
+                 v.variant_name = ?,
+                 v.cost_price = ?,
+                 v.selling_price = ?,
+                 v.pricing_method = ?,
+                 v.markup_percentage = ?,
+                 vbi.reorder_level = ?,
+                 vbi.expiration_date = ?
+         WHERE v.id = ? AND v.product_id = ? AND v.is_default = 0 AND v.deleted_at IS NULL`,
+        [JSON.stringify(variant.variantValues), v2VariantName(variant.variantValues),
+            Number(variant.originalPrice || 0), Number(variant.salesPrice || 0),
+            variant.pricingMethod || "manual", variant.markupPercentage ?? null,
+            Math.max(0, Number(variant.alertLevel) || 0), variant.expirationDate || null,
+            variant.id, productId]);
+}
+
+async function lockProductForUpdate(connection, storeId, branchId, productId) {
+    const [locked] = await connection.execute(
+        `SELECT p.id FROM products p
+                              JOIN product_variants dv ON dv.product_id = p.id AND dv.is_default = 1
+                              JOIN branch_inventory base_bi ON base_bi.variant_id = dv.id
+         WHERE p.id = ? AND p.store_id = ? AND p.deleted_at IS NULL
+             ${branchId ? "AND base_bi.branch_id = ?" : ""}
+         FOR UPDATE`,
+        branchId ? [productId, storeId, branchId] : [productId, storeId]);
+    if (!locked.length) return null;
+    const [rows] = await connection.execute(
+        `SELECT products.id, products.name, products.product_number, products.has_variants,
+                products.stock, products.alert_level, products.original_price, products.sales_price,
+                products.pricing_method, products.markup_percentage, products.expiration_date,
+                products.branch_id
+         FROM ${V2_PRODUCTS} products
+         WHERE products.id = ?`,
+        [productId]);
+    return rows[0] || null;
+}
+
+async function lockVariantsForUpdate(connection, productId, variantId = null) {
+    await connection.execute(
+        `SELECT v.id FROM product_variants v
+                              LEFT JOIN branch_inventory vbi ON vbi.variant_id = v.id
+         WHERE v.product_id = ? AND v.is_default = 0 AND v.deleted_at IS NULL
+             ${variantId ? "AND v.id = ?" : ""}
+         FOR UPDATE`,
+        variantId ? [productId, variantId] : [productId]);
+    const [rows] = await connection.execute(
+        `SELECT pv.id, pv.stock, pv.variant_values, pv.variant_number, pv.original_price,
+                pv.sales_price, pv.alert_level, pv.pricing_method, pv.markup_percentage, pv.expiration_date
+         FROM ${V2_PRODUCT_VARIANTS} pv
+         WHERE pv.product_id = ? AND pv.deleted_at IS NULL ${variantId ? "AND pv.id = ?" : ""}
+         ORDER BY pv.id`,
+        variantId ? [productId, variantId] : [productId]);
+    return rows;
+}
+
+
 
 // V2 branch inventory is authoritative for sales/booking availability. This helper
 // runs inside the SAME SQL transaction as a catalog creation or supplier receipt.
@@ -983,152 +1173,98 @@ async function creditBranchInventoryBatch(connection, {
         expectedBefore + quantity > 2147483647) {
         throw new Error("Invalid stock quantity for synchronized receipt.");
     }
-    const [matches] = await connection.execute(
-        `SELECT id, quantity_on_hand FROM branch_inventory
-         WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ?
-           AND status='active' LIMIT 1 FOR UPDATE`,
-        [storeId,branchId,productId,variantId]);
-    let inventory = matches[0];
+    let inventory = await v2LockInventory(connection, {storeId, branchId, productId, variantId});
     if (!inventory) {
         if (!isOpening || expectedBefore !== 0) {
             throw new Error("Branch inventory row is missing. Reconcile this product before receiving additional stock.");
         }
-        const [insert] = await connection.execute(
-            `INSERT INTO branch_inventory
-             (store_id,branch_id,product_id,variant_id,quantity_on_hand,reorder_level,cost_price,sales_price,status)
-             VALUES (?,?,?,?,0,?,?,?,'active')`,
-            [storeId,branchId,productId,variantId,reorderLevel,costPrice,salesPrice]);
-        inventory = {id: Number(insert.insertId),quantity_on_hand:0};
+        const catalogVariantId = await v2CatalogVariantId(connection, productId, variantId);
+        if (!catalogVariantId) throw new Error("Product variant is missing for this stock receipt.");
+        await v2EnsureInventoryRow(connection, {storeId, branchId, catalogVariantId, reorderLevel});
+        inventory = await v2LockInventory(connection, {storeId, branchId, productId, variantId});
     }
     const before = Number(inventory.quantity_on_hand);
-    const [batchRows] = await connection.execute(
-        `SELECT COALESCE(SUM(remaining_quantity),0) AS total
-         FROM inventory_batches WHERE branch_inventory_id=?`,[inventory.id]);
-    const batchTotal = Number(batchRows[0]?.total || 0);
-    // In a newly created product, a legacy trigger might have already populated
-    // both ledgers. Do not double-credit such a complete opening balance.
-    if (isOpening && before === quantity && batchTotal === quantity && expectedBefore === 0) {
-        return {alreadySeeded:true,inventoryId:inventory.id};
-    }
-    // A new verified supplier delivery is independent of an OLD catalog-only
-    // discrepancy. Credit only the new quantity; do not invent an old batch or
-    // quietly change catalog stock. Branch and batches MUST agree first.
     const catalogDrift = expectedBefore - before;
-    if (!Number.isSafeInteger(before) || before < 0 ||
-        !Number.isSafeInteger(batchTotal) || batchTotal < 0 ||
-        before + quantity > 2147483647 || batchTotal !== before ||
+    if (!Number.isSafeInteger(before) || before < 0 || before + quantity > 2147483647 ||
         (catalogDrift !== 0 && (!allowVerifiedReceiptWithCatalogDrift || catalogDrift < 0))) {
         throw new Error(
             `Stock ledger mismatch for product ${productId}${variantId ? ` variant ${variantId}` : ""}: `+
-            `catalog=${expectedBefore}, branch=${before}, batches=${batchTotal}. `+
-            `Branch and batch balances must agree; reconcile unsupported stock before making it sellable.`);
+            `expected=${expectedBefore}, branch=${before}. Refresh inventory before receiving stock.`);
     }
     const after = before + quantity;
-    const batchCode = String(reference).slice(0,100);
+    // One expiration date per branch stock row: keep the earliest date that
+    // still has stock; a fresh delivery into an empty row replaces it.
+    const currentExpiry = inventory.expiration_date
+        ? (inventory.expiration_date instanceof Date
+            ? inventory.expiration_date.toISOString().slice(0, 10)
+            : String(inventory.expiration_date).slice(0, 10))
+        : null;
+    const nextExpiry = before === 0
+        ? (expirationDate || null)
+        : expirationDate && (!currentExpiry || expirationDate < currentExpiry)
+            ? expirationDate : currentExpiry;
     await connection.execute(
-        `UPDATE branch_inventory SET quantity_on_hand=?,reorder_level=?,cost_price=?,sales_price=?
-         WHERE id=?`,[after,reorderLevel,costPrice,salesPrice,inventory.id]);
-    await connection.execute(
-        `INSERT INTO inventory_batches
-         (store_id,branch_id,branch_inventory_id,batch_code,received_quantity,remaining_quantity,
-          unit_cost,received_at,expiration_date,status)
-         VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,?,'active')`,
-        [storeId,branchId,inventory.id,batchCode,quantity,quantity,costPrice,expirationDate]);
-    await connection.execute(
-        `INSERT INTO inventory_movements
-         (store_id,branch_id,branch_inventory_id,movement_type,quantity_delta,
-          quantity_before,quantity_after,reference_type,reference_id,actor_id,actor_role,actor_name,notes)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [storeId,branchId,inventory.id,isOpening?'OPENING_STOCK':'MANAGER_RECEIPT',
-            quantity,before,after,isOpening?'PRODUCT_OPENING':'STOCK_RECEIPT',
-            String(reference).slice(0,255),actorId,actorRole,actorName,
-            isOpening?'New product opening stock':catalogDrift
-                ? `Manager-authorized supplier stock receipt. Pre-existing catalog drift: +${catalogDrift} unit(s) (catalog=${expectedBefore}, branch=${before}); historical units NOT credited.`
-                : 'Manager-authorized supplier stock receipt']);
-    return {inventoryId:inventory.id,before,after,catalogDrift};
+        `UPDATE branch_inventory SET on_hand_quantity=?, reorder_level=?, expiration_date=?
+         WHERE id=?`,
+        [after, Math.max(0, Number(reorderLevel) || 0), nextExpiry, inventory.id]);
+    const movementId = await v2RecordMovement(connection, {
+        storeId, branchId, inventoryId: inventory.id,
+        movementType: isOpening ? "OPENING_STOCK" : "MANAGER_RECEIPT",
+        delta: quantity, before, after, unitCost: costPrice,
+        referenceType: isOpening ? "PRODUCT_OPENING" : "STOCK_RECEIPT",
+        referenceId: productId, reference: String(reference).slice(0, 100), actorId,
+        notes: isOpening ? "New product opening stock" : "Manager-authorized stock receipt",
+    });
+    return {inventoryId: inventory.id, before, after, catalogDrift, movementId};
 }
 
 // Physical stock corrections must also update V2 batches, not only products.stock.
 // A correction is not a supplier receipt and does not create an invoice.
 async function adjustSynchronizedStock(connection, {storeId,branchId,productId,variantId,
     before,target,requestKey,costPrice,expirationDate,employee,reason}) {
-    const [rows]=await connection.execute(
-        `SELECT id,quantity_on_hand FROM branch_inventory
-         WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ?
-           AND status='active' LIMIT 1 FOR UPDATE`,[storeId,branchId,productId,variantId]);
-    if(!rows.length) throw new Error('Active branch inventory is missing. Reconcile before correcting stock.');
-    const inventory=rows[0];
-    const branchBefore=Number(inventory.quantity_on_hand);
-    const [batches]=await connection.execute(
-        `SELECT id,remaining_quantity FROM inventory_batches WHERE branch_inventory_id=?
-                                                               AND remaining_quantity>0 ORDER BY (expiration_date IS NULL) ASC,expiration_date ASC,received_at ASC,id ASC FOR UPDATE`,
-        [inventory.id]);
-    const batchBefore=batches.reduce((sum,b)=>sum+Number(b.remaining_quantity),0);
-    if(before!==branchBefore || before!==batchBefore) throw new Error(
-        `Stock mismatch: catalog ${before}, branch ${branchBefore}, batches ${batchBefore}. Reconcile before correcting.`);
+    const inventory = await v2LockInventory(connection, {storeId, branchId, productId, variantId});
+    if(!inventory) throw new Error('Active branch inventory is missing. Reconcile before correcting stock.');
+    const branchBefore = Number(inventory.quantity_on_hand);
+    if(before!==branchBefore) throw new Error(
+        `Stock mismatch: expected ${before}, branch ${branchBefore}. Reconcile before correcting.`);
     const [duplicates]=await connection.execute(
         `SELECT id FROM inventory_movements WHERE store_id=? AND branch_id=?
-                                              AND reference_type='STOCK_ADJUSTMENT' AND reference_id=? LIMIT 1`,
-        [storeId,branchId,requestKey]);
+                                              AND reference_type='STOCK_ADJUSTMENT' AND reason LIKE ? LIMIT 1`,
+        [storeId,branchId,`Ref ${String(requestKey).replace(/: /g, " ")}: %`]);
     if(duplicates.length) throw new Error('This stock correction was already processed. Refresh stock.');
     const delta=target-before;
-    if(delta>0){
-        await connection.execute(
-            `INSERT INTO inventory_batches
-             (store_id,branch_id,branch_inventory_id,batch_code,received_quantity,remaining_quantity,
-              unit_cost,received_at,expiration_date,status)
-             VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP,?,'active')`,
-            [storeId,branchId,inventory.id,`ADJ-${requestKey}`.slice(0,100),delta,delta,costPrice,expirationDate]);
-    } else {
-        let remaining=-delta;
-        for(const batch of batches){
-            if(remaining<=0)break;
-            const used=Math.min(remaining,Number(batch.remaining_quantity));
-            await connection.execute(
-                `UPDATE inventory_batches SET remaining_quantity=remaining_quantity-?,
-                                              status=CASE WHEN remaining_quantity-?=0 THEN 'depleted' ELSE status END WHERE id=?`,
-                [used,used,batch.id]);
-            remaining-=used;
-        }
-        if(remaining!==0)throw new Error('Batch balances cannot cover the correction. No stock was changed.');
-    }
-    await connection.execute(`UPDATE branch_inventory SET quantity_on_hand=? WHERE id=?`,[target,inventory.id]);
     await connection.execute(
-        `INSERT INTO inventory_movements
-         (store_id,branch_id,branch_inventory_id,movement_type,quantity_delta,quantity_before,
-          quantity_after,reference_type,reference_id,actor_id,actor_role,actor_name,notes)
-         VALUES(?,?,?,'STOCK_ADJUSTMENT',?,?,?,'STOCK_ADJUSTMENT',?,?,?,?,?)`,
-        [storeId,branchId,inventory.id,delta,before,target,requestKey,employee.id,employee.role,employee.name,reason]);
+        `UPDATE branch_inventory
+         SET on_hand_quantity=?,
+             expiration_date=CASE WHEN ? > 0 AND ? IS NOT NULL THEN ? ELSE expiration_date END,
+             last_counted_at=NOW()
+         WHERE id=?`,
+        [target, delta, expirationDate || null, expirationDate || null, inventory.id]);
+    await v2RecordMovement(connection, {
+        storeId, branchId, inventoryId: inventory.id, movementType: "STOCK_ADJUSTMENT",
+        delta, before, after: target, unitCost: delta > 0 ? costPrice : null,
+        referenceType: "STOCK_ADJUSTMENT", referenceId: productId, reference: requestKey,
+        actorId: employee?.id, notes: reason,
+    });
 }
 
 // End-of-transaction verification catches unexpected DB triggers that would
 // otherwise update a ledger a second time after the catalog UPDATE.
 async function assertInventoryLineSynchronized(connection,{
-    storeId,branchId,productId,variantId=null,expected,expectedCatalog=expected,
+    storeId,branchId,productId,variantId=null,expected,
 }) {
+    const catalogVariantId = await v2CatalogVariantId(connection, productId, variantId);
     const [rows]=await connection.execute(
-        `SELECT bi.quantity_on_hand AS branchStock,
-                (SELECT COALESCE(SUM(b.remaining_quantity),0) FROM inventory_batches b
-                 WHERE b.branch_inventory_id=bi.id) AS batchStock
-         FROM branch_inventory bi
-         WHERE bi.store_id=? AND bi.branch_id=? AND bi.product_id=? AND bi.variant_id <=> ?
-           AND bi.status='active' LIMIT 1`,[storeId,branchId,productId,variantId]);
-    const [catalog]=await connection.execute(variantId!=null
-            ? `SELECT stock FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`
-            : `SELECT stock FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL`,
-        variantId!=null?[variantId,productId]:[productId,storeId,branchId]);
-    if(!rows.length || !catalog.length || Number(rows[0].branchStock)!==expected ||
-        Number(rows[0].batchStock)!==expected || Number(catalog[0].stock)!==expectedCatalog) {
+        `SELECT on_hand_quantity AS branchStock FROM branch_inventory
+         WHERE store_id=? AND branch_id=? AND variant_id=? AND status='active' LIMIT 1`,
+        [storeId,branchId,catalogVariantId]);
+    if(!rows.length || Number(rows[0].branchStock)!==expected) {
         throw new Error(`Inventory synchronization check failed for product ${productId} variant ${variantId ?? 'regular'}; transaction rolled back.`);
     }
 }
 
-async function requireSynchronizedInventoryTables(connection) {
-    for (const name of ["branch_inventory","inventory_batches","inventory_movements"]) {
-        if (!(await tableExists(connection,name))) {
-            throw new Error(`Required synchronized inventory table ${name} is missing.`);
-        }
-    }
+async function requireSynchronizedInventoryTables() {
+    return true;
 }
 
 // Product creation and imports require a V2 row and one batch per stocked variant.
@@ -1137,9 +1273,12 @@ async function createOpeningBranchStock(connection, {storeId,branchId,productId,
     reorderLevel,costPrice,salesPrice,expirationDate,actorName}) {
     if (variants && variants.length) {
         for (const variant of variants) {
+            const catalogVariantId = Number(variant.id);
+            await v2EnsureInventoryRow(connection, {storeId, branchId, catalogVariantId,
+                reorderLevel: Number(variant.alertLevel), expirationDate: variant.expirationDate || null});
             if (Number(variant.stock) <= 0) continue;
             await creditBranchInventoryBatch(connection,{
-                storeId,branchId,productId,variantId:Number(variant.id),
+                storeId,branchId,productId,variantId:catalogVariantId,
                 quantity:Number(variant.stock),expectedBefore:0,
                 reorderLevel:Number(variant.alertLevel),costPrice:Number(variant.originalPrice),
                 salesPrice:Number(variant.salesPrice),expirationDate:variant.expirationDate||null,
@@ -1151,21 +1290,6 @@ async function createOpeningBranchStock(connection, {storeId,branchId,productId,
             reorderLevel:Number(reorderLevel),costPrice:Number(costPrice),salesPrice:Number(salesPrice),
             expirationDate:expirationDate||null,reference:`OPEN-${productId}-BASE`,
             actorName,isOpening:true});
-    }
-    // Keep a zero-stock V2 row for variants and regular products too, so a
-    // subsequent first restock can lock an existing branch-scoped inventory row.
-    const entries = variants && variants.length ? variants.map(v=>({id:Number(v.id),reorder:Number(v.alertLevel),
-            cost:Number(v.originalPrice),price:Number(v.salesPrice)})) :
-        [{id:null,reorder:Number(reorderLevel),cost:Number(costPrice),price:Number(salesPrice)}];
-    for (const entry of entries) {
-        const [found] = await connection.execute(
-            `SELECT id FROM branch_inventory WHERE store_id=? AND branch_id=? AND product_id=?
-                                               AND variant_id <=> ? AND status='active' LIMIT 1`,[storeId,branchId,productId,entry.id]);
-        if (!found.length) await connection.execute(
-            `INSERT INTO branch_inventory
-             (store_id,branch_id,product_id,variant_id,quantity_on_hand,reorder_level,cost_price,sales_price,status)
-             VALUES (?,?,?,?,0,?,?,?,'active')`,
-            [storeId,branchId,productId,entry.id,entry.reorder,entry.cost,entry.price]);
     }
 }
 
@@ -1185,36 +1309,10 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
             products.sales_price AS salesPrice,
             products.pricing_method AS pricingMethod,
             products.markup_percentage AS markupPercentage,
-            CASE WHEN EXISTS (
-                SELECT 1 FROM branch_inventory bi
-                                  JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
-                WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
-                  AND bi.product_id=products.id AND bi.variant_id IS NULL
-                  AND ib.status='active' AND ib.remaining_quantity>0
-                  AND (ib.expiration_date IS NULL OR ib.expiration_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR))
-            ) THEN (
-                SELECT MIN(ib.expiration_date) FROM branch_inventory bi
-                                                        JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
-                WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
-                  AND bi.product_id=products.id AND bi.variant_id IS NULL
-                  AND ib.status='active' AND ib.remaining_quantity>0
-                  AND (ib.expiration_date IS NULL OR ib.expiration_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR))
-            ) WHEN EXISTS (
-                SELECT 1 FROM branch_inventory bi
-                    JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
-                WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
-                  AND bi.product_id=products.id AND bi.variant_id IS NULL
-                  AND ib.remaining_quantity>0 AND ib.expiration_date IS NOT NULL
-            ) THEN (
-                SELECT MIN(ib.expiration_date) FROM branch_inventory bi
-                    JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
-                WHERE bi.store_id=products.store_id AND bi.branch_id=products.branch_id
-                  AND bi.product_id=products.id AND bi.variant_id IS NULL
-                  AND ib.remaining_quantity>0 AND ib.expiration_date IS NOT NULL
-            ) ELSE products.expiration_date END AS expirationDate,
+            products.expiration_date AS expirationDate,
             products.has_variants AS hasVariants,
             products.created_at AS createdAt
-        FROM products
+        FROM ${V2_PRODUCTS} products
                  LEFT JOIN branches
                            ON products.branch_id = branches.id
                                AND products.store_id = branches.store_id
@@ -1238,29 +1336,24 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
 
     const [rows] = await connection.execute(query, params);
 
-    // UI-only sellable quantity: the same active, non-expired branch batches
-    // checked by POS and Bookings. Keep `stock` untouched for financial restock
-    // and stock-correction concurrency checks. Never backfill legacy drift here.
+    // UI-only sellable quantity: physical branch stock that is not expired,
+    // reserved for a booking, or unusable. Keep `stock` as the physical count
+    // used by stock receipts and corrections.
     const today = new Intl.DateTimeFormat('en-CA', {
         timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'
     }).format(new Date());
     const [balances] = await connection.execute(
         `SELECT bi.branch_id AS branchId, bi.product_id AS productId,
                 bi.variant_id AS variantId, bi.quantity_on_hand AS onHand,
-                COALESCE(SUM(CASE WHEN ib.status='active'
-                    AND ib.remaining_quantity>0
-                    AND (ib.expiration_date IS NULL OR ib.expiration_date>=?)
-                                      THEN ib.remaining_quantity ELSE 0 END),0) AS eligibleBatches,
-                COALESCE(SUM(ib.remaining_quantity),0) AS allBatches,
-                COALESCE(SUM(CASE WHEN ib.remaining_quantity>0
-                    AND ib.expiration_date IS NOT NULL AND ib.expiration_date<?
-                    AND ib.status IN ('active','expired')
-                                      THEN ib.remaining_quantity ELSE 0 END),0) AS expiredBatches
-         FROM branch_inventory bi
-                  LEFT JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
+                CASE WHEN bi.expiration_date IS NULL OR bi.expiration_date>=?
+                         THEN GREATEST(bi.quantity_on_hand-bi.reserved_quantity-bi.unavailable_quantity,0)
+                     ELSE 0 END AS eligibleBatches,
+                bi.quantity_on_hand AS allBatches,
+                CASE WHEN bi.quantity_on_hand>0 AND bi.expiration_date IS NOT NULL AND bi.expiration_date<?
+                         THEN bi.quantity_on_hand ELSE 0 END AS expiredBatches
+         FROM ${V2_BRANCH_INVENTORY} bi
          WHERE bi.store_id=? AND bi.status='active'
-             ${activeBranchId ? 'AND bi.branch_id=?' : ''}
-         GROUP BY bi.id,bi.branch_id,bi.product_id,bi.variant_id,bi.quantity_on_hand`,
+             ${activeBranchId ? 'AND bi.branch_id=?' : ''}`,
         activeBranchId ? [today,today,storeId,activeBranchId] : [today,today,storeId]);
     const ledgerByKey = new Map(balances.map(row => [
         `${Number(row.branchId)}:${Number(row.productId)}:${row.variantId==null?'regular':Number(row.variantId)}`,
@@ -1269,6 +1362,7 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
             eligible:Math.max(0,Number(row.eligibleBatches||0)),
             expired:Math.max(0,Number(row.expiredBatches||0))}
     ]));
+
     const enriched = await attachVariants(connection, rows);
     return enriched.map(product=>{
         const branchId=Number(product.branchId);
@@ -1278,8 +1372,8 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
                 || {physical:0,batches:0,eligible:0,expired:0};
             const catalog=Math.max(0,Number(variant.stock||0));
             return {...variant,
-                // Once all batches are depleted/disposed, the legacy catalog
-                // expiry is historical, not an active expired-stock warning.
+                // Once the stock is gone, the old expiry is historical, not an
+                // active expired-stock warning.
                 expirationDate:ledger.batches===0 ? null : variant.expirationDate,
                 sellableStock:Math.max(0,Math.min(catalog,ledger.physical,ledger.eligible)),
                 branchStock:ledger.physical,batchStock:ledger.batches,
@@ -1299,7 +1393,6 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
             ? variants.reduce((total,variant)=>total+variant.expiredBatchUnits,0):base.expired;
         const ledgerMismatch=Number(product.stock||0)!==branchStock ||
             branchStock!==batchStock || variants.some(variant=>variant.ledgerMismatch);
-        // Read-only diagnostic: never make a mismatched catalog quantity sellable.
         return {...product,variants,
             expirationDate:!product.hasVariants && base.batches===0 ? null : product.expirationDate,
             sellableStock,branchStock,batchStock,expiredBatchUnits,ledgerMismatch};
@@ -1339,10 +1432,18 @@ function validateProductInventoryInputs(body, stock, alertLevel, originalPrice, 
 async function insertProductVariants(connection, productId, variants) {
     if (!Array.isArray(variants) || variants.length === 0) return [];
     const [counterRows] = await connection.execute(
-        "SELECT product_number AS productNumber, next_variant_sequence AS nextSequence FROM products WHERE id = ? FOR UPDATE",
+        `SELECT p.store_id AS storeId, p.product_number AS productNumber,
+                p.next_variant_sequence AS nextSequence, base_bi.branch_id AS branchId
+         FROM products p
+                  JOIN product_variants dv ON dv.product_id = p.id AND dv.is_default = 1
+                  JOIN branch_inventory base_bi ON base_bi.variant_id = dv.id
+         WHERE p.id = ?
+             LIMIT 1
+         FOR UPDATE`,
         [productId]
     );
     if (!counterRows.length || !counterRows[0].productNumber) throw new Error("Parent Product Number is missing.");
+    const {storeId, branchId} = counterRows[0];
     let sequence = Number(counterRows[0].nextSequence || 1);
     const generated = [];
     for (const variant of variants) {
@@ -1350,15 +1451,20 @@ async function insertProductVariants(connection, productId, variants) {
         const variantNumber = `${counterRows[0].productNumber}-V${String(sequence++).padStart(3, "0")}`;
         const [result] = await connection.execute(
             `INSERT INTO product_variants
-             (product_id, variant_number, variant_values, stock, alert_level, original_price,
-              sales_price, pricing_method, markup_percentage, expiration_date)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [productId, variantNumber, JSON.stringify(variant.variantValues), Number(variant.stock || 0),
-                Number(variant.alertLevel || 0), Number(variant.originalPrice || 0),
-                Number(variant.salesPrice || 0), variant.pricingMethod || "manual",
-                variant.markupPercentage ?? null, variant.expirationDate || null]
+             (store_id, product_id, variant_number, variant_name, attributes, is_default,
+              selling_price, cost_price, pricing_method, markup_percentage, status)
+             VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'active')`,
+            [storeId, productId, variantNumber, v2VariantName(variant.variantValues),
+                JSON.stringify(variant.variantValues), Number(variant.salesPrice || 0),
+                Number(variant.originalPrice || 0), variant.pricingMethod || "manual",
+                variant.markupPercentage ?? null]
         );
-        generated.push({id: Number(result.insertId), variantNumber});
+        const variantId = Number(result.insertId);
+        await v2EnsureInventoryRow(connection, {
+            storeId, branchId: Number(branchId), catalogVariantId: variantId,
+            reorderLevel: Number(variant.alertLevel || 0), expirationDate: variant.expirationDate || null,
+        });
+        generated.push({id: variantId, variantNumber});
     }
     await connection.execute("UPDATE products SET next_variant_sequence = ? WHERE id = ?", [sequence, productId]);
     return generated;
@@ -1427,11 +1533,11 @@ async function findExistingProductByName(
     excludeProductId = null
 ) {
     const [rows] = await connection.execute(
-        `SELECT id, name
-         FROM products
-         WHERE store_id = ?
-           AND branch_id = ?
-           AND deleted_at IS NULL`,
+        `SELECT products.id, products.name
+         FROM ${V2_PRODUCTS} products
+         WHERE products.store_id = ?
+           AND products.branch_id = ?
+           AND products.deleted_at IS NULL`,
         [storeId, branchId]
     );
 
@@ -1448,30 +1554,6 @@ async function findExistingProductByName(
     );
 }
 
-
-async function ensureRestockHistoryTable(connection) {
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS restock_history (
-                                                       id BIGINT NOT NULL AUTO_INCREMENT,
-                                                       store_id BIGINT NOT NULL,
-                                                       branch_id BIGINT NOT NULL,
-                                                       product_id BIGINT NOT NULL,
-                                                       product_name VARCHAR(255) NOT NULL,
-            variant_name VARCHAR(255) NULL,
-            stock_before INT NOT NULL DEFAULT 0,
-            quantity_added INT NOT NULL DEFAULT 0,
-            current_stock INT NOT NULL DEFAULT 0,
-            received_by VARCHAR(255) NULL,
-            notes VARCHAR(500) NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            INDEX idx_restock_store (store_id),
-            INDEX idx_restock_branch (branch_id),
-            INDEX idx_restock_product (product_id),
-            INDEX idx_restock_created_at (created_at)
-            )
-    `);
-}
 
 /* -------------------------------------------------------------------------- */
 /*         INITIAL PURCHASE: SUPPLIER AND CASH / CREDIT RECORD ONLY           */
@@ -1538,76 +1620,16 @@ function getInitialPurchaseInput(body, stock, originalPrice, variants, storedTot
         amountPaid, outstandingBalance, paymentDueDate };
 }
 
-async function ensureInitialPurchaseTable(connection) {
-    // Initialized only when a new product has initial supplier purchase details.
-    // DDL happens BEFORE beginTransaction to avoid an implicit MySQL commit.
-    if (await tableExists(connection, "inventory_initial_purchases")) return;
-    await connection.execute(`
-        CREATE TABLE IF NOT EXISTS inventory_initial_purchases (
-                                                                   id BIGINT NOT NULL AUTO_INCREMENT,
-                                                                   store_id BIGINT NOT NULL,
-                                                                   branch_id BIGINT NOT NULL,
-                                                                   product_id BIGINT NOT NULL,
-                                                                   supplier VARCHAR(150) NOT NULL,
-            purchase_date DATE NOT NULL,
-            supplier_invoice_number VARCHAR(80) NULL,
-            payment_method VARCHAR(10) NOT NULL,
-            purchase_total DECIMAL(14,2) NOT NULL,
-            amount_paid DECIMAL(14,2) NOT NULL,
-            outstanding_balance DECIMAL(14,2) NOT NULL,
-            payment_due_date DATE NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            UNIQUE KEY uq_inventory_initial_product (product_id),
-            INDEX idx_initial_purchase_store_branch (store_id, branch_id),
-            INDEX idx_initial_purchase_due_date (payment_due_date)
-            )
-    `);
+async function recordInitialPurchase() {
+    return null;
 }
 
-async function recordInitialPurchase(connection, storeId, branchId, productId, purchase) {
-    if (!purchase) return;
-    await connection.execute(
-        `INSERT INTO inventory_initial_purchases
-         (store_id, branch_id, product_id, supplier, supplier_invoice_number, purchase_date, payment_method,
-          purchase_total, amount_paid, outstanding_balance, payment_due_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [storeId, branchId, productId, purchase.supplier, purchase.supplierInvoiceNumber, purchase.purchaseDate,
-            purchase.paymentMethod, purchase.purchaseTotal, purchase.amountPaid,
-            purchase.outstandingBalance, purchase.paymentDueDate]
-    );
+async function findInitialPurchase() {
+    return null;
 }
 
-async function findInitialPurchase(connection, storeId, branchId, productId, lock = false) {
-    if (!(await tableExists(connection, "inventory_initial_purchases"))) return null;
-    const [rows] = await connection.execute(
-        `SELECT id, supplier, supplier_invoice_number AS supplierInvoiceNumber,
-                DATE_FORMAT(purchase_date,'%Y-%m-%d') AS purchaseDate,
-                payment_method AS paymentMethod, purchase_total AS purchaseTotal,
-                amount_paid AS amountPaid, outstanding_balance AS outstandingBalance,
-                DATE_FORMAT(payment_due_date,'%Y-%m-%d') AS paymentDueDate
-         FROM inventory_initial_purchases
-         WHERE store_id = ? AND branch_id = ? AND product_id = ? LIMIT 1 ${lock ? "FOR UPDATE" : ""}`,
-        [storeId, branchId, productId]
-    );
-    return rows[0] || null;
-}
-
-async function updateInitialPurchase(connection, storeId, branchId, productId, purchase, existingRecord) {
-    if (!purchase) return;
-    if (!existingRecord) {
-        await recordInitialPurchase(connection, storeId, branchId, productId, purchase);
-        return;
-    }
-    await connection.execute(
-        `UPDATE inventory_initial_purchases
-         SET supplier = ?, supplier_invoice_number = ?, purchase_date = ?, payment_method = ?, amount_paid = ?,
-             outstanding_balance = ?, payment_due_date = ?
-         WHERE id = ? AND store_id = ? AND branch_id = ? AND product_id = ?`,
-        [purchase.supplier, purchase.supplierInvoiceNumber, purchase.purchaseDate, purchase.paymentMethod,
-            purchase.amountPaid, purchase.outstandingBalance, purchase.paymentDueDate,
-            existingRecord.id, storeId, branchId, productId]
-    );
+async function updateInitialPurchase() {
+    return null;
 }
 
 /* STOCKNBOOK PURCHASE LEDGER: canonical financial transactions, distinct from stock. */
@@ -1619,83 +1641,10 @@ function exactMoney(value, label) {
     return Math.round(raw * 100);
 }
 // Correct one selected purchase without updating products, stock, or receipt history.
-async function updateSupplierPurchaseDetails(connection, {purchaseId, storeId, activeBranchId, details, expected, decoded, tokenRole}) {
-    const invalid = (message, status = 400) => {
-        const error = new Error(message);
-        error.purchaseEditStatus = status;
-        return error;
-    };
-    const snapshotFields = ["supplier", "supplierInvoiceNumber", "purchaseDate", "paymentMethod", "paymentDueDate", "purchaseTotal", "amountPaid"];
-    if (!Number.isSafeInteger(purchaseId) || purchaseId <= 0 ||
-        !details || typeof details !== "object" || Array.isArray(details) ||
-        !expected || typeof expected !== "object" || Array.isArray(expected) ||
-        snapshotFields.some(key => !Object.prototype.hasOwnProperty.call(expected, key))) {
-        throw invalid("Valid purchase details and the originally loaded purchase are required.");
-    }
-    const branchSql = activeBranchId ? " AND branch_id=?" : "";
-    const branchParams = activeBranchId ? [activeBranchId] : [];
-    await connection.beginTransaction();
-    try {
-        const [purchases] = await connection.execute(
-            `SELECT id,branch_id AS branchId,purchase_number AS purchaseNumber,
-                    supplier,supplier_invoice_number AS supplierInvoiceNumber,
-                    DATE_FORMAT(purchase_date,'%Y-%m-%d') AS purchaseDate,
-                    payment_method AS paymentMethod,purchase_total AS purchaseTotal,
-                    DATE_FORMAT(payment_due_date,'%Y-%m-%d') AS paymentDueDate
-             FROM inventory_purchase_transactions
-             WHERE id=? AND store_id=?${branchSql} FOR UPDATE`,
-            [purchaseId,storeId,...branchParams]);
-        if (!purchases.length) throw invalid("Purchase not found in this store/branch.", 404);
-        const current = purchases[0];
-        const [payments] = await connection.execute(
-            "SELECT id,amount FROM inventory_supplier_payments WHERE purchase_id=? ORDER BY id FOR UPDATE",
-            [purchaseId]);
-        const currentPaidCents = payments.reduce((sum,payment) => sum + Math.round(Number(payment.amount)*100), 0);
-        let totalCents, expectedPaidCents, expectedTotalCents, revised;
-        try {
-            totalCents = exactMoney(current.purchaseTotal, "Original Purchase Total");
-            expectedPaidCents = exactMoney(expected.amountPaid, "Previously Recorded Amount Paid");
-            expectedTotalCents = exactMoney(expected.purchaseTotal, "Previously Recorded Purchase Total");
-            exactMoney(details.amountPaid ?? 0, "Total Amount Paid");
-            revised = getInitialPurchaseInput({initialPurchase:details}, 0, 0, [], totalCents/100);
-        } catch (error) {
-            throw invalid(error.message);
-        }
-        const headerChanged = snapshotFields.slice(0,5).some(key =>
-            String(current[key] ?? "") !== String(expected[key] ?? ""));
-        if (headerChanged || currentPaidCents !== expectedPaidCents || totalCents !== expectedTotalCents) {
-            throw invalid("This purchase or its payments changed after you opened the editor. Close it and reopen Edit to load the latest details.", 409);
-        }
-        const targetPaidCents = exactMoney(revised.amountPaid, "Total Amount Paid");
-        const delta = targetPaidCents-currentPaidCents;
-        if (delta !== 0) {
-            // Retain every historical payment; a signed entry records only the correction.
-            await connection.execute(
-                `INSERT INTO inventory_supplier_payments(purchase_id,amount,payment_date,request_key)
-                 VALUES(?,?,?,?)`,
-                [purchaseId,delta/100,revised.purchaseDate,
-                    `PURCHASE-EDIT-${purchaseId}-${require("crypto").randomUUID()}`]);
-        }
-        await connection.execute(
-            `UPDATE inventory_purchase_transactions
-             SET supplier=?,supplier_invoice_number=?,purchase_date=?,payment_method=?,payment_due_date=?
-             WHERE id=? AND store_id=? AND branch_id=?`,
-            [revised.supplier,revised.supplierInvoiceNumber,revised.purchaseDate,
-                revised.paymentMethod,revised.paymentDueDate,purchaseId,storeId,Number(current.branchId)]);
-        const employee = await getActingEmployee(connection,decoded,tokenRole,storeId);
-        await logEmployeeAction(connection, {
-            storeId,branchId:Number(current.branchId),employee,module:"Inventory",
-            referenceNumber:current.purchaseNumber || String(purchaseId),
-            action:"Corrected supplier purchase",referenceId:String(purchaseId),
-            details:`Corrected ${current.purchaseNumber || purchaseId} supplier/payment details (paid: ${currentPaidCents/100} -> ${targetPaidCents/100}); original total and stock receiving history preserved`,
-        });
-        await connection.commit();
-        return {success:true,purchaseId,purchaseTotal:totalCents/100,
-            amountPaid:targetPaidCents/100,outstandingBalance:(totalCents-targetPaidCents)/100};
-    } catch (error) {
-        await safeRollback(connection);
-        throw error;
-    }
+async function updateSupplierPurchaseDetails() {
+    const error = new Error("Supplier purchases are no longer recorded in StockNBook.");
+    error.purchaseEditStatus = 410;
+    throw error;
 }
 
 
@@ -1722,116 +1671,17 @@ function validatePurchaseHeader(input, lines) {
     return {supplier, purchaseDate, supplierInvoiceNumber, paymentMethod, dueDate,
         totalCents, amountPaidCents, outstandingCents: totalCents - amountPaidCents};
 }
-async function createStockReceipt(connection, {storeId, branchId, purchaseId, lines, receivedDate, receivedBy, requestKey,
-    legacySupplier, legacyInvoice, legacyPaymentMethod, legacyAmountPaid,
-    legacyPurchaseTotal, legacyOutstandingBalance}) {
-    if (!lines.length) throw new Error("Receipt must contain received stock.");
-    const [r] = await connection.execute(
-        `INSERT INTO inventory_stock_receipts
-         (store_id, branch_id, product_id, purchase_id, supplier, supplier_invoice_number,
-          received_date, payment_method, purchase_total, amount_paid, outstanding_balance,
-          payment_due_date, received_by, request_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
-        [storeId, branchId, lines[0].productId, purchaseId, legacySupplier, legacyInvoice,
-            receivedDate, legacyPaymentMethod,
-            legacyPurchaseTotal ?? roundMoney(lines.reduce((sum,l)=>sum+l.quantity*l.unitPurchaseCost,0)),
-            legacyAmountPaid || 0, legacyOutstandingBalance ?? 0, receivedBy || "System", requestKey || null]
-    );
-    const receiptId = Number(r.insertId);
-    await connection.execute("UPDATE inventory_stock_receipts SET receiving_number = ? WHERE id = ?",
-        [`RCV-${String(receiptId).padStart(6,"0")}`, receiptId]);
-    for (const line of lines) {
-        const [createdItem] = await connection.execute(
-            `INSERT INTO inventory_stock_receipt_items
-             (receipt_id, product_id, variant_id, variant_name, quantity_received,
-              unit_purchase_cost, expiration_date, purchase_item_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [receiptId, line.productId, line.variantId ?? null, line.variantName ?? null,
-                line.quantity, line.unitPurchaseCost, line.expirationDate ?? null, line.purchaseItemId ?? null]
-        );
-        // One canonical Stock In movement per physical receipt line, including
-        // initial stock. Payment settlement does not create stock movements.
-        await connection.execute(
-            `INSERT INTO inventory_stock_movements
-             (store_id, branch_id, product_id, variant_id, receipt_item_id,
-              movement, quantity, movement_date)
-             VALUES (?, ?, ?, ?, ?, 'Stock In', ?, ?)`,
-            [storeId,branchId,line.productId,line.variantId ?? null,Number(createdItem.insertId),line.quantity,receivedDate]
-        );
-    }
-    return receiptId;
+async function createStockReceipt() {
+    return null;
 }
 // CREATE purchase once; record its financial payment once even if the purchase has many variants/products.
-async function createPurchaseLedger(connection, {storeId, branchId, input, lines, source, purchaseRef, requestKey, receivedBy,
-    receivedDate, deliveredLines}) {
+async function createPurchaseLedger(connection, {input, lines}) {
     const p = validatePurchaseHeader(input, lines);
-    const [result] = await connection.execute(
-        `INSERT INTO inventory_purchase_transactions
-         (store_id, branch_id, source, import_ref, request_key, supplier, supplier_invoice_number,
-          purchase_date, payment_method, purchase_total, payment_due_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [storeId, branchId, source, purchaseRef || null, requestKey || null, p.supplier,
-            p.supplierInvoiceNumber, p.purchaseDate, p.paymentMethod, p.totalCents/100, p.dueDate]
-    );
-    const purchaseId = Number(result.insertId);
-    // Include the persisted store and branch codes in every new Purchase Number.
-    const { storeCode, branchCode } = await getProductCodeContext(connection, storeId, branchId);
-    await connection.execute("UPDATE inventory_purchase_transactions SET purchase_number = ? WHERE id = ?",
-        [`${storeCode}-${branchCode}-PUR-${String(purchaseId).padStart(6, "0")}`, purchaseId]);
-    const purchaseLines = [];
-    for (const line of lines) {
-        const [item] = await connection.execute(
-            `INSERT INTO inventory_purchase_items
-             (purchase_id, product_id, variant_id, quantity_ordered, unit_purchase_cost, expiration_date)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [purchaseId, line.productId, line.variantId ?? null, line.quantity,
-                line.unitPurchaseCost, line.expirationDate ?? null]
-        );
-        purchaseLines.push({...line, purchaseItemId: Number(item.insertId)});
-    }
-    if (p.amountPaidCents > 0) {
-        await connection.execute(
-            `INSERT INTO inventory_supplier_payments (purchase_id, amount, payment_date)
-             VALUES (?, ?, ?)`, [purchaseId, p.amountPaidCents/100, p.purchaseDate]);
-    }
-    // Invoice/order quantities can be greater than the first delivery.
-    // Match physical receipts to ordered lines; never treat undelivered goods as on-hand stock.
-    const physicalLines = deliveredLines === undefined ? purchaseLines : deliveredLines.map(delivery => {
-        const item = purchaseLines.find(line => line.productId === delivery.productId &&
-            (line.variantId ?? null) === (delivery.variantId ?? null));
-        if (!item || delivery.quantity > item.quantity || delivery.quantity <= 0 ||
-            exactMoney(item.unitPurchaseCost,"Purchase cost") !== exactMoney(delivery.unitPurchaseCost,"Received cost")) {
-            throw new Error("Delivered quantities and costs must match their purchase lines.");
-        }
-        return {...delivery, purchaseItemId:item.purchaseItemId};
-    });
-    const receiptId = await createStockReceipt(connection, {
-        storeId, branchId, purchaseId, lines: physicalLines,
-        receivedDate: receivedDate || p.purchaseDate, receivedBy, requestKey,
-        legacySupplier: p.supplier, legacyInvoice: p.supplierInvoiceNumber,
-        legacyPaymentMethod: p.paymentMethod, legacyAmountPaid: p.amountPaidCents/100,
-        legacyPurchaseTotal:p.totalCents/100,legacyOutstandingBalance:p.outstandingCents/100,
-    });
-    return {purchaseId, receiptId, purchaseTotal:p.totalCents/100,
-        amountPaid:p.amountPaidCents/100, outstandingBalance:p.outstandingCents/100};
+    return {purchaseId: null, receiptId: null, purchaseTotal: p.totalCents/100,
+        amountPaid: p.amountPaidCents/100, outstandingBalance: p.outstandingCents/100};
 }
-async function findCanonicalInitialPurchase(connection, storeId, branchId, productId) {
-    const [rows] = await connection.execute(
-        `SELECT p.id AS purchaseId, p.supplier, p.supplier_invoice_number AS supplierInvoiceNumber,
-                DATE_FORMAT(p.purchase_date,'%Y-%m-%d') AS purchaseDate,
-                p.payment_method AS paymentMethod, p.purchase_total AS purchaseTotal,
-                DATE_FORMAT(p.payment_due_date,'%Y-%m-%d') AS paymentDueDate,
-                (SELECT COUNT(DISTINCT item.product_id) FROM inventory_purchase_items item WHERE item.purchase_id=p.id) AS productCount,
-                COALESCE((SELECT SUM(pay.amount) FROM inventory_supplier_payments pay WHERE pay.purchase_id=p.id),0) AS amountPaid
-         FROM inventory_purchase_transactions p
-                  INNER JOIN inventory_purchase_items pi ON pi.purchase_id=p.id
-         WHERE p.store_id=? AND p.branch_id=? AND pi.product_id=? AND p.source IN ('add','import')
-         ORDER BY p.id ASC LIMIT 1`, [storeId, branchId, productId]
-    );
-    if (!rows.length) return null;
-    const entry = rows[0];
-    return {...entry, purchaseTotal: Number(entry.purchaseTotal), amountPaid: Number(entry.amountPaid),
-        outstandingBalance: roundMoney(Number(entry.purchaseTotal)-Number(entry.amountPaid))};
+async function findCanonicalInitialPurchase() {
+    return null;
 }
 
 async function getRestockReceivedBy(
@@ -1843,10 +1693,11 @@ async function getRestockReceivedBy(
     try {
         if (tokenRole === "manager" && decoded?.manager_id) {
             const [rows] = await connection.execute(
-                `SELECT manager_name
-                 FROM managers
+                `SELECT full_name AS manager_name
+                 FROM users
                  WHERE id = ?
                    AND store_id = ?
+                   AND role = 'manager'
                      LIMIT 1`,
                 [Number(decoded.manager_id), storeId]
             );
@@ -1862,10 +1713,11 @@ async function getRestockReceivedBy(
 
         if (tokenRole === "staff" && decoded?.staff_id) {
             const [rows] = await connection.execute(
-                `SELECT staff_name
-                 FROM staff
+                `SELECT full_name AS staff_name
+                 FROM users
                  WHERE id = ?
                    AND store_id = ?
+                   AND role = 'staff'
                      LIMIT 1`,
                 [Number(decoded.staff_id), storeId]
             );
@@ -1881,9 +1733,10 @@ async function getRestockReceivedBy(
 
         if (tokenRole === "owner") {
             const [rows] = await connection.execute(
-                `SELECT owner_name
-                 FROM stores
-                 WHERE id = ?
+                `SELECT full_name AS owner_name
+                 FROM users
+                 WHERE store_id = ?
+                   AND role = 'owner'
                      LIMIT 1`,
                 [storeId]
             );
@@ -1907,137 +1760,8 @@ async function getRestockReceivedBy(
     );
 }
 
-async function recordRestockHistory(
-    connection,
-    {
-        storeId,
-        branchId,
-        beforeProduct,
-        afterProduct,
-        receivedBy,
-    }
-) {
-    if (!beforeProduct || !afterProduct || !branchId) {
-        return;
-    }
-
-    const beforeVariants = Array.isArray(beforeProduct.variants)
-        ? beforeProduct.variants
-        : [];
-
-    const afterVariants = Array.isArray(afterProduct.variants)
-        ? afterProduct.variants
-        : [];
-
-    const beforeHasVariants =
-        Boolean(beforeProduct.hasVariants) || beforeVariants.length > 0;
-
-    const afterHasVariants =
-        Boolean(afterProduct.hasVariants) || afterVariants.length > 0;
-
-    if (beforeHasVariants !== afterHasVariants) {
-        return;
-    }
-
-    await ensureRestockHistoryTable(connection);
-
-    if (!afterHasVariants) {
-        const stockBefore = Number(beforeProduct.stock || 0);
-        const currentStock = Number(afterProduct.stock || 0);
-        const quantityAdded = currentStock - stockBefore;
-
-        if (quantityAdded <= 0) {
-            return;
-        }
-
-        await connection.execute(
-            `INSERT INTO restock_history
-             (
-                 store_id,
-                 branch_id,
-                 product_id,
-                 product_name,
-                 variant_name,
-                 stock_before,
-                 quantity_added,
-                 current_stock,
-                 received_by
-             )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-                storeId,
-                branchId,
-                Number(afterProduct.id),
-                toSafeString(afterProduct.name || beforeProduct.name, 255),
-                null,
-                stockBefore,
-                quantityAdded,
-                currentStock,
-                receivedBy,
-            ]
-        );
-
-        return;
-    }
-
-    const previousVariants = new Map();
-
-    for (const variant of beforeVariants) {
-        const signature = getVariantSignature(
-            variant.variantValues || {}
-        );
-
-        if (!signature) {
-            continue;
-        }
-
-        previousVariants.set(signature, Number(variant.stock || 0));
-    }
-
-    for (const variant of afterVariants) {
-        const signature = getVariantSignature(
-            variant.variantValues || {}
-        );
-
-        if (!signature || !previousVariants.has(signature)) {
-            continue;
-        }
-
-        const stockBefore = Number(previousVariants.get(signature) || 0);
-        const currentStock = Number(variant.stock || 0);
-        const quantityAdded = currentStock - stockBefore;
-
-        if (quantityAdded <= 0) {
-            continue;
-        }
-
-        await connection.execute(
-            `INSERT INTO restock_history
-             (
-                 store_id,
-                 branch_id,
-                 product_id,
-                 product_name,
-                 variant_name,
-                 stock_before,
-                 quantity_added,
-                 current_stock,
-                 received_by
-             )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-                storeId,
-                branchId,
-                Number(afterProduct.id),
-                toSafeString(afterProduct.name || beforeProduct.name, 255),
-                getVariantDisplayName(variant.variantValues),
-                stockBefore,
-                quantityAdded,
-                currentStock,
-                receivedBy,
-            ]
-        );
-    }
+async function recordRestockHistory() {
+    return null;
 }
 
 /*
@@ -2051,7 +1775,7 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "manager" && decoded?.manager_id) {
         const [rows] = await connection.execute(
-            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS manager_name FROM users WHERE id = ? AND store_id = ? AND role = 'manager' LIMIT 1`,
             [Number(decoded.manager_id), storeId]
         );
 
@@ -2064,7 +1788,7 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "staff" && decoded?.staff_id) {
         const [rows] = await connection.execute(
-            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS staff_name FROM users WHERE id = ? AND store_id = ? AND role = 'staff' LIMIT 1`,
             [Number(decoded.staff_id), storeId]
         );
 
@@ -2077,12 +1801,12 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "owner") {
         const [rows] = await connection.execute(
-            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            `SELECT id AS owner_user_id, full_name AS owner_name FROM users WHERE store_id = ? AND role = 'owner' ORDER BY id ASC LIMIT 1`,
             [storeId]
         );
 
         return {
-            id: null,
+            id: rows[0]?.owner_user_id ? Number(rows[0].owner_user_id) : null,
             name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
             role: "Owner",
         };
@@ -2097,22 +1821,28 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
  * action succeed or fail together.
  */
 async function logEmployeeAction(connection, entry) {
+    // employee_actions.user_id references users.id (owners included).
+    const userId = Number(entry?.employee?.id);
+    if (!Number.isSafeInteger(userId) || userId <= 0) return;
+    const entityId = Number(entry.referenceId);
     await connection.execute(
         `INSERT INTO employee_actions
-         (store_id, branch_id, employee_id, employee_name, employee_role,
-          module, reference_number, action, reference_id, details)
+         (store_id, branch_id, user_id, user_name, user_role,
+          module, reference_number, action, entity_id, details)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             entry.storeId,
             entry.branchId ?? null,
-            entry.employee.id,
-            entry.employee.name,
+            userId,
+            String(entry.employee.name || "Unknown").slice(0, 150),
             entry.employee.role,
             entry.module,
             entry.referenceNumber ?? null,
             entry.action,
-            entry.referenceId ?? null,
-            entry.details ?? null,
+            Number.isSafeInteger(entityId) && entityId > 0 ? entityId : null,
+            entry.details === undefined || entry.details === null
+                ? null
+                : JSON.stringify(entry.details),
         ]
     );
 }
@@ -2203,75 +1933,6 @@ function getBranchCodeSource(branchName, address) {
     return addressParts[0] || branchName || "Branch";
 }
 
-async function allocateUniqueStoreCode(connection, storeId, storeName, slug) {
-    const source = storeName || slug || `Store ${storeId}`;
-    const base = buildReadableCode(source, STORE_CODE_STOP_WORDS, "STR");
-    const compact = compactAlpha(source);
-    const candidates = [base];
-
-    for (let length = 4; length <= 7; length += 1) {
-        const extra = compact.slice(0, Math.max(0, length - 3));
-        const candidate = `${base}${extra}`.slice(0, length);
-        if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
-    }
-
-    for (let suffix = 0; suffix < 26; suffix += 1) {
-        candidates.push(`${base}${String.fromCharCode(65 + suffix)}`);
-    }
-
-    for (const candidate of candidates) {
-        const [rows] = await connection.execute(
-            `SELECT id FROM stores
-             WHERE store_code = ?
-               AND id <> ?
-                 LIMIT 1`,
-            [candidate, storeId]
-        );
-
-        if (rows.length === 0) return candidate;
-    }
-
-    throw new Error("Unable to allocate a unique store code.");
-}
-
-async function allocateUniqueBranchCode(
-    connection,
-    storeId,
-    branchId,
-    branchName,
-    address
-) {
-    const source = getBranchCodeSource(branchName, address);
-    const base = buildReadableCode(source, BRANCH_CODE_STOP_WORDS, "BRN");
-    const compact = compactAlpha(source);
-    const candidates = [base];
-
-    for (let length = 4; length <= 7; length += 1) {
-        const extra = compact.slice(0, Math.max(0, length - 3));
-        const candidate = `${base}${extra}`.slice(0, length);
-        if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
-    }
-
-    for (let suffix = 0; suffix < 26; suffix += 1) {
-        candidates.push(`${base}${String.fromCharCode(65 + suffix)}`);
-    }
-
-    for (const candidate of candidates) {
-        const [rows] = await connection.execute(
-            `SELECT id FROM branches
-             WHERE store_id = ?
-               AND branch_code = ?
-               AND id <> ?
-                 LIMIT 1`,
-            [storeId, candidate, branchId]
-        );
-
-        if (rows.length === 0) return candidate;
-    }
-
-    throw new Error("Unable to allocate a unique branch code.");
-}
-
 function buildProductNumber(storeCode, branchCode, sequence) {
     return `${storeCode}-${branchCode}-${String(sequence).padStart(3, "0")}`;
 }
@@ -2301,93 +1962,22 @@ async function getProductCodeContext(connection, storeId, branchId) {
 }
 
 async function reserveNextProductSequence(connection, storeId, branchId) {
-    // The branch row is locked by create_product before this helper runs.
-    // Derive the current maximum from BOTH the sequence table and the actual
-    // stored Product Nos. This makes the allocator self-healing even when
-    // product_number_sequences is empty or behind existing products.
-    const [sequenceRows] = await connection.execute(
-        `SELECT last_sequence AS lastSequence
-         FROM product_number_sequences
-         WHERE store_id = ?
-           AND branch_id = ?
-             FOR UPDATE`,
-        [storeId, branchId]
-    );
-
-    const [productRows] = await connection.execute(
-        `SELECT COALESCE(
-                        MAX(
-                                CAST(
-                                        SUBSTRING_INDEX(product_number, '-', -1)
-                                    AS UNSIGNED
-                                )
-                        ),
-                        0
-                ) AS maxExistingSequence
-         FROM products
-         WHERE store_id = ?
-           AND branch_id = ?
-           AND deleted_at IS NULL
-           AND product_number REGEXP
-               '^[A-Za-z0-9]{2,8}-[A-Za-z0-9]{2,8}-(PRD-)?[0-9]{3,}$'`,
-        [storeId, branchId]
-    );
-
-    const sequenceValue = sequenceRows.length
-        ? Number(sequenceRows[0].lastSequence || 0)
-        : 0;
-
-    const productValue = Number(
-        productRows?.[0]?.maxExistingSequence || 0
-    );
-
-    // New Product Nos. (STORE-BRANCH-PRD-XXXX) share this branch sequence with rental
-    // product types, and never reuse a number already issued with the same prefix.
-    let rentalValue = 0;
-    try {
-        const [rentalRows] = await connection.execute(
-            `SELECT equipment_number AS equipmentNumber
-             FROM rental_equipment
-             WHERE store_id = ?
-               AND branch_id = ?
-               AND equipment_number LIKE '%-PRD-%'`,
-            [storeId, branchId]
-        );
-        rentalValue = rentalRows.reduce((max, row) =>
-            identifiers.PATTERNS.product.test(String(row.equipmentNumber || ""))
-                ? Math.max(max, identifiers.trailingSequence(row.equipmentNumber))
-                : max, 0);
-    } catch (error) {
-        if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
-    }
     const prefix = await identifiers.getIdentifierCodes(connection, storeId, branchId);
-    const prefixValue = await identifiers.maxProductPrefixSequence(connection, prefix.storeCode, prefix.branchCode);
-
-    const currentMaximum = Math.max(sequenceValue, productValue, rentalValue, prefixValue, 0);
-
-    await connection.execute(
-        `INSERT INTO product_number_sequences
-             (store_id, branch_id, last_sequence)
-         VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE
-                                  last_sequence = GREATEST(last_sequence, VALUES(last_sequence)),
-                                  updated_at = CURRENT_TIMESTAMP`,
-        [storeId, branchId, currentMaximum]
+    const [rows] = await connection.execute(
+        `SELECT product_number AS value FROM products
+         WHERE store_id = ? AND product_number LIKE ?
+         UNION ALL
+        SELECT equipment_number AS value FROM equipment
+        WHERE store_id = ? AND equipment_number LIKE ?`,
+        [storeId, `${prefix.storeCode}-${prefix.branchCode}-%`, storeId, `${prefix.storeCode}-${prefix.branchCode}-PRD-%`]
     );
-
-    return currentMaximum + 1;
+    const fromRows = rows.reduce((max, row) => Math.max(max, identifiers.trailingSequence(row.value)), 0);
+    const prefixValue = await identifiers.maxProductPrefixSequence(connection, prefix.storeCode, prefix.branchCode);
+    return Math.max(fromRows, prefixValue, 0) + 1;
 }
 
-async function commitProductSequence(connection, storeId, branchId, sequence) {
-    await connection.execute(
-        `INSERT INTO product_number_sequences
-             (store_id, branch_id, last_sequence)
-         VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE
-                                  last_sequence = GREATEST(last_sequence, VALUES(last_sequence)),
-                                  updated_at = CURRENT_TIMESTAMP`,
-        [storeId, branchId, sequence]
-    );
+async function commitProductSequence() {
+    return null;
 }
 
 function getTotalStock(product) {
@@ -2408,384 +1998,39 @@ function getTotalStock(product) {
 /*                    SAFE PRODUCT REMOVAL / ARCHIVE LOGIC                    */
 /* -------------------------------------------------------------------------- */
 
-async function tableExists(connection, tableName) {
-    const [rows] = await connection.execute(
-        `SELECT 1
-         FROM INFORMATION_SCHEMA.TABLES
-         WHERE TABLE_SCHEMA = DATABASE()
-           AND TABLE_NAME = ?
-             LIMIT 1`,
-        [tableName]
-    );
+/* stocknbook_v2 schema, used where this Lambda previously probed
+ * INFORMATION_SCHEMA. Tables that are not part of stocknbook_v2 report false. */
+const V2_SCHEMA_COLUMNS = {
+    stores: ["id", "store_code", "slug", "store_name", "business_name", "email", "phone", "address", "tax_registration", "tin", "status", "created_at", "updated_at"],
+    branches: ["id", "store_id", "branch_code", "branch_name", "address", "phone", "email", "status", "created_at", "updated_at"],
+    users: ["id", "store_id", "branch_id", "manager_id", "employee_code", "full_name", "role", "email", "password_hash", "phone", "permissions", "status", "invite_token_hash", "invited_by", "email_verified_at", "last_login_at", "created_at", "updated_at"],
+    categories: ["id", "store_id", "category_name", "category_type", "status", "created_at", "updated_at"],
+    products: ["id", "store_id", "category_id", "product_number", "product_name", "description", "has_variants", "next_variant_sequence", "status", "created_at", "updated_at", "deleted_at"],
+    product_variants: ["id", "store_id", "product_id", "variant_number", "variant_name", "attributes", "unit_of_measure", "is_default", "selling_price", "cost_price", "pricing_method", "markup_percentage", "status", "created_at", "updated_at", "deleted_at"],
+    equipment: ["id", "store_id", "category_id", "equipment_number", "equipment_name", "description", "has_variants", "next_variant_sequence", "status", "created_at", "updated_at", "deleted_at"],
+    equipment_variants: ["id", "store_id", "equipment_id", "variant_number", "variant_name", "attributes", "is_default", "rental_rate_per_day", "cost_price", "status", "created_at", "updated_at", "deleted_at"],
+    branch_inventory: ["id", "store_id", "branch_id", "variant_id", "equipment_variant_id", "on_hand_quantity", "reserved_quantity", "unavailable_quantity", "reorder_level", "expiration_date", "status", "last_counted_at", "created_at", "updated_at"],
+    inventory_movements: ["id", "store_id", "branch_id", "branch_inventory_id", "movement_type", "quantity_bucket", "quantity_change", "quantity_before", "quantity_after", "unit_cost", "reference_type", "reference_id", "reason", "performed_by", "created_at"],
+    inventory_batches: ["id", "store_id", "branch_id", "branch_inventory_id", "batch_code", "received_quantity", "remaining_quantity", "unit_cost", "received_at", "expiration_date", "status"],
+    stock_issues: ["id", "store_id", "branch_id", "branch_inventory_id", "booking_id", "issue_type", "quantity", "quantity_resolved", "reason", "status", "estimated_completion_date", "reported_by", "approved_by", "approved_at", "resolved_by", "resolved_at", "resolution_notes", "created_at", "updated_at"],
+    packages: ["id", "store_id", "branch_id", "package_code", "package_name", "description", "category", "discount_type", "discount_value", "package_price", "down_payment_amount", "duration", "cover_image_url", "status", "updated_by", "created_at", "updated_at"],
+    package_items: ["id", "store_id", "package_id", "product_id", "variant_id", "quantity"],
+    bookings: ["id", "store_id", "branch_id", "booking_reference", "customer_id", "package_id", "booking_type", "status", "created_at", "updated_at"],
+    booking_items: ["id", "store_id", "booking_id", "product_id", "variant_id", "quantity"],
+    orders: ["order_id", "order_number", "store_id", "branch_id", "customer_id", "order_date", "subtotal", "discount_amount", "vatable_sales", "vat_amount", "total", "tax_type", "payment_mode", "amount_tendered", "change_due", "status", "processed_by", "created_at"],
+    order_items: ["id", "store_id", "order_id", "product_id", "variant_id", "product_name", "quantity", "unit_price", "cost_price_at_sale", "discount_amount", "line_total"],
+};
 
-    return rows.length > 0;
+async function tableExists(connection, tableName) {
+    return Object.prototype.hasOwnProperty.call(V2_SCHEMA_COLUMNS, String(tableName));
 }
 
 async function tableHasColumn(connection, tableName, columnName) {
-    const [rows] = await connection.execute(
-        `SELECT 1
-         FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE()
-           AND TABLE_NAME = ?
-           AND COLUMN_NAME = ?
-             LIMIT 1`,
-        [tableName, columnName]
-    );
-
-    return rows.length > 0;
+    return (V2_SCHEMA_COLUMNS[String(tableName)] || []).includes(String(columnName));
 }
 
-async function tableHasIndex(connection, tableName, indexName) {
-    const [rows] = await connection.execute(
-        `SELECT 1
-         FROM INFORMATION_SCHEMA.STATISTICS
-         WHERE TABLE_SCHEMA = DATABASE()
-           AND TABLE_NAME = ?
-           AND INDEX_NAME = ?
-             LIMIT 1`,
-        [tableName, indexName]
-    );
-
-    return rows.length > 0;
-}
-
-async function addColumnIfMissing(connection, tableName, columnName, definitionSql) {
-    if (await tableHasColumn(connection, tableName, columnName)) {
-        return;
-    }
-
-    try {
-        await connection.execute(
-            `ALTER TABLE ${tableName} ADD COLUMN ${definitionSql}`
-        );
-    } catch (error) {
-        // Two API requests can reach this migration at the same time. In that
-        // case request A may add the column after request B's INFORMATION_SCHEMA
-        // check but before request B executes ALTER TABLE. Treat that race as
-        // success instead of turning a valid request into HTTP 500.
-        if (error?.code === "ER_DUP_FIELDNAME") {
-            return;
-        }
-        throw error;
-    }
-}
-
-async function addIndexIfMissing(connection, tableName, indexName, indexSql) {
-    if (await tableHasIndex(connection, tableName, indexName)) {
-        return;
-    }
-
-    try {
-        await connection.execute(
-            `ALTER TABLE ${tableName} ADD ${indexSql}`
-        );
-    } catch (error) {
-        // Same race protection as addColumnIfMissing(). If another request has
-        // already created the named index, the desired schema is already true.
-        if (error?.code === "ER_DUP_KEYNAME") {
-            return;
-        }
-        throw error;
-    }
-}
-
-async function isProductNumberSchemaReady(connection) {
-    const requiredStructure = await Promise.all([
-        tableHasColumn(connection, "stores", "store_code"),
-        tableHasColumn(connection, "branches", "branch_code"),
-        tableHasColumn(connection, "products", "product_number"),
-        tableExists(connection, "product_number_sequences"),
-        tableHasIndex(connection, "stores", "uq_stores_store_code"),
-        tableHasIndex(connection, "branches", "uq_branches_store_branch_code"),
-        tableHasIndex(connection, "products", "uq_products_product_number"),
-    ]);
-
-    if (requiredStructure.some((ready) => !ready)) {
-        return false;
-    }
-
-    const [missingStoreCodes] = await connection.execute(
-        `SELECT id
-         FROM stores
-         WHERE store_code IS NULL OR TRIM(store_code) = ''
-             LIMIT 1`
-    );
-
-    if (missingStoreCodes.length > 0) {
-        return false;
-    }
-
-    const [missingBranchCodes] = await connection.execute(
-        `SELECT id
-         FROM branches
-         WHERE branch_code IS NULL OR TRIM(branch_code) = ''
-             LIMIT 1`
-    );
-
-    if (missingBranchCodes.length > 0) {
-        return false;
-    }
-
-    const [missingProductNumbers] = await connection.execute(
-        `SELECT id
-         FROM products
-         WHERE deleted_at IS NULL
-           AND (
-             product_number IS NULL
-                 OR TRIM(product_number) = ''
-                 OR product_number NOT REGEXP
-                  '^[A-Za-z0-9]{2,8}-[A-Za-z0-9]{2,8}-(PRD-)?[0-9]{3,}$'
-             )
-             LIMIT 1`
-    );
-
-    return missingProductNumbers.length === 0;
-}
-
-async function ensureProductNumberSchema(connection) {
-    if (!(await tableExists(connection, "products"))) return;
-
-    /*
-     * IMPORTANT:
-     * Do not use MySQL GET_LOCK() here.
-     *
-     * This function runs inside a normal API request. Multiple inventory,
-     * dashboard, POS, and report requests can happen at the same time, so a
-     * long-lived advisory lock can make every /api/products request wait and
-     * eventually return HTTP 500.
-     *
-     * Instead:
-     * 1. Use a very cheap fast-path once the schema/data are already ready.
-     * 2. Keep every DDL operation idempotent.
-     * 3. Backfill only when something is actually missing.
-     *
-     * Product-number allocation itself is protected separately by a row lock
-     * on the branch during create_product.
-     */
-    if (await isProductNumberSchemaReady(connection)) {
-        return;
-    }
-
-    await addColumnIfMissing(
-        connection,
-        "stores",
-        "store_code",
-        "store_code VARCHAR(8) NULL AFTER id"
-    );
-
-    await addColumnIfMissing(
-        connection,
-        "branches",
-        "branch_code",
-        "branch_code VARCHAR(8) NULL AFTER id"
-    );
-
-    await addColumnIfMissing(
-        connection,
-        "products",
-        "product_number",
-        "product_number VARCHAR(40) NULL AFTER id"
-    );
-
-    await connection.execute(
-        `CREATE TABLE IF NOT EXISTS product_number_sequences (
-                                                                 store_id BIGINT NOT NULL,
-                                                                 branch_id BIGINT NOT NULL,
-                                                                 last_sequence INT NOT NULL DEFAULT 0,
-                                                                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                                                 ON UPDATE CURRENT_TIMESTAMP,
-                                                                 PRIMARY KEY (store_id, branch_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
-    );
-
-    // Generate a stable store code only for stores that still need one.
-    const [stores] = await connection.execute(
-        `SELECT id, store_name, slug, store_code
-         FROM stores
-         WHERE store_code IS NULL OR TRIM(store_code) = ''
-         ORDER BY id ASC`
-    );
-
-    for (const store of stores) {
-        const code = await allocateUniqueStoreCode(
-            connection,
-            Number(store.id),
-            store.store_name,
-            store.slug
-        );
-
-        await connection.execute(
-            `UPDATE stores
-             SET store_code = ?
-             WHERE id = ?
-               AND (store_code IS NULL OR TRIM(store_code) = '')`,
-            [code, Number(store.id)]
-        );
-    }
-
-    // Generate a stable branch code only for branches that still need one.
-    const [branches] = await connection.execute(
-        `SELECT id, store_id, branch_name, address, branch_code
-         FROM branches
-         WHERE branch_code IS NULL OR TRIM(branch_code) = ''
-         ORDER BY store_id ASC, id ASC`
-    );
-
-    for (const branch of branches) {
-        const code = await allocateUniqueBranchCode(
-            connection,
-            Number(branch.store_id),
-            Number(branch.id),
-            branch.branch_name,
-            branch.address
-        );
-
-        await connection.execute(
-            `UPDATE branches
-             SET branch_code = ?
-             WHERE id = ?
-               AND (branch_code IS NULL OR TRIM(branch_code) = '')`,
-            [code, Number(branch.id)]
-        );
-    }
-
-    // Backfill ONLY products that are missing the new business Product No.
-    const [products] = await connection.execute(
-        `SELECT
-             products.id,
-             products.store_id,
-             products.branch_id,
-             products.product_number,
-             stores.store_code,
-             branches.branch_code
-         FROM products
-                  INNER JOIN stores
-                             ON stores.id = products.store_id
-                  LEFT JOIN branches
-                            ON branches.id = products.branch_id
-                                AND branches.store_id = products.store_id
-         WHERE products.deleted_at IS NULL
-           AND (
-             products.product_number IS NULL
-                 OR TRIM(products.product_number) = ''
-                 OR products.product_number NOT REGEXP
-                  '^[A-Za-z0-9]{2,8}-[A-Za-z0-9]{2,8}-(PRD-)?[0-9]{3,}$'
-             )
-         ORDER BY products.store_id ASC,
-                  products.branch_id ASC,
-                  products.id ASC`
-    );
-
-    const branchState = new Map();
-
-    for (const product of products) {
-        const storeId = Number(product.store_id);
-        const branchId = Number(product.branch_id || 0);
-
-        if (!storeId || !branchId || !product.store_code || !product.branch_code) {
-            continue;
-        }
-
-        const key = `${storeId}:${branchId}`;
-
-        if (!branchState.has(key)) {
-            const [maxRows] = await connection.execute(
-                `SELECT COALESCE(
-                                MAX(
-                                        CAST(
-                                                SUBSTRING_INDEX(product_number, '-', -1)
-                                            AS UNSIGNED
-                                        )
-                                ),
-                                0
-                        ) AS maximum
-                 FROM products
-                 WHERE store_id = ?
-                   AND branch_id = ?
-                   AND product_number REGEXP
-                       '^[A-Za-z0-9]{2,8}-[A-Za-z0-9]{2,8}-(PRD-)?[0-9]{3,}$'`,
-                [storeId, branchId]
-            );
-
-            branchState.set(
-                key,
-                Number(maxRows?.[0]?.maximum || 0)
-            );
-        }
-
-        const nextSequence = Number(branchState.get(key) || 0) + 1;
-        branchState.set(key, nextSequence);
-
-        const replacement = buildProductNumber(
-            String(product.store_code),
-            String(product.branch_code),
-            nextSequence
-        );
-
-        await connection.execute(
-            `UPDATE products
-             SET product_number = ?
-             WHERE id = ?
-               AND (
-                 product_number IS NULL
-                     OR TRIM(product_number) = ''
-                     OR product_number NOT REGEXP
-                      '^[A-Za-z0-9]{2,8}-[A-Za-z0-9]{2,8}-(PRD-)?[0-9]{3,}$'
-                 )`,
-            [replacement, Number(product.id)]
-        );
-    }
-
-    // Sync the sequence table to the actual Product Nos. already stored.
-    const [sequenceMaximums] = await connection.execute(
-        `SELECT
-             store_id,
-             branch_id,
-             COALESCE(
-                     MAX(
-                             CAST(
-                                     SUBSTRING_INDEX(product_number, '-', -1)
-                                 AS UNSIGNED
-                             )
-                     ),
-                     0
-             ) AS maximum
-         FROM products
-         WHERE branch_id IS NOT NULL
-           AND product_number REGEXP
-               '^[A-Za-z0-9]{2,8}-[A-Za-z0-9]{2,8}-(PRD-)?[0-9]{3,}$'
-         GROUP BY store_id, branch_id`
-    );
-
-    for (const row of sequenceMaximums) {
-        await commitProductSequence(
-            connection,
-            Number(row.store_id),
-            Number(row.branch_id),
-            Number(row.maximum || 0)
-        );
-    }
-
-    await addIndexIfMissing(
-        connection,
-        "stores",
-        "uq_stores_store_code",
-        "UNIQUE INDEX uq_stores_store_code (store_code)"
-    );
-
-    await addIndexIfMissing(
-        connection,
-        "branches",
-        "uq_branches_store_branch_code",
-        "UNIQUE INDEX uq_branches_store_branch_code (store_id, branch_code)"
-    );
-
-    await addIndexIfMissing(
-        connection,
-        "products",
-        "uq_products_product_number",
-        "UNIQUE INDEX uq_products_product_number (product_number)"
-    );
+async function tableHasIndex() {
+    return true;
 }
 
 function normalizeRemovalStatus(value) {
@@ -2864,189 +2109,95 @@ async function getProductRemovalImpact(
 
     // POS history. Any order item referencing the product is historical data
     // that should survive product removal.
-    if (await tableExists(connection, "order_items")) {
-        const [rows] = await connection.execute(
-            `SELECT COUNT(*) AS total
-             FROM order_items
-             WHERE product_id = ?`,
-            [productId]
-        );
-
-        counts.posSales = Number(rows[0]?.total || 0);
-        if (counts.posSales > 0) {
-            history.push("POS sales history");
-        }
+    const [posRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM ${V2_ORDER_ITEMS} order_items
+         WHERE order_items.product_id = ?`,
+        [productId]
+    );
+    counts.posSales = Number(posRows[0]?.total || 0);
+    if (counts.posSales > 0) {
+        history.push("POS sales history");
     }
 
-    // Booking history and unresolved bookings. Pending Review, Confirmed and
-    // Preparing are considered active because the booking has not yet reached
-    // a final Completed/Cancelled state.
-    if (
-        await tableExists(connection, "booking_items") &&
-        await tableExists(connection, "bookings")
-    ) {
-        const [historyRows] = await connection.execute(
-            `SELECT COUNT(*) AS total
-             FROM booking_items
-             WHERE product_id = ?`,
-            [productId]
+    // Booking history and unresolved bookings.
+    const [historyRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM ${V2_PRODUCT_BOOKING_ITEMS} booking_items
+         WHERE booking_items.product_id = ?`,
+        [productId]
+    );
+    counts.bookings = Number(historyRows[0]?.total || 0);
+    if (counts.bookings > 0) {
+        history.push("booking history");
+    }
+    const [activeRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM ${V2_PRODUCT_BOOKING_ITEMS} bi
+                  INNER JOIN bookings b
+                             ON b.id = bi.booking_id
+         WHERE bi.product_id = ?
+           AND LOWER(TRIM(COALESCE(b.status, ''))) IN ${V2_ACTIVE_BOOKING_STATUSES_SQL}`,
+        [productId]
+    );
+    counts.activeBookings = Number(activeRows[0]?.total || 0);
+    if (counts.activeBookings > 0) {
+        blockers.push(
+            "This product is used by an active booking. Complete or cancel the booking before removing the product."
         );
+    }
 
-        counts.bookings = Number(historyRows[0]?.total || 0);
-        if (counts.bookings > 0) {
-            history.push("booking history");
-        }
-
-        const [activeRows] = await connection.execute(
-            `SELECT COUNT(*) AS total
-             FROM booking_items bi
-                      INNER JOIN bookings b
-                                 ON b.id = bi.booking_id
-             WHERE bi.product_id = ?
-               AND LOWER(TRIM(COALESCE(b.status, ''))) IN
-                   ('pending review','approved','approved - awaiting payment','awaiting payment','confirmed','preparing','released','return inspection','pending settlement','event in progress')`,
-            [productId]
-        );
-
-        counts.activeBookings = Number(activeRows[0]?.total || 0);
-        if (counts.activeBookings > 0) {
+    // Packages list their contents in package_items.
+    const [packageRows] = await connection.execute(
+        `SELECT p.id, p.package_name AS name, p.status
+         FROM ${V2_PRODUCT_PACKAGE_ITEMS} pi
+                  INNER JOIN packages p ON p.id = pi.package_id
+         WHERE pi.product_id = ?
+           AND p.store_id = ?
+             ${activeBranchId ? "AND p.branch_id = ?" : ""}
+         GROUP BY p.id, p.package_name, p.status`,
+        activeBranchId ? [productId, storeId, activeBranchId] : [productId, storeId]
+    );
+    for (const pkg of packageRows) {
+        counts.packages += 1;
+        if (normalizeRemovalStatus(pkg.status) === "active") {
+            counts.activePackages += 1;
             blockers.push(
-                "This product is used by an active booking. Complete or cancel the booking before removing the product."
+                `This product is included in the active package “${toSafeString(pkg.name, 120) || `Package #${pkg.id}`}”. Remove it from that package first.`
             );
         }
     }
-
-    // Packages are stored primarily in packages.inclusions as JSON in the
-    // current StockNBook implementation. Read and inspect the JSON in JS so the
-    // check remains compatible with MySQL/TiDB JSON/text storage.
-    if (await tableExists(connection, "packages")) {
-        const packageColumns = {
-            branchId: await tableHasColumn(connection, "packages", "branch_id"),
-            status: await tableHasColumn(connection, "packages", "status"),
-            inclusions: await tableHasColumn(connection, "packages", "inclusions"),
-        };
-
-        if (packageColumns.inclusions) {
-            let packageQuery = `
-                SELECT id, name,
-                       ${packageColumns.status ? "status" : "'Active' AS status"},
-                       inclusions
-                FROM packages
-                WHERE store_id = ?
-            `;
-            const packageParams = [storeId];
-
-            if (activeBranchId && packageColumns.branchId) {
-                packageQuery += " AND branch_id = ?";
-                packageParams.push(activeBranchId);
-            }
-
-            const [packageRows] = await connection.execute(
-                packageQuery,
-                packageParams
-            );
-
-            for (const pkg of packageRows) {
-                const inclusions = parsePackageInclusions(pkg.inclusions);
-                if (!packageIncludesProduct(inclusions, productId)) continue;
-
-                counts.packages += 1;
-
-                if (normalizeRemovalStatus(pkg.status) === "active") {
-                    counts.activePackages += 1;
-                    blockers.push(
-                        `This product is included in the active package “${toSafeString(pkg.name, 120) || `Package #${pkg.id}`}”. Remove it from that package first.`
-                    );
-                }
-            }
-
-            if (counts.packages > 0) {
-                history.push("package history");
-            }
-        }
+    if (counts.packages > 0) {
+        history.push("package history");
     }
 
-    // Backward compatibility for installations that use a normalized
-    // package_items table in addition to the packages.inclusions JSON field.
-    if (
-        await tableExists(connection, "package_items") &&
-        await tableHasColumn(connection, "package_items", "product_id")
-    ) {
-        const [packageItemRows] = await connection.execute(
-            `SELECT COUNT(*) AS total
-             FROM package_items
-             WHERE product_id = ?`,
-            [productId]
-        );
-
-        const normalizedPackageHistory = Number(packageItemRows[0]?.total || 0);
-        if (normalizedPackageHistory > 0) {
-            if (counts.packages === 0) history.push("package history");
-            counts.packages = Math.max(counts.packages, normalizedPackageHistory);
-        }
-
-        if (
-            await tableHasColumn(connection, "package_items", "package_id") &&
-            await tableExists(connection, "packages") &&
-            await tableHasColumn(connection, "packages", "status")
-        ) {
-            const [activePackageRows] = await connection.execute(
-                `SELECT COUNT(*) AS total
-                 FROM package_items pi
-                          INNER JOIN packages p
-                                     ON p.id = pi.package_id
-                 WHERE pi.product_id = ?
-                   AND LOWER(TRIM(COALESCE(p.status, ''))) = 'active'`,
-                [productId]
-            );
-
-            const normalizedActivePackages = Number(activePackageRows[0]?.total || 0);
-            if (normalizedActivePackages > 0 && counts.activePackages === 0) {
-                blockers.push(
-                    "This product is included in an active package. Remove it from the package first."
-                );
-            }
-            counts.activePackages = Math.max(
-                counts.activePackages,
-                normalizedActivePackages
-            );
-        }
+    // Stock-in history (inventory_movements).
+    const [restockRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM inventory_movements m
+                  JOIN branch_inventory bi ON bi.id = m.branch_inventory_id
+                  JOIN product_variants v ON v.id = bi.variant_id
+         WHERE v.product_id = ?
+           AND m.quantity_change > 0
+           AND m.movement_type IN ('MANAGER_RECEIPT','STAFF_RECEIPT','RESTOCK','STOCK_IN')`,
+        [productId]
+    );
+    counts.restocks = Number(restockRows[0]?.total || 0);
+    if (counts.restocks > 0) {
+        history.push("restock history");
     }
 
-    // Restock history is optional and is created by this Lambda when needed.
-    if (
-        await tableExists(connection, "restock_history") &&
-        await tableHasColumn(connection, "restock_history", "product_id")
-    ) {
-        const [rows] = await connection.execute(
-            `SELECT COUNT(*) AS total
-             FROM restock_history
-             WHERE product_id = ?`,
-            [productId]
-        );
-
-        counts.restocks = Number(rows[0]?.total || 0);
-        if (counts.restocks > 0) {
-            history.push("restock history");
-        }
-    }
-
-    if (await tableExists(connection, "inventory_purchase_items")) {
-        const [rows] = await connection.execute(
-            `SELECT COUNT(*) AS total FROM inventory_purchase_items WHERE product_id=?`, [productId]);
-        if (Number(rows[0]?.total || 0) > 0) history.push("supplier purchase history");
-    }
-
-    // A supplier purchase is a financial record and must survive product removal.
-    if (await tableExists(connection, "inventory_initial_purchases")) {
-        const [purchaseRows] = await connection.execute(
-            `SELECT COUNT(*) AS total FROM inventory_initial_purchases
-             WHERE store_id = ? AND product_id = ?`,
-            [storeId, productId]
-        );
-        if (Number(purchaseRows[0]?.total || 0) > 0) {
-            history.push("initial supplier purchase / payable history");
-        }
+    // Any recorded stock movement must be preserved with the product.
+    const [movementRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM inventory_movements m
+                  JOIN branch_inventory bi ON bi.id = m.branch_inventory_id
+                  JOIN product_variants v ON v.id = bi.variant_id
+         WHERE v.product_id = ?`,
+        [productId]
+    );
+    if (Number(movementRows[0]?.total || 0) > 0) {
+        history.push("stock movement history");
     }
 
     // Expiration by itself is not a reason for permanent deletion. Preserve the
@@ -3102,111 +2253,61 @@ async function getVariantRemovalImpact(connection, storeId, activeBranchId, prod
     const blockers = [];
     const history = [];
     const counts = {};
-
-    const referenceCount = async (table, name) => {
-        if (!(await tableExists(connection, table)) ||
-            !(await tableHasColumn(connection, table, "product_id"))) return 0;
-        const hasVariantId = await tableHasColumn(connection, table, "variant_id");
-        // A NULL variant_id can be a legacy, unallocated reference to any
-        // variant of this product. Never silently treat it as unrelated.
-        const [rows] = await connection.execute(
-            `SELECT COUNT(*) AS total FROM ${table} WHERE product_id=?` +
-            (hasVariantId ? " AND (variant_id=? OR variant_id IS NULL)" : ""),
-            hasVariantId ? [productId, variantId] : [productId]
-        );
+    const referenceCount = async (sql, params, name) => {
+        const [rows] = await connection.execute(sql, params);
         const count = Number(rows[0]?.total || 0);
         counts[name] = count;
         if (count > 0) history.push(name);
         return count;
     };
+    await referenceCount(
+        `SELECT COUNT(*) AS total FROM order_items WHERE variant_id=?`,
+        [variantId], "POS sales history");
+    await referenceCount(
+        `SELECT COUNT(*) AS total FROM inventory_movements m
+                                           JOIN branch_inventory bi ON bi.id = m.branch_inventory_id
+         WHERE bi.variant_id=?`,
+        [variantId], "stock movement history");
 
-    await referenceCount("order_items", "POS sales history");
-    await referenceCount("inventory_purchase_items", "supplier purchase history");
-    await referenceCount("inventory_stock_receipt_items", "stock receipt history");
-    await referenceCount("inventory_stock_movements", "stock movement history");
-    await referenceCount("inventory_stock_adjustments", "stock adjustment history");
-
-    // This legacy table records variant_name instead of a stable variant id.
-    // Treat product-level history as a reference rather than deleting its data.
-    await referenceCount("restock_history", "restock history");
-    await referenceCount("inventory_initial_purchases", "initial purchase history");
-
-    if (await tableExists(connection, "booking_items") &&
-        await tableExists(connection, "bookings") &&
-        await tableHasColumn(connection, "booking_items", "product_id")) {
-        const hasVariantId = await tableHasColumn(connection, "booking_items", "variant_id");
-        const condition = hasVariantId ? " AND (bi.variant_id=? OR bi.variant_id IS NULL)" : "";
-        const args = hasVariantId ? [productId, variantId] : [productId];
-        const [rows] = await connection.execute(
-            `SELECT COUNT(*) AS total FROM booking_items bi WHERE bi.product_id=?${condition}`, args
-        );
-        counts.bookings = Number(rows[0]?.total || 0);
-        if (counts.bookings > 0) history.push("booking history");
-        const [activeRows] = await connection.execute(
-            `SELECT COUNT(*) AS total FROM booking_items bi
-                                               JOIN bookings b ON b.id=bi.booking_id
-             WHERE bi.product_id=?${condition}
-               AND LOWER(TRIM(COALESCE(b.status,''))) IN ('pending review','approved','approved - awaiting payment','awaiting payment','confirmed','preparing','released','return inspection','pending settlement','event in progress')`, args
-        );
-        if (Number(activeRows[0]?.total || 0) > 0) {
-            blockers.push("This variant may be needed for an active booking. Complete or cancel the booking first.");
-        }
+    const [bookingRows] = await connection.execute(
+        `SELECT COUNT(*) AS total FROM booking_items bi WHERE bi.variant_id=?`, [variantId]
+    );
+    counts.bookings = Number(bookingRows[0]?.total || 0);
+    if (counts.bookings > 0) history.push("booking history");
+    const [activeRows] = await connection.execute(
+        `SELECT COUNT(*) AS total FROM booking_items bi
+                                           JOIN bookings b ON b.id=bi.booking_id
+         WHERE bi.variant_id=?
+           AND LOWER(TRIM(COALESCE(b.status,''))) IN ${V2_ACTIVE_BOOKING_STATUSES_SQL}`,
+        [variantId]
+    );
+    if (Number(activeRows[0]?.total || 0) > 0) {
+        blockers.push("This variant may be needed for an active booking. Complete or cancel the booking first.");
     }
 
-    // JSON package inclusions can be product-level or variant-specific.
-    // Product-level inclusions are ambiguous, so protect all child variants.
-    if (await tableExists(connection, "packages") &&
-        await tableHasColumn(connection, "packages", "inclusions")) {
-        const hasBranch = await tableHasColumn(connection, "packages", "branch_id");
-        const hasStatus = await tableHasColumn(connection, "packages", "status");
-        const [rows] = await connection.execute(
-            `SELECT id, name, ${hasStatus ? "status" : "'Active' AS status"}, inclusions
-             FROM packages WHERE store_id=?` +
-            (activeBranchId && hasBranch ? " AND branch_id=?" : ""),
-            activeBranchId && hasBranch ? [storeId, activeBranchId] : [storeId]
-        );
-        for (const pkg of rows) {
-            const matched = parsePackageInclusions(pkg.inclusions).some(item => {
-                if (!item || typeof item !== "object") return false;
-                const itemProductId = Number(item.productId ?? item.product_id ?? item.id ?? 0);
-                const itemVariantId = item.variantId ?? item.variant_id;
-                return itemProductId === productId &&
-                    (itemVariantId == null || itemVariantId === "" || Number(itemVariantId) === variantId);
-            });
-            if (!matched) continue;
-            history.push("package history");
-            if (normalizeRemovalStatus(pkg.status) === "active") {
-                blockers.push(`This variant may be used in active package "${toSafeString(pkg.name, 120) || pkg.id}". Remove it from the package first.`);
-            }
+    const [packageRows] = await connection.execute(
+        `SELECT p.id, p.package_name AS name, p.status
+         FROM package_items pi
+                  JOIN packages p ON p.id=pi.package_id
+         WHERE pi.variant_id=?
+         GROUP BY p.id, p.package_name, p.status`,
+        [variantId]
+    );
+    for (const pkg of packageRows) {
+        history.push("package history");
+        if (normalizeRemovalStatus(pkg.status) === "active") {
+            blockers.push(`This variant may be used in active package "${toSafeString(pkg.name, 120) || pkg.id}". Remove it from the package first.`);
         }
     }
-    if (await tableExists(connection, "package_items") &&
-        await tableHasColumn(connection, "package_items", "product_id")) {
-        const hasVariantId = await tableHasColumn(connection, "package_items", "variant_id");
-        const condition = hasVariantId ? " AND (pi.variant_id=? OR pi.variant_id IS NULL)" : "";
-        const args = hasVariantId ? [productId, variantId] : [productId];
-        const [rows] = await connection.execute(
-            `SELECT COUNT(*) AS total FROM package_items pi WHERE pi.product_id=?${condition}`, args
-        );
-        if (Number(rows[0]?.total || 0) > 0) history.push("package history");
-        if (await tableExists(connection, "packages") &&
-            await tableHasColumn(connection, "packages", "status") &&
-            await tableHasColumn(connection, "package_items", "package_id")) {
-            const [active] = await connection.execute(
-                `SELECT COUNT(*) AS total FROM package_items pi
-                                                   JOIN packages p ON p.id=pi.package_id
-                 WHERE pi.product_id=?${condition}
-                   AND LOWER(TRIM(COALESCE(p.status,'')))='active'`, args
-            );
-            if (Number(active[0]?.total || 0) > 0) {
-                blockers.push("This variant may be used in an active package. Remove that package inclusion first.");
-            }
-        }
-    }
+    void productId;
+    void storeId;
+    void activeBranchId;
+
     // Expiration records are retained under StockNBook's established archive policy.
     if (isExpiredInventoryDate(variant.expiration_date ?? variant.expirationDate)) {
         history.push("expired inventory record");
     }
+
     return {
         mode: blockers.length ? "blocked" : history.length ? "archive" : "permanent",
         blockers: [...new Set(blockers)],
@@ -3218,32 +2319,30 @@ async function getVariantRemovalImpact(connection, storeId, activeBranchId, prod
 // Must run inside a transaction after locking the parent to serialize against
 // stock receipts, stock adjustments, and edits to that same product.
 async function applyVariantRemoval(connection, storeId, activeBranchId, productId, variantId, employee, forceArchive = false) {
-    let sql = `SELECT id, name, product_number AS productNumber, has_variants AS hasVariants,
-                      branch_id AS branchId FROM products
-               WHERE id=? AND store_id=? AND deleted_at IS NULL`;
-    const params = [productId, storeId];
-    if (activeBranchId) { sql += " AND branch_id=?"; params.push(activeBranchId); }
-    sql += " FOR UPDATE";
-    const [products] = await connection.execute(sql, params);
-    if (!products.length || !Number(products[0].hasVariants)) {
+    const locked = await lockProductForUpdate(connection, storeId, activeBranchId, productId);
+    if (!locked || !Number(locked.has_variants)) {
         const err = new Error("Active variant product not found.");
         err.removalStatus = 404;
         throw err;
     }
-    const product = products[0];
-    const [variants] = await connection.execute(
-        `SELECT id, variant_number AS variantNumber, variant_values AS variantValues,
-                expiration_date, stock
-         FROM product_variants
-         WHERE id=? AND product_id=? AND deleted_at IS NULL FOR UPDATE`,
-        [variantId, productId]
-    );
+    const product = {
+        id: Number(locked.id),
+        name: locked.name,
+        productNumber: locked.product_number,
+        hasVariants: locked.has_variants,
+        branchId: locked.branch_id,
+    };
+    const variants = await lockVariantsForUpdate(connection, productId, variantId);
     if (!variants.length) {
         const err = new Error("The selected variant is no longer active. Refresh inventory.");
         err.removalStatus = 404;
         throw err;
     }
-    const variant = variants[0];
+    const variant = {
+        ...variants[0],
+        variantNumber: variants[0].variant_number,
+        variantValues: variants[0].variant_values,
+    };
     if (!isVariantExpiryRemovalEligible(variant)) {
         const err = new Error("Only expired or expiring-soon variants can be removed from this review action.");
         err.removalStatus = 409;
@@ -3259,76 +2358,75 @@ async function applyVariantRemoval(connection, storeId, activeBranchId, productI
     const mode = forceArchive ? "archive" : impact.mode;
     if (mode === "archive") {
         const [result] = await connection.execute(
-            `UPDATE product_variants SET deleted_at=NOW()
-             WHERE id=? AND product_id=? AND deleted_at IS NULL`, [variantId, productId]
+            `UPDATE product_variants SET deleted_at=NOW(), status='inactive'
+             WHERE id=? AND product_id=? AND is_default=0 AND deleted_at IS NULL`, [variantId, productId]
         );
         if (!Number(result.affectedRows)) throw new Error("Variant was not archived.");
+        await connection.execute(
+            `UPDATE branch_inventory SET status='inactive' WHERE variant_id=?`, [variantId]
+        );
     } else {
+        await connection.execute(
+            `DELETE FROM branch_inventory WHERE variant_id=? AND on_hand_quantity=0`, [variantId]
+        );
         const [result] = await connection.execute(
-            `DELETE FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`,
+            `DELETE FROM product_variants WHERE id=? AND product_id=? AND is_default=0 AND deleted_at IS NULL`,
             [variantId, productId]
         );
         if (!Number(result.affectedRows)) throw new Error("Variant was not deleted.");
     }
 
-    // Never remove or change sibling variants. Update only the parent summary,
-    // using remaining ACTIVE variants. Archive an empty parent but keep its
-    // identifiers and transaction references intact.
+    // Never remove or change sibling variants. Keep the parent's display price
+    // in line with the remaining ACTIVE variants; archive an empty parent.
     const [remaining] = await connection.execute(
-        `SELECT stock, alert_level AS alertLevel, original_price AS originalPrice,
-                sales_price AS salesPrice
-         FROM product_variants WHERE product_id=? AND deleted_at IS NULL`, [productId]
+        `SELECT pv.stock, pv.alert_level AS alertLevel, pv.original_price AS originalPrice,
+                pv.sales_price AS salesPrice
+         FROM ${V2_PRODUCT_VARIANTS} pv WHERE pv.product_id=? AND pv.deleted_at IS NULL`, [productId]
     );
     if (remaining.length) {
-        const stock = getVariantTotalStock(remaining);
-        const alert = getVariantTotalAlert(remaining);
         const cost = getMinVariantPrice(remaining, "originalPrice");
         const price = getMinVariantPrice(remaining, "salesPrice");
         await connection.execute(
-            `UPDATE products SET stock=?, alert_level=?, original_price=?, sales_price=?
-             WHERE id=? AND store_id=? AND deleted_at IS NULL`,
-            [stock, alert, cost, price, productId, storeId]
+            `UPDATE product_variants SET cost_price=?, selling_price=?
+             WHERE product_id=? AND is_default=1`,
+            [cost, price, productId]
         );
     } else {
         await connection.execute(
-            `UPDATE products SET stock=0, alert_level=0, deleted_at=NOW()
+            `UPDATE products SET deleted_at=NOW(), status='inactive'
              WHERE id=? AND store_id=? AND deleted_at IS NULL`,
             [productId, storeId]
         );
     }
+
     await logEmployeeAction(connection, {
         storeId, branchId: Number(product.branchId), employee,
         module: "Inventory", referenceNumber: variant.variantNumber || product.productNumber || String(variantId),
         action: mode === "archive" ? "Archived variant" : "Permanently deleted variant",
         referenceId: String(productId),
-        details: `${mode === "archive" ? "Archived" : "Deleted"} variant ${getVariantDisplayName(parseVariantValues(variant.variantValues))} (${variant.variantNumber || variantId}) of ${product.name}; sibling variants unchanged`,
+        details: `${mode === "archive" ? "Archived" : "Deleted"} variant ${getVariantDisplayName(parseVariantValues(variant.variantValues))} (${variant.variantNumber || variantId}) of ${product.name}; sibling variants were not changed`,
     });
+
     return { mode, impact: { ...impact, mode } };
 }
 
 async function archiveProduct(connection, storeId, activeBranchId, productId) {
+    const locked = await lockProductForUpdate(connection, storeId, activeBranchId, productId);
+    if (!locked) return 0;
     await connection.execute(
         `UPDATE product_variants
-         SET deleted_at = COALESCE(deleted_at, NOW())
-         WHERE product_id = ?`,
+         SET deleted_at = COALESCE(deleted_at, NOW()), status = 'inactive'
+         WHERE product_id = ? AND is_default = 0`,
         [productId]
     );
-
-    let query = `
-        UPDATE products
-        SET deleted_at = NOW()
-        WHERE id = ?
-          AND store_id = ?
-          AND deleted_at IS NULL
-    `;
-    const params = [productId, storeId];
-
-    if (activeBranchId) {
-        query += " AND branch_id = ?";
-        params.push(activeBranchId);
-    }
-
-    const [result] = await connection.execute(query, params);
+    const [result] = await connection.execute(
+        `UPDATE products
+         SET deleted_at = NOW(), status = 'inactive'
+         WHERE id = ?
+           AND store_id = ?
+           AND deleted_at IS NULL`,
+        [productId, storeId]
+    );
     return Number(result.affectedRows || 0);
 }
 
@@ -3338,27 +2436,27 @@ async function permanentlyDeleteProduct(
     activeBranchId,
     productId
 ) {
-    // Variants are safe to physically remove only after the impact check proves
-    // that no transaction/package/booking/restock history depends on the product.
+    const locked = await lockProductForUpdate(connection, storeId, activeBranchId, productId);
+    if (!locked) return 0;
+    // Only an unused product reaches this point (the impact check found no
+    // sales, booking, package or stock history), so its rows can be removed.
+    await connection.execute(
+        `DELETE bi FROM branch_inventory bi
+                            JOIN product_variants v ON v.id = bi.variant_id
+         WHERE v.product_id = ?`,
+        [productId]
+    );
     await connection.execute(
         "DELETE FROM product_variants WHERE product_id = ?",
         [productId]
     );
-
-    let query = `
-        DELETE FROM products
-        WHERE id = ?
-          AND store_id = ?
-          AND deleted_at IS NULL
-    `;
-    const params = [productId, storeId];
-
-    if (activeBranchId) {
-        query += " AND branch_id = ?";
-        params.push(activeBranchId);
-    }
-
-    const [result] = await connection.execute(query, params);
+    const [result] = await connection.execute(
+        `DELETE FROM products
+         WHERE id = ?
+           AND store_id = ?
+           AND deleted_at IS NULL`,
+        [productId, storeId]
+    );
     return Number(result.affectedRows || 0);
 }
 
@@ -3369,16 +2467,8 @@ async function permanentlyDeleteProduct(
 // Keep inventory's paid-POS filter aligned with lambda-pos/index.js, but do
 // not reference optional order columns that may be absent in an older schema.
 // The mandatory payment_mode column identifies completed checkout payments.
-function ownerRecordedPosFilterSql({hasCustomerType = false, hasControlNumber = false} = {}) {
-    const indicators = [];
-    if (hasCustomerType) indicators.push("UPPER(TRIM(COALESCE(o.customer_type,''))) = 'WALK_IN'");
-    indicators.push("o.order_id LIKE '%-POS-%'");
-    if (hasControlNumber) indicators.push("o.control_number LIKE 'INV-%'");
-    // With neither optional identifier, this database's orders table is the
-    // POS checkout ledger; use the existing settled-payment filter alone.
-    const identity = hasCustomerType || hasControlNumber
-        ? `(${indicators.join(' OR ')}) AND ` : '';
-    return `${identity}UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')`;
+function ownerRecordedPosFilterSql() {
+    return "LOWER(COALESCE(o.status,'completed')) <> 'voided' AND UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')";
 }
 
 async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}) {
@@ -3390,88 +2480,83 @@ async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}
     const expiryLimit = expires.toISOString().slice(0, 10);
     const counts = {healthy:0, expiring:0, low:0, slow:0, maintenance:0};
     const conditions = new Set();
-    const present = async table => (await tableExists(connection,table));
     const status = ({maintenance=false,expiring=false,low=false,slow=false}) =>
         maintenance ? 'maintenance' : expiring ? 'expiring' : low ? 'low' : slow ? 'slow' : 'healthy';
-    const date = v => String(v ?? '').slice(0, 10);
+    const date = v => (v instanceof Date ? v.toISOString() : String(v ?? '')).slice(0, 10);
     const args = [storeId, ...(branchId ? [branchId] : [])];
-    let productHistory = false, rentalHistory = false;
 
-    if (await present('products')) {
-        const hasVariants = await present('product_variants');
-        const [rows] = await connection.execute(`SELECT p.id,p.branch_id AS branchId,p.stock,
-                                                        p.alert_level AS alertLevel,DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS expiresAt,p.has_variants AS hasVariants,
-                                                        DATE_FORMAT(p.created_at,'%Y-%m-%d') AS createdDate,
-                                                        ${hasVariants ? "v.id AS variantId,v.stock AS variantStock,v.alert_level AS variantAlert,DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS variantExpiry" :
-                                                                'NULL AS variantId,NULL AS variantStock,NULL AS variantAlert,NULL AS variantExpiry'}
-                                                 FROM products p ${hasVariants ? 'LEFT JOIN product_variants v ON v.product_id=p.id AND v.deleted_at IS NULL' : ''}
-                                                 WHERE p.store_id=? AND p.deleted_at IS NULL ${branchId ? 'AND p.branch_id=?' : ''}
-                                                 ORDER BY p.id`, args);
-        const products = new Map();
-        for (const row of rows) {
-            const id = Number(row.id);
-            if (!products.has(id)) products.set(id,{...row,variants:[]});
-            if (row.variantId != null) products.get(id).variants.push(row);
-        }
-        const recentlySold = new Set();
-        if (await present('orders') && await present('order_items') &&
-            await tableHasColumn(connection,'order_items','product_id') &&
-            await tableHasColumn(connection,'orders','payment_mode')) {
-            productHistory = true;
-            const recordedPosFilter = ownerRecordedPosFilterSql({
-                hasCustomerType: await tableHasColumn(connection,'orders','customer_type'),
-                hasControlNumber: await tableHasColumn(connection,'orders','control_number'),
-            });
-            const [sales] = await connection.execute(`SELECT DISTINCT oi.product_id AS productId
-                                                      FROM orders o JOIN order_items oi ON oi.order_id=o.order_id AND oi.store_id=o.store_id
-                                                      WHERE o.store_id=? ${branchId ? 'AND o.branch_id=?' : ''} AND o.order_date>=?
-                AND ${recordedPosFilter}`,
-                [...args,slowStart]);
-            sales.forEach(row=>recentlySold.add(Number(row.productId)));
-        }
-        for (const product of products.values()) {
-            const variants = product.variants;
-            const useVariants = Boolean(Number(product.hasVariants)) || variants.length > 0;
-            const quantity = useVariants
-                ? variants.reduce((sum,row)=>sum+Number(row.variantStock||0),0)
-                : Number(product.stock||0);
-            const low = quantity <= 0 || (useVariants
-                ? variants.some(row=>Number(row.variantStock)<=Number(row.variantAlert||0))
-                : Number(product.alertLevel)>0 && quantity<=Number(product.alertLevel));
-            const expiring = useVariants
-                ? variants.some(row=>Number(row.variantStock)>0 && date(row.variantExpiry) && date(row.variantExpiry)<=expiryLimit)
-                : quantity>0 && Boolean(date(product.expiresAt)) && date(product.expiresAt)<=expiryLimit;
-            const slow = productHistory && quantity>0 && date(product.createdDate) &&
-                date(product.createdDate)<=slowStart && !recentlySold.has(Number(product.id));
-            conditions.add(`sale:${Number(product.branchId)}:${Number(product.id)}`);
-            counts[status({expiring,low,slow})]++;
-        }
+    const [rows] = await connection.execute(`SELECT p.id,p.branch_id AS branchId,p.stock,
+                                                    p.alert_level AS alertLevel,DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS expiresAt,p.has_variants AS hasVariants,
+                                                    DATE_FORMAT(p.created_at,'%Y-%m-%d') AS createdDate,
+                                                    v.id AS variantId,v.stock AS variantStock,v.alert_level AS variantAlert,DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS variantExpiry
+                                             FROM ${V2_PRODUCTS} p LEFT JOIN ${V2_PRODUCT_VARIANTS} v ON v.product_id=p.id AND v.deleted_at IS NULL
+                                             WHERE p.store_id=? AND p.deleted_at IS NULL ${branchId ? 'AND p.branch_id=?' : ''}
+                                             ORDER BY p.id`, args);
+    const products = new Map();
+    for (const row of rows) {
+        const id = Number(row.id);
+        if (!products.has(id)) products.set(id,{...row,variants:[]});
+        if (row.variantId != null) products.get(id).variants.push(row);
     }
-    if (await present('rental_equipment')) {
-        const recentlyRented = new Set();
-        if (await present('rental_stock_movements')) {
-            rentalHistory = true;
-            const [moves] = await connection.execute(`SELECT DISTINCT equipment_id AS equipmentId
-                                                      FROM rental_stock_movements WHERE store_id=? ${branchId ? 'AND branch_id=?' : ''}
-                AND type='rented_out' AND occurred_at>=?`, [...args,slowStart]);
-            moves.forEach(row=>recentlyRented.add(Number(row.equipmentId)));
-        }
-        const [rows] = await connection.execute(`SELECT id,branch_id AS branchId,total_units AS totalUnits,
-                                                        rented_out_units AS rentedOut,maintenance_units AS maintenanceUnits,
-                                                        missing_units AS missingUnits,alert_level AS alertLevel,
-                                                        DATE_FORMAT(created_at,'%Y-%m-%d') AS createdDate
-                                                 FROM rental_equipment WHERE store_id=? ${branchId ? 'AND branch_id=?' : ''}
-            AND archived_at IS NULL`, args);
-        for(const row of rows) {
-            const available = Math.max(0, Number(row.totalUnits||0)-Number(row.rentedOut||0)-
-                Number(row.maintenanceUnits||0)-Number(row.missingUnits||0));
-            const maintenance = Number(row.maintenanceUnits)>0 || Number(row.missingUnits)>0;
-            const low = available===0 || (Number(row.alertLevel)>0 && available<=Number(row.alertLevel));
-            const slow = rentalHistory && Number(row.totalUnits)>0 && date(row.createdDate) &&
-                date(row.createdDate)<=slowStart && !recentlyRented.has(Number(row.id));
-            conditions.add(`rental:${Number(row.branchId)}:${Number(row.id)}`);
-            counts[status({maintenance,low,slow})]++;
-        }
+    const recentlySold = new Set();
+    const productHistory = true;
+    const [sales] = await connection.execute(`SELECT DISTINCT oi.product_id AS productId
+                                              FROM orders o JOIN ${V2_ORDER_ITEMS} oi ON oi.order_id=o.order_id AND oi.store_id=o.store_id
+                                              WHERE o.store_id=? ${branchId ? 'AND o.branch_id=?' : ''} AND o.order_date>=?
+                                                AND ${ownerRecordedPosFilterSql()}`,
+        [...args,slowStart]);
+    sales.forEach(row=>recentlySold.add(Number(row.productId)));
+    for (const product of products.values()) {
+        const variants = product.variants;
+        const useVariants = Boolean(Number(product.hasVariants)) || variants.length > 0;
+        const quantity = useVariants
+            ? variants.reduce((sum,row)=>sum+Number(row.variantStock||0),0)
+            : Number(product.stock||0);
+        const low = quantity <= 0 || (useVariants
+            ? variants.some(row=>Number(row.variantStock)<=Number(row.variantAlert||0))
+            : Number(product.alertLevel)>0 && quantity<=Number(product.alertLevel));
+        const expiring = useVariants
+            ? variants.some(row=>Number(row.variantStock)>0 && date(row.variantExpiry) && date(row.variantExpiry)<=expiryLimit)
+            : quantity>0 && Boolean(date(product.expiresAt)) && date(product.expiresAt)<=expiryLimit;
+        const slow = productHistory && quantity>0 && date(product.createdDate) &&
+            date(product.createdDate)<=slowStart && !recentlySold.has(Number(product.id));
+        conditions.add(`sale:${Number(product.branchId)}:${Number(product.id)}`);
+        counts[status({expiring,low,slow})]++;
+    }
+
+    // Rental equipment: branch stock of each equipment item, units currently
+    // released to bookings, and units recorded as unavailable (damaged/repair).
+    const recentlyRented = new Set();
+    const rentalHistory = true;
+    const [moves] = await connection.execute(`SELECT DISTINCT ev.equipment_id AS equipmentId
+                                              FROM booking_items bki
+                                                       JOIN bookings b ON b.id=bki.booking_id
+                                                       JOIN equipment_variants ev ON ev.id=bki.equipment_variant_id
+                                              WHERE b.store_id=? ${branchId ? 'AND b.branch_id=?' : ''}
+                                                AND bki.item_type='rental' AND bki.released_at>=?`, [...args,slowStart]);
+    moves.forEach(row=>recentlyRented.add(Number(row.equipmentId)));
+    const [rentals] = await connection.execute(`SELECT e.id,bi.branch_id AS branchId,bi.on_hand_quantity AS totalUnits,
+                                                       COALESCE((SELECT SUM(bki.quantity-bki.returned_quantity) FROM booking_items bki
+                                                                 JOIN bookings b ON b.id=bki.booking_id
+                                                                 WHERE bki.equipment_variant_id=ev.id AND b.branch_id=bi.branch_id
+                                                                   AND bki.item_type='rental' AND bki.item_status='released'),0) AS rentedOut,
+                                                       bi.unavailable_quantity AS maintenanceUnits,
+                                                       0 AS missingUnits,bi.reorder_level AS alertLevel,
+                                                       DATE_FORMAT(e.created_at,'%Y-%m-%d') AS createdDate
+                                                FROM equipment e
+                                                         JOIN equipment_variants ev ON ev.equipment_id=e.id AND ev.is_default=1
+                                                         JOIN branch_inventory bi ON bi.equipment_variant_id=ev.id
+                                                WHERE e.store_id=? ${branchId ? 'AND bi.branch_id=?' : ''}
+                                                  AND e.deleted_at IS NULL`, args);
+    for(const row of rentals) {
+        const available = Math.max(0, Number(row.totalUnits||0)-Number(row.rentedOut||0)-
+            Number(row.maintenanceUnits||0)-Number(row.missingUnits||0));
+        const maintenance = Number(row.maintenanceUnits)>0 || Number(row.missingUnits)>0;
+        const low = available===0 || (Number(row.alertLevel)>0 && available<=Number(row.alertLevel));
+        const slow = rentalHistory && Number(row.totalUnits)>0 && date(row.createdDate) &&
+            date(row.createdDate)<=slowStart && !recentlyRented.has(Number(row.id));
+        conditions.add(`rental:${Number(row.branchId)}:${Number(row.id)}`);
+        counts[status({maintenance,low,slow})]++;
     }
     return {counts,total:conditions.size,asOfDate};
 }
@@ -3481,46 +2566,19 @@ async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}
  * Supports an explicit booking allocation charge snapshot or an itemized ledger.
  */
 async function loadOwnerRecordedRentalRevenue(connection,{storeId,branchId,dateFrom,dateTo}) {
-    const schemaTables = ['rental_revenue_entries','rental_booking_allocations','rental_staff_allocation_workflow'];
-    const [schema] = await connection.execute(`SELECT TABLE_NAME AS tableName,COLUMN_NAME AS columnName
-                                               FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE()
-                                                                                 AND TABLE_NAME IN ('rental_revenue_entries','rental_booking_allocations','rental_staff_allocation_workflow')`);
-    const columnSet = new Set(schema.map(r=>`${r.tableName}.${r.columnName}`));
-    const has = (t,c) => columnSet.has(`${t}.${c}`);
-    const branchSql = branchId ? ' AND r.branch_id=?' : '';
     const args = [storeId,...(branchId?[branchId]:[]),dateFrom,dateTo];
-    let rows = [], available = false, method = null;
-    if (['store_id','branch_id','equipment_id','amount','revenue_date'].every(c=>has('rental_revenue_entries',c))) {
-        available=true; method='ledger';
-        [rows] = await connection.execute(`SELECT r.branch_id AS branchId,r.equipment_id AS equipmentId,
-                                                  COALESCE(e.name,'Archived rental equipment') AS equipmentName,
-                                                  DATE_FORMAT(r.revenue_date,'%Y-%m-%d') AS revenueDate,r.amount AS revenueAmount
-                                           FROM rental_revenue_entries r LEFT JOIN rental_equipment e ON e.id=r.equipment_id
-                                               AND e.store_id=r.store_id AND e.branch_id=r.branch_id
-                                           WHERE r.store_id=? ${branchSql} AND r.revenue_date>=? AND r.revenue_date<=?`,args);
-    } else if (['store_id','branch_id','equipment_id','status','end_date'].every(c=>has('rental_booking_allocations',c))) {
-        // Accept only a SAVED charge, never multiply today's catalog rate by an old rental.
-        const savedCharge = ['rental_charge_total','charged_total','line_total']
-            .find(c=>has('rental_booking_allocations',c));
-        if(savedCharge && await tableExists(connection,'rental_equipment')) {
-            const workflow = has('rental_staff_allocation_workflow','returned_at') &&
-                has('rental_staff_allocation_workflow','allocation_id');
-            available=true;method='allocation';
-            const dateExpression = workflow ? 'DATE(COALESCE(w.returned_at,a.end_date))' : 'DATE(a.end_date)';
-            [rows] = await connection.execute(`SELECT a.branch_id AS branchId,a.equipment_id AS equipmentId,
-                                                      COALESCE(e.name,'Archived rental equipment') AS equipmentName,
-                                                      DATE_FORMAT(${dateExpression},'%Y-%m-%d') AS revenueDate,
-                                                      a.${savedCharge} AS revenueAmount
-                                               FROM rental_booking_allocations a
-                                                        LEFT JOIN rental_equipment e ON e.id=a.equipment_id AND e.store_id=a.store_id AND e.branch_id=a.branch_id
-                                                   ${workflow ? 'LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id' : ''}
-                                               WHERE a.store_id=? ${branchId ? 'AND a.branch_id=?' : ''}
-                                                 AND a.status='returned' AND ${dateExpression}>=? AND ${dateExpression}<=?`,args);
-        }
-    }
-    if (!available) return {available:false,rows:[],warnings:[
-            'Rental-item charges are not stored in the supplied booking/inventory schema. Record an agreed rental charge per booking item (or post entries to a rental revenue ledger) to enable this report.'
-        ]};
+    const [rows] = await connection.execute(`SELECT b.branch_id AS branchId,ev.equipment_id AS equipmentId,
+                                                    COALESCE(e.equipment_name,bki.item_name_snapshot,'Archived rental equipment') AS equipmentName,
+                                                    DATE_FORMAT(DATE(COALESCE(bki.returned_at,b.rental_end_date,b.event_date)),'%Y-%m-%d') AS revenueDate,
+                                                    bki.line_total AS revenueAmount
+                                             FROM booking_items bki
+                                                      JOIN bookings b ON b.id=bki.booking_id AND b.store_id=bki.store_id
+                                                      JOIN equipment_variants ev ON ev.id=bki.equipment_variant_id
+                                                      LEFT JOIN equipment e ON e.id=ev.equipment_id
+                                             WHERE b.store_id=? ${branchId ? 'AND b.branch_id=?' : ''}
+                                               AND bki.item_type='rental' AND bki.item_status IN ('returned','cleaning','damaged','cleared')
+                                               AND DATE(COALESCE(bki.returned_at,b.rental_end_date,b.event_date))>=?
+                                               AND DATE(COALESCE(bki.returned_at,b.rental_end_date,b.event_date))<=?`,args);
     const normalized=[];
     for (const row of rows) {
         const amount=Number(row.revenueAmount);
@@ -3531,7 +2589,7 @@ async function loadOwnerRecordedRentalRevenue(connection,{storeId,branchId,dateF
         normalized.push({...row,branchId:Number(row.branchId),equipmentId:Number(row.equipmentId),
             revenueAmount:Math.round(amount*100)/100});
     }
-    return {available:true,rows:normalized,warnings:[],method};
+    return {available:true,rows:normalized,warnings:[],method:'allocation'};
 }
 
 /* OWNER INVENTORY: read-only recorded sales, separate from stock valuation. */
@@ -3711,41 +2769,25 @@ async function loadOwnerInventoryPerformance(connection, {storeId, branchId, dat
     const [storeRows] = await connection.execute("SELECT store_name AS storeName FROM stores WHERE id=? LIMIT 1", [storeId]);
     const [branches] = await connection.execute(
         "SELECT id,branch_name AS branchName FROM branches WHERE store_id=? ORDER BY branch_name,id", [storeId]);
-    const [schemaRows] = await connection.execute(
-        `SELECT TABLE_NAME AS tableName,COLUMN_NAME AS columnName
-         FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('orders','order_items')`, []);
-    const columns = new Set(schemaRows.map(row => `${row.tableName}.${row.columnName}`));
-    const hasColumns = (table, names) => names.every(name => columns.has(`${table}.${name}`));
-    const posAvailable = hasColumns("orders", ["order_id", "store_id", "branch_id", "order_date", "total",
-        "payment_mode"]);
-    const itemsAvailable = hasColumns("order_items", ["id", "order_id", "store_id", "quantity", "line_total"]);
-    let rows = [];
-    if (posAvailable) {
-        const recordedPosFilter = ownerRecordedPosFilterSql({
-            hasCustomerType: columns.has("orders.customer_type"),
-            hasControlNumber: columns.has("orders.control_number"),
-        });
-        const optionalItem = (column, alias) => itemsAvailable && columns.has(`order_items.${column}`)
-            ? `oi.${column} AS ${alias}` : `NULL AS ${alias}`;
-        const [salesRows] = await connection.execute(
-            `SELECT o.order_id AS orderId,o.branch_id AS branchId,b.branch_name AS branchName,
-                    DATE_FORMAT(o.order_date,'%Y-%m-%d') AS orderDate,o.total AS orderTotal,
-                    ${optionalItem("id", "itemId")},${optionalItem("product_id", "productId")},
-                    ${optionalItem("product_name", "productName")},${optionalItem("quantity", "quantity")},
-                    ${optionalItem("line_total", "lineTotal")},${optionalItem("cost_price_at_sale", "costPriceAtSale")}
-             FROM orders o LEFT JOIN branches b ON b.id=o.branch_id AND b.store_id=o.store_id
-                 ${itemsAvailable ? "LEFT JOIN order_items oi ON oi.order_id=o.order_id AND oi.store_id=o.store_id" : ""}
-             WHERE o.store_id=? AND o.order_date>=? AND o.order_date<=?${branchId ? " AND o.branch_id=?" : ""}
-               AND ${recordedPosFilter}
-             ORDER BY o.order_date,o.order_id${itemsAvailable ? ",oi.id" : ""} LIMIT 100001`,
-            [storeId, dateFrom, dateTo, ...(branchId ? [branchId] : [])]);
-        if (salesRows.length > 100000) {
-            const error = new Error("This report contains too many sales items. Choose a shorter date range or one branch.");
-            error.ownerInventoryStatus = 400;
-            throw error;
-        }
-        rows = salesRows;
+    const posAvailable = true;
+    const [salesRows] = await connection.execute(
+        `SELECT o.order_number AS orderId,o.branch_id AS branchId,b.branch_name AS branchName,
+                DATE_FORMAT(o.order_date,'%Y-%m-%d') AS orderDate,o.total AS orderTotal,
+                oi.id AS itemId,oi.product_id AS productId,
+                oi.product_name AS productName,oi.quantity AS quantity,
+                oi.line_total AS lineTotal,oi.cost_price_at_sale AS costPriceAtSale
+         FROM orders o LEFT JOIN branches b ON b.id=o.branch_id AND b.store_id=o.store_id
+                       LEFT JOIN ${V2_ORDER_ITEMS} oi ON oi.order_id=o.order_id AND oi.store_id=o.store_id
+         WHERE o.store_id=? AND DATE(o.order_date)>=? AND DATE(o.order_date)<=?${branchId ? " AND o.branch_id=?" : ""}
+           AND ${ownerRecordedPosFilterSql()}
+         ORDER BY o.order_date,o.order_id,oi.id LIMIT 100001`,
+        [storeId, dateFrom, dateTo, ...(branchId ? [branchId] : [])]);
+    if (salesRows.length > 100000) {
+        const error = new Error("This report contains too many sales items. Choose a shorter date range or one branch.");
+        error.ownerInventoryStatus = 400;
+        throw error;
     }
+    const rows = salesRows;
     const rentalReport = await loadOwnerRecordedRentalRevenue(connection,
         {storeId,branchId,dateFrom,dateTo});
     return buildOwnerInventoryPerformance({
@@ -3812,13 +2854,11 @@ exports.handler = async (event) => {
             const [balances]=await connection.execute(
                 `SELECT bi.product_id AS productId, bi.variant_id AS variantId,
                         bi.quantity_on_hand AS onHand,
-                        COALESCE(SUM(ib.remaining_quantity),0) AS eligibleBatches
-                 FROM branch_inventory bi
-                          LEFT JOIN inventory_batches ib ON ib.branch_inventory_id=bi.id
-                     AND ib.status='active' AND ib.remaining_quantity>0
-                     AND (ib.expiration_date IS NULL OR ib.expiration_date>=?)
-                 WHERE bi.store_id=? AND bi.branch_id=? AND bi.status='active'
-                 GROUP BY bi.id,bi.product_id,bi.variant_id,bi.quantity_on_hand`,
+                        CASE WHEN bi.expiration_date IS NULL OR bi.expiration_date>=?
+                                 THEN GREATEST(bi.quantity_on_hand-bi.reserved_quantity-bi.unavailable_quantity,0)
+                             ELSE 0 END AS eligibleBatches
+                 FROM ${V2_BRANCH_INVENTORY} bi
+                 WHERE bi.store_id=? AND bi.branch_id=? AND bi.status='active'`,
                 [eligibleOn,sid,bid]);
             const available=new Map(balances.map(row=>[
                 `${Number(row.productId)}:${row.variantId==null?'regular':Number(row.variantId)}`,
@@ -3902,7 +2942,7 @@ exports.handler = async (event) => {
                 return jsonResponse(403, headers, {error: "Manager account is invalid."});
             }
             const [managerRows] = await connection.execute(
-                `SELECT branch_id,status,permissions FROM managers WHERE id=? AND store_id=? LIMIT 1`,
+                `SELECT branch_id,status,permissions FROM users WHERE id=? AND store_id=? AND role='manager' LIMIT 1`,
                 [managerId,storeId]);
             const manager = managerRows[0];
             if (!manager || !["active","accepted"].includes(String(manager.status).toLowerCase())) {
@@ -4007,7 +3047,7 @@ exports.handler = async (event) => {
                 return unauthorized(headers, "Staff account is not valid.");
             }
             const [currentStaff] = await connection.execute(
-                `SELECT branch_id,status,permissions FROM staff WHERE id=? AND store_id=? LIMIT 1`,
+                `SELECT branch_id,status,permissions FROM users WHERE id=? AND store_id=? AND role='staff' LIMIT 1`,
                 [currentStaffId,storeId]);
             if (!currentStaff.length || Number(currentStaff[0].branch_id) !== activeBranchId ||
                 !["active", "accepted"].includes(String(currentStaff[0].status).toLowerCase())) {
@@ -4032,7 +3072,7 @@ exports.handler = async (event) => {
         }
         if (tokenRole === "staff" && ["complete_staff_stock_receipt", "report_staff_stock_shortage", "report_staff_stock_condition"].includes(action)) {
             const [rows] = await connection.execute(
-                `SELECT permissions FROM staff WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,
+                `SELECT permissions FROM users WHERE id=? AND store_id=? AND branch_id=? AND role='staff' LIMIT 1`,
                 [Number(decoded.staff_id),storeId,activeBranchId]);
             let permissions = {};
             try { permissions = typeof rows[0]?.permissions === "string" ? JSON.parse(rows[0].permissions) : rows[0]?.permissions || {}; }
@@ -4045,29 +3085,20 @@ exports.handler = async (event) => {
 
         // Keep Product No. as a real, unique database field. This also
         // backfills products created before the product_number column existed.
-        await ensureProductNumberSchema(connection);
         // New tables/columns for standardized IDs (outside any transaction).
         await identifiers.ensureIdentifierSchema(connection);
 
         /* STAFF INVENTORY: branch-scoped operational workflow, separate from purchasing.
-         * Tables are deployed by migrations/2026-10-11_staff_inventory_operations.sql.
-         * This action MUST NOT use receive_stock: that action creates a financial purchase.
+         * Shortage and condition reports are stored in stock_issues.
          */
         if (["get_staff_inventory_workspace", "get_staff_inventory_activity", "get_staff_receiving_permissions", "set_staff_receiving_permission", "authorize_staff_stock_receipt",
             "complete_staff_stock_receipt", "cancel_staff_stock_receipt", "report_staff_stock_shortage", "resolve_staff_stock_shortage", "report_staff_stock_condition", "resolve_staff_stock_condition"].includes(action)) {
-            if (!(await tableExists(connection, "staff_stock_receiving_tasks")) ||
-                !(await tableExists(connection, "staff_stock_shortage_reports"))) {
-                return jsonResponse(503, headers, { error: "The Staff Inventory SQL migration is required before using these operations." });
-            }
-            if (!(await tableExists(connection, "staff_stock_condition_reports"))) {
-                return jsonResponse(503, headers, { error: "The Staff product condition reports SQL migration is required." });
-            }
             if (!activeBranchId) return badRequest(headers, "An assigned branch is required.");
             if (!["owner", "manager", "staff"].includes(tokenRole)) return unauthorized(headers, "Inventory access denied.");
             if (tokenRole === "manager") {
                 const managerId=Number(decoded?.manager_id);
                 const [managers]= await connection.execute(
-                    `SELECT permissions,status FROM managers WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,
+                    `SELECT permissions,status FROM users WHERE id=? AND store_id=? AND branch_id=? AND role='manager' LIMIT 1`,
                     [managerId,storeId,activeBranchId]);
                 if (!managers.length || !["active","accepted"].includes(String(managers[0].status).toLowerCase())) {
                     return unauthorized(headers,"Active branch Manager required.");
@@ -4087,7 +3118,7 @@ exports.handler = async (event) => {
             if (tokenRole === "staff") {
                 if (!Number.isInteger(staffId) || staffId <= 0) return unauthorized(headers, "Invalid staff account.");
                 const [rows] = await connection.execute(
-                    `SELECT id, permissions, status FROM staff WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,
+                    `SELECT id, permissions, status FROM users WHERE id=? AND store_id=? AND branch_id=? AND role='staff' LIMIT 1`,
                     [staffId, storeId, activeBranchId]);
                 staffRow = rows[0];
                 if (!staffRow || !["active", "accepted"].includes(String(staffRow.status).toLowerCase())) {
@@ -4113,7 +3144,7 @@ exports.handler = async (event) => {
                 if (!["owner","manager"].includes(tokenRole)) return unauthorized(headers,"Only supervisors may view receiving grants.");
                 const [rows] = await connection.execute(
                     `SELECT id, JSON_UNQUOTE(JSON_EXTRACT(permissions,'$.inventory_stock_receive')) AS stockReceiving
-                     FROM staff WHERE store_id=? AND branch_id=?`,[storeId,activeBranchId]);
+                     FROM users WHERE store_id=? AND branch_id=? AND role='staff'`,[storeId,activeBranchId]);
                 return jsonResponse(200,headers,{success:true, grants:rows.map(row=>({staffId:row.id,allowed:row.stockReceiving==='true'}))});
             }
             // Calculate an Asia/Manila calendar-day range as UTC Unix seconds.
@@ -4144,49 +3175,38 @@ exports.handler = async (event) => {
                             pv.variant_values AS variantValues, m.movement_type AS kind,
                             m.quantity_delta AS quantity, m.reference_id AS reference,
                             m.actor_name AS actorName
-                     FROM inventory_movements m
-                         JOIN branch_inventory bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
-                         JOIN products p ON p.id=bi.product_id AND p.store_id=bi.store_id AND p.branch_id=bi.branch_id
-                         LEFT JOIN product_variants pv ON pv.id=bi.variant_id AND pv.product_id=p.id
+                     FROM ${V2_INVENTORY_MOVEMENTS} m
+                         JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
+                         JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
+                         LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id=bi.variant_id AND pv.product_id=p.id
                      WHERE ${where.join(' AND ')}
                      ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?`,
                     [...params, limit+1, (page-1)*limit]);
                 return jsonResponse(200,headers,{success:true,movements:rows.slice(0,limit),hasMore:rows.length>limit,page});
             }
             if (action === "get_staff_inventory_workspace") {
-                const [receivingTasks] = await connection.execute(
-                    `SELECT t.id, t.product_id AS productId, t.variant_id AS variantId,
-                            p.name AS productName, p.product_number AS productNumber,
-                            pv.variant_values AS variantValues,
-                            t.authorized_quantity AS authorizedQuantity,
-                            COALESCE(t.received_quantity,0) AS alreadyReceived,
-                            (t.authorized_quantity - COALESCE(t.received_quantity,0)) AS quantity,
-                            t.last_receiving_notes AS lastReceivingNotes,
-                            t.delivery_reference AS deliveryReference, t.expiration_date AS expirationDate,
-                            t.status, t.notes, t.created_at AS createdAt
-                     FROM staff_stock_receiving_tasks t
-                              JOIN products p ON p.id=t.product_id AND p.store_id=t.store_id AND p.branch_id=t.branch_id
-                              LEFT JOIN product_variants pv ON pv.id=t.variant_id AND pv.product_id=p.id
-                     WHERE t.store_id=? AND t.branch_id=? AND t.status='pending' AND p.deleted_at IS NULL
-                     ORDER BY t.created_at DESC, t.id DESC LIMIT 40`, [storeId,activeBranchId]);
+                // Staff stock receiving tasks are not part of stocknbook_v2.
+                const receivingTasks = [];
                 const [shortages] = await connection.execute(
-                    `SELECT r.id, r.product_id AS productId, r.variant_id AS variantId,
-                            p.name AS productName, r.stock_snapshot AS stockSnapshot,
-                            r.reorder_snapshot AS reorderSnapshot, r.notes,
+                    `SELECT r.id, bi.product_id AS productId, bi.variant_id AS variantId,
+                            p.name AS productName, bi.quantity_on_hand AS stockSnapshot,
+                            bi.reorder_level AS reorderSnapshot, r.reason AS notes,
                             r.created_at AS createdAt
-                     FROM staff_stock_shortage_reports r
-                              JOIN products p ON p.id=r.product_id AND p.store_id=r.store_id AND p.branch_id=r.branch_id
-                     WHERE r.store_id=? AND r.branch_id=? AND r.status='open'
+                     FROM stock_issues r
+                              JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=r.branch_inventory_id
+                              JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
+                     WHERE r.store_id=? AND r.branch_id=? AND r.issue_type='shortage' AND r.status='open'
                      ORDER BY r.created_at DESC LIMIT 100`, [storeId,activeBranchId]);
                 const [conditionReports] = await connection.execute(
-                    `SELECT r.id, r.product_id AS productId, r.variant_id AS variantId,
-                            p.name AS productName, r.issue_type AS issueType, r.notes,
-                            COALESCE(pv.expiration_date,p.expiration_date) AS expirationDate,
+                    `SELECT r.id, bi.product_id AS productId, bi.variant_id AS variantId,
+                            p.name AS productName, r.issue_type AS issueType, r.reason AS notes,
+                            bi.expiration_date AS expirationDate,
                             r.created_at AS createdAt
-                     FROM staff_stock_condition_reports r
-                              JOIN products p ON p.id=r.product_id AND p.store_id=r.store_id AND p.branch_id=r.branch_id
-                              LEFT JOIN product_variants pv ON pv.id=r.variant_id AND pv.product_id=p.id
+                     FROM stock_issues r
+                              JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=r.branch_inventory_id
+                              JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
                      WHERE r.store_id=? AND r.branch_id=? AND r.status='open'
+                       AND r.issue_type IN ('expired','expiring','damaged')
                      ORDER BY r.created_at DESC, r.id DESC LIMIT 100`,
                     [storeId,activeBranchId]);
                 const [movements] = await connection.execute(
@@ -4194,10 +3214,10 @@ exports.handler = async (event) => {
                             pv.variant_values AS variantValues, m.movement_type AS kind,
                             m.quantity_delta AS quantity, m.reference_type AS referenceType,
                             m.reference_id AS reference, m.actor_name AS actorName
-                     FROM inventory_movements m
-                         JOIN branch_inventory bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
-                         JOIN products p ON p.id=bi.product_id AND p.store_id=bi.store_id AND p.branch_id=bi.branch_id
-                         LEFT JOIN product_variants pv ON pv.id=bi.variant_id AND pv.product_id=p.id
+                     FROM ${V2_INVENTORY_MOVEMENTS} m
+                         JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
+                         JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
+                         LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id=bi.variant_id AND pv.product_id=p.id
                      WHERE m.store_id=? AND m.branch_id=? AND ${operationalMovementsOnly}
                      ORDER BY m.created_at DESC, m.id DESC LIMIT 8`, [storeId,activeBranchId]);
                 // A proper daily count, independent of list limits and previous days.
@@ -4222,7 +3242,7 @@ exports.handler = async (event) => {
                 }
                 await connection.beginTransaction();
                 const [matches] = await connection.execute(
-                    `SELECT id, permissions FROM staff WHERE id=? AND store_id=? AND branch_id=? LIMIT 1 FOR UPDATE`,
+                    `SELECT id, permissions FROM users WHERE id=? AND store_id=? AND branch_id=? AND role='staff' LIMIT 1 FOR UPDATE`,
                     [targetStaffId,storeId,activeBranchId]);
                 if (!matches.length) {await safeRollback(connection);return notFound(headers,"Staff account not found in this branch.");}
                 let current = {};
@@ -4233,7 +3253,7 @@ exports.handler = async (event) => {
                     await safeRollback(connection);return badRequest(headers,"Grant full Inventory access before enabling stock receiving.");
                 }
                 await connection.execute(
-                    `UPDATE staff SET permissions = JSON_SET(COALESCE(permissions,JSON_OBJECT()),'$.inventory_stock_receive', JSON_EXTRACT(?, '$')) WHERE id=? AND store_id=? AND branch_id=?`,
+                    `UPDATE users SET permissions = JSON_SET(COALESCE(permissions,JSON_OBJECT()),'$.inventory_stock_receive', JSON_EXTRACT(?, '$')) WHERE id=? AND store_id=? AND branch_id=? AND role='staff'`,
                     [String(body.allowed), targetStaffId, storeId, activeBranchId]);
                 await logEmployeeAction(connection, {storeId,branchId:activeBranchId,employee,module:"Inventory",
                     action:body.allowed ? "Granted staff receiving access" : "Revoked staff receiving access",
@@ -4242,177 +3262,15 @@ exports.handler = async (event) => {
                 return jsonResponse(200,headers,{success:true,allowed:body.allowed});
             }
             if (action === "authorize_staff_stock_receipt") {
-                if (tokenRole !== "manager" && tokenRole !== "owner") return unauthorized(headers,"Only the manager or owner can authorize receiving tasks.");
-                const {productId,variantId,valid} = itemIdentity();
-                const quantity = Number(body.quantity);
-                const deliveryReference = toSafeString(body.deliveryReference,100);
-                const notes = toSafeString(body.notes,500);
-                let expirationDate;
-                try { expirationDate = normalizeOptionalDate(body.expirationDate); }
-                catch (e) { return badRequest(headers,e.message); }
-                if (!valid || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000 ||
-                    !/^[a-zA-Z0-9][a-zA-Z0-9 _./-]{2,99}$/.test(deliveryReference)) {
-                    return badRequest(headers,"Valid product, quantity and delivery reference (3–100 characters) are required.");
-                }
-                const today = new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Manila",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
-                if (expirationDate && expirationDate < today) return badRequest(headers,"An expired batch cannot be authorized for receiving.");
-                const [products] = await connection.execute(
-                    `SELECT id, has_variants FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL`,
-                    [productId,storeId,activeBranchId]);
-                if (!products.length) return notFound(headers,"Product not in this branch.");
-                if (Boolean(products[0].has_variants) !== (variantId !== null)) return badRequest(headers,"Select the exact product variant.");
-                if (variantId !== null) {
-                    const [variants] = await connection.execute(`SELECT id FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`,[variantId,productId]);
-                    if (!variants.length) return badRequest(headers,"Variant unavailable.");
-                }
-                // Require a mapped V2 row before authorization; POS uses this ledger.
-                const [inventory] = await connection.execute(
-                    `SELECT id FROM branch_inventory WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ? AND status='active'`,
-                    [storeId,activeBranchId,productId,variantId]);
-                if (!inventory.length) return badRequest(headers,"V2 branch inventory is missing for this item. Reconcile inventory before creating a receiving task.");
-                try {
-                    await connection.execute(
-                        `INSERT INTO staff_stock_receiving_tasks (store_id,branch_id,product_id,variant_id,authorized_quantity,delivery_reference,expiration_date,notes,authorized_by)
-                         VALUES (?,?,?,?,?,?,?,?,?)`,
-                        [storeId,activeBranchId,productId,variantId,quantity,deliveryReference,expirationDate,notes,employee.id]);
-                } catch (err) { if (err?.code === "ER_DUP_ENTRY") return jsonResponse(409,headers,{error:"A task already exists for this item and delivery reference."}); throw err; }
-                return jsonResponse(201,headers,{success:true});
+                // Staff stock receiving tasks are not part of stocknbook_v2.
+                // Managers record deliveries directly with Receive Stock.
+                return jsonResponse(410,headers,{error:"Staff receiving tasks are no longer available. Use Receive Stock to record the delivery."});
             }
             if (action === "cancel_staff_stock_receipt") {
-                if (!["manager","owner"].includes(tokenRole)) return unauthorized(headers,"Manager authorization required.");
-                const taskId=Number(body.taskId);
-                if (!Number.isSafeInteger(taskId)||taskId<1) return badRequest(headers,"Invalid receiving task.");
-                const [result] = await connection.execute(`UPDATE staff_stock_receiving_tasks
-                                                           SET status='cancelled' WHERE id=? AND store_id=? AND branch_id=? AND status='pending'`,
-                    [taskId,storeId,activeBranchId]);
-                if (!result.affectedRows) return jsonResponse(409,headers,{error:"Task already completed, cancelled, or unavailable."});
-                return jsonResponse(200,headers,{success:true});
+                return jsonResponse(410,headers,{error:"Staff receiving tasks are no longer available."});
             }
             if (action === "complete_staff_stock_receipt") {
-                if (tokenRole !== "staff" || !allowedReceiving) return unauthorized(headers,"Only designated stock receiving staff may complete this task.");
-                const taskId = Number(body.taskId);
-                const requestKey = toSafeString(body.requestKey,80);
-                if (!Number.isSafeInteger(taskId) || taskId < 1 || !/^[a-zA-Z0-9-]{12,80}$/.test(requestKey)) {
-                    return badRequest(headers,"Valid receiving task and unique request key required.");
-                }
-                if (!(await tableExists(connection,"restock_history"))) return jsonResponse(503,headers,{error:"Restock history table must exist before receiving stock."});
-                if (!(await tableExists(connection,"inventory_movements")) ||
-                    !(await tableExists(connection,"inventory_batches"))) {
-                    return jsonResponse(503,headers,{error:"V2 inventory movement and batch tables are required."});
-                }
-                if (!(await tableExists(connection,"staff_stock_receipt_events"))) {
-                    return jsonResponse(503,headers,{error:"Run the partial receiving SQL migration before recording receipts."});
-                }
-                await connection.beginTransaction();
-                const [tasks] = await connection.execute(
-                    `SELECT * FROM staff_stock_receiving_tasks WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
-                    [taskId,storeId,activeBranchId]);
-                const task = tasks[0];
-                if (!task) { await safeRollback(connection);return notFound(headers,"Receiving task unavailable."); }
-                // Each partial receipt gets its own idempotency event. Retry with the same
-                // requestKey returns success without increasing stock twice.
-                const [existingReceipt] = await connection.execute(
-                    `SELECT id, received_quantity AS receivedQuantity FROM staff_stock_receipt_events
-                     WHERE store_id=? AND branch_id=? AND task_id=? AND request_key=? LIMIT 1`,
-                    [storeId,activeBranchId,taskId,requestKey]);
-                if (existingReceipt.length) {
-                    await safeRollback(connection);
-                    return jsonResponse(200,headers,{success:true,alreadyProcessed:true,
-                        quantity:Number(existingReceipt[0].receivedQuantity)});
-                }
-                // Preserve idempotent retries for receipts completed before this migration.
-                if (task.status === "received" && task.request_key === requestKey) {
-                    await safeRollback(connection);
-                    return jsonResponse(200,headers,{success:true,alreadyProcessed:true});
-                }
-                if (task.status !== "pending") {await safeRollback(connection);return jsonResponse(409,headers,{error:"This receiving task was already processed."});}
-                const remaining = Number(task.authorized_quantity) - Number(task.received_quantity || 0);
-                const quantity = body.receivedQuantity == null ? remaining : Number(body.receivedQuantity);
-                const receivingNotes = toSafeString(body.receivingNotes,500);
-                if (!Number.isSafeInteger(remaining) || remaining < 1 ||
-                    !Number.isSafeInteger(quantity) || quantity < 1 || quantity > remaining) {
-                    await safeRollback(connection);
-                    return badRequest(headers,`Actual acceptable quantity must be between 1 and ${remaining}.`);
-                }
-                if (quantity < remaining && receivingNotes.length < 5) {
-                    await safeRollback(connection);
-                    return badRequest(headers,"Explain the partial delivery in at least 5 characters.");
-                }
-                const dateParts = new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Manila",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date());
-                const part = kind => dateParts.find(p=>p.type===kind)?.value||"";
-                const today = `${part("year")}-${part("month")}-${part("day")}`;
-                if (task.expiration_date && new Date(task.expiration_date).toISOString().slice(0,10) < today) {
-                    await safeRollback(connection);return jsonResponse(409,headers,{error:"The delivery's approved expiration date is now in the past. Ask the Manager to review the batch."});
-                }
-                const [products] = await connection.execute(
-                    `SELECT id,name,has_variants,product_number,stock FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
-                    [task.product_id,storeId,activeBranchId]);
-                if (!products.length) {await safeRollback(connection);return jsonResponse(409,headers,{error:"Product no longer active."});}
-                const product = products[0];
-                const variantId = task.variant_id == null ? null : Number(task.variant_id);
-                const [inventory] = await connection.execute(
-                    `SELECT id,quantity_on_hand,cost_price FROM branch_inventory
-                     WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ? AND status='active' LIMIT 1 FOR UPDATE`,
-                    [storeId,activeBranchId,task.product_id,variantId]);
-                if (!inventory.length) {await safeRollback(connection);return jsonResponse(409,headers,{error:"V2 inventory row missing; ask a manager to reconcile stock."});}
-                const before = Number(inventory[0].quantity_on_hand);
-                if (!Number.isSafeInteger(before) || before + quantity > 2147483647) {await safeRollback(connection);return badRequest(headers,"Stock quantity out of range.");}
-                // Staff receipts also require consistent V2 balances. A missing
-                // historical batch must be reconciled rather than masked by receipt.
-                const [batchCounts]=await connection.execute(
-                    `SELECT COALESCE(SUM(remaining_quantity),0) AS total
-                     FROM inventory_batches WHERE branch_inventory_id=?`,[inventory[0].id]);
-                if (Number(batchCounts[0]?.total||0)!==before) {
-                    await safeRollback(connection);
-                    return jsonResponse(409,headers,{error:"Inventory batch balance differs from branch stock. Ask the Manager to reconcile this product first."});
-                }
-                if (variantId !== null) {
-                    const [v] = await connection.execute(`SELECT id,stock FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL FOR UPDATE`,[variantId,task.product_id]);
-                    if (!v.length) {await safeRollback(connection);return jsonResponse(409,headers,{error:"Variant no longer available."});}
-                    if (Number(v[0].stock)!==before || Number(product.stock)+quantity>2147483647) {await safeRollback(connection);return jsonResponse(409,headers,{error:"Inventory quantities need Manager reconciliation before receiving."});}
-                    await connection.execute(`UPDATE product_variants SET stock=stock+? WHERE id=?`,[quantity,variantId]);
-                }
-                if (variantId === null && Number(product.stock)!==before) {
-                    await safeRollback(connection);return jsonResponse(409,headers,{error:"Stock differs between POS and product inventory; ask the Manager to reconcile it."});
-                }
-                const [receiptEvent] = await connection.execute(
-                    `INSERT INTO staff_stock_receipt_events
-                     (store_id,branch_id,task_id,request_key,received_quantity,received_by,receiving_notes)
-                     VALUES (?,?,?,?,?,?,?)`,
-                    [storeId,activeBranchId,taskId,requestKey,quantity,staffId,receivingNotes || null]);
-                const receiptEventId = Number(receiptEvent.insertId);
-                await connection.execute(`UPDATE products SET stock=stock+? WHERE id=? AND store_id=? AND branch_id=?`,[quantity,task.product_id,storeId,activeBranchId]);
-                await connection.execute(`UPDATE branch_inventory SET quantity_on_hand=quantity_on_hand+? WHERE id=?`,[quantity,inventory[0].id]);
-                await connection.execute(
-                    `INSERT INTO inventory_batches (store_id,branch_id,branch_inventory_id,batch_code,received_quantity,remaining_quantity,unit_cost,received_at,expiration_date,status)
-                     VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,?,'active')`,
-                    [storeId,activeBranchId,inventory[0].id,`STAFF-RCV-${task.id}-${receiptEventId}`.slice(0,100),quantity,quantity,Number(inventory[0].cost_price),task.expiration_date]);
-                await connection.execute(
-                    `INSERT INTO inventory_movements (store_id,branch_id,branch_inventory_id,movement_type,quantity_delta,quantity_before,quantity_after,
-                                                      reference_type,reference_id,actor_id,actor_role,actor_name,notes)
-                     VALUES (?,?,?,'STAFF_RECEIPT',?,?,?,'STAFF_RECEIVING_TASK',?,?,?,?,?)`,
-                    [storeId,activeBranchId,inventory[0].id,quantity,before,before+quantity,String(task.id),staffId,"staff",employee.name,`Delivery: ${task.delivery_reference}${receivingNotes ? `; ${receivingNotes}` : ""}`]);
-                const variantName = variantId != null ? `Variant ${variantId}` : null;
-                await connection.execute(
-                    `INSERT INTO restock_history (store_id,branch_id,product_id,product_name,variant_name,stock_before,quantity_added,current_stock,received_by)
-                     VALUES (?,?,?,?,?,?,?,?,?)`,
-                    [storeId,activeBranchId,task.product_id,product.name,variantName,before,quantity,before+quantity,employee.name]);
-                await connection.execute(
-                    `UPDATE staff_stock_receiving_tasks
-                     SET received_quantity=received_quantity+?,
-                         status=CASE WHEN received_quantity+?>=authorized_quantity THEN 'received' ELSE 'pending' END,
-                         received_by=?,received_at=CURRENT_TIMESTAMP,request_key=?,last_receiving_notes=?
-                     WHERE id=?`,
-                    [quantity,quantity,staffId,requestKey,receivingNotes || null,taskId]);
-                await assertInventoryLineSynchronized(connection,{
-                    storeId,branchId:activeBranchId,productId:task.product_id,variantId,
-                    expected:before+quantity});
-                await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,module:"Inventory",
-                    referenceNumber:product.product_number,action:"Received authorized stock",referenceId:String(taskId),
-                    details:`Received ${quantity} units of ${product.name} for delivery ${task.delivery_reference}; ${remaining-quantity} pending${receivingNotes ? `; ${receivingNotes}` : ""}`});
-                await connection.commit();
-                return jsonResponse(200,headers,{success:true,quantity,reference:task.delivery_reference,
-                    remainingQuantity:remaining-quantity,completed:quantity===remaining});
+                return jsonResponse(410,headers,{error:"Staff receiving tasks are no longer available. Ask the Manager to record the delivery with Receive Stock."});
             }
 
             if (action === "report_staff_stock_condition") {
@@ -4423,15 +3281,13 @@ exports.handler = async (event) => {
                 if (!valid || !["expired","expiring","damaged"].includes(issueType) || notes.length<5)
                     return badRequest(headers,"Select a product, valid issue type, and at least 5 characters of notes.");
                 await connection.beginTransaction();
-                const [products] = await connection.execute(
-                    `SELECT id,has_variants,expiration_date,product_number,name FROM products
-                     WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
-                    [productId,storeId,activeBranchId]);
-                if (!products.length) {await safeRollback(connection);return notFound(headers,"Product not in this branch.");}
+                const locked = await lockProductForUpdate(connection,storeId,activeBranchId,productId);
+                if (!locked) {await safeRollback(connection);return notFound(headers,"Product not in this branch.");}
+                const products = [locked];
                 if (Boolean(products[0].has_variants)!==(variantId!==null)) {await safeRollback(connection);return badRequest(headers,"Select the correct product variant.");}
                 let expiry=products[0].expiration_date;
                 if (variantId!==null) {
-                    const [variants]=await connection.execute(`SELECT id,expiration_date FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`,[variantId,productId]);
+                    const variants=await lockVariantsForUpdate(connection,productId,variantId);
                     if (!variants.length) {await safeRollback(connection);return notFound(headers,"Variant unavailable.");}
                     expiry=variants[0].expiration_date;
                 }
@@ -4446,16 +3302,19 @@ exports.handler = async (event) => {
                     (issueType==="expiring" && (!expiryKey || expiryKey<today || expiryKey>soon))) {
                     await safeRollback(connection);return badRequest(headers,"The recorded expiration date does not match this report type.");
                 }
+                const inventory = await v2LockInventory(connection,{storeId,branchId:activeBranchId,productId,variantId});
+                if (!inventory) {await safeRollback(connection);return notFound(headers,"Branch inventory record is missing.");}
                 const [duplicate]=await connection.execute(
-                    `SELECT id FROM staff_stock_condition_reports WHERE store_id=? AND branch_id=? AND product_id=?
-                                                                    AND variant_id <=> ? AND issue_type=? AND status='open' LIMIT 1`,
-                    [storeId,activeBranchId,productId,variantId,issueType]);
+                    `SELECT id FROM stock_issues WHERE store_id=? AND branch_id=? AND branch_inventory_id=?
+                                                   AND issue_type=? AND status='open' LIMIT 1`,
+                    [storeId,activeBranchId,inventory.id,issueType]);
                 if (duplicate.length) {await safeRollback(connection);return jsonResponse(409,headers,{error:"This product condition is already reported and awaiting review."});}
                 const [created] = await connection.execute(
-                    `INSERT INTO staff_stock_condition_reports
-                     (store_id,branch_id,product_id,variant_id,issue_type,notes,reported_by)
-                     VALUES (?,?,?,?,?,?,?)`,
-                    [storeId,activeBranchId,productId,variantId,issueType,notes,employee.id]);
+                    `INSERT INTO stock_issues
+                     (store_id,branch_id,branch_inventory_id,issue_type,quantity,reason,status,reported_by)
+                     VALUES (?,?,?,?,?,?,'open',?)`,
+                    [storeId,activeBranchId,inventory.id,issueType,Math.max(1,Number(inventory.quantity_on_hand)||0),
+                        notes,await v2ActorUserId(connection,storeId,employee.id)]);
                 await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,module:"Inventory",
                     referenceNumber:products[0].product_number,action:`Reported product condition: ${issueType}`,
                     referenceId:String(created.insertId),details:notes});
@@ -4467,9 +3326,10 @@ exports.handler = async (event) => {
                 const reportId=Number(body.reportId);
                 if (!Number.isSafeInteger(reportId)||reportId<1) return badRequest(headers,"Invalid condition report.");
                 const [updated]=await connection.execute(
-                    `UPDATE staff_stock_condition_reports SET status='resolved',resolved_by=?,resolved_at=CURRENT_TIMESTAMP
-                     WHERE id=? AND store_id=? AND branch_id=? AND status='open'`,
-                    [employee.id,reportId,storeId,activeBranchId]);
+                    `UPDATE stock_issues SET status='resolved',resolved_by=?,resolved_at=CURRENT_TIMESTAMP
+                     WHERE id=? AND store_id=? AND branch_id=? AND status='open'
+                       AND issue_type IN ('expired','expiring','damaged')`,
+                    [await v2ActorUserId(connection,storeId,employee.id),reportId,storeId,activeBranchId]);
                 if (!updated.affectedRows) return notFound(headers,"Report already resolved or unavailable.");
                 return jsonResponse(200,headers,{success:true});
             }
@@ -4478,33 +3338,45 @@ exports.handler = async (event) => {
                 const {productId,variantId,valid} = itemIdentity();
                 const notes=toSafeString(body.notes,500);
                 if (!valid || notes.length < 5) return badRequest(headers,"Select an item and enter at least 5 characters of notes.");
-                const [products] = await connection.execute(`SELECT id,stock,alert_level,has_variants,product_number,name FROM products
-                                                             WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL`,[productId,storeId,activeBranchId]);
+                const [products] = await connection.execute(`SELECT products.id,products.stock,products.alert_level,products.has_variants,
+                                                                    products.product_number,products.name
+                                                             FROM ${V2_PRODUCTS} products
+                                                             WHERE products.id=? AND products.store_id=? AND products.branch_id=? AND products.deleted_at IS NULL`,[productId,storeId,activeBranchId]);
                 if (!products.length) return notFound(headers,"Product not in your branch.");
                 let stock=Number(products[0].stock),reorder=Number(products[0].alert_level);
                 if (products[0].has_variants) {
                     if (variantId == null) return badRequest(headers,"Select the specific variant.");
-                    const [v] = await connection.execute(`SELECT stock,alert_level FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`,[variantId,productId]);
+                    const [v] = await connection.execute(`SELECT pv.stock,pv.alert_level FROM ${V2_PRODUCT_VARIANTS} pv
+                                                          WHERE pv.id=? AND pv.product_id=? AND pv.deleted_at IS NULL`,[variantId,productId]);
                     if (!v.length) return badRequest(headers,"Variant unavailable.");
                     stock=Number(v[0].stock);reorder=Number(v[0].alert_level);
                 } else if (variantId != null) return badRequest(headers,"This product does not have variants.");
                 try {
                     await connection.beginTransaction();
-                    const [insert] = await connection.execute(`INSERT INTO staff_stock_shortage_reports
-                                                               (store_id,branch_id,product_id,variant_id,stock_snapshot,reorder_snapshot,notes,reported_by)
-                                                               VALUES (?,?,?,?,?,?,?,?)`,[storeId,activeBranchId,productId,variantId,stock,reorder,notes,employee.id]);
+                    const inventory = await v2LockInventory(connection,{storeId,branchId:activeBranchId,productId,variantId});
+                    if (!inventory) {await safeRollback(connection);return notFound(headers,"Branch inventory record is missing.");}
+                    const [open] = await connection.execute(
+                        `SELECT id FROM stock_issues WHERE branch_inventory_id=? AND issue_type='shortage' AND status='open' LIMIT 1`,
+                        [inventory.id]);
+                    if (open.length) {await safeRollback(connection);return jsonResponse(409,headers,{error:"A shortage report is already open for this item."});}
+                    const [insert] = await connection.execute(`INSERT INTO stock_issues
+                                                               (store_id,branch_id,branch_inventory_id,issue_type,quantity,reason,status,reported_by)
+                                                               VALUES (?,?,?,'shortage',?,?,'open',?)`,
+                        [storeId,activeBranchId,inventory.id,Math.max(1,reorder-stock),notes,
+                            await v2ActorUserId(connection,storeId,employee.id)]);
                     await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,module:"Inventory",
                         referenceNumber:products[0].product_number,action:"Reported stock shortage",referenceId:String(insert.insertId),details:notes});
                     await connection.commit();
-                } catch(err) {await safeRollback(connection);if(err?.code === "ER_DUP_ENTRY") return jsonResponse(409,headers,{error:"A shortage report is already open for this item."});throw err;}
+                } catch(err) {await safeRollback(connection);throw err;}
                 return jsonResponse(201,headers,{success:true});
             }
             if (action === "resolve_staff_stock_shortage") {
                 if (!["manager","owner"].includes(tokenRole)) return unauthorized(headers,"Manager authorization required.");
                 const reportId=Number(body.reportId);
                 if (!Number.isSafeInteger(reportId)||reportId<1) return badRequest(headers,"A valid shortage report is required.");
-                const [result] = await connection.execute(`UPDATE staff_stock_shortage_reports SET status='resolved',resolved_by=?,resolved_at=CURRENT_TIMESTAMP
-                                                           WHERE id=? AND store_id=? AND branch_id=? AND status='open'`,[employee.id,reportId,storeId,activeBranchId]);
+                const [result] = await connection.execute(`UPDATE stock_issues SET status='resolved',resolved_by=?,resolved_at=CURRENT_TIMESTAMP
+                                                           WHERE id=? AND store_id=? AND branch_id=? AND issue_type='shortage' AND status='open'`,
+                    [await v2ActorUserId(connection,storeId,employee.id),reportId,storeId,activeBranchId]);
                 if (!result.affectedRows) return notFound(headers,"Report already resolved or unavailable.");
                 return jsonResponse(200,headers,{success:true});
             }
@@ -4523,33 +3395,24 @@ exports.handler = async (event) => {
                 return unauthorized(headers, "Only owners and managers may view purchase references.");
             }
             if (!activeBranchId) return badRequest(headers, "A branch is required.");
-            if (!(await tableExists(connection, "inventory_stock_receipts")) ||
-                !(await tableExists(connection, "inventory_stock_receipt_items")) ||
-                !(await tableExists(connection, "inventory_purchase_transactions"))) {
-                return jsonResponse(200, headers, { success: true, stockInMovements: [] });
-            }
-            const hasCreatedAt = await tableHasColumn(connection, "inventory_stock_receipts", "created_at");
-            const dateExpression = hasCreatedAt ? "r.created_at" : "r.received_date";
-            const displayDate = hasCreatedAt ? "r.created_at" : "DATE_FORMAT(r.received_date, '%Y-%m-%d')";
+            // Stock-in movements of the last 30 days (no supplier purchase records in stocknbook_v2).
             const [rows] = await connection.execute(
-                `SELECT ri.product_id AS productId,
+                `SELECT bi.product_id AS productId,
                         COALESCE(p.name, 'Archived Product') AS productName,
-                        ri.variant_name AS variantName,
-                        ri.quantity_received AS quantity,
-                        ${displayDate} AS recordedAt,
-                        pt.purchase_number AS purchaseNumber,
-                        pt.source AS purchaseSource
-                 FROM inventory_stock_receipt_items ri
-                          INNER JOIN inventory_stock_receipts r ON r.id = ri.receipt_id
-                          LEFT JOIN inventory_purchase_transactions pt
-                                    ON pt.id = r.purchase_id AND pt.store_id = r.store_id
-                                        AND pt.branch_id = r.branch_id
-                          LEFT JOIN products p ON p.id = ri.product_id AND p.store_id = r.store_id
-                     AND p.branch_id = r.branch_id
-                 WHERE r.store_id = ? AND r.branch_id = ?
-                   AND ri.quantity_received > 0
-                   AND ${dateExpression} >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-                 ORDER BY ${dateExpression} DESC, ri.id DESC
+                        pv.variant_name AS variantName,
+                        m.quantity_delta AS quantity,
+                        m.created_at AS recordedAt,
+                        NULL AS purchaseNumber,
+                        CASE WHEN m.movement_type='OPENING_STOCK' THEN 'add' ELSE 'receive' END AS purchaseSource
+                 FROM ${V2_INVENTORY_MOVEMENTS} m
+                          JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id = m.branch_inventory_id
+                          LEFT JOIN ${V2_PRODUCTS} p ON p.id = bi.product_id
+                          LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id = bi.variant_id
+                 WHERE m.store_id = ? AND m.branch_id = ?
+                   AND m.quantity_delta > 0
+                   AND m.movement_type IN ('OPENING_STOCK','MANAGER_RECEIPT','STAFF_RECEIPT')
+                   AND m.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                 ORDER BY m.created_at DESC, m.id DESC
                      LIMIT 500`,
                 [storeId, activeBranchId]
             );
@@ -4560,55 +3423,33 @@ exports.handler = async (event) => {
         // "Last Stock In" column. Only positive stock increases qualify.
         if (action === "get_last_stock_in") {
             if (!activeBranchId) return badRequest(headers, "A branch is required.");
-            if (!(await tableExists(connection, "restock_history")) ||
-                !(await tableExists(connection,"inventory_stock_receipts"))) {
-                return jsonResponse(200, headers, { success: true, stockInRecords: [] });
-            }
             const [rows] = await connection.execute(
-                `SELECT events.productId, events.variantId, events.variantName,
-                        DATE_FORMAT(MAX(events.stockInDate),'%Y-%m-%d') AS stockInDate
-                 FROM (
-                          SELECT rh.product_id AS productId, CAST(NULL AS SIGNED) AS variantId,
-                                 rh.variant_name AS variantName,
-                                 COALESCE(rh.received_date,DATE(rh.created_at)) AS stockInDate,
-                                 rh.store_id AS storeId,rh.branch_id AS branchId
-                          FROM restock_history rh WHERE rh.quantity_added>0
-                          UNION ALL
-                          SELECT ri.product_id AS productId,ri.variant_id AS variantId,
-                                 ri.variant_name AS variantName,r.received_date AS stockInDate,
-                                 r.store_id AS storeId,r.branch_id AS branchId
-                          FROM inventory_stock_receipt_items ri
-                                   JOIN inventory_stock_receipts r ON r.id=ri.receipt_id
-                          WHERE ri.quantity_received>0
-                      ) AS events
-                          JOIN products p ON p.id=events.productId AND p.store_id=events.storeId
-                     AND p.branch_id=events.branchId AND p.deleted_at IS NULL
-                 WHERE events.storeId=? AND events.branchId=?
-                   AND events.stockInDate <= CURRENT_DATE()
-                 GROUP BY events.productId,events.variantId,events.variantName`,
-                [storeId,activeBranchId]
+                `SELECT bi.product_id AS productId, bi.variant_id AS variantId,
+                        pv.variant_name AS variantName,
+                        DATE_FORMAT(MAX(m.created_at),'%Y-%m-%d') AS stockInDate
+                 FROM ${V2_INVENTORY_MOVEMENTS} m
+                          JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id = m.branch_inventory_id
+                          JOIN ${V2_PRODUCTS} p ON p.id = bi.product_id AND p.deleted_at IS NULL
+                          LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id = bi.variant_id
+                 WHERE m.store_id = ? AND m.branch_id = ?
+                   AND m.quantity_delta > 0
+                   AND m.movement_type IN ('OPENING_STOCK','MANAGER_RECEIPT','STAFF_RECEIPT')
+                   AND DATE(m.created_at) <= CURRENT_DATE()
+                 GROUP BY bi.product_id, bi.variant_id, pv.variant_name`,
+                [storeId, activeBranchId]
             );
-            // An Added movement must show the quantity actually received when
-            // the product was created, never the current stock after POS sales.
-            // Each Add Product / Import purchase stores its original item units.
-            let initialStockQuantities = [];
-            if (await tableExists(connection, "inventory_purchase_transactions") &&
-                await tableExists(connection, "inventory_purchase_items")) {
-                const [initialRows] = await connection.execute(
-                    `SELECT pi.product_id AS productId,
-                            SUM(pi.quantity_ordered) AS initialQuantity
-                     FROM inventory_purchase_items pi
-                              JOIN inventory_purchase_transactions pt ON pt.id = pi.purchase_id
-                              JOIN products p ON p.id = pi.product_id
-                     WHERE pt.store_id = ? AND pt.branch_id = ?
-                       AND pt.source IN ('add', 'import')
-                       AND p.store_id = ? AND p.branch_id = ?
-                       AND p.deleted_at IS NULL
-                     GROUP BY pi.product_id`,
-                    [storeId, activeBranchId, storeId, activeBranchId]
-                );
-                initialStockQuantities = initialRows;
-            }
+            // The quantity actually received when the product was created.
+            const [initialStockQuantities] = await connection.execute(
+                `SELECT bi.product_id AS productId,
+                        SUM(m.quantity_delta) AS initialQuantity
+                 FROM ${V2_INVENTORY_MOVEMENTS} m
+                          JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id = m.branch_inventory_id
+                          JOIN ${V2_PRODUCTS} p ON p.id = bi.product_id AND p.deleted_at IS NULL
+                 WHERE m.store_id = ? AND m.branch_id = ?
+                   AND m.movement_type = 'OPENING_STOCK'
+                 GROUP BY bi.product_id`,
+                [storeId, activeBranchId]
+            );
             return jsonResponse(200, headers, { success: true, stockInRecords: rows, initialStockQuantities });
         }
 
@@ -4618,18 +3459,8 @@ exports.handler = async (event) => {
                 return unauthorized(headers, "Supplier purchasing information is restricted to Managers and Owners.");
             }
             if (!activeBranchId) return badRequest(headers, "A branch is required.");
-            const suppliers = new Set();
-            for (const table of ["inventory_initial_purchases", "inventory_stock_receipts"]) {
-                if (!(await tableExists(connection, table))) continue;
-                const [rows] = await connection.execute(
-                    `SELECT DISTINCT supplier FROM ${table}
-                     WHERE store_id = ? AND branch_id = ? AND supplier IS NOT NULL`,
-                    [storeId, activeBranchId]);
-                for (const row of rows) {
-                    if (String(row.supplier || "").trim()) suppliers.add(String(row.supplier).trim());
-                }
-            }
-            return jsonResponse(200, headers, { success: true, suppliers: [...suppliers].sort() });
+            // Supplier records are not part of stocknbook_v2.
+            return jsonResponse(200, headers, { success: true, suppliers: [] });
         }
 
         /* Dedicated stock receipt: updates quantities and moving-average unit costs,
@@ -4747,40 +3578,29 @@ exports.handler = async (event) => {
             if (outstandingBalance > 0 && (!dueDate || dueDate < receivedDate)) {
                 return badRequest(headers, "A valid Payment Due Date is required for unpaid credit.");
             }
-            if (!(await tableExists(connection, "inventory_purchase_transactions")) ||
-                !(await tableExists(connection, "inventory_stock_receipts")) ||
-                !(await tableExists(connection, "inventory_stock_receipt_items"))) {
-                return badRequest(headers, "Run the Receive Stock SQL migration before receiving stock.");
-            }
-            try { await requireSynchronizedInventoryTables(connection); }
-            catch (error) { return jsonResponse(503,headers,{error:error.message}); }
             const requestKey = toSafeString(body.requestKey, 80);
             if (!requestKey) return badRequest(headers, "Receiving request key is required to prevent duplicate stock receipts.");
             await connection.beginTransaction();
             // Lock the parent product to serialize concurrent receives for it.
-            const [lockedProducts] = await connection.execute(
-                `SELECT id, name, has_variants, product_number, stock,
-                        original_price, sales_price, pricing_method, markup_percentage, alert_level FROM products
-                 WHERE id = ? AND store_id = ? AND branch_id = ? AND deleted_at IS NULL
-                     FOR UPDATE`, [productId, storeId, activeBranchId]);
-            if (!lockedProducts.length) { await safeRollback(connection); return notFound(headers, "Product not found."); }
+            const lockedProduct = await lockProductForUpdate(connection, storeId, activeBranchId, productId);
+            if (!lockedProduct) { await safeRollback(connection); return notFound(headers, "Product not found."); }
+            // The same request key is answered from the stock movement it created.
+            const receiptReference = `RCV-${requestKey}`;
             const [previous] = await connection.execute(
-                `SELECT id, purchase_id AS purchaseId FROM inventory_stock_receipts
-                 WHERE store_id=? AND branch_id=? AND request_key=? LIMIT 1`,
-                [storeId, activeBranchId, requestKey]);
+                `SELECT id FROM inventory_movements
+                 WHERE store_id=? AND branch_id=? AND reference_type='STOCK_RECEIPT' AND reason LIKE ?
+                 ORDER BY id LIMIT 1`,
+                [storeId, activeBranchId, `Ref ${receiptReference.replace(/: /g, " ")}-%`]);
             if (previous.length) {
                 await connection.commit();
                 return jsonResponse(200, headers, {success:true, alreadyProcessed:true,
-                    receiptId:previous[0].id, purchaseId:previous[0].purchaseId});
+                    receiptId:previous[0].id, purchaseId:null});
             }
-            const current = lockedProducts[0];
+            const current = lockedProduct;
             const isVariantProduct = Number(current.has_variants) === 1;
             const variants = new Map();
             if (isVariantProduct) {
-                const [rows] = await connection.execute(
-                    `SELECT id, stock, variant_values, original_price, sales_price, alert_level,
-                            pricing_method, markup_percentage FROM product_variants
-                     WHERE product_id = ? AND deleted_at IS NULL FOR UPDATE`, [productId]);
+                const rows = await lockVariantsForUpdate(connection, productId);
                 for (const variant of rows) variants.set(Number(variant.id), variant);
             }
             const receiptLines = [];
@@ -4828,11 +3648,9 @@ exports.handler = async (event) => {
                 // Use the branch balance for weighted-average receiving cost.
                 // A legacy catalog-only discrepancy is not physical stock and
                 // must not inflate the cost weighting of a new supplier receipt.
-                const [valuationRows] = await connection.execute(
-                    `SELECT quantity_on_hand FROM branch_inventory
-                     WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ?
-                       AND status='active' LIMIT 1 FOR UPDATE`,
-                    [storeId,activeBranchId,productId,line.variantId]);
+                const valuationInventory = await v2LockInventory(connection,
+                    {storeId,branchId:activeBranchId,productId,variantId:line.variantId});
+                const valuationRows = valuationInventory ? [valuationInventory] : [];
                 if (!valuationRows.length) {
                     await safeRollback(connection);
                     return jsonResponse(409,headers,{error:'Active branch inventory is missing. Reconcile before receiving stock.'});
@@ -4892,7 +3710,7 @@ exports.handler = async (event) => {
                     purchaseDate:receivedDate, paymentMethod, amountPaid, paymentDueDate:dueDate},
                 lines:receiptLines.map(line=>({...line, productId})),
                 source:"receive", requestKey, receivedBy, receivedDate});
-            const receiptId = ledger.receiptId;
+            let receiptId = ledger.receiptId;
             const purchaseId = ledger.purchaseId;
             const totalQuantity = cleanLines.reduce((sum, line) => sum + line.quantity, 0);
             // Credit the NEW verified delivery into branch and batch records.
@@ -4908,55 +3726,49 @@ exports.handler = async (event) => {
                     reorderLevel:Number(match.alert_level ?? match.alertLevel ?? current.alert_level ?? 0),
                     costPrice:line.averageCost,salesPrice:line.selectedPrice,
                     expirationDate:line.expirationDate,
-                    reference:`RCV-${receiptId}-${lineIndex + 1}`,
-                    actorId:Number(decoded?.manager_id||decoded?.owner_id||0)||null,
+                    reference:`${receiptReference}-${lineIndex + 1}`,
+                    actorId:Number(decoded?.manager_id||decoded?.user_id||0)||null,
                     actorRole:tokenRole,actorName:actingEmployee.name,
                     allowVerifiedReceiptWithCatalogDrift:true,
                 }));
             }
+            // The first stock movement of this delivery is its receipt number.
+            receiptId = creditResults[0]?.movementId || receiptId;
+            // Stock was credited above; save the new average cost and the chosen selling price.
             for (const line of receiptLines) {
                 if (line.variantId !== null) {
                     await connection.execute(
                         `UPDATE product_variants
-                         SET stock = stock + ?, original_price = ?, sales_price = ?,
+                         SET cost_price = ?, selling_price = ?,
                              pricing_method = ?, markup_percentage = ?
-                         WHERE id = ? AND product_id = ? AND deleted_at IS NULL`,
-                        [line.quantity, line.averageCost, line.selectedPrice,
+                         WHERE id = ? AND product_id = ? AND is_default = 0 AND deleted_at IS NULL`,
+                        [line.averageCost, line.selectedPrice,
                             line.selectedMethod, line.selectedMarkup, line.variantId, productId]);
                 }
-                await connection.execute(
-                    `INSERT INTO restock_history
-                     (store_id, branch_id, product_id, product_name, variant_name,
-                      stock_before, quantity_added, current_stock, received_by, received_date)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [storeId, activeBranchId, productId, toSafeString(current.name), line.variantName,
-                        line.stockBefore, line.quantity, line.stockBefore + line.quantity,
-                        receivedBy, receivedDate]);
             }
             if (isVariantProduct) {
                 // Parent product's display prices follow the updated variant rows.
                 // Preserve its existing pricing method: variant pricing is individual.
                 const [updatedVariants] = await connection.execute(
-                    `SELECT original_price, sales_price FROM product_variants
-                     WHERE product_id = ? AND deleted_at IS NULL`, [productId]);
+                    `SELECT cost_price AS original_price, selling_price AS sales_price FROM product_variants
+                     WHERE product_id = ? AND is_default = 0 AND deleted_at IS NULL`, [productId]);
                 const minimumPositive = (field) => {
                     const prices = updatedVariants.map(row => Number(row[field]))
                         .filter(price => Number.isFinite(price) && price > 0);
                     return prices.length ? Math.min(...prices) : 0;
                 };
                 await connection.execute(
-                    `UPDATE products SET stock = stock + ?, original_price = ?, sales_price = ?
-                     WHERE id = ? AND store_id = ? AND branch_id = ?`,
-                    [totalQuantity, minimumPositive("original_price"), minimumPositive("sales_price"),
-                        productId, storeId, activeBranchId]);
+                    `UPDATE product_variants SET cost_price = ?, selling_price = ?
+                     WHERE product_id = ? AND is_default = 1`,
+                    [minimumPositive("original_price"), minimumPositive("sales_price"), productId]);
             } else {
                 const line = receiptLines[0];
                 await connection.execute(
-                    `UPDATE products SET stock = stock + ?, original_price = ?, sales_price = ?,
-                                         pricing_method = ?, markup_percentage = ?
-                     WHERE id = ? AND store_id = ? AND branch_id = ?`,
-                    [totalQuantity, line.averageCost, line.selectedPrice, line.selectedMethod,
-                        line.selectedMarkup, productId, storeId, activeBranchId]);
+                    `UPDATE product_variants SET cost_price = ?, selling_price = ?,
+                                                 pricing_method = ?, markup_percentage = ?
+                     WHERE product_id = ? AND is_default = 1`,
+                    [line.averageCost, line.selectedPrice, line.selectedMethod,
+                        line.selectedMarkup, productId]);
             }
             for (const [index,line] of receiptLines.entries()) {
                 await assertInventoryLineSynchronized(connection,{
@@ -4989,29 +3801,9 @@ exports.handler = async (event) => {
         }
 
         if (action === "get_supplier_payables") {
-            // Owners can view all of their store's branches. Managers stay
-            // restricted to the assigned branch from their verified token.
             if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers, "Not permitted.");
-            const branchSql = activeBranchId ? " AND p.branch_id=?" : "";
-            const branchParams = activeBranchId ? [activeBranchId] : [];
-            const [rows] = await connection.execute(
-                `SELECT p.id AS purchaseId, p.branch_id AS branchId,
-                        b.branch_name AS branchName, p.purchase_number AS purchaseNumber,
-                        p.supplier, p.supplier_invoice_number AS supplierInvoiceNumber,
-                        p.purchase_total AS purchaseTotal, p.payment_method AS paymentMethod,
-                        DATE_FORMAT(p.purchase_date,'%Y-%m-%d') AS purchaseDate,
-                        DATE_FORMAT(p.created_at,'%Y-%m-%d %H:%i:%s') AS recordedAt,
-                        DATE_FORMAT(p.payment_due_date,'%Y-%m-%d') AS paymentDueDate,
-                        COALESCE((SELECT SUM(pay.amount) FROM inventory_supplier_payments pay
-                                  WHERE pay.purchase_id=p.id),0) AS amountPaid
-                 FROM inventory_purchase_transactions p
-                          LEFT JOIN branches b ON b.id=p.branch_id AND b.store_id=p.store_id
-                 WHERE p.store_id=?${branchSql}
-                 ORDER BY p.id DESC`, [storeId, ...branchParams]);
-            const payables=rows.map(row=>({...row, purchaseTotal:Number(row.purchaseTotal),amountPaid:Number(row.amountPaid),
-                outstandingBalance:Math.max(0,roundMoney(Number(row.purchaseTotal)-Number(row.amountPaid))),
-                paymentStatus:Number(row.amountPaid)>=Number(row.purchaseTotal)?"Paid":Number(row.amountPaid)>0?"Partially Paid":"Unpaid"}));
-            return jsonResponse(200,headers,{success:true,payables});
+            // Supplier payables are not part of stocknbook_v2.
+            return jsonResponse(200,headers,{success:true,payables:[]});
         }
         if (action === "update_supplier_purchase") {
             if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers,"Not permitted.");
@@ -5028,60 +3820,11 @@ exports.handler = async (event) => {
         }
         if (action === "get_supplier_purchase_items") {
             if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers,"Not permitted.");
-            const purchaseId=Number(body.purchaseId);
-            if(!Number.isInteger(purchaseId)||purchaseId<=0)return badRequest(headers,"Valid purchase ID required.");
-            const branchSql=activeBranchId?" AND branch_id=?":"";
-            const branchParams=activeBranchId?[activeBranchId]:[];
-            const [headersFound]=await connection.execute(
-                `SELECT id,purchase_number AS purchaseNumber,supplier,purchase_total AS purchaseTotal
-                 FROM inventory_purchase_transactions
-                 WHERE id=? AND store_id=?${branchSql} LIMIT 1`,
-                [purchaseId,storeId,...branchParams]);
-            if(!headersFound.length)return notFound(headers,"Purchase not found in this store/branch.");
-            const [rows]=await connection.execute(
-                `SELECT pi.product_id AS productId,p.product_number AS productNumber,
-                        COALESCE(p.name,'Archived product') AS productName,
-                        pi.variant_id AS variantId, v.variant_number AS variantNumber,v.variant_values AS variantValues,
-                        pi.quantity_ordered AS quantity,pi.unit_purchase_cost AS unitCost,
-                        (pi.quantity_ordered*pi.unit_purchase_cost) AS lineTotal
-                 FROM inventory_purchase_items pi
-                          LEFT JOIN products p ON p.id=pi.product_id AND p.store_id=?
-                          LEFT JOIN product_variants v ON v.id=pi.variant_id AND v.product_id=pi.product_id
-                 WHERE pi.purchase_id=? ORDER BY pi.id`,[storeId,purchaseId]);
-            return jsonResponse(200,headers,{success:true,purchase:headersFound[0],items:rows.map(row=>({
-                    ...row,quantity:Number(row.quantity),unitCost:Number(row.unitCost),lineTotal:roundMoney(Number(row.lineTotal)),
-                    variantValues:parseVariantValues(row.variantValues)
-                }))});
+            return notFound(headers,"Purchase not found in this store/branch.");
         }
         if (action === "pay_supplier_purchase") {
             if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers,"Not permitted.");
-            const purchaseId=Number(body.purchaseId), requestKey=toSafeString(body.requestKey,80);
-            if (!Number.isInteger(purchaseId) || purchaseId<=0 || !requestKey) return badRequest(headers,"Purchase and payment reference required.");
-            let amountCents,date;
-            try {amountCents=exactMoney(body.amount,"Amount paid");date=normalizeOptionalDate(body.paymentDate);}
-            catch(error) {return badRequest(headers,error.message);}
-            if (amountCents<=0 || !date) return badRequest(headers,"Positive payment and payment date are required.");
-            if (date > new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"})) {
-                return badRequest(headers,"Payment Date cannot be in the future.");
-            }
-            const branchSql=activeBranchId?" AND branch_id=?":"";
-            const branchParams=activeBranchId?[activeBranchId]:[];
-            await connection.beginTransaction();
-            const [rows]=await connection.execute(
-                `SELECT id,purchase_total AS purchaseTotal FROM inventory_purchase_transactions
-                 WHERE id=? AND store_id=?${branchSql} FOR UPDATE`,[purchaseId,storeId,...branchParams]);
-            if (!rows.length){await safeRollback(connection);return notFound(headers,"Purchase not found.");}
-            const [existingPayment]=await connection.execute(
-                `SELECT id FROM inventory_supplier_payments WHERE purchase_id=? AND request_key=? LIMIT 1`,[purchaseId,requestKey]);
-            if (existingPayment.length){await connection.commit();return jsonResponse(200,headers,{success:true,alreadyProcessed:true});}
-            const [paidRows]=await connection.execute(
-                `SELECT COALESCE(SUM(amount),0) AS amountPaid FROM inventory_supplier_payments WHERE purchase_id=?`,[purchaseId]);
-            const balanceCents=exactMoney(rows[0].purchaseTotal,"Purchase total")-exactMoney(paidRows[0].amountPaid,"Amount paid");
-            if (amountCents>balanceCents){await safeRollback(connection);return badRequest(headers,"Payment exceeds remaining balance.");}
-            await connection.execute(`INSERT INTO inventory_supplier_payments (purchase_id,amount,payment_date,request_key)
-                                      VALUES (?,?,?,?)`,[purchaseId,amountCents/100,date,requestKey]);
-            await connection.commit();
-            return jsonResponse(200,headers,{success:true,outstandingBalance:(balanceCents-amountCents)/100});
+            return jsonResponse(410,headers,{error:"Supplier payments are no longer recorded in StockNBook."});
         }
 
         // Expired goods are excluded from availability automatically. The physical
@@ -5095,21 +3838,21 @@ exports.handler = async (event) => {
                 (variantId !== null && (!Number.isSafeInteger(variantId) || variantId < 1))) {
                 return badRequest(headers,"Choose a valid product or variant.");
             }
+            const catalogVariantId = await v2CatalogVariantId(connection, productId, variantId);
             const [rows] = await connection.execute(
-                `SELECT b.id AS batchId,b.batch_code AS batchCode,b.remaining_quantity AS remainingQuantity,
-                        DATE_FORMAT(b.expiration_date,'%Y-%m-%d') AS expirationDate,b.status
-                 FROM inventory_batches b
-                          JOIN branch_inventory bi ON bi.id=b.branch_inventory_id
-                          JOIN products p ON p.id=bi.product_id
-                 WHERE p.id=? AND p.store_id=? AND p.branch_id=? AND p.deleted_at IS NULL
+                `SELECT bi.id AS batchId,CONCAT('INV-',bi.id) AS batchCode,bi.on_hand_quantity AS remainingQuantity,
+                        DATE_FORMAT(bi.expiration_date,'%Y-%m-%d') AS expirationDate,'expired' AS status
+                 FROM branch_inventory bi
+                          JOIN product_variants v ON v.id=bi.variant_id
+                          JOIN products p ON p.id=v.product_id
+                 WHERE p.id=? AND p.store_id=? AND p.deleted_at IS NULL
                    AND bi.store_id=? AND bi.branch_id=? AND bi.status='active'
-                   AND bi.variant_id <=> ?
-                   AND b.store_id=? AND b.branch_id=?
-                   AND b.remaining_quantity>0 AND b.status IN ('active','expired')
-                   AND b.expiration_date IS NOT NULL
-                   AND b.expiration_date < DATE(UTC_TIMESTAMP()+INTERVAL 8 HOUR)
-                 ORDER BY b.expiration_date ASC,b.id ASC`,
-                [productId,storeId,activeBranchId,storeId,activeBranchId,variantId,storeId,activeBranchId]);
+                   AND bi.variant_id=?
+                   AND bi.on_hand_quantity>0
+                   AND bi.expiration_date IS NOT NULL
+                   AND bi.expiration_date < DATE(UTC_TIMESTAMP()+INTERVAL 8 HOUR)
+                 ORDER BY bi.expiration_date ASC,bi.id ASC`,
+                [productId,storeId,storeId,activeBranchId,catalogVariantId]);
             return jsonResponse(200,headers,{success:true,batches:rows});
         }
         // Read the already-audited expired-stock removals for the Manager's
@@ -5123,12 +3866,11 @@ exports.handler = async (event) => {
             const [rows] = await connection.execute(
                 `SELECT m.id, m.created_at AS recordedAt, p.name AS productName,
                         pv.variant_values AS variantValues, m.quantity_delta AS quantity
-                 FROM inventory_movements m
-                          JOIN branch_inventory bi ON bi.id = m.branch_inventory_id
+                 FROM ${V2_INVENTORY_MOVEMENTS} m
+                          JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id = m.branch_inventory_id
                      AND bi.store_id = m.store_id AND bi.branch_id = m.branch_id
-                          JOIN products p ON p.id = bi.product_id AND p.store_id = bi.store_id
-                     AND p.branch_id = bi.branch_id
-                          LEFT JOIN product_variants pv ON pv.id = bi.variant_id AND pv.product_id = p.id
+                          JOIN ${V2_PRODUCTS} p ON p.id = bi.product_id
+                          LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id = bi.variant_id AND pv.product_id = p.id
                  WHERE m.store_id = ? AND m.branch_id = ?
                    AND m.movement_type = 'EXPIRED_DISPOSAL'
                    AND m.created_at >= FROM_UNIXTIME(?)
@@ -5155,105 +3897,45 @@ exports.handler = async (event) => {
             await connection.beginTransaction();
             // Lock the parent product first so independent stock operations on
             // this product cannot race this disposal. No new receipt is created.
-            const [products]=await connection.execute(
-                `SELECT id,product_number AS productNumber,name,stock,has_variants AS hasVariants
-                 FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
-                [productId,storeId,activeBranchId]);
-            if(!products.length){await safeRollback(connection);return notFound(headers,"Product not found in this branch.");}
-            const product=products[0];
-            if(Boolean(product.hasVariants)!==(variantId!==null)){
+            const product=await lockProductForUpdate(connection,storeId,activeBranchId,productId);
+            if(!product){await safeRollback(connection);return notFound(headers,"Product not found in this branch.");}
+            if(Boolean(Number(product.has_variants))!==(variantId!==null)){
                 await safeRollback(connection);return badRequest(headers,"Choose the correct variant for this product.");
             }
-            let catalogLine=Number(product.stock);
-            if(variantId!==null){
-                const [variants]=await connection.execute(
-                    `SELECT stock FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL FOR UPDATE`,
-                    [variantId,productId]);
-                if(!variants.length){await safeRollback(connection);return notFound(headers,"Variant is unavailable.");}
-                catalogLine=Number(variants[0].stock);
-            }
-            const [inventories]=await connection.execute(
-                `SELECT id,quantity_on_hand FROM branch_inventory
-                 WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ? AND status='active'
-                 LIMIT 1 FOR UPDATE`,
-                [storeId,activeBranchId,productId,variantId]);
-            if(!inventories.length){await safeRollback(connection);return notFound(headers,"Branch inventory record is missing.");}
-            const inventory=inventories[0];
+            const inventory=await v2LockInventory(connection,{storeId,branchId:activeBranchId,productId,variantId});
+            if(!inventory){await safeRollback(connection);return notFound(headers,"Branch inventory record is missing.");}
             const [existing]=await connection.execute(
                 `SELECT id FROM inventory_movements WHERE store_id=? AND branch_id=?
-                                                      AND branch_inventory_id=? AND reference_type='EXPIRED_DISPOSAL' AND reference_id=? LIMIT 1`,
-                [storeId,activeBranchId,inventory.id,requestKey]);
+                                                      AND branch_inventory_id=? AND reference_type='EXPIRED_DISPOSAL' AND reason LIKE ? LIMIT 1`,
+                [storeId,activeBranchId,inventory.id,`Ref ${requestKey.replace(/: /g," ")}: %`]);
             if(existing.length){await connection.commit();return jsonResponse(200,headers,{success:true,alreadyProcessed:true});}
-            const [allBatches]=await connection.execute(
-                `SELECT id,remaining_quantity,expiration_date,status FROM inventory_batches
-                 WHERE branch_inventory_id=? ORDER BY id FOR UPDATE`,[inventory.id]);
             const before=Number(inventory.quantity_on_hand);
-            const batchBefore=allBatches.reduce((sum,row)=>sum+Number(row.remaining_quantity),0);
-            // Preserve known historical catalog drift, but never allow disposing
-            // more than physically recorded, or into an inconsistent branch/batch ledger.
-            if(!Number.isSafeInteger(before)||before<quantity||batchBefore!==before||
-                catalogLine<quantity||Number(product.stock)<quantity){
-                await safeRollback(connection);
-                return badRequest(headers,`Physical ledger mismatch or insufficient recorded stock: branch=${before}, batches=${batchBefore}, catalog=${catalogLine}. Reconcile before disposal.`);
-            }
-            const selected=allBatches.find(row=>Number(row.id)===batchId);
-            const exp=selected?.expiration_date instanceof Date
-                ?selected.expiration_date.toISOString().slice(0,10)
-                :String(selected?.expiration_date||'').slice(0,10);
+            const available=before-Number(inventory.reserved_quantity||0)-Number(inventory.unavailable_quantity||0);
+            const exp=inventory.expiration_date instanceof Date
+                ?inventory.expiration_date.toISOString().slice(0,10)
+                :String(inventory.expiration_date||'').slice(0,10);
             const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Manila'});
-            if(!selected||Number(selected.remaining_quantity)<quantity||
-                !['active','expired'].includes(String(selected.status))||!exp||exp>=today){
+            if(batchId!==Number(inventory.id)||!Number.isSafeInteger(before)||available<quantity||!exp||exp>=today){
                 await safeRollback(connection);return badRequest(headers,"The selected batch is not expired, already disposed, or has insufficient remaining units.");
             }
-            const remainingAfter=Number(selected.remaining_quantity)-quantity;
             await connection.execute(
-                `UPDATE inventory_batches SET remaining_quantity=?,status=?
-                 WHERE id=? AND branch_inventory_id=?`,
-                [remainingAfter,remainingAfter===0?'disposed':'expired',batchId,inventory.id]);
-            await connection.execute(
-                `UPDATE branch_inventory SET quantity_on_hand=quantity_on_hand-? WHERE id=?`,[quantity,inventory.id]);
-            if(variantId!==null){
-                await connection.execute(`UPDATE product_variants SET stock=stock-? WHERE id=? AND product_id=?`,[quantity,variantId,productId]);
-            }
-            await connection.execute(
-                `UPDATE products SET stock=stock-? WHERE id=? AND store_id=? AND branch_id=?`,
-                [quantity,productId,storeId,activeBranchId]);
+                `UPDATE branch_inventory SET on_hand_quantity=on_hand_quantity-? WHERE id=?`,[quantity,inventory.id]);
             const employee=await getActingEmployee(connection,decoded,tokenRole,storeId);
-            await connection.execute(
-                `INSERT INTO inventory_movements
-                 (store_id,branch_id,branch_inventory_id,movement_type,quantity_delta,
-                  quantity_before,quantity_after,reference_type,reference_id,
-                  actor_id,actor_role,actor_name,notes)
-                 VALUES (?,?,?,'EXPIRED_DISPOSAL',?,?,?,'EXPIRED_DISPOSAL',?,?,?,?,?)`,
-                [storeId,activeBranchId,inventory.id,-quantity,before,before-quantity,
-                    requestKey,employee.id,employee.role,employee.name,
-                    `Batch ${batchId}, expiry ${exp}; ${reason}`.slice(0,500)]);
-            // Check the remaining physical ledger inside the transaction.
-            const [post]=await connection.execute(
-                `SELECT COALESCE(SUM(remaining_quantity),0) AS total FROM inventory_batches
-                 WHERE branch_inventory_id=?`,[inventory.id]);
-            if(Number(post[0].total)!==before-quantity){
-                throw new Error("Disposal verification failed; the transaction was rolled back.");
-            }
-            // Resolve a Staff expired-condition report only when the product
-            // line has no other expired units awaiting physical removal.
-            if(await tableExists(connection,'staff_stock_condition_reports')){
-                const [stillExpired]=await connection.execute(
-                    `SELECT COUNT(*) AS total FROM inventory_batches
-                     WHERE branch_inventory_id=? AND remaining_quantity>0
-                       AND status IN ('active','expired') AND expiration_date IS NOT NULL
-                       AND expiration_date<DATE(UTC_TIMESTAMP()+INTERVAL 8 HOUR)`,[inventory.id]);
-                if(Number(stillExpired[0]?.total||0)===0){
-                    await connection.execute(
-                        `UPDATE staff_stock_condition_reports
-                         SET status='resolved',resolved_by=?,resolved_at=CURRENT_TIMESTAMP
-                         WHERE store_id=? AND branch_id=? AND product_id=? AND variant_id <=> ?
-                           AND issue_type='expired' AND status='open'`,
-                        [employee.id,storeId,activeBranchId,productId,variantId]);
-                }
+            await v2RecordMovement(connection,{storeId,branchId:activeBranchId,inventoryId:inventory.id,
+                movementType:'EXPIRED_DISPOSAL',delta:-quantity,before,after:before-quantity,
+                referenceType:'EXPIRED_DISPOSAL',referenceId:productId,reference:requestKey,actorId:employee.id,
+                notes:`Batch ${batchId}, expiry ${exp}; ${reason}`.slice(0,500)});
+            // Resolve an expired-condition report once no expired units remain.
+            if(before-quantity===0){
+                await connection.execute(
+                    `UPDATE stock_issues
+                     SET status='resolved',resolved_by=?,resolved_at=CURRENT_TIMESTAMP
+                     WHERE store_id=? AND branch_id=? AND branch_inventory_id=?
+                       AND issue_type='expired' AND status='open'`,
+                    [await v2ActorUserId(connection,storeId,employee.id),storeId,activeBranchId,inventory.id]);
             }
             await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,
-                module:'Inventory',referenceNumber:product.productNumber||String(productId),
+                module:'Inventory',referenceNumber:product.product_number||String(productId),
                 action:'Disposed expired batch',referenceId:String(batchId),
                 details:`Removed ${quantity} expired units from batch ${batchId} (${exp}); reason: ${reason}`});
             await connection.commit();
@@ -5269,32 +3951,23 @@ exports.handler = async (event) => {
             if(!Number.isInteger(productId)||productId<=0 || (variantId!==null && (!Number.isInteger(variantId)||variantId<=0)) ||
                 !Number.isInteger(expected)||expected<0||!Number.isInteger(target)||target<0 || target>2147483647 ||
                 reason.length<8 || !requestKey) return badRequest(headers,"Provide valid current/corrected stock, a reason of at least 8 characters, and a request reference.");
-            // Use the existing structured adjustment ledger when available;
-            // otherwise log the correction in the existing employee_actions
-            // audit history. No additional table is required for this change.
-            const hasAdjustmentLedger = await tableExists(connection, "inventory_stock_adjustments");
             await connection.beginTransaction();
-            const [products]=await connection.execute(
-                `SELECT id,name,product_number AS productNumber,stock,has_variants AS hasVariants FROM products
-                 WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
-                [productId,storeId,activeBranchId]);
-            if(!products.length){await safeRollback(connection);return notFound(headers,"Product not found in this branch.");}
-            const p=products[0];
-            if (hasAdjustmentLedger) {
-                const [duplicates] = await connection.execute(
-                    "SELECT id,stock_after AS newStock FROM inventory_stock_adjustments WHERE store_id=? AND branch_id=? AND request_key=? LIMIT 1",
-                    [storeId,activeBranchId,requestKey]);
-                if (duplicates.length) {await connection.commit();return jsonResponse(200,headers,{success:true,alreadyProcessed:true,newStock:Number(duplicates[0].newStock)});}
-            }
+            const p=await lockProductForUpdate(connection,storeId,activeBranchId,productId);
+            if(!p){await safeRollback(connection);return notFound(headers,"Product not found in this branch.");}
+            // A repeated request (same request reference) is answered from the stock movement.
+            const [duplicates] = await connection.execute(
+                `SELECT m.quantity_after AS newStock FROM inventory_movements m
+                 WHERE m.store_id=? AND m.branch_id=? AND m.reference_type='STOCK_ADJUSTMENT' AND m.reason LIKE ? LIMIT 1`,
+                [storeId,activeBranchId,`Ref ${requestKey.replace(/: /g," ")}: %`]);
+            if (duplicates.length) {await connection.commit();return jsonResponse(200,headers,{success:true,alreadyProcessed:true,newStock:Number(duplicates[0].newStock)});}
             let current, aggregateStock=target;
-            if(Boolean(p.hasVariants)) {
+            if(Boolean(Number(p.has_variants))) {
                 if(variantId===null){await safeRollback(connection);return badRequest(headers,"Select a specific variant to adjust.");}
-                const [variants]=await connection.execute(
-                    `SELECT id,stock FROM product_variants WHERE product_id=? AND deleted_at IS NULL ORDER BY id FOR UPDATE`,[productId]);
+                const variants=await lockVariantsForUpdate(connection,productId);
                 const selected=variants.find(row=>Number(row.id)===variantId);
                 if(!selected){await safeRollback(connection);return badRequest(headers,"Variant not found.");}
                 current=Number(selected.stock);
-                aggregateStock=variants.reduce((sum,row)=>sum+Number(row.id===variantId?target:row.stock),0);
+                aggregateStock=variants.reduce((sum,row)=>sum+Number(Number(row.id)===variantId?target:row.stock),0);
             }else{
                 if(variantId!==null){await safeRollback(connection);return badRequest(headers,"This product has no variants.");}
                 current=Number(p.stock);
@@ -5302,14 +3975,10 @@ exports.handler = async (event) => {
             if(current!==expected){await safeRollback(connection);return badRequest(headers,`Stock changed since opening this dialog (now ${current}). Reopen and retry.`);}
             if(target===current){await safeRollback(connection);return badRequest(headers,"Corrected quantity must differ from current stock.");}
             if(aggregateStock>2147483647){await safeRollback(connection);return badRequest(headers,"Total stock would exceed the supported limit.");}
-            // Reconcile the V2 count and expiration-aware batch ledger in the
-            // very same transaction. Fail closed on pre-existing drift.
             const employee=await getActingEmployee(connection,decoded,tokenRole,storeId);
             const [priceInfo]=await connection.execute(
-                variantId!==null
-                    ? `SELECT original_price AS cost FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`
-                    : `SELECT original_price AS cost FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL`,
-                variantId!==null?[variantId,productId]:[productId,storeId,activeBranchId]);
+                `SELECT cost_price AS cost FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`,
+                [await v2CatalogVariantId(connection,productId,variantId),productId]);
             if(!priceInfo.length){await safeRollback(connection);return notFound(headers,"Product/variant pricing unavailable.");}
             let correctionExpiry;
             try {correctionExpiry=normalizeOptionalDate(body.expirationDate);}
@@ -5322,23 +3991,14 @@ exports.handler = async (event) => {
             if(correctionExpiry && correctionExpiry<correctionToday && target>current){
                 await safeRollback(connection);return badRequest(headers,"Do not increase sellable stock with an expired date.");
             }
+            // The correction and its audited movement are written together.
             await adjustSynchronizedStock(connection,{storeId,branchId:activeBranchId,productId,variantId,
                 before:current,target,requestKey,costPrice:Number(priceInfo[0].cost),
                 expirationDate:correctionExpiry||null,employee,reason});
-            // A correction is never a purchase receipt or POS sale.
-            if(variantId!==null) await connection.execute("UPDATE product_variants SET stock=? WHERE id=? AND product_id=?",[target,variantId,productId]);
-            await connection.execute("UPDATE products SET stock=? WHERE id=? AND store_id=? AND branch_id=?",[aggregateStock,productId,storeId,activeBranchId]);
-            if (hasAdjustmentLedger) {
-                await connection.execute(
-                    `INSERT INTO inventory_stock_adjustments
-                     (store_id,branch_id,product_id,variant_id,stock_before,stock_after,quantity_change,reason,employee_name,employee_role,request_key)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-                    [storeId,activeBranchId,productId,variantId,current,target,target-current,reason,employee.name,employee.role,requestKey]);
-            }
             await assertInventoryLineSynchronized(connection,{
                 storeId,branchId:activeBranchId,productId,variantId,expected:target});
             await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,
-                module:"Inventory",referenceNumber:p.productNumber||String(productId),action:"Corrected stock level",referenceId:String(productId),
+                module:"Inventory",referenceNumber:p.product_number||String(productId),action:"Corrected stock level",referenceId:String(productId),
                 details:`Corrected ${variantId?`variant ${variantId}`:"regular product"} stock ${current} -> ${target} (${target-current>=0?"+":""}${target-current}); reason: ${reason}`});
             await connection.commit();
             return jsonResponse(200,headers,{success:true,productId,variantId,previousStock:current,newStock:target,totalStock:aggregateStock});
@@ -5381,40 +4041,8 @@ exports.handler = async (event) => {
             }
             const product = await getProductById(connection, storeId, activeBranchId, productId);
             if (!product) return notFound(headers, "Product not found");
-            const canonical = await findCanonicalInitialPurchase(connection, storeId, Number(product.branchId), productId);
-            if (canonical) {
-                return jsonResponse(200,headers,{purchase:tokenRole==="owner"?canonical:{
-                        supplier:canonical.supplier,purchaseDate:canonical.purchaseDate,paymentMethod:canonical.paymentMethod}});
-            }
-            if (!(await tableExists(connection, "inventory_initial_purchases"))) {
-                return jsonResponse(200, headers, { purchase: null });
-            }
-            const [rows] = await connection.execute(
-                `SELECT supplier,
-                        DATE_FORMAT(purchase_date, '%Y-%m-%d') AS purchaseDate,
-                        payment_method AS paymentMethod,
-                        purchase_total AS purchaseTotal,
-                        amount_paid AS amountPaid,
-                        outstanding_balance AS outstandingBalance,
-                        DATE_FORMAT(payment_due_date, '%Y-%m-%d') AS paymentDueDate
-                 FROM inventory_initial_purchases
-                 WHERE store_id = ? AND branch_id = ? AND product_id = ? LIMIT 1`,
-                [storeId, Number(product.branchId), productId]
-            );
-            const row = rows[0];
-            if (!row) return jsonResponse(200, headers, { purchase: null });
-            const purchase = tokenRole === "owner" ? {
-                supplier: row.supplier, purchaseDate: row.purchaseDate,
-                paymentMethod: row.paymentMethod,
-                purchaseTotal: Number(row.purchaseTotal),
-                amountPaid: Number(row.amountPaid),
-                outstandingBalance: Number(row.outstandingBalance),
-                paymentDueDate: row.paymentDueDate,
-            } : {
-                supplier: row.supplier, purchaseDate: row.purchaseDate,
-                paymentMethod: row.paymentMethod,
-            };
-            return jsonResponse(200, headers, { purchase });
+            // Supplier purchases are not part of stocknbook_v2.
+            return jsonResponse(200, headers, { purchase: null });
         }
 
         /* ATOMIC IMPORT FOR THE THREE-SHEET STOCKNBOOK TEMPLATE.
@@ -5515,24 +4143,10 @@ exports.handler = async (event) => {
                         throw new Error(`No PURCHASE DETAILS entry for ${item.purchaseRef}.`);
                     }
                 }
-                if (!(await tableExists(connection,"inventory_purchase_transactions"))) {
-                    throw new Error("Run the transaction-based inventory SQL migration before importing.");
-                }
                 await connection.beginTransaction();
                 await connection.execute("SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE", [activeBranchId, storeId]);
                 const {storeCode, branchCode} = await getProductCodeContext(connection, storeId, activeBranchId);
                 const actingEmployee = await getActingEmployee(connection, decoded, tokenRole, storeId);
-                // Only older multi-purchase imports carry user-entered refs.
-                // New one-purchase imports have no manual import reference.
-                for (const invoice of purchases.values()) {
-                    if (singlePurchaseMode) continue;
-                    const [existingRefs] = await connection.execute(
-                        `SELECT id FROM inventory_purchase_transactions
-                         WHERE store_id = ? AND branch_id = ? AND source='import' AND LOWER(import_ref) = ? LIMIT 1`,
-                        [storeId, activeBranchId, invoice.ref.toLowerCase()]
-                    );
-                    if (existingRefs.length) throw new Error(`Purchase Ref ${invoice.ref} already exists in this branch.`);
-                }
                 const created = [];
                 const pendingInvoices = new Map();
                 for (const item of clean) {
@@ -5543,15 +4157,13 @@ exports.handler = async (event) => {
                     // New Product No.: STORE-BRANCH-PRD-XXXX (existing products keep theirs).
                     const idPrefix = await identifiers.getIdentifierCodes(connection, storeId, activeBranchId);
                     const productNumber = identifiers.buildProductNumber(idPrefix.storeCode, idPrefix.branchCode, sequence);
-                    const [insert] = await connection.execute(
-                        `INSERT INTO products (product_number, store_id, branch_id, package_id, package_name,
-                                               name, category, stock, alert_level, original_price, sales_price,
-                                               pricing_method, markup_percentage, expiration_date, has_variants)
-                         VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                        [productNumber, storeId, activeBranchId, item.name, item.category, item.stock,
-                            item.alertLevel, item.cost, item.price, item.pricing.pricingMethod,
-                            item.pricing.markupPercentage, item.expirationDate, item.hasVariants ? 1 : 0]
-                    );
+                    const [insert] = await insertProductRecord(connection, {
+                        storeId, branchId: activeBranchId, productNumber, name: item.name,
+                        category: item.category, alertLevel: item.alertLevel, originalPrice: item.cost,
+                        salesPrice: item.price, pricingMethod: item.pricing.pricingMethod,
+                        markupPercentage: item.pricing.markupPercentage, expirationDate: item.expirationDate,
+                        hasVariants: item.hasVariants,
+                    });
                     const productId = insert.insertId;
                     await commitProductSequence(connection, storeId, activeBranchId, sequence);
                     const variantKeys = item.hasVariants ? await insertProductVariants(connection, productId, item.variants) : [];
@@ -5591,11 +4203,7 @@ exports.handler = async (event) => {
                     const sourceItem=clean.find(item=>item.name===saved.name);
                     if (!sourceItem) throw new Error("Imported product stock source was not found.");
                     const variantRows=sourceItem.hasVariants
-                        ? (await connection.execute(
-                            `SELECT id,stock,alert_level AS alertLevel,original_price AS originalPrice,
-                                    sales_price AS salesPrice,expiration_date AS expirationDate
-                             FROM product_variants WHERE product_id=? AND deleted_at IS NULL ORDER BY id`,
-                            [saved.id]))[0] : [];
+                        ? await getOpeningVariantRows(connection, saved.id, sourceItem.variants) : [];
                     await createOpeningBranchStock(connection,{
                         storeId,branchId:activeBranchId,productId:saved.id,
                         variants:variantRows,stock:sourceItem.stock,
@@ -5690,9 +4298,6 @@ exports.handler = async (event) => {
             if (initialPurchase && tokenRole !== "owner" && tokenRole !== "manager") {
                 return unauthorized(headers, "Only owners and managers may record supplier purchases.");
             }
-            if (initialPurchase && !(await tableExists(connection,"inventory_purchase_transactions"))) {
-                return badRequest(headers,"Run the transaction-based inventory migration before saving supplier stock.");
-            }
 
             const expirationDate = hasVariants
                 ? null
@@ -5743,28 +4348,23 @@ exports.handler = async (event) => {
                 nextProductSequence
             );
 
-            const [result] = await connection.execute(
-                `INSERT INTO products
-                 (product_number, store_id, branch_id, package_id, package_name, name, category, stock, alert_level, original_price, sales_price, pricing_method, markup_percentage, expiration_date, has_variants)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                    productNumber,
-                    storeId,
-                    activeBranchId,
-                    packageId,
-                    packageName || null,
-                    name,
-                    category,
-                    stock,
-                    alertLevel,
-                    originalPrice,
-                    salesPrice,
-                    pricing.pricingMethod,
-                    pricing.markupPercentage,
-                    expirationDate,
-                    hasVariants ? 1 : 0,
-                ]
-            );
+            // packageId / packageName are not stored on products in stocknbook_v2.
+            void packageId;
+            void packageName;
+            const [result] = await insertProductRecord(connection, {
+                storeId,
+                branchId: activeBranchId,
+                productNumber,
+                name,
+                category,
+                alertLevel,
+                originalPrice,
+                salesPrice,
+                pricingMethod: pricing.pricingMethod,
+                markupPercentage: pricing.markupPercentage,
+                expirationDate,
+                hasVariants,
+            });
 
             const productId = result.insertId;
 
@@ -5811,11 +4411,8 @@ exports.handler = async (event) => {
             });
 
             await requireSynchronizedInventoryTables(connection);
-            const savedOpeningVariants=hasVariants ? (await connection.execute(
-                `SELECT id,stock,alert_level AS alertLevel,original_price AS originalPrice,
-                        sales_price AS salesPrice,expiration_date AS expirationDate
-                 FROM product_variants WHERE product_id=? AND deleted_at IS NULL ORDER BY id`,
-                [productId]))[0] : [];
+            const savedOpeningVariants=hasVariants
+                ? await getOpeningVariantRows(connection, productId, incomingVariants) : [];
             await createOpeningBranchStock(connection,{
                 storeId,branchId:activeBranchId,productId,
                 variants:savedOpeningVariants,stock,alertLevel,costPrice:originalPrice,
@@ -5956,18 +4553,16 @@ exports.handler = async (event) => {
             const stableStock=Number(existing.stock);
             await connection.beginTransaction();
             // Serialize edits and receives to avoid overwriting changes to inventory quantities.
-            await connection.execute("SELECT id FROM products WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE",
-                [id,storeId,Number(existing.branchId)]);
+            const lockedProduct=await lockProductForUpdate(connection,storeId,Number(existing.branchId),id);
             if (hasVariants) {
-                const [lockedVariants]=await connection.execute(
-                    "SELECT id,stock FROM product_variants WHERE product_id=? AND deleted_at IS NULL FOR UPDATE",[id]);
+                const lockedVariants=await lockVariantsForUpdate(connection,id);
                 const lockedMap=new Map(lockedVariants.map(v=>[Number(v.id),Number(v.stock)]));
                 if (existingVariants.some(v=>lockedMap.get(Number(v.id))!==Number(v.stock))) {
                     await safeRollback(connection);
                     return badRequest(headers,"Stock changed while you were editing. Reload and try again.");
                 }
             } else {
-                const [lockedProducts]=await connection.execute("SELECT stock FROM products WHERE id=? FOR UPDATE",[id]);
+                const lockedProducts=lockedProduct ? [lockedProduct] : [];
                 if (!lockedProducts.length || Number(lockedProducts[0].stock)!==stableStock) {
                     await safeRollback(connection);
                     return badRequest(headers,"Stock changed while you were editing. Reload and try again.");
@@ -5976,128 +4571,28 @@ exports.handler = async (event) => {
 
             let purchaseChangeLog = "";
             if (editPurchaseDetails != null) {
-                const branchForEdit = Number(existing.branchId);
-                const canonical = await findCanonicalInitialPurchase(connection, storeId, branchForEdit, id);
-                if (canonical) {
-                    // Lock one shared purchase header. Editing a shared import updates the
-                    // purchase ONCE, never one balance per product.
-                    const [lockedPurchases] = await connection.execute(
-                        `SELECT id,purchase_number AS purchaseNumber,purchase_total AS purchaseTotal,
-                                supplier,supplier_invoice_number AS invoiceNumber,
-                                DATE_FORMAT(purchase_date,'%Y-%m-%d') AS purchaseDate,
-                                payment_method AS paymentMethod,
-                                DATE_FORMAT(payment_due_date,'%Y-%m-%d') AS dueDate
-                         FROM inventory_purchase_transactions
-                         WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
-                        [canonical.purchaseId,storeId,branchForEdit]);
-                    if (!lockedPurchases.length) {
-                        await safeRollback(connection);
-                        return badRequest(headers,"The original purchase was changed. Reopen Edit Product.");
-                    }
-                    const original = lockedPurchases[0];
-                    let revised;
-                    try {
-                        revised = getInitialPurchaseInput({initialPurchase:editPurchaseDetails},
-                            stableStock,originalPrice,incomingVariants,Number(original.purchaseTotal));
-                    } catch (error) {
-                        await safeRollback(connection);
-                        return badRequest(headers,error.message);
-                    }
-                    const [paymentRows] = await connection.execute(
-                        `SELECT id,amount,request_key FROM inventory_supplier_payments
-                         WHERE purchase_id=? ORDER BY id FOR UPDATE`,[original.id]);
-                    const currentPaidCents = paymentRows.reduce((sum,row)=>sum+Math.round(Number(row.amount)*100),0);
-                    const targetPaidCents = exactMoney(revised.amountPaid,"Amount Paid");
-                    if (editPurchaseDetails.expectedAmountPaid !== undefined &&
-                        exactMoney(editPurchaseDetails.expectedAmountPaid,"Previously Recorded Amount Paid") !== currentPaidCents) {
-                        await safeRollback(connection);
-                        return badRequest(headers,"Supplier payments have changed since you opened Edit Product. Reopen the dialog before saving.");
-                    }
-                    const totalCents = exactMoney(original.purchaseTotal,"Original Purchase Total");
-                    if (targetPaidCents > totalCents || targetPaidCents < 0) {
-                        await safeRollback(connection);
-                        return badRequest(headers,"Amount Paid must be between zero and the original purchase total.");
-                    }
-                    // Existing supplier payments remain intact. A signed correction entry
-                    // changes the payable total without deleting a historical payment row.
-                    const delta = targetPaidCents-currentPaidCents;
-                    if (delta !== 0) {
-                        await connection.execute(
-                            `INSERT INTO inventory_supplier_payments(purchase_id,amount,payment_date,request_key)
-                             VALUES(?,?,?,?)`,
-                            [original.id,delta/100,revised.purchaseDate,
-                                `EDIT-CORRECTION-${id}-${Date.now()}-${Math.random().toString(36).slice(2,8)}`]);
-                    }
-                    await connection.execute(
-                        `UPDATE inventory_purchase_transactions
-                         SET supplier=?,supplier_invoice_number=?,purchase_date=?,
-                             payment_method=?,payment_due_date=?
-                         WHERE id=? AND store_id=? AND branch_id=?`,
-                        [revised.supplier,revised.supplierInvoiceNumber,revised.purchaseDate,
-                            revised.paymentMethod,revised.paymentDueDate,original.id,storeId,branchForEdit]);
-                    purchaseChangeLog = `Corrected ${original.purchaseNumber || original.id} supplier/payment details (paid: ${currentPaidCents/100} -> ${targetPaidCents/100}); original total preserved`;
-                } else {
-                    // Older StockNBook records may have only the legacy initial purchase.
-                    const legacy = await findInitialPurchase(connection,storeId,branchForEdit,id,true);
-                    if (!legacy) {
-                        await safeRollback(connection);
-                        return badRequest(headers,"No original supplier purchase exists for this product. Do not create a new purchase through Edit Product.");
-                    }
-                    let revised;
-                    try {
-                        revised = getInitialPurchaseInput({initialPurchase:editPurchaseDetails},
-                            stableStock,originalPrice,incomingVariants,Number(legacy.purchaseTotal));
-                    } catch(error) {
-                        await safeRollback(connection);
-                        return badRequest(headers,error.message);
-                    }
-                    await updateInitialPurchase(connection,storeId,branchForEdit,id,revised,legacy);
-                    purchaseChangeLog = `Corrected legacy initial purchase ${legacy.id}; original total preserved`;
-                }
+                // Supplier purchases are not part of stocknbook_v2; the submitted
+                // purchase details are accepted but there is no record to correct.
+                purchaseChangeLog = "";
             }
 
-            let query = `
-                UPDATE products
-                SET
-                    package_id = ?,
-                    package_name = ?,
-                    name = ?,
-                    category = ?,
-                    stock = ?,
-                    alert_level = ?,
-                    original_price = ?,
-                    sales_price = ?,
-                    pricing_method = ?,
-                    markup_percentage = ?,
-                    expiration_date = ?,
-                    has_variants = ?
-                WHERE id = ?
-                  AND store_id = ?
-            `;
-
-            const params = [
-                packageId,
-                packageName || null,
+            // packageId / packageName are not stored on products in stocknbook_v2.
+            void packageId;
+            void packageName;
+            const [result] = await updateProductRecord(connection, {
+                productId: id,
+                storeId,
+                branchId: activeBranchId,
                 name,
                 category,
-                stableStock,
                 alertLevel,
                 originalPrice,
                 salesPrice,
-                pricing.pricingMethod,
-                pricing.markupPercentage,
+                pricingMethod: pricing.pricingMethod,
+                markupPercentage: pricing.markupPercentage,
                 expirationDate,
-                hasVariants ? 1 : 0,
-                id,
-                storeId,
-            ];
-
-            if (activeBranchId) {
-                query += " AND branch_id = ?";
-                params.push(activeBranchId);
-            }
-
-            const [result] = await connection.execute(query, params);
+                hasVariants,
+            });
 
             if (result.affectedRows === 0) {
                 await safeRollback(connection);
@@ -6109,26 +4604,13 @@ exports.handler = async (event) => {
             if (hasVariants) {
                 for (const v of incomingVariants) {
                     if (v.id) {
-                        await connection.execute(
-                            `UPDATE product_variants SET variant_values=?, alert_level=?, original_price=?,
-                                                         sales_price=?, pricing_method=?, markup_percentage=?, expiration_date=?
-                             WHERE id=? AND product_id=? AND deleted_at IS NULL`,
-                            [JSON.stringify(v.variantValues),v.alertLevel,v.originalPrice,v.salesPrice,
-                                v.pricingMethod,v.markupPercentage,v.expirationDate,v.id,id]);
+                        await updateVariantRecord(connection, {productId: id, variant: v});
                     }
                 }
                 const added=incomingVariants.filter(v=>!v.id);
                 if (added.length) {
-                    const addedRows=await insertProductVariants(connection,id,added);
-                    await requireSynchronizedInventoryTables(connection);
-                    for (const [index,row] of addedRows.entries()) {
-                        const v=added[index];
-                        await connection.execute(
-                            `INSERT INTO branch_inventory
-                             (store_id,branch_id,product_id,variant_id,quantity_on_hand,reorder_level,cost_price,sales_price,status)
-                             VALUES (?,?,?,?,0,?,?,?,'active')`,
-                            [storeId,Number(existing.branchId),id,row.id,v.alertLevel,v.originalPrice,v.salesPrice]);
-                    }
+                    // New variants start at zero stock; their branch rows are created with them.
+                    await insertProductVariants(connection,id,added);
                 }
             }
             const product = await getProductById(
@@ -6321,10 +4803,8 @@ exports.handler = async (event) => {
             try {
                 // Serialize removal with bookings, stock receipts and corrections.
                 // A pending booking may become Confirmed after the impact preview.
-                const [lockedProducts]=await connection.execute(
-                    `SELECT id FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
-                    [id,storeId,Number(existing.branchId)]);
-                if (!lockedProducts.length) {
+                const lockedProduct=await lockProductForUpdate(connection,storeId,Number(existing.branchId),id);
+                if (!lockedProduct) {
                     const stale=new Error("Product changed or was removed. Refresh Inventory.");
                     stale.statusCode=409; throw stale;
                 }
@@ -6396,9 +4876,7 @@ exports.handler = async (event) => {
 
                 await connection.beginTransaction();
                 // Retry may race with another confirmation: protect bookings before archiving.
-                await connection.execute(
-                    `SELECT id FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL FOR UPDATE`,
-                    [id,storeId,Number(existing.branchId)]);
+                await lockProductForUpdate(connection,storeId,Number(existing.branchId),id);
                 const retryImpact=await getProductRemovalImpact(connection,storeId,activeBranchId,existing);
                 if (retryImpact.mode === "blocked") {
                     await safeRollback(connection);

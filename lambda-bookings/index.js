@@ -9,8 +9,8 @@ const JWT_SECRET = "stocknbook-secret-key";
 const dbConfig = {
     host: "127.0.0.1",
     user: "root",
-    password: "020820@Steph",
-    database: "stocknbook",
+    password: "BTA5EYVWLfWcebF",
+    database: "stocknbook_v2",
     ssl: { rejectUnauthorized: false },
 };
 
@@ -24,29 +24,973 @@ const dbPool = mysql.createPool({
 });
 
 
+// ===== BEGIN StockNBook v2 catalog (identical in lambda-products, lambda-pos, lambda-bookings, lambda-packages) =====
+/*
+ * stocknbook_v2 keeps ONE catalog row per product (products) and the prices on
+ * product_variants. Every product has one hidden default variant
+ * (is_default = 1) that carries the product-level price and, for a product
+ * without variants, its stock. Real variants have is_default = 0.
+ * Physical stock exists only in branch_inventory, and a product belongs to the
+ * branch that holds the branch_inventory row of its default variant.
+ *
+ * Rental equipment follows the same rule with equipment / equipment_variants.
+ *
+ * The read models below expose the column names this Lambda already returns,
+ * so API responses and the UI stay exactly the same.
+ */
+const V2_PRODUCT_STOCK_SQL = (p, bi) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.on_hand_quantity)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.on_hand_quantity END`;
+const V2_PRODUCT_ALERT_SQL = (p, bi) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
+        SELECT SUM(vbi.reorder_level)
+        FROM product_variants vv
+                 JOIN branch_inventory vbi ON vbi.variant_id = vv.id AND vbi.branch_id = ${bi}.branch_id
+        WHERE vv.product_id = ${p}.id AND vv.is_default = 0 AND vv.deleted_at IS NULL), 0)
+    ELSE ${bi}.reorder_level END`;
+
+// Product rows exactly as the inventory screens use them (one row per product).
+const V2_PRODUCTS = `(SELECT
+        p.id, p.store_id, base_bi.branch_id, p.product_number,
+        p.product_name AS name, COALESCE(cat.category_name, '') AS category, p.category_id,
+        p.description,
+        ${V2_PRODUCT_STOCK_SQL("p", "base_bi")} AS stock,
+        ${V2_PRODUCT_ALERT_SQL("p", "base_bi")} AS alert_level,
+        dv.cost_price AS original_price, dv.selling_price AS sales_price,
+        dv.pricing_method, dv.markup_percentage,
+        base_bi.expiration_date, p.has_variants, p.next_variant_sequence, p.status,
+        p.created_at, p.updated_at, p.deleted_at,
+        dv.id AS default_variant_id, base_bi.id AS base_inventory_id
+    FROM products p
+             JOIN product_variants dv ON dv.product_id = p.id AND dv.is_default = 1
+             JOIN branch_inventory base_bi ON base_bi.variant_id = dv.id
+             LEFT JOIN categories cat ON cat.id = p.category_id)`;
+
+// Real (selectable) variants with their branch stock.
+const V2_PRODUCT_VARIANTS = `(SELECT
+        v.id, v.store_id, v.product_id, v.variant_number, v.variant_name,
+        v.attributes AS variant_values,
+        COALESCE(vbi.on_hand_quantity, 0) AS stock, COALESCE(vbi.reorder_level, 0) AS alert_level,
+        v.cost_price AS original_price, v.selling_price AS sales_price,
+        v.pricing_method, v.markup_percentage, vbi.expiration_date,
+        vbi.branch_id, vbi.id AS inventory_id, v.status, v.created_at, v.updated_at, v.deleted_at
+    FROM product_variants v
+             LEFT JOIN branch_inventory vbi ON vbi.variant_id = v.id
+    WHERE v.is_default = 0)`;
+
+// Consumable branch stock keyed by (product_id, variant_id); variant_id is NULL
+// for a product without variants.
+const V2_BRANCH_INVENTORY = `(SELECT
+        bi.id, bi.store_id, bi.branch_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE v.id END AS variant_id,
+        bi.variant_id AS catalog_variant_id,
+        bi.on_hand_quantity AS quantity_on_hand, bi.reserved_quantity, bi.unavailable_quantity,
+        bi.reorder_level, v.cost_price, v.selling_price AS sales_price, bi.expiration_date,
+        bi.status, bi.created_at, bi.updated_at
+    FROM branch_inventory bi
+             JOIN product_variants v ON v.id = bi.variant_id)`;
+
+// Batch tracking is not part of stocknbook_v2: each branch_inventory row is
+// its own (single) batch with one expiration date.
+const V2_INVENTORY_BATCHES = `(SELECT
+        bi.id, bi.store_id, bi.branch_id, bi.id AS branch_inventory_id,
+        CONCAT('INV-', bi.id) AS batch_code, bi.on_hand_quantity AS received_quantity,
+        bi.on_hand_quantity AS remaining_quantity, v.cost_price AS unit_cost,
+        bi.updated_at AS received_at, bi.expiration_date,
+        CASE WHEN bi.on_hand_quantity > 0 THEN 'active' ELSE 'depleted' END AS status
+    FROM branch_inventory bi
+             JOIN product_variants v ON v.id = bi.variant_id)`;
+
+// Movement history with the legacy reference/actor fields.
+const V2_INVENTORY_MOVEMENTS = `(SELECT
+        m.id, m.store_id, m.branch_id, m.branch_inventory_id, m.movement_type,
+        m.quantity_change AS quantity_delta, m.quantity_before, m.quantity_after, m.unit_cost,
+        m.reference_type,
+        CASE WHEN m.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING_INDEX(SUBSTRING(m.reason, 5), ': ', 1)
+             ELSE CAST(m.reference_id AS CHAR) END AS reference_id,
+        m.performed_by AS actor_id, mu.role AS actor_role, COALESCE(mu.full_name, 'System') AS actor_name,
+        CASE WHEN m.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING(m.reason, LOCATE(': ', m.reason) + 2)
+             ELSE m.reason END AS notes,
+        m.created_at
+    FROM inventory_movements m
+             LEFT JOIN users mu ON mu.id = m.performed_by)`;
+
+// POS lines keyed by (product_id, variant_id).
+const V2_ORDER_ITEMS = `(SELECT
+        oi.id, oi.store_id, oi.order_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE oi.variant_id END AS variant_id,
+        oi.variant_id AS catalog_variant_id,
+        oi.product_name_snapshot AS product_name, oi.quantity, oi.unit_price,
+        oi.cost_price_at_sale, oi.discount_amount, oi.line_total
+    FROM order_items oi
+             JOIN product_variants v ON v.id = oi.variant_id)`;
+
+// Consumable booking lines keyed by (product_id, variant_id).
+const V2_PRODUCT_BOOKING_ITEMS = `(SELECT
+        bki.id, bki.store_id, bki.booking_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE bki.variant_id END AS variant_id,
+        bki.variant_id AS catalog_variant_id, bki.item_type, bki.quantity,
+        bki.unit_price_snapshot, bki.line_total, bki.item_status, bki.created_at
+    FROM booking_items bki
+             JOIN product_variants v ON v.id = bki.variant_id
+    WHERE bki.item_type = 'consumable')`;
+
+// Consumable package lines keyed by (product_id, variant_id).
+const V2_PRODUCT_PACKAGE_ITEMS = `(SELECT
+        pki.id, pki.store_id, pki.package_id, v.product_id,
+        CASE WHEN v.is_default = 1 THEN NULL ELSE pki.variant_id END AS variant_id,
+        pki.variant_id AS catalog_variant_id, pki.quantity, pki.unit_price_snapshot, pki.sort_order
+    FROM package_items pki
+             JOIN product_variants v ON v.id = pki.variant_id
+    WHERE pki.item_type = 'consumable')`;
+
+async function v2DefaultVariantId(connection, productId) {
+    const [rows] = await connection.execute(
+        "SELECT id FROM product_variants WHERE product_id = ? AND is_default = 1 LIMIT 1",
+        [productId]
+    );
+    return rows.length ? Number(rows[0].id) : null;
+}
+
+// (product_id, variant_id|null) -> product_variants.id used by stocknbook_v2.
+async function v2CatalogVariantId(connection, productId, variantId) {
+    if (variantId !== null && variantId !== undefined && variantId !== "") return Number(variantId);
+    return v2DefaultVariantId(connection, productId);
+}
+
+// Locks the branch stock row of a product/variant (FOR UPDATE).
+async function v2LockInventory(connection, { storeId, branchId, productId, variantId = null }) {
+    const catalogVariantId = await v2CatalogVariantId(connection, productId, variantId);
+    if (!catalogVariantId) return null;
+    const [rows] = await connection.execute(
+        `SELECT bi.id, bi.variant_id, bi.on_hand_quantity, bi.reserved_quantity,
+                bi.unavailable_quantity, bi.reorder_level, bi.expiration_date
+         FROM branch_inventory bi
+                  JOIN product_variants v ON v.id = bi.variant_id
+         WHERE bi.store_id = ? AND bi.branch_id = ? AND bi.variant_id = ?
+           AND v.product_id = ? AND bi.status = 'active'
+             LIMIT 1
+         FOR UPDATE`,
+        [storeId, branchId, catalogVariantId, productId]
+    );
+    if (!rows.length) return null;
+    return {
+        ...rows[0],
+        id: Number(rows[0].id),
+        quantity_on_hand: Number(rows[0].on_hand_quantity),
+        catalog_variant_id: catalogVariantId,
+    };
+}
+
+// Creates the branch stock row for a catalog variant when it does not exist yet.
+async function v2EnsureInventoryRow(connection, { storeId, branchId, catalogVariantId, reorderLevel = 0, expirationDate = null }) {
+    const [found] = await connection.execute(
+        "SELECT id FROM branch_inventory WHERE branch_id = ? AND variant_id = ? LIMIT 1",
+        [branchId, catalogVariantId]
+    );
+    if (found.length) return Number(found[0].id);
+    const [insert] = await connection.execute(
+        `INSERT INTO branch_inventory
+             (store_id, branch_id, variant_id, on_hand_quantity, reorder_level, expiration_date, status)
+         VALUES (?, ?, ?, 0, ?, ?, 'active')`,
+        [storeId, branchId, catalogVariantId, Math.max(0, Number(reorderLevel) || 0), expirationDate || null]
+    );
+    return Number(insert.insertId);
+}
+
+// inventory_movements.performed_by must be a user of the same store.
+async function v2ActorUserId(connection, storeId, actorId) {
+    const id = Number(actorId);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    const [rows] = await connection.execute(
+        "SELECT id FROM users WHERE id = ? AND store_id = ? LIMIT 1",
+        [id, storeId]
+    );
+    return rows.length ? id : null;
+}
+
+// A text reference (receipt key, request key ...) is kept at the start of the
+// movement reason so it can be read back as reference_id.
+function v2MovementReason(reference, notes) {
+    const ref = String(reference ?? "").replace(/: /g, " ").trim();
+    const text = String(notes ?? "").trim();
+    if (!ref) return text || null;
+    return `Ref ${ref}: ${text}`;
+}
+
+async function v2RecordMovement(connection, {
+    storeId, branchId, inventoryId, movementType, delta, before, after,
+    referenceType = null, referenceId = null, reference = null, unitCost = null,
+    actorId = null, notes = null, bucket = "on_hand",
+}) {
+    const numericReference = Number(referenceId);
+    const [result] = await connection.execute(
+        `INSERT INTO inventory_movements
+         (store_id, branch_id, branch_inventory_id, movement_type, quantity_bucket, quantity_change,
+          quantity_before, quantity_after, unit_cost, reference_type, reference_id, reason, performed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            storeId, branchId, inventoryId, movementType, bucket, Number(delta),
+            Number(before), Number(after),
+            unitCost === null || unitCost === undefined ? null : Number(unitCost),
+            referenceType,
+            Number.isSafeInteger(numericReference) && numericReference > 0 ? numericReference : null,
+            v2MovementReason(reference, notes),
+            await v2ActorUserId(connection, storeId, actorId),
+        ]
+    );
+    return Number(result.insertId);
+}
+
+// Category text -> categories.id (created on first use, like the old free-text category).
+async function v2CategoryId(connection, storeId, categoryName, categoryType = "product") {
+    const name = String(categoryName || "").trim();
+    if (!name) return null;
+    const [rows] = await connection.execute(
+        `SELECT id FROM categories
+         WHERE store_id = ? AND category_type = ? AND LOWER(category_name) = LOWER(?)
+             LIMIT 1`,
+        [storeId, categoryType, name]
+    );
+    if (rows.length) return Number(rows[0].id);
+    const [insert] = await connection.execute(
+        "INSERT INTO categories (store_id, category_name, category_type, status) VALUES (?, ?, ?, 'active')",
+        [storeId, name.slice(0, 150), categoryType]
+    );
+    return Number(insert.insertId);
+}
+
+function v2VariantName(values, fallback) {
+    const name = Object.values(values || {})
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .join(", ");
+    return (name || fallback || "Default").slice(0, 150);
+}
+// ===== END StockNBook v2 catalog =====
+
+// ===== BEGIN StockNBook v2 rentals & bookings (identical in lambda-rental-inventory and lambda-bookings) =====
+/*
+ * stocknbook_v2 rental model
+ *  - equipment + its default equipment_variants row (is_default = 1) hold the
+ *    item, daily rate and average cost. A rental item belongs to the branch
+ *    holding the branch_inventory row of that default variant.
+ *  - branch_inventory (equipment_variant_id):
+ *      on_hand_quantity     = total units owned by the branch
+ *      reserved_quantity    = units currently out with customers (rented out)
+ *      unavailable_quantity = units on hold (maintenance, inspection, cleaning)
+ *                             + units reported missing
+ *  - stock_issues: maintenance records (issue_type 'maintenance', status =
+ *    condition), missing reports (issue_type 'missing') and staff repair
+ *    completion requests (issue_type 'repair_completion').
+ *  - booking_items (item_type 'rental') are the booking's equipment lines:
+ *      item_status 'pending'   requested, not yet reserved
+ *                  'reserved'  reserved by a confirmed booking
+ *                  'released'  handed over (checked out)
+ *                  'returned'  returned, waiting for inspection
+ *                  'cleaning' / 'damaged' / 'cleared'  inspected
+ *                  'cancelled'
+ *    A customer charge for lost or damaged equipment is a booking_items row
+ *    with item_status 'claim_approved' / 'claim_settled' / 'claim_waived'.
+ *  - Rental activity is recorded in inventory_movements.
+ */
+const V2_RETURNED_ITEM_STATUSES_SQL = "('returned','cleaning','damaged','cleared')";
+const V2_RENTAL_LINE_SQL = "bki.item_type = 'rental' AND bki.item_status NOT LIKE 'claim%'";
+
+// Missing units still unresolved for an equipment branch stock row.
+const V2_MISSING_UNITS_SQL = (bi) => `COALESCE((SELECT SUM(mi.quantity - mi.quantity_resolved)
+        FROM stock_issues mi
+        WHERE mi.branch_inventory_id = ${bi}.id AND mi.issue_type = 'missing' AND mi.status = 'pending'), 0)`;
+
+// Rental equipment rows as the rental screens use them (one per item and branch).
+const V2_RENTAL_EQUIPMENT = `(SELECT
+        e.id, e.store_id, ebi.branch_id, e.category_id, e.equipment_number,
+        e.equipment_name AS name, LOWER(TRIM(e.equipment_name)) AS name_key,
+        ebi.reorder_level AS alert_level, ev.rental_rate_per_day,
+        'manual' AS pricing_method, NULL AS pricing_recovery_days, NULL AS pricing_residual_value,
+        NULL AS pricing_operating_cost_per_day, NULL AS pricing_margin_percent, NULL AS pricing_unit_cost_basis,
+        ebi.on_hand_quantity AS total_units,
+        ebi.reserved_quantity AS rented_out_units,
+        ebi.unavailable_quantity - ${V2_MISSING_UNITS_SQL("ebi")} AS maintenance_units,
+        ${V2_MISSING_UNITS_SQL("ebi")} AS missing_units,
+        ev.cost_price AS average_unit_cost, NULL AS last_supplier,
+        e.deleted_at AS archived_at, e.created_at, e.updated_at,
+        ev.id AS equipment_variant_id, ebi.id AS inventory_id
+    FROM equipment e
+             JOIN equipment_variants ev ON ev.equipment_id = e.id AND ev.is_default = 1
+             JOIN branch_inventory ebi ON ebi.equipment_variant_id = ev.id)`;
+
+// Rental categories (store-wide categories with category_type 'equipment').
+const V2_RENTAL_CATEGORIES = `(SELECT
+        id, store_id, category_name AS name, LOWER(TRIM(category_name)) AS category_key,
+        CASE WHEN status = 'active' THEN NULL ELSE updated_at END AS archived_at, created_at
+    FROM categories
+    WHERE category_type = 'equipment')`;
+
+// Equipment lines of bookings in the legacy allocation + staff workflow shape.
+const V2_RENTAL_ALLOCATIONS = `(SELECT
+        bki.id, bki.id AS allocation_id, bki.store_id, rb.branch_id, rb.id AS booking_id, rb.booking_reference,
+        ev.equipment_id, bki.equipment_variant_id, bki.quantity,
+        COALESCE(rb.rental_start_date, rb.event_date) AS start_date,
+        COALESCE(rb.rental_end_date, rb.event_end_date, rb.rental_start_date, rb.event_date) AS end_date,
+        CASE
+            WHEN bki.item_status = 'released' THEN 'checked_out'
+            WHEN bki.item_status IN ${V2_RETURNED_ITEM_STATUSES_SQL} THEN 'returned'
+            WHEN bki.item_status = 'cancelled' THEN 'cancelled'
+            WHEN bki.item_status = 'reserved' THEN 'reserved'
+            ELSE 'requested' END AS status,
+        bki.item_status, bki.line_total AS rental_charge_total, bki.unit_price_snapshot AS daily_rate_snapshot,
+        bki.rental_days AS billable_days, bki.item_name_snapshot AS equipment_name,
+        bki.prepared_at, bki.prepared_by, bki.released_at, bki.released_by,
+        bki.returned_at, bki.received_by AS returned_by,
+        CASE WHEN bki.returned_at IS NULL THEN NULL ELSE bki.returned_quantity END AS returned_received_units,
+        CASE WHEN bki.item_status = 'returned' THEN 'pending'
+             WHEN bki.item_status IN ('cleaning','damaged','cleared') THEN bki.item_status
+             ELSE NULL END AS inspection_status,
+        bki.used_quantity AS inspection_cleaning_units,
+        bki.damaged_quantity AS inspection_damaged_units,
+        bki.missing_quantity AS missing_units,
+        bki.return_notes AS inspection_notes,
+        bki.inspected_at, bki.inspected_by,
+        (SELECT di.id FROM stock_issues di
+          WHERE di.booking_id = rb.id AND di.issue_type = 'maintenance'
+            AND di.branch_inventory_id = (SELECT dbi.id FROM branch_inventory dbi
+                                          WHERE dbi.equipment_variant_id = bki.equipment_variant_id
+                                            AND dbi.branch_id = rb.branch_id LIMIT 1)
+            AND di.reason LIKE 'Rental damage %'
+          ORDER BY di.id DESC LIMIT 1) AS maintenance_record_id,
+        bki.created_at, bki.updated_at
+    FROM booking_items bki
+             JOIN bookings rb ON rb.id = bki.booking_id AND rb.store_id = bki.store_id
+             JOIN equipment_variants ev ON ev.id = bki.equipment_variant_id
+    WHERE ${V2_RENTAL_LINE_SQL})`;
+
+// Maintenance / inspection holds.
+const V2_MAINTENANCE_RECORDS = `(SELECT
+        si.id, si.store_id, si.branch_id, mev.equipment_id,
+        si.quantity AS quantity_started, si.quantity - si.quantity_resolved AS quantity_remaining,
+        si.reason AS start_reason, si.status AS condition_status,
+        si.estimated_completion_date, si.created_at AS opened_at,
+        mb.booking_reference, si.booking_id,
+        si.approved_at AS repair_approved_at, si.approved_by AS repair_approved_by,
+        si.resolution_notes AS completion_notes, si.resolved_at AS completed_at
+    FROM stock_issues si
+             JOIN branch_inventory mbi ON mbi.id = si.branch_inventory_id
+             JOIN equipment_variants mev ON mev.id = mbi.equipment_variant_id
+             LEFT JOIN bookings mb ON mb.id = si.booking_id
+    WHERE si.issue_type = 'maintenance')`;
+
+// Missing-unit reports.
+const V2_MISSING_REPORTS = `(SELECT
+        si.id, si.store_id, si.branch_id, mev.equipment_id, si.quantity, si.quantity_resolved AS recovered,
+        si.reason, COALESCE(ru.full_name, '') AS reported_by, mb.booking_reference, si.booking_id,
+        si.status, si.resolved_by, si.resolved_at, si.resolution_notes, si.created_at
+    FROM stock_issues si
+             JOIN branch_inventory mbi ON mbi.id = si.branch_inventory_id
+             JOIN equipment_variants mev ON mev.id = mbi.equipment_variant_id
+             LEFT JOIN bookings mb ON mb.id = si.booking_id
+             LEFT JOIN users ru ON ru.id = si.reported_by
+    WHERE si.issue_type = 'missing')`;
+
+// Staff repair completion requests awaiting Manager approval.
+const V2_COMPLETION_REQUESTS = `(SELECT
+        si.id, si.store_id, si.branch_id, mev.equipment_id,
+        CAST(SUBSTRING_INDEX(SUBSTRING(si.reason, 5), ':', 1) AS UNSIGNED) AS maintenance_record_id,
+        si.quantity, SUBSTRING(si.reason, LOCATE(': ', si.reason) + 2) AS notes,
+        si.status, si.reported_by AS requested_by, si.resolved_by AS reviewed_by,
+        si.resolved_at AS reviewed_at, si.created_at
+    FROM stock_issues si
+             JOIN branch_inventory mbi ON mbi.id = si.branch_inventory_id
+             JOIN equipment_variants mev ON mev.id = mbi.equipment_variant_id
+    WHERE si.issue_type = 'repair_completion')`;
+
+// Rental activity (inventory_movements of equipment stock rows).
+const V2_RENTAL_MOVEMENTS = `(SELECT
+        mm.id, mm.store_id, mm.branch_id, rev.equipment_id, mm.movement_type AS type,
+        ABS(mm.quantity_change) AS quantity,
+        CASE WHEN mm.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING_INDEX(SUBSTRING(mm.reason, 5), ': ', 1)
+             ELSE NULL END AS reference_number,
+        CASE WHEN mm.reason LIKE 'Ref %: %'
+                 THEN SUBSTRING(mm.reason, LOCATE(': ', mm.reason) + 2)
+             ELSE mm.reason END AS description,
+        COALESCE(mu.full_name, 'System') AS actor_name, mm.created_at AS occurred_at
+    FROM inventory_movements mm
+             JOIN branch_inventory rbi ON rbi.id = mm.branch_inventory_id
+             JOIN equipment_variants rev ON rev.id = rbi.equipment_variant_id
+             LEFT JOIN users mu ON mu.id = mm.performed_by)`;
+
+// Booking bill payments (security deposits and damage/loss charge payments are separate).
+const V2_BOOKING_PAID_SQL = (b) => `(COALESCE((SELECT SUM(bp.amount) FROM payments bp
+        WHERE bp.booking_id = ${b}.id AND bp.status <> 'voided'
+          AND bp.payment_type NOT IN ('Security Deposit','Additional Charge')), 0)
+    - COALESCE((SELECT SUM(br.amount) FROM refunds br JOIN payments brp ON brp.id = br.payment_id
+        WHERE brp.booking_id = ${b}.id AND br.status = 'completed'
+          AND brp.payment_type NOT IN ('Security Deposit','Additional Charge')), 0))`;
+
+// Bookings with the legacy customer/package/payment columns.
+const V2_BOOKINGS = `(SELECT
+        b.id, b.store_id, b.branch_id, b.booking_reference, b.customer_id, b.package_id,
+        b.booking_type, b.event_type, b.theme, b.event_date, b.event_end_date, b.event_time,
+        b.venue, b.rental_start_date, b.rental_end_date, b.custom_order, b.notes, b.status,
+        bc.full_name AS name, bc.facebook_name, bc.phone, bc.email,
+        COALESCE(bpk.package_name, '') AS package_name,
+        b.package_price_snapshot AS package_price, b.agreed_price, b.required_down_payment,
+        b.down_payment_deadline, b.refundable_deposit_required, b.vat_amount,
+        b.final_additional_charges, b.deposit_applied_amount, b.approved_refund_amount,
+        b.settlement_status, b.settlement_notes, b.cancellation_reason,
+        b.approved_by, b.approved_at, b.created_by,
+        ${V2_BOOKING_PAID_SQL("b")} AS amount_paid,
+        GREATEST(COALESCE(b.agreed_price, 0) - ${V2_BOOKING_PAID_SQL("b")}, 0) AS balance,
+        CASE WHEN ${V2_BOOKING_PAID_SQL("b")} <= 0 THEN 'Unpaid'
+             WHEN ${V2_BOOKING_PAID_SQL("b")} + 0.005 >= COALESCE(b.agreed_price, 0) THEN 'Paid'
+             ELSE 'Partially Paid' END AS payment_status,
+        b.created_at, b.updated_at
+    FROM bookings b
+             JOIN customers bc ON bc.id = b.customer_id
+             LEFT JOIN packages bpk ON bpk.id = b.package_id)`;
+
+// Security-deposit position of each booking.
+const V2_BOOKING_FINANCIALS = `(SELECT
+        b.id AS booking_id, b.store_id, b.branch_id,
+        b.refundable_deposit_required,
+        COALESCE((SELECT SUM(dp.amount) FROM payments dp
+                  WHERE dp.booking_id = b.id AND dp.status <> 'voided' AND dp.payment_type = 'Security Deposit'), 0) AS deposit_collected,
+        b.deposit_applied_amount AS deposit_applied,
+        COALESCE((SELECT SUM(dr.amount) FROM refunds dr JOIN payments drp ON drp.id = dr.payment_id
+                  WHERE drp.booking_id = b.id AND dr.status = 'completed' AND drp.payment_type = 'Security Deposit'), 0) AS deposit_refunded,
+        b.final_additional_charges, b.approved_refund_amount, b.settlement_status, b.settlement_notes,
+        b.settlement_reviewed_by, b.settlement_reviewed_at, b.required_down_payment, b.down_payment_deadline,
+        b.vat_amount, b.agreed_price,
+        COALESCE(b.package_price_snapshot, 0) AS package_base,
+        COALESCE((SELECT SUM(rl.line_total) FROM booking_items rl
+                  WHERE rl.booking_id = b.id AND rl.item_type = 'rental'
+                    AND rl.item_status NOT LIKE 'claim%' AND rl.item_status <> 'cancelled'), 0) AS rental_subtotal,
+        0 AS delivery_fee, 0 AS setup_fee,
+        (SELECT JSON_UNQUOTE(JSON_EXTRACT(wa.details, '$.reason')) FROM employee_actions wa
+          WHERE wa.store_id = b.store_id AND wa.entity_id = b.id
+            AND wa.action = 'Recorded security deposit waiver'
+          ORDER BY wa.id DESC LIMIT 1) AS deposit_waiver_reason,
+        b.created_at, b.updated_at
+    FROM bookings b)`;
+
+// Customer charges for lost or damaged rental equipment.
+const V2_BOOKING_CLAIMS = `(SELECT
+        cl.id, cl.booking_id, cl.store_id, cb.branch_id,
+        SUBSTRING_INDEX(cl.variant_name_snapshot, '#', 1) AS source_type,
+        CAST(SUBSTRING_INDEX(cl.variant_name_snapshot, '#', -1) AS UNSIGNED) AS source_record_id,
+        cev.equipment_id, cl.quantity, cl.notes AS reason,
+        cl.line_total AS approved_amount,
+        COALESCE((SELECT SUM(cp.amount) FROM payments cp
+                  WHERE cp.booking_id = cl.booking_id AND cp.status <> 'voided'
+                    AND cp.payment_type = 'Additional Charge'
+                    AND cp.reference_number = CONCAT('CLAIM-', cl.id)), 0) AS amount_paid,
+        cl.unit_price_snapshot AS deposit_applied,
+        SUBSTRING(cl.item_status, 7) AS status,
+        cl.inspected_by AS approved_by, cl.created_at, cl.updated_at
+    FROM booking_items cl
+             JOIN bookings cb ON cb.id = cl.booking_id AND cb.store_id = cl.store_id
+             JOIN equipment_variants cev ON cev.id = cl.equipment_variant_id
+    WHERE cl.item_type = 'rental' AND cl.item_status LIKE 'claim%')`;
+
+// Applies a change to the rental stock buckets of one equipment branch row.
+async function v2AdjustEquipmentStock(db, inventoryId, {total = 0, rentedOut = 0, maintenance = 0, missing = 0} = {}) {
+    await db.execute(
+        `UPDATE branch_inventory
+         SET on_hand_quantity = on_hand_quantity + ?,
+             reserved_quantity = reserved_quantity + ?,
+             unavailable_quantity = unavailable_quantity + ?
+         WHERE id = ?`,
+        [Number(total) || 0, Number(rentedOut) || 0, (Number(maintenance) || 0) + (Number(missing) || 0), inventoryId]
+    );
+}
+
+// Branch stock row id of an equipment item in a branch.
+async function v2EquipmentInventoryId(db, storeId, branchId, equipmentId) {
+    const [rows] = await db.execute(
+        `SELECT ebi.id FROM branch_inventory ebi
+                  JOIN equipment_variants ev ON ev.id = ebi.equipment_variant_id AND ev.is_default = 1
+         WHERE ev.equipment_id = ? AND ebi.store_id = ? AND ebi.branch_id = ? LIMIT 1`,
+        [equipmentId, storeId, branchId]
+    );
+    return rows.length ? Number(rows[0].id) : null;
+}
+
+async function v2BookingIdByReference(db, storeId, branchId, reference) {
+    if (!reference) return null;
+    const [rows] = await db.execute(
+        "SELECT id FROM bookings WHERE store_id = ? AND branch_id = ? AND booking_reference = ? LIMIT 1",
+        [storeId, branchId, reference]
+    );
+    return rows.length ? Number(rows[0].id) : null;
+}
+
+async function v2UserId(db, storeId, userId) {
+    const value = Number(userId);
+    if (!Number.isSafeInteger(value) || value <= 0) return null;
+    const [rows] = await db.execute("SELECT id FROM users WHERE id = ? AND store_id = ? LIMIT 1", [value, storeId]);
+    return rows.length ? value : null;
+}
+
+// Signed effect of each rental activity on its stock bucket.
+const V2_RENTAL_MOVEMENT_BUCKETS = {
+    received: ["on_hand", 1], adjustment: ["on_hand", 1],
+    rented_out: ["reserved", 1], returned: ["reserved", -1],
+    maintenance_started: ["unavailable", 1], maintenance_completed: ["unavailable", -1],
+    missing_reported: ["unavailable", 1], missing_resolved: ["unavailable", -1],
+    missing_replaced: ["unavailable", -1],
+    prepared: ["event", 1], inspected: ["event", 1], cleaned: ["unavailable", -1], damage_reported: ["event", 1],
+};
+
+// Records one rental activity in inventory_movements (after the stock change).
+async function v2RecordRentalMovement(db, scope, equipmentId, type, quantity, ref, description, sign = null) {
+    const inventoryId = await v2EquipmentInventoryId(db, scope.storeId, scope.branchId, equipmentId);
+    if (!inventoryId) return;
+    const [bucket, defaultSign] = V2_RENTAL_MOVEMENT_BUCKETS[type] || ["event", 1];
+    const delta = Math.abs(Number(quantity) || 0) * (sign ?? defaultSign);
+    let after = Math.abs(Number(quantity) || 0);
+    let before = 0;
+    if (bucket !== "event") {
+        const column = bucket === "on_hand" ? "on_hand_quantity" : bucket === "reserved" ? "reserved_quantity" : "unavailable_quantity";
+        const [rows] = await db.execute(`SELECT ${column} AS value FROM branch_inventory WHERE id = ?`, [inventoryId]);
+        after = Number(rows[0]?.value || 0);
+        before = after - delta;
+        if (before < 0) { before = 0; after = delta > 0 ? delta : 0; }
+    }
+    const reference = String(ref ?? "").replace(/: /g, " ").trim();
+    const text = String(description ?? "").trim();
+    await db.execute(
+        `INSERT INTO inventory_movements
+         (store_id, branch_id, branch_inventory_id, movement_type, quantity_bucket, quantity_change,
+          quantity_before, quantity_after, reference_type, reason, performed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RENTAL', ?, ?)`,
+        [scope.storeId, scope.branchId, inventoryId, type, bucket, bucket === "event" ? after : after - before,
+            before, after, reference ? `Ref ${reference}: ${text}` : (text || null),
+            await v2UserId(db, scope.storeId, scope.actorId)]
+    );
+}
+// ===== END StockNBook v2 rentals & bookings =====
+
+// ===== BEGIN StockNBook v2 bookings =====
+/*
+ * stocknbook_v2 bookings
+ *  - Customer details live in customers (bookings.customer_id).
+ *  - booking_items holds every booking line:
+ *      item_type 'package'    one parent line for the selected package
+ *      item_type 'consumable' product lines (parent_item_id set for package inclusions)
+ *      item_type 'rental'     rental equipment lines (see the rentals block)
+ *  - Customer payments are payments rows (Down Payment / Balance / Security
+ *    Deposit / Additional Charge); money given back is a refunds row.
+ *  - Customer review flags are kept on customers; case notes, approval
+ *    requests and audit events are kept in employee_actions.
+ */
+const V2_BOOKING_LINES = `(SELECT
+        bki.id, bki.id AS booking_item_id, bki.booking_id, bki.store_id, lb.branch_id,
+        CASE WHEN bki.parent_item_id IS NULL THEN 'custom' ELSE 'package' END AS source_type,
+        pbi.package_id, lv.product_id,
+        CASE WHEN lv.is_default = 1 THEN NULL ELSE bki.variant_id END AS variant_id,
+        bki.variant_id AS catalog_variant_id,
+        bki.item_name_snapshot AS product_name, COALESCE(bki.variant_name_snapshot, '') AS variant_name,
+        COALESCE(lcat.category_name, '') AS category,
+        bki.quantity AS booked_quantity,
+        CASE WHEN bki.item_status = 'pending' THEN 0 ELSE bki.quantity END AS reserved_quantity,
+        bki.used_quantity, bki.returned_quantity AS restored_quantity,
+        bki.unit_price_snapshot AS unit_price, bki.line_total AS estimated_subtotal,
+        ROUND(bki.used_quantity * bki.unit_price_snapshot, 2) AS used_subtotal,
+        bki.item_status AS inventory_status, bki.notes,
+        bki.prepared_at, bki.prepared_by, bki.released_at AS issued_at, bki.released_by AS issued_by,
+        bki.created_at, bki.updated_at
+    FROM booking_items bki
+             JOIN bookings lb ON lb.id = bki.booking_id AND lb.store_id = bki.store_id
+             JOIN product_variants lv ON lv.id = bki.variant_id
+             LEFT JOIN products lp ON lp.id = lv.product_id
+             LEFT JOIN categories lcat ON lcat.id = lp.category_id
+             LEFT JOIN booking_items pbi ON pbi.id = bki.parent_item_id
+    WHERE bki.item_type = 'consumable')`;
+
+// Rental request lines with their booking dates.
+const V2_BOOKING_RENTAL_ITEMS = `(SELECT
+        bki.id, bki.booking_id, bki.store_id, rb.branch_id, rb.booking_reference, rev.equipment_id,
+        bki.equipment_variant_id, bki.item_name_snapshot AS equipment_name, bki.quantity,
+        COALESCE(rb.rental_start_date, rb.event_date) AS start_date,
+        COALESCE(rb.rental_end_date, rb.event_end_date, rb.rental_start_date, rb.event_date) AS end_date,
+        bki.rental_days AS billable_days, bki.unit_price_snapshot AS daily_rate_snapshot,
+        bki.line_total AS agreed_line_total, bki.item_status, bki.created_at
+    FROM booking_items bki
+             JOIN bookings rb ON rb.id = bki.booking_id AND rb.store_id = bki.store_id
+             JOIN equipment_variants rev ON rev.id = bki.equipment_variant_id
+    WHERE bki.item_type = 'rental' AND bki.item_status NOT LIKE 'claim%')`;
+
+// Packages with the legacy column names.
+const V2_PACKAGES = `(SELECT
+        pk.id, pk.store_id, pk.branch_id, pk.package_code, pk.package_name AS name, pk.description,
+        COALESCE((SELECT SUM(pki.quantity * pki.unit_price_snapshot)
+                  FROM package_items pki WHERE pki.package_id = pk.id), 0) AS original_value,
+        pk.discount_type, pk.discount_value, pk.package_price, pk.down_payment_amount, pk.duration,
+        pk.status, pk.category, pk.cover_image_url AS cover_image, NULL AS inclusions,
+        pk.created_at, pk.updated_at
+    FROM packages pk)`;
+
+// Package contents (package_items) in the inclusions format used by the app.
+async function attachV2Inclusions(connection, rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return rows || [];
+    const ids = rows.map((row) => Number(row.id)).filter(Boolean);
+    if (!ids.length) return rows;
+    const [items] = await connection.execute(
+        `SELECT pi.package_id AS packageId, pi.item_type AS itemType, pi.quantity,
+                pi.unit_price_snapshot AS unitPrice,
+                v.product_id AS productId,
+                CASE WHEN v.is_default = 1 THEN NULL ELSE v.id END AS variantId,
+                p.product_name AS productName,
+                CASE WHEN v.is_default = 1 THEN '' ELSE v.variant_name END AS variantName,
+                ev.equipment_id AS equipmentId, e.equipment_name AS equipmentName
+         FROM package_items pi
+                  LEFT JOIN product_variants v ON v.id = pi.variant_id
+                  LEFT JOIN products p ON p.id = v.product_id
+                  LEFT JOIN equipment_variants ev ON ev.id = pi.equipment_variant_id
+                  LEFT JOIN equipment e ON e.id = ev.equipment_id
+         WHERE pi.package_id IN (${ids.map(() => "?").join(",")})
+         ORDER BY pi.package_id, pi.sort_order, pi.id`,
+        ids
+    );
+    const byPackage = new Map();
+    for (const item of items) {
+        const key = Number(item.packageId);
+        if (!byPackage.has(key)) byPackage.set(key, []);
+        const quantity = Number(item.quantity || 0);
+        const unitPrice = Number(item.unitPrice || 0);
+        byPackage.get(key).push(item.itemType === "rental"
+            ? {itemType: "rental", equipmentId: Number(item.equipmentId), productName: item.equipmentName || "",
+                quantity, unitSalesPrice: unitPrice, unit_sales_price: unitPrice}
+            : {productId: Number(item.productId), variantId: item.variantId == null ? null : Number(item.variantId),
+                productName: item.productName || "", variantName: item.variantName || "",
+                quantity, unitSalesPrice: unitPrice, lineValue: unitPrice * quantity});
+    }
+    return rows.map((row) => ({...row, inclusions: byPackage.get(Number(row.id)) || []}));
+}
+
+// Package snapshot of a booking (legacy bookings.package_json).
+async function v2BookingPackageJson(connection, booking) {
+    const packageId = Number(booking?.package_id);
+    if (!Number.isSafeInteger(packageId) || packageId <= 0) return null;
+    const [rows] = await connection.execute(
+        `SELECT packages.* FROM ${V2_PACKAGES} packages WHERE packages.id = ? LIMIT 1`, [packageId]);
+    if (!rows.length) return null;
+    const [pkg] = await attachV2Inclusions(connection, rows);
+    const price = Number(booking.package_price ?? pkg.package_price ?? 0);
+    return JSON.stringify({
+        id: pkg.id, name: pkg.name, price, package_price: price,
+        down_payment_amount: Number(pkg.down_payment_amount || 0),
+        required_down_payment: Number(pkg.down_payment_amount || 0),
+        duration: pkg.duration || null, status: pkg.status || null,
+        inclusions: pkg.inclusions || [],
+    });
+}
+
+function v2PhoneDigits(phone) {
+    return String(phone || "").replace(/\D/g, "").slice(-10);
+}
+
+// The store's customer with this phone number (same normalization as customerPhoneHash).
+async function v2CustomerForPhone(connection, storeId, phone) {
+    const digits = v2PhoneDigits(phone);
+    if (!digits) return null;
+    const [rows] = await connection.execute(
+        `SELECT id, full_name, phone, email, facebook_name, review_required, identity_verified,
+                review_reason, updated_at
+         FROM customers
+         WHERE store_id = ?
+           AND REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(phone, ''), ' ', ''), '-', ''), '+', ''), '(', '') LIKE ?
+         ORDER BY id ASC`,
+        [storeId, `%${digits}`]
+    );
+    const wanted = customerPhoneHash(phone);
+    return rows.find((row) => (wanted ? customerPhoneHash(row.phone) === wanted : v2PhoneDigits(row.phone) === digits)) || null;
+}
+
+// Finds the customer by phone or creates them; keeps their latest contact details.
+async function v2EnsureCustomer(connection, {storeId, name, facebookName = null, phone, email = null}) {
+    const existing = await v2CustomerForPhone(connection, storeId, phone);
+    if (existing) {
+        await connection.execute(
+            `UPDATE customers
+             SET full_name = ?, facebook_name = COALESCE(?, facebook_name), email = COALESCE(?, email)
+             WHERE id = ?`,
+            [String(name || existing.full_name).slice(0, 150), facebookName || null, email || null, existing.id]
+        );
+        return Number(existing.id);
+    }
+    const [created] = await connection.execute(
+        `INSERT INTO customers (store_id, full_name, phone, email, facebook_name, status)
+         VALUES (?, ?, ?, ?, ?, 'active')`,
+        [storeId, String(name || "Customer").slice(0, 150), String(phone || "").slice(0, 40) || null,
+            email || null, facebookName || null]
+    );
+    return Number(created.insertId);
+}
+
+async function v2UserIdOf(connection, storeId, userId) {
+    const id = Number(userId);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    const [rows] = await connection.execute("SELECT id FROM users WHERE id = ? AND store_id = ? LIMIT 1", [id, storeId]);
+    return rows.length ? id : null;
+}
+
+// Audit/case record of a booking in employee_actions (skipped when no user is known).
+async function v2LogBookingEvent(connection, {storeId, branchId = null, bookingId = null, reference = null,
+    userId, userName = "System", userRole = "System", module = "Bookings", action, details = null}) {
+    const user = await v2UserIdOf(connection, storeId, userId);
+    if (!user) return false;
+    await connection.execute(
+        `INSERT INTO employee_actions
+         (store_id, branch_id, user_id, user_name, user_role, module, reference_number, action, entity_id, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [storeId, branchId, user, String(userName || "System").slice(0, 150), String(userRole || "System").slice(0, 30),
+            module, reference ? String(reference).slice(0, 100) : null, String(action).slice(0, 150),
+            bookingId ? Number(bookingId) : null, details === null ? null : JSON.stringify(details)]
+    );
+    return true;
+}
+
+// Customer payment for a booking.
+async function v2RecordBookingPayment(connection, {storeId, branchId, bookingId, paymentType, amount,
+    method = "Cash", reference = null, requestKey = null, userId = null, notes = null}) {
+    const value = Math.round(Number(amount) * 100) / 100;
+    if (!(value > 0)) return null;
+    const [result] = await connection.execute(
+        `INSERT INTO payments
+         (store_id, branch_id, booking_id, payment_type, amount, payment_method, reference_number,
+          status, request_key, recorded_by, paid_at, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'recorded', ?, ?, NOW(), ?)`,
+        [storeId, branchId, bookingId, paymentType, value, String(method || "Cash").slice(0, 50),
+            reference ? String(reference).slice(0, 120) : null, requestKey ? String(requestKey).slice(0, 120) : null,
+            await v2UserIdOf(connection, storeId, userId), notes]
+    );
+    return Number(result.insertId);
+}
+
+// Money returned to the customer, linked to the latest payment of the given type.
+async function v2RecordBookingRefund(connection, {storeId, bookingId, paymentTypes, refundType, amount,
+    reason = null, method = null, userId = null}) {
+    const value = Math.round(Number(amount) * 100) / 100;
+    if (!(value > 0)) return null;
+    const types = Array.isArray(paymentTypes) ? paymentTypes : [paymentTypes];
+    const [payments] = await connection.execute(
+        `SELECT id FROM payments
+         WHERE booking_id = ? AND store_id = ? AND status <> 'voided'
+           AND payment_type IN (${types.map(() => "?").join(",")})
+         ORDER BY id DESC LIMIT 1`,
+        [bookingId, storeId, ...types]
+    );
+    if (!payments.length) throw rentalError("No recorded customer payment exists for this refund.");
+    const user = await v2UserIdOf(connection, storeId, userId);
+    const [result] = await connection.execute(
+        `INSERT INTO refunds
+         (store_id, payment_id, refund_type, amount, refund_reason, refund_method, status,
+          approved_by, processed_by, processed_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, NOW())`,
+        [storeId, payments[0].id, refundType, value, reason, method, user, user]
+    );
+    return Number(result.insertId);
+}
+
+// Booking financial events: deposits and charge payments are payments rows,
+// deposit refunds are refunds rows, deposit applications are recorded in
+// bookings.deposit_applied_amount by the caller. Every event leaves an audit
+// row whose reference_number is the request key (duplicate guard).
+async function v2SaveBookingFinancialEvent(connection, {bookingId, storeId, branchId, claimId = null, type,
+    amount, requestKey, userId = null, userName = "Manager", userRole = "Manager"}) {
+    const value = Math.round(Number(amount) * 100) / 100;
+    if (!(value > 0)) return;
+    if (type === "deposit_received") {
+        await v2RecordBookingPayment(connection, {storeId, branchId, bookingId, paymentType: "Security Deposit",
+            amount: value, requestKey, userId, notes: "Refundable security deposit"});
+    } else if (type === "claim_paid") {
+        await v2RecordBookingPayment(connection, {storeId, branchId, bookingId, paymentType: "Additional Charge",
+            amount: value, reference: claimId ? `CLAIM-${claimId}` : null, requestKey, userId,
+            notes: "Loss/damage charge payment"});
+    } else if (type === "deposit_refunded") {
+        await v2RecordBookingRefund(connection, {storeId, bookingId, paymentTypes: ["Security Deposit"],
+            refundType: "Deposit", amount: value, reason: "Security deposit refund", userId});
+    }
+    await v2LogBookingEvent(connection, {storeId, branchId, bookingId, reference: requestKey, userId, userName,
+        userRole, action: "Booking financial event", details: {type, amount: value, claimId}});
+}
+
+// True when any of the request keys (or the LIKE pattern) was already recorded.
+async function v2FinancialEventExists(connection, storeId, keys, likePattern = null) {
+    const list = (keys || []).filter(Boolean);
+    const clauses = [];
+    const params = [storeId];
+    if (list.length) {
+        clauses.push(`ref IN (${list.map(() => "?").join(",")})`);
+        params.push(...list);
+    }
+    if (likePattern) {
+        clauses.push("ref LIKE ?");
+        params.push(likePattern);
+    }
+    if (!clauses.length) return false;
+    const [rows] = await connection.execute(
+        `SELECT 1 FROM (
+             SELECT request_key AS ref FROM payments WHERE store_id = ? AND request_key IS NOT NULL
+             UNION ALL
+             SELECT reference_number AS ref FROM employee_actions
+             WHERE store_id = ${Number(storeId)} AND action = 'Booking financial event'
+         ) keyed
+         WHERE ${clauses.join(" OR ")} LIMIT 1`,
+        params
+    );
+    return rows.length > 0;
+}
+
+// Default (price-holding) equipment variant of a rental item.
+async function v2EquipmentDefaultVariant(connection, equipmentId) {
+    const [rows] = await connection.execute(
+        `SELECT ev.id, e.equipment_name AS name FROM equipment_variants ev
+                  JOIN equipment e ON e.id = ev.equipment_id
+         WHERE ev.equipment_id = ? AND ev.is_default = 1 LIMIT 1`, [equipmentId]);
+    return rows[0] || null;
+}
+
+// Status of a booking's approval request (legacy booking_approval_requests).
+async function v2BookingApproval(connection, bookingId, storeId) {
+    const [rows] = await connection.execute(
+        `SELECT action, JSON_UNQUOTE(JSON_EXTRACT(details, '$.reason')) AS reason
+         FROM employee_actions
+         WHERE store_id = ? AND entity_id = ? AND module = 'Bookings'
+           AND action IN ('Requested booking approval', 'Approved booking request', 'Rejected booking request')
+         ORDER BY id DESC LIMIT 1`, [storeId, bookingId]);
+    if (!rows.length) return null;
+    const status = rows[0].action === "Requested booking approval" ? "pending"
+        : rows[0].action === "Approved booking request" ? "approved" : "rejected";
+    return {status, reason: rows[0].reason || null};
+}
+// Creates a loss/damage customer charge (claim) line on the booking.
+async function v2InsertBookingClaim(connection, {bookingId, storeId, sourceType, sourceId, equipmentId,
+    quantity, reason, amount, status, userId}) {
+    const variant = await v2EquipmentDefaultVariant(connection, equipmentId);
+    if (!variant) throw rentalError("Rental equipment for this incident was not found.");
+    const [created] = await connection.execute(
+        `INSERT INTO booking_items
+         (store_id, booking_id, equipment_variant_id, item_type, item_name_snapshot, variant_name_snapshot,
+          quantity, unit_price_snapshot, line_total, item_status, inspected_by, notes)
+         VALUES (?, ?, ?, 'rental', ?, ?, ?, 0, ?, ?, ?, ?)`,
+        [storeId, bookingId, variant.id, String(variant.name || "Equipment").slice(0, 180),
+            `${sourceType}#${Number(sourceId)}`, Math.max(1, Number(quantity) || 1), Number(amount) || 0,
+            `claim_${status}`, await v2UserIdOf(connection, storeId, userId), String(reason || "").slice(0, 500)]
+    );
+    return Number(created.insertId);
+}
+
+// Adds a deposit application to a claim and recomputes its status from the
+// charge payments already recorded (payments.reference_number = CLAIM-<id>).
+async function v2UpdateBookingClaimSettlement(connection, {claimId, bookingId, storeId, depositApplied = 0}) {
+    await connection.execute(
+        `UPDATE booking_items
+         SET item_status = IF(line_total <= COALESCE((SELECT SUM(cp.amount) FROM payments cp
+                                                      WHERE cp.booking_id = ? AND cp.status <> 'voided'
+                                                        AND cp.payment_type = 'Additional Charge'
+                                                        AND cp.reference_number = CONCAT('CLAIM-', ?)), 0)
+                                         + unit_price_snapshot + ? + 0.005, 'claim_settled', 'claim_approved'),
+             unit_price_snapshot = unit_price_snapshot + ?
+         WHERE id = ? AND booking_id = ? AND store_id = ? AND item_status IN ('claim_approved','claim_settled')`,
+        [bookingId, claimId, Number(depositApplied) || 0, Number(depositApplied) || 0, claimId, bookingId, storeId]
+    );
+}
+
+// Records a booking bill payment as Down Payment or Balance, by what is already paid.
+async function v2RecordBookingBillPayment(connection, {bookingId, storeId, branchId, amount, method = "Cash",
+    requestKey = null, userId = null, notes = null}) {
+    const [rows] = await connection.execute(
+        `SELECT b.amount_paid, b.required_down_payment FROM ${V2_BOOKINGS} b WHERE b.id = ? AND b.store_id = ?`,
+        [bookingId, storeId]);
+    const paid = Number(rows[0]?.amount_paid || 0);
+    const down = Number(rows[0]?.required_down_payment || 0);
+    return v2RecordBookingPayment(connection, {storeId, branchId, bookingId,
+        paymentType: down > 0 && paid + 0.005 < down ? "Down Payment" : "Balance",
+        amount, method, requestKey, userId, notes});
+}
+
+// Brings the recorded booking payments to the given total: a payment for an
+// increase, a correction refund for a decrease.
+async function v2SetBookingAmountPaid(connection, {bookingId, storeId, branchId, target, method = "Cash", userId = null}) {
+    const [rows] = await connection.execute(
+        `SELECT b.amount_paid FROM ${V2_BOOKINGS} b WHERE b.id = ? AND b.store_id = ?`, [bookingId, storeId]);
+    const current = Math.round(Number(rows[0]?.amount_paid || 0) * 100);
+    const wanted = Math.round(Number(target || 0) * 100);
+    if (wanted > current) {
+        await v2RecordBookingBillPayment(connection, {bookingId, storeId, branchId, amount: (wanted - current) / 100,
+            method, userId, notes: "Recorded through booking payment update"});
+    } else if (wanted < current) {
+        await v2RecordBookingRefund(connection, {storeId, bookingId,
+            paymentTypes: ["Down Payment", "Balance", "Full Payment"], refundType: "Correction",
+            amount: (current - wanted) / 100, reason: "Booking payment correction", method, userId});
+    }
+}
+
+// Latest approval request decision per booking (legacy booking_approval_requests).
+const V2_BOOKING_APPROVALS = `(SELECT
+        ea.entity_id AS booking_id, ea.store_id, ea.branch_id,
+        CASE ea.action WHEN 'Requested booking approval' THEN 'pending'
+                       WHEN 'Approved booking request' THEN 'approved' ELSE 'rejected' END AS status,
+        JSON_UNQUOTE(JSON_EXTRACT(ea.details, '$.reason')) AS reason,
+        ea.user_id AS requested_by, ea.created_at AS requested_at
+    FROM employee_actions ea
+    WHERE ea.module = 'Bookings'
+      AND ea.action IN ('Requested booking approval','Approved booking request','Rejected booking request')
+      AND ea.id = (SELECT MAX(ea2.id) FROM employee_actions ea2
+                   WHERE ea2.store_id = ea.store_id AND ea2.entity_id = ea.entity_id AND ea2.module = 'Bookings'
+                     AND ea2.action IN ('Requested booking approval','Approved booking request','Rejected booking request')))`;
+
+// Customer review case notes (legacy booking_customer_case_events).
+const V2_CASE_EVENTS = `(SELECT
+        ce.id, ce.store_id, ce.branch_id, ce.entity_id AS booking_id,
+        SUBSTRING(ce.action, 16) AS event_type,
+        JSON_UNQUOTE(JSON_EXTRACT(ce.details, '$.phoneHash')) AS customer_phone_hash,
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(ce.details, '$.channel')), 'null') AS channel,
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(ce.details, '$.notes')), 'null') AS notes,
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(ce.details, '$.followUpOn')), 'null') AS follow_up_on,
+        ce.user_name AS actor_name, ce.created_at
+    FROM employee_actions ce
+    WHERE ce.module = 'Customer Review' AND ce.action LIKE 'Customer case: %')`;
+// Bookings plus the package snapshot JSON text (legacy bookings.package_json).
+const V2_BOOKINGS_FULL = `(SELECT bk.*,
+        CASE WHEN bk.package_id IS NULL THEN NULL ELSE CAST(JSON_OBJECT(
+            'id', bk.package_id, 'name', bk.package_name,
+            'price', COALESCE(bk.package_price, 0), 'package_price', COALESCE(bk.package_price, 0),
+            'down_payment_amount', COALESCE(bk.required_down_payment, 0),
+            'required_down_payment', COALESCE(bk.required_down_payment, 0),
+            'duration', (SELECT jp.duration FROM packages jp WHERE jp.id = bk.package_id),
+            'status', (SELECT jp.status FROM packages jp WHERE jp.id = bk.package_id),
+            'inclusions', COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                    'itemType', CASE WHEN ji.item_type = 'rental' THEN 'rental' ELSE 'product' END,
+                    'productId', jv.product_id,
+                    'variantId', CASE WHEN jv.is_default = 1 THEN NULL ELSE jv.id END,
+                    'equipmentId', jev.equipment_id,
+                    'productName', COALESCE(jpr.product_name, je.equipment_name),
+                    'variantName', CASE WHEN jv.is_default = 0 THEN jv.variant_name ELSE '' END,
+                    'quantity', ji.quantity,
+                    'unitSalesPrice', ji.unit_price_snapshot))
+                FROM package_items ji
+                         LEFT JOIN product_variants jv ON jv.id = ji.variant_id
+                         LEFT JOIN products jpr ON jpr.id = jv.product_id
+                         LEFT JOIN equipment_variants jev ON jev.id = ji.equipment_variant_id
+                         LEFT JOIN equipment je ON je.id = jev.equipment_id
+                WHERE ji.package_id = bk.package_id), JSON_ARRAY())
+        ) AS CHAR) END AS package_json
+    FROM ${V2_BOOKINGS} bk)`;
+// ===== END StockNBook v2 bookings =====
+
 let bookingItemsCostSchemaCache = null;
 
-async function getBookingItemsCostSchema(connection) {
-    if (bookingItemsCostSchemaCache) {
-        return bookingItemsCostSchemaCache;
-    }
-
-    const [columnRows] = await connection.query(`SHOW COLUMNS FROM booking_items`);
-    const availableColumns = new Set(
-        columnRows.map((row) => String(row.Field || row.field || "").toLowerCase())
-    );
-
-    bookingItemsCostSchemaCache = {
-        quantityColumn: [
-            "used_quantity",
-            "booked_quantity",
-            "quantity",
-            "reserved_quantity",
-        ].find((column) => availableColumns.has(column)) || null,
-        hasUnitCost: availableColumns.has("unit_cost"),
-    };
-
-    return bookingItemsCostSchemaCache;
+async function getBookingItemsCostSchema() {
+    // booking_items in stocknbook_v2: used_quantity is recorded per line, no unit cost column.
+    return {quantityColumn: "used_quantity", hasUnitCost: false};
 }
 
 const headers = {
@@ -227,12 +1171,15 @@ async function findPackageSnapshot(connection, {storeId, branchId, packageId}) {
     if (!Number.isSafeInteger(Number(packageId)) || Number(packageId) <= 0 ||
         !Number.isSafeInteger(Number(branchId)) || Number(branchId) <= 0) return null;
     const [rows] = await connection.execute(`
-        SELECT id, name, package_price, down_payment_amount, duration, status, inclusions
-        FROM packages
-        WHERE id=? AND store_id=? AND branch_id=?
-          AND (status IS NULL OR TRIM(status)='' OR LOWER(TRIM(status))='active')
+        SELECT packages.id, packages.name, packages.package_price, packages.down_payment_amount,
+               packages.duration, packages.status, packages.inclusions
+        FROM ${V2_PACKAGES} packages
+        WHERE packages.id=? AND packages.store_id=? AND packages.branch_id=?
+          AND (packages.status IS NULL OR TRIM(packages.status)='' OR LOWER(TRIM(packages.status))='active')
             LIMIT 1`, [Number(packageId), Number(storeId), Number(branchId)]);
-    return rows.length ? packageSnapshotFromRow(rows[0]) : null;
+    if (!rows.length) return null;
+    const [withItems] = await attachV2Inclusions(connection, rows);
+    return packageSnapshotFromRow(withItems);
 }
 
 // Rental equipment is stored separately from consumable Sales booking_items.
@@ -279,13 +1226,13 @@ function rentalTodayManila() {
     return `${part('year')}-${part('month')}-${part('day')}`;
 }
 async function rentalOverlapAllocations(connection,{storeId,branchId,equipmentId,from,to}) {
-    const [rows]=await connection.execute(`SELECT quantity,status,
-                                                  DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
-                                                  DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
-                                           FROM rental_booking_allocations
-                                           WHERE store_id=? AND branch_id=? AND equipment_id=?
-                                             AND status IN ('reserved','checked_out')
-                                             AND start_date<=? AND (end_date>=? OR status='checked_out')`,
+    const [rows]=await connection.execute(`SELECT a.quantity,a.status,
+                                                  DATE_FORMAT(a.start_date,'%Y-%m-%d') AS startDate,
+                                                  DATE_FORMAT(a.end_date,'%Y-%m-%d') AS endDate
+                                           FROM ${V2_RENTAL_ALLOCATIONS} a
+                                           WHERE a.store_id=? AND a.branch_id=? AND a.equipment_id=?
+                                             AND a.status IN ('reserved','checked_out')
+                                             AND a.start_date<=? AND (a.end_date>=? OR a.status='checked_out')`,
         [storeId,branchId,equipmentId,to,from]);
     return rows;
 }
@@ -313,10 +1260,12 @@ async function saveRentalRequestLines(connection,{bookingId,storeId,branchId,ref
     if (!lines.length) return {amount:0,count:0};
     const days = rentalDays(startDate,endDate);
     let totalCents=0;
+    void reference;
     // Read active catalog entries server-side; do not trust client-supplied amounts.
     for (const line of [...lines].sort((a,b)=>a.equipmentId-b.equipmentId)) {
-        const [equipment] = await connection.execute(`SELECT id,name,rental_rate_per_day,total_units,maintenance_units,missing_units
-                                                      FROM rental_equipment WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL LIMIT 1`,
+        const [equipment] = await connection.execute(`SELECT e.id,e.name,e.rental_rate_per_day,e.total_units,e.maintenance_units,e.missing_units,
+                                                             e.equipment_variant_id
+                                                      FROM ${V2_RENTAL_EQUIPMENT} e WHERE e.id=? AND e.store_id=? AND e.branch_id=? AND e.archived_at IS NULL LIMIT 1`,
             [line.equipmentId,storeId,branchId]);
         if (!equipment.length) throw new Error("Selected rental equipment is unavailable in this branch.");
         const e=equipment[0];
@@ -342,18 +1291,22 @@ async function saveRentalRequestLines(connection,{bookingId,storeId,branchId,ref
         const lineCents=cents*(line.quantity-includedQuantity)*days;
         if (!Number.isSafeInteger(lineCents)) throw new Error("Rental quotation is too large.");
         totalCents+=lineCents;
-        await connection.execute(`INSERT INTO booking_rental_items
-                                  (booking_id,store_id,branch_id,booking_reference,equipment_id,equipment_name,quantity,start_date,end_date,
-                                   billable_days,daily_rate_snapshot,agreed_line_total)
-                                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-            [bookingId,storeId,branchId,reference,line.equipmentId,e.name,line.quantity,startDate,endDate,days,cents/100,lineCents/100]);
+        await connection.execute(`INSERT INTO booking_items
+                                  (store_id,booking_id,equipment_variant_id,item_type,item_name_snapshot,quantity,
+                                   rental_days,unit_price_snapshot,line_total,item_status)
+                                  VALUES (?,?,?,'rental',?,?,?,?,?,'pending')`,
+            [storeId,bookingId,e.equipment_variant_id,String(e.name).slice(0,180),line.quantity,days,cents/100,lineCents/100]);
     }
     if (!Number.isSafeInteger(totalCents)) throw new Error("Rental quotation total is too large.");
+    // The rental period of the booking.
+    await connection.execute(`UPDATE bookings SET rental_start_date=?, rental_end_date=? WHERE id=? AND store_id=?`,
+        [startDate,endDate,bookingId,storeId]);
     return {amount:totalCents/100,count:lines.length};
 }
 async function rentalQuoteTotal(connection,bookingId,storeId,branchId) {
-    const [rows]=await connection.execute(`SELECT COALESCE(SUM(agreed_line_total),0) AS rentalTotal,COUNT(*) AS lineCount
-                                           FROM booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
+    const [rows]=await connection.execute(`SELECT COALESCE(SUM(r.agreed_line_total),0) AS rentalTotal,COUNT(*) AS lineCount
+                                           FROM ${V2_BOOKING_RENTAL_ITEMS} r WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=?
+                                             AND r.item_status<>'cancelled'`,[bookingId,storeId,branchId]);
     return {total:Number(rows[0].rentalTotal),count:Number(rows[0].lineCount)};
 }
 function rentalError(message) {const e=new Error(message);e.rentalValidation=true;return e;}
@@ -361,11 +1314,13 @@ function rentalError(message) {const e=new Error(message);e.rentalValidation=tru
 // overlapping dates and different booking references. Everything runs in the
 // same transaction as the booking's Confirmed/Cancelled status transition.
 async function confirmRentalAllocations(connection,{bookingId,storeId,branchId,price}) {
-    const [lines]=await connection.execute(`SELECT equipment_id AS equipmentId,quantity,
-                                                   DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
-                                                   DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate,
-                                                   booking_reference AS bookingReference,agreed_line_total AS lineTotal
-                                            FROM booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=? ORDER BY equipment_id FOR UPDATE`,
+    await connection.execute(`SELECT id FROM booking_items WHERE booking_id=? AND item_type='rental' FOR UPDATE`,[bookingId]);
+    const [lines]=await connection.execute(`SELECT r.id,r.equipment_id AS equipmentId,r.quantity,
+                                                   DATE_FORMAT(r.start_date,'%Y-%m-%d') AS startDate,
+                                                   DATE_FORMAT(r.end_date,'%Y-%m-%d') AS endDate,
+                                                   r.booking_reference AS bookingReference,r.agreed_line_total AS lineTotal
+                                            FROM ${V2_BOOKING_RENTAL_ITEMS} r WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=?
+                                              AND r.item_status='pending' ORDER BY r.equipment_id`,
         [bookingId,storeId,branchId]);
     if(!lines.length)return;
     const agreed=Number(price);
@@ -373,8 +1328,14 @@ async function confirmRentalAllocations(connection,{bookingId,storeId,branchId,p
     if(!Number.isFinite(agreed)||agreed<minimum-0.005)
         throw rentalError(`Set an agreed booking price of at least ₱${minimum.toFixed(2)} before confirming this rental.`);
     for(const line of lines) {
-        const [eq]=await connection.execute(`SELECT id,total_units,maintenance_units,missing_units FROM rental_equipment
-                                             WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL FOR UPDATE`,
+        const [locked]=await connection.execute(`SELECT e.id FROM equipment e
+                                                          JOIN equipment_variants ev ON ev.equipment_id=e.id AND ev.is_default=1
+                                                          JOIN branch_inventory ebi ON ebi.equipment_variant_id=ev.id
+                                                 WHERE e.id=? AND e.store_id=? AND ebi.branch_id=? AND e.deleted_at IS NULL FOR UPDATE`,
+            [line.equipmentId,storeId,branchId]);
+        if(!locked.length)throw rentalError("Rental equipment was archived. Update the request before confirming.");
+        const [eq]=await connection.execute(`SELECT e.id,e.total_units,e.maintenance_units,e.missing_units FROM ${V2_RENTAL_EQUIPMENT} e
+                                             WHERE e.id=? AND e.store_id=? AND e.branch_id=?`,
             [line.equipmentId,storeId,branchId]);
         if(!eq.length)throw rentalError("Rental equipment was archived. Update the request before confirming.");
         const from=String(line.startDate).slice(0,10),to=String(line.endDate).slice(0,10);
@@ -384,32 +1345,27 @@ async function confirmRentalAllocations(connection,{bookingId,storeId,branchId,p
         const peak=rentalPeakReserved(existing,from,to,rentalTodayManila());
         const physical=Number(eq[0].total_units)-Number(eq[0].maintenance_units)-Number(eq[0].missing_units);
         if(physical-peak<Number(line.quantity))throw rentalError(`Not enough rental equipment for ${from} to ${to}. Choose another date or reduce quantity.`);
-        await connection.execute(`INSERT INTO rental_booking_allocations
-                                  (store_id,branch_id,booking_reference,equipment_id,quantity,start_date,end_date,status,rental_charge_total)
-                                  VALUES (?,?,?,?,?,?,?,'reserved',?)`,
-            [storeId,branchId,line.bookingReference,line.equipmentId,line.quantity,from,to,line.lineTotal]);
+        await connection.execute(`UPDATE booking_items SET item_status='reserved' WHERE id=? AND item_status='pending'`,[line.id]);
     }
 }
 async function cancelRentalAllocations(connection,{bookingId,storeId,branchId}) {
-    const [rows]=await connection.execute(`SELECT a.id,a.status FROM rental_booking_allocations a
-                                                                         JOIN booking_rental_items r ON r.booking_reference=a.booking_reference AND r.equipment_id=a.equipment_id
-        AND r.store_id=a.store_id AND r.branch_id=a.branch_id
-                                           WHERE r.booking_id=? AND a.store_id=? AND a.branch_id=? FOR UPDATE`,[bookingId,storeId,branchId]);
+    await connection.execute(`SELECT id FROM booking_items WHERE booking_id=? AND item_type='rental' FOR UPDATE`,[bookingId]);
+    const [rows]=await connection.execute(`SELECT a.id,a.status FROM ${V2_RENTAL_ALLOCATIONS} a
+                                           WHERE a.booking_id=? AND a.store_id=? AND a.branch_id=?`,[bookingId,storeId,branchId]);
     if(rows.some(r=>r.status==='checked_out'))
         throw rentalError("Receive the checked-out rental equipment before cancelling this booking.");
     if(rows.some(r=>r.status==='returned'))
         throw rentalError("Returned rentals already contain fulfilled charges; contact an administrator for refund adjustments.");
     for(const row of rows)if(row.status==='reserved')
-        await connection.execute("UPDATE rental_booking_allocations SET status='cancelled' WHERE id=?",[row.id]);
+        await connection.execute("UPDATE booking_items SET item_status='cancelled' WHERE id=?",[row.id]);
 }
 async function requireRentalReturnBeforeCompletion(connection,{bookingId,storeId,branchId}) {
-    const [rows]=await connection.execute(`SELECT a.status FROM rental_booking_allocations a
-                                                                    JOIN booking_rental_items r ON r.booking_reference=a.booking_reference AND r.equipment_id=a.equipment_id
-        AND r.store_id=a.store_id AND r.branch_id=a.branch_id
-                                           WHERE r.booking_id=? AND a.store_id=? AND a.branch_id=?`,[bookingId,storeId,branchId]);
+    const [rows]=await connection.execute(`SELECT a.status FROM ${V2_RENTAL_ALLOCATIONS} a
+                                           WHERE a.booking_id=? AND a.store_id=? AND a.branch_id=?
+                                             AND a.status<>'requested'`,[bookingId,storeId,branchId]);
     if(rows.some(x=>x.status!=='returned'))throw rentalError("Receive and account for rented equipment before completing the booking.");
-    const [requests]=await connection.execute(`SELECT COUNT(*) AS total FROM booking_rental_items
-                                               WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
+    const [requests]=await connection.execute(`SELECT COUNT(*) AS total FROM ${V2_BOOKING_RENTAL_ITEMS} r
+                                               WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=?`,[bookingId,storeId,branchId]);
     if(Number(requests[0].total)>rows.length)throw rentalError("Rental allocation is missing. Confirm the booking correctly before completion.");
 }
 
@@ -422,23 +1378,22 @@ async function requireRentalIncidentSettlement(db,{bookingId,storeId,branchId,al
                                     WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,[bookingId,storeId,branchId]);
     if(!books.length)throw rentalError('Booking not found for equipment reconciliation.');
     const reference=books[0].booking_reference;
-    const [uninspected]=await db.execute(`SELECT COUNT(*) AS pending FROM rental_booking_allocations a
-                                                                              LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id
+    const [uninspected]=await db.execute(`SELECT COUNT(*) AS pending FROM ${V2_RENTAL_ALLOCATIONS} a
                                           WHERE a.store_id=? AND a.branch_id=?
-                                            AND a.booking_reference COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
-                                            AND a.status='returned' AND COALESCE(w.returned_received_units,a.quantity)>0
-                                            AND (w.inspected_at IS NULL OR w.inspection_status='pending')`,[storeId,branchId,reference]);
+                                            AND a.booking_reference = ?
+                                            AND a.status='returned' AND COALESCE(a.returned_received_units,a.quantity)>0
+                                            AND (a.inspected_at IS NULL OR a.inspection_status='pending')`,[storeId,branchId,reference]);
     if(Number(uninspected[0].pending)>0)
         throw rentalError('Staff must inspect all physically returned rental equipment before completing the booking.');
     const [recoveredPending]=await db.execute(`SELECT COUNT(*) AS pending
-                                               FROM rental_maintenance_records WHERE store_id=? AND branch_id=? AND booking_reference=?
-                                                                                 AND start_reason LIKE 'Recovered missing equipment (report #%'
-                                                                                 AND quantity_remaining>0`,[storeId,branchId,reference]);
+                                               FROM ${V2_MAINTENANCE_RECORDS} m WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?
+                                                                                 AND m.start_reason LIKE 'Recovered missing equipment (report #%'
+                                                                                 AND m.quantity_remaining>0`,[storeId,branchId,reference]);
     if(Number(recoveredPending[0]?.pending||0)>0)
         throw rentalError('Recovered missing equipment must be inspected by Staff before the booking is completed.');
     const [missing]=await db.execute(`SELECT m.status,c.status AS claimStatus,c.approved_amount AS amount,
                                              c.amount_paid AS paid,c.deposit_applied AS applied
-                                      FROM rental_missing_unit_reports m LEFT JOIN booking_customer_claims c
+                                      FROM ${V2_MISSING_REPORTS} m LEFT JOIN ${V2_BOOKING_CLAIMS} c
                                                                                    ON c.source_type='missing' AND c.source_record_id=m.id AND c.booking_id=?
                                       WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?`,
         [bookingId,storeId,branchId,reference]);
@@ -446,12 +1401,12 @@ async function requireRentalIncidentSettlement(db,{bookingId,storeId,branchId,al
         if(issue.status==='pending')throw rentalError('Manager must review missing rental equipment before booking completion.');
         if(issue.status==='writeoff'&&!issue.claimStatus)
             throw rentalError('Manager must approve or waive the verified missing-equipment charge.');
-        if(!allowOutstanding&&issue.claimStatus!=='waived'&&Number(issue.paid)+Number(issue.applied)+0.005<Number(issue.amount))
+        if(!allowOutstanding&&issue.claimStatus&&issue.claimStatus!=='waived'&&Number(issue.paid)+Number(issue.applied)+0.005<Number(issue.amount))
             throw rentalError('Settle the approved missing-equipment charge or apply the held security deposit.');
     }
     const [damage]=await db.execute(`SELECT c.status AS claimStatus,c.approved_amount AS amount,
                                             c.amount_paid AS paid,c.deposit_applied AS applied
-                                     FROM rental_maintenance_records m LEFT JOIN booking_customer_claims c
+                                     FROM ${V2_MAINTENANCE_RECORDS} m LEFT JOIN ${V2_BOOKING_CLAIMS} c
                                                                                  ON c.source_type='damage' AND c.source_record_id=m.id AND c.booking_id=?
                                      WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?
                                        AND m.start_reason LIKE 'Rental damage %'`,[bookingId,storeId,branchId,reference]);
@@ -463,10 +1418,10 @@ async function requireRentalIncidentSettlement(db,{bookingId,storeId,branchId,al
     if(!allowOutstanding){
         // Never complete or refund an underpaid claim, even if its status label was
         // prematurely marked "settled". Deposit application is not cash received.
-        const [unpaid]=await db.execute(`SELECT COUNT(*) AS outstanding FROM booking_customer_claims
-                                         WHERE booking_id=? AND store_id=? AND branch_id=?
-                                           AND status<>'waived'
-                                           AND COALESCE(approved_amount,0)>COALESCE(amount_paid,0)+COALESCE(deposit_applied,0)+0.005`,
+        const [unpaid]=await db.execute(`SELECT COUNT(*) AS outstanding FROM ${V2_BOOKING_CLAIMS} c
+                                         WHERE c.booking_id=? AND c.store_id=? AND c.branch_id=?
+                                           AND c.status<>'waived'
+                                           AND COALESCE(c.approved_amount,0)>COALESCE(c.amount_paid,0)+COALESCE(c.deposit_applied,0)+0.005`,
             [bookingId,storeId,branchId]);
         if(Number(unpaid[0]?.outstanding||0)>0)
             throw rentalError('Record and verify all additional customer payments before completing the booking or refunding the deposit.');
@@ -488,37 +1443,39 @@ function customerPhoneHash(phone) {
 async function getCustomerReviewProfile(db,storeId,phone) {
     const phoneHash=customerPhoneHash(phone);
     if(!phoneHash)return null;
-    const [rows]=await db.execute(`SELECT review_required AS reviewRequired,
-                                          identity_verified AS identityVerified,reason,updated_by AS updatedBy,
-                                          DATE_FORMAT(updated_at,'%Y-%m-%d %H:%i') AS updatedAt
-                                   FROM booking_customer_review_profiles WHERE store_id=? AND phone_hash=? LIMIT 1`,
-        [storeId,phoneHash]);
-    return rows[0]||null;
+    const customer=await v2CustomerForPhone(db,storeId,phone);
+    if(!customer)return null;
+    if(!Number(customer.review_required)&&!Number(customer.identity_verified)&&!customer.review_reason)return null;
+    const updated=customer.updated_at instanceof Date
+        ? customer.updated_at.toISOString().slice(0,16).replace('T',' ')
+        : String(customer.updated_at||'').slice(0,16);
+    return {reviewRequired:Number(customer.review_required),identityVerified:Number(customer.identity_verified),
+        reason:customer.review_reason||null,updatedBy:null,updatedAt:updated};
 }
 async function requireCustomerReviewClear(db,{bookingId,storeId,branchId,phone}) {
     const review=await getCustomerReviewProfile(db,storeId,phone);
     if(!review || !review.reviewRequired || !review.identityVerified)return;
-    const [overrides]=await db.execute(`SELECT id FROM booking_customer_case_events
-                                        WHERE store_id=? AND branch_id=? AND booking_id=? AND event_type='confirmation_exception'
-                                          AND customer_phone_hash=?
-                                          AND created_at >= (SELECT updated_at FROM booking_customer_review_profiles
-                                                             WHERE store_id=? AND phone_hash=?)
-                                            LIMIT 1`,[storeId,branchId,bookingId,customerPhoneHash(phone),storeId,customerPhoneHash(phone)]);
+    const customer=await v2CustomerForPhone(db,storeId,phone);
+    const [overrides]=await db.execute(`SELECT id FROM employee_actions
+                                        WHERE store_id=? AND branch_id=? AND entity_id=? AND module='Customer Review'
+                                          AND action='Customer case: confirmation_exception'
+                                          AND created_at >= ?
+                                            LIMIT 1`,[storeId,branchId,bookingId,customer.updated_at]);
     if(!overrides.length)throw rentalError('Customer review required. A Manager must verify the customer and document an exception for this booking before confirmation.');
 }
 async function requirePhysicalAndIncidentDecision(db,{bookingId,storeId,branchId}) {
-    const [bill]=await db.execute(`SELECT agreed_price,amount_paid FROM bookings
-                                   WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,storeId,branchId]);
+    await db.execute(`SELECT id FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,storeId,branchId]);
+    const [bill]=await db.execute(`SELECT b.agreed_price,b.amount_paid FROM ${V2_BOOKINGS} b
+                                   WHERE b.id=? AND b.store_id=? AND b.branch_id=?`,[bookingId,storeId,branchId]);
     if(!bill.length || Number(bill[0].agreed_price||0)<=0 ||
         Number(bill[0].amount_paid||0)+0.005<Number(bill[0].agreed_price))
         throw rentalError('Original booking price must be fully paid.');
     const [sales]=await db.execute(`SELECT COUNT(*) AS pendingCount
-                                    FROM booking_items bi LEFT JOIN booking_sales_fulfillment f
-                                                                    ON f.booking_item_id=bi.id AND f.store_id=bi.store_id AND f.branch_id=bi.branch_id
+                                    FROM ${V2_BOOKING_LINES} bi
                                     WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?
                                       AND bi.product_id IS NOT NULL AND bi.booked_quantity>0
                                       AND bi.inventory_status='reserved'
-                                      AND (f.issued_at IS NULL OR COALESCE(bi.used_quantity,0)<bi.booked_quantity)`,
+                                      AND (bi.issued_at IS NULL OR COALESCE(bi.used_quantity,0)<bi.booked_quantity)`,
         [bookingId,storeId,branchId]);
     if(Number(sales[0]?.pendingCount||0)>0)
         throw rentalError('Physically hand over all consumable inclusions first.');
@@ -529,28 +1486,27 @@ async function requirePhysicalAndIncidentDecision(db,{bookingId,storeId,branchId
 // Final booking completion is automatic, but only after physical return, inspection,
 // claims and the separate refundable deposit ledger have all been reconciled.
 async function automaticallyCompleteSettledBooking(db,bookingId,storeId,branchId) {
-    const [books]=await db.execute(`SELECT status,agreed_price,amount_paid,balance FROM bookings
-                                    WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,storeId,branchId]);
+    await db.execute(`SELECT id FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,storeId,branchId]);
+    const [books]=await db.execute(`SELECT b.status,b.agreed_price,b.amount_paid,b.balance FROM ${V2_BOOKINGS} b
+                                    WHERE b.id=? AND b.store_id=? AND b.branch_id=?`,[bookingId,storeId,branchId]);
     const booking=books[0];
     if(String(booking?.status||'').toLowerCase()!=='pending settlement')return false;
     if(!(Number(booking.agreed_price)>0) || Number(booking.amount_paid)+0.005<Number(booking.agreed_price)
         || Number(booking.balance)>0.005)return false;
-    const [details]=await db.execute(`SELECT refundable_deposit_required,deposit_collected,deposit_applied,deposit_refunded
-                                      FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
+    const [details]=await db.execute(`SELECT f.refundable_deposit_required,f.deposit_collected,f.deposit_applied,f.deposit_refunded
+                                      FROM ${V2_BOOKING_FINANCIALS} f WHERE f.booking_id=? AND f.store_id=? AND f.branch_id=?`,
         [bookingId,storeId,branchId]);
     if(!details.length)return false;
     const f=details[0];
     if(Number(f.deposit_collected)+0.005<Number(f.refundable_deposit_required) ||
         Number(f.deposit_collected)-Number(f.deposit_applied)-Number(f.deposit_refunded)>0.005)return false;
-    const [sales]=await db.execute(`SELECT COUNT(*) AS pending FROM booking_items bi
-                                                                        LEFT JOIN booking_sales_fulfillment sf ON sf.booking_item_id=bi.id
-                AND sf.store_id=bi.store_id AND sf.branch_id=bi.branch_id
+    const [sales]=await db.execute(`SELECT COUNT(*) AS pending FROM ${V2_BOOKING_LINES} bi
                                     WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?
                                       AND bi.product_id IS NOT NULL AND bi.booked_quantity>0
-                                      AND (sf.issued_at IS NULL OR COALESCE(bi.used_quantity,0)<bi.booked_quantity)`,
+                                      AND (bi.issued_at IS NULL OR COALESCE(bi.used_quantity,0)<bi.booked_quantity)`,
         [bookingId,storeId,branchId]);
     if(Number(sales[0]?.pending||0)>0)return false;
-    // These existing validation functions check all rental returns, inspection,
+    // These validation functions check all rental returns, inspection,
     // pending physical incidents and paid/waived/applied loss/damage claims.
     try {
         await requireRentalReturnBeforeCompletion(db,{bookingId,storeId,branchId});
@@ -560,13 +1516,11 @@ async function automaticallyCompleteSettledBooking(db,bookingId,storeId,branchId
         throw err;
     }
     const [pendingCleaning]=await db.execute(`SELECT COUNT(*) AS pending
-                                              FROM rental_booking_allocations a
-                                                       LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id
-                                                       JOIN booking_rental_items ri ON ri.booking_reference=a.booking_reference
-                                                  AND ri.equipment_id=a.equipment_id AND ri.store_id=a.store_id AND ri.branch_id=a.branch_id
-                                              WHERE ri.booking_id=? AND a.store_id=? AND a.branch_id=?
-                                                AND COALESCE(w.returned_received_units,a.quantity)>0
-                                                AND (w.inspected_at IS NULL OR w.inspection_status IN ('pending','cleaning'))`,
+                                              FROM ${V2_RENTAL_ALLOCATIONS} a
+                                              WHERE a.booking_id=? AND a.store_id=? AND a.branch_id=?
+                                                AND a.status<>'requested'
+                                                AND COALESCE(a.returned_received_units,a.quantity)>0
+                                                AND (a.inspected_at IS NULL OR a.inspection_status IN ('pending','cleaning'))`,
         [bookingId,storeId,branchId]);
     if(Number(pendingCleaning[0]?.pending||0)>0)return false;
     const [result]=await db.execute(`UPDATE bookings SET status='Completed'
@@ -585,40 +1539,35 @@ function financeCurrency(value,label='Amount') {
 function financePositive(value,label='Amount') {
     const n=financeCurrency(value,label);if(n<=0)throw rentalError(`${label} must be positive.`);return n;
 }
-async function getFeePolicy(db,storeId,branchId){
-    const [rows]=await db.execute(`SELECT p.* FROM booking_fee_policies p
-                                                       JOIN branches br ON br.id=p.branch_id AND br.store_id=p.store_id
-                                   WHERE p.store_id=? AND p.branch_id=? LIMIT 1`,[storeId,branchId]);
-    const row=rows[0]||{};
-    return {deliveryFee:Number(row.delivery_fee||0),setupFee:Number(row.setup_fee||0),
+async function getFeePolicy(){
+    return {deliveryFee:0,setupFee:0,
         // Refundable rental security deposits are chosen per booking by the Manager.
-        // No branch/Owner minimum is imposed on new booking quotations.
         refundableDeposit:0,
         depositPolicy:'optional',
-        deliveryIncludedPackage:!!row.delivery_included_package,
-        setupIncludedPackage:!!row.setup_included_package};
+        deliveryIncludedPackage:false,
+        setupIncludedPackage:false};
 }
 async function getBookingStatement(db,bookingId,storeId,branchId,includeWaiverReason=false){
-    const [bs]=await db.execute(`SELECT id,booking_reference AS reference,name,phone,booking_type AS bookingType,
-                                        package_name AS packageName,DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate,
-                                        status,agreed_price AS agreedPrice,package_price AS packagePrice,
-                                        required_down_payment AS downPayment,amount_paid AS bookingPayments,balance
-                                 FROM bookings WHERE id=? AND store_id=? AND branch_id=? LIMIT 1`,[bookingId,storeId,branchId]);
+    const [bs]=await db.execute(`SELECT b.id,b.booking_reference AS reference,b.name,b.phone,b.booking_type AS bookingType,
+                                        b.package_name AS packageName,DATE_FORMAT(b.event_date,'%Y-%m-%d') AS eventDate,
+                                        b.status,b.agreed_price AS agreedPrice,b.package_price AS packagePrice,
+                                        b.required_down_payment AS downPayment,b.amount_paid AS bookingPayments,b.balance
+                                 FROM ${V2_BOOKINGS} b WHERE b.id=? AND b.store_id=? AND b.branch_id=? LIMIT 1`,[bookingId,storeId,branchId]);
     if(!bs.length)throw rentalError('Booking not found in assigned branch.');
     const b=bs[0];
-    const [d]=await db.execute('SELECT * FROM booking_financial_details WHERE booking_id=?',[bookingId]);
-    const [items]=await db.execute(`SELECT equipment_name AS name,quantity,billable_days AS days,
-                                           daily_rate_snapshot AS dailyRate,agreed_line_total AS amount FROM booking_rental_items
-                                    WHERE booking_id=? AND store_id=? AND branch_id=? ORDER BY id`,[bookingId,storeId,branchId]);
-    const [salesItems]=await db.execute(`SELECT product_name AS name,variant_name AS variantName,
-                                                booked_quantity AS quantity,unit_price AS unitPrice,estimated_subtotal AS amount
-                                         FROM booking_items WHERE booking_id=? AND store_id=? AND branch_id=?
-                                                              AND source_type='custom' ORDER BY id`,[bookingId,storeId,branchId]);
+    const [d]=await db.execute(`SELECT f.* FROM ${V2_BOOKING_FINANCIALS} f WHERE f.booking_id=?`,[bookingId]);
+    const [items]=await db.execute(`SELECT r.equipment_name AS name,r.quantity,r.billable_days AS days,
+                                           r.daily_rate_snapshot AS dailyRate,r.agreed_line_total AS amount FROM ${V2_BOOKING_RENTAL_ITEMS} r
+                                    WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=? AND r.item_status<>'cancelled' ORDER BY r.id`,[bookingId,storeId,branchId]);
+    const [salesItems]=await db.execute(`SELECT bi.product_name AS name,bi.variant_name AS variantName,
+                                                bi.booked_quantity AS quantity,bi.unit_price AS unitPrice,bi.estimated_subtotal AS amount
+                                         FROM ${V2_BOOKING_LINES} bi WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?
+                                                              AND bi.source_type='custom' ORDER BY bi.id`,[bookingId,storeId,branchId]);
     const [claims]=await db.execute(`SELECT c.id,c.source_type AS sourceType,c.source_record_id AS sourceId,
                                             COALESCE(e.name,CONCAT('Equipment #',c.equipment_id)) AS equipmentName,
                                             c.quantity,c.reason,c.approved_amount AS amount,c.amount_paid AS amountPaid,
                                             c.deposit_applied AS depositApplied,c.status
-                                     FROM booking_customer_claims c LEFT JOIN rental_equipment e
+                                     FROM ${V2_BOOKING_CLAIMS} c LEFT JOIN ${V2_RENTAL_EQUIPMENT} e
                                                                               ON e.id=c.equipment_id AND e.store_id=c.store_id AND e.branch_id=c.branch_id
                                      WHERE c.booking_id=? AND c.store_id=? AND c.branch_id=? ORDER BY c.id`,[bookingId,storeId,branchId]);
     const fin=d[0]||{};
@@ -673,22 +1622,21 @@ async function validatePublicBookingSalesItems(connection, rawItems, storeId, br
             !Number.isSafeInteger(qty)||qty<=0||qty>100000)
             throw rentalError('Invalid product or quantity in the custom booking.');
         const [products]=await connection.execute(
-            `SELECT id,name,category,sales_price,has_variants,expiration_date
-             FROM products WHERE id=? AND store_id=? AND branch_id=? AND deleted_at IS NULL LIMIT 1`,
+            `SELECT products.id,products.name,products.category,products.sales_price,products.has_variants,products.expiration_date
+             FROM ${V2_PRODUCTS} products
+             WHERE products.id=? AND products.store_id=? AND products.branch_id=? AND products.deleted_at IS NULL LIMIT 1`,
             [productId,storeId,branchId]);
         const p=products[0];
         if(!p)throw rentalError(`Product #${productId} is not available from the selected branch.`);
-        const dateText=v=>v instanceof Date?v.toISOString().slice(0,10):String(v||'').slice(0,10);
-        const today=new Intl.DateTimeFormat('en-CA',{year:'numeric',month:'2-digit',day:'2-digit',timeZone:'Asia/Manila'}).format(new Date());
-        // Date eligibility is checked from real batches before approval/reservation,
+        // Date eligibility is checked from real stock before approval/reservation,
         // not from a possibly stale catalog expiration date.
         let price=Number(p.sales_price||0),variantName='';
         if(Number(p.has_variants)===1 || variantId!==null){
             if(variantId===null)throw rentalError(`Select a variant for ${p.name}.`);
             if(Number(p.has_variants)!==1)throw rentalError(`${p.name} does not use variants.`);
             const [variants]=await connection.execute(
-                `SELECT id,sales_price,variant_values,expiration_date FROM product_variants
-                 WHERE id=? AND product_id=? AND deleted_at IS NULL LIMIT 1`,[variantId,productId]);
+                `SELECT pv.id,pv.sales_price,pv.variant_values,pv.expiration_date FROM ${V2_PRODUCT_VARIANTS} pv
+                 WHERE pv.id=? AND pv.product_id=? AND pv.deleted_at IS NULL LIMIT 1`,[variantId,productId]);
             const v=variants[0];
             if(!v) throw rentalError(`Selected variant is unavailable for ${p.name}.`);
             price=Number(v.sales_price||0);
@@ -804,155 +1752,68 @@ function normalizeBookingItemsForSave(rawItems, options) {
 
 async function insertBookingItems(connection, items) {
     if (!Array.isArray(items) || items.length === 0) return;
-
-    const placeholders = items
-        .map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .join(", ");
-
-    const params = items.flatMap((item) => [
-        item.bookingId,
-        item.storeId,
-        item.branchId,
-        item.sourceType,
-        item.packageId,
-
-        item.productId,
-        item.variantId,
-
-        item.productName,
-        item.variantName || null,
-        item.category || null,
-
-        item.bookedQuantity,
-        0,
-        0,
-        0,
-
-        item.unitPrice,
-        item.estimatedSubtotal,
-        0,
-
-        "pending",
-        null,
-    ]);
-
-    await connection.execute(
-        `
-            INSERT INTO booking_items
-            (
-                booking_id,
-                store_id,
-                branch_id,
-                source_type,
-                package_id,
-
-                product_id,
-                variant_id,
-
-                product_name,
-                variant_name,
-                category,
-
-                booked_quantity,
-                reserved_quantity,
-                used_quantity,
-                restored_quantity,
-
-                unit_price,
-                estimated_subtotal,
-                used_subtotal,
-
-                inventory_status,
-                notes
-            )
-            VALUES ${placeholders}
-        `,
-        params
-    );
+    const parents = new Map();
+    for (const item of items) {
+        let parentId = null;
+        if (item.sourceType === "package" && item.packageId) {
+            const key = `${item.bookingId}:${item.packageId}`;
+            if (!parents.has(key)) {
+                const [existing] = await connection.execute(
+                    `SELECT id FROM booking_items WHERE booking_id=? AND item_type='package' AND package_id=? LIMIT 1`,
+                    [item.bookingId, item.packageId]);
+                if (existing.length) {
+                    parents.set(key, Number(existing[0].id));
+                } else {
+                    const [pkg] = await connection.execute(
+                        "SELECT package_name FROM packages WHERE id=? AND store_id=? LIMIT 1", [item.packageId, item.storeId]);
+                    const [created] = await connection.execute(
+                        `INSERT INTO booking_items
+                         (store_id, booking_id, package_id, item_type, item_name_snapshot, quantity,
+                          unit_price_snapshot, line_total, item_status)
+                         VALUES (?, ?, ?, 'package', ?, 1, 0, 0, 'pending')`,
+                        [item.storeId, item.bookingId, item.packageId,
+                            String(pkg[0]?.package_name || `Package #${item.packageId}`).slice(0, 180)]);
+                    parents.set(key, Number(created.insertId));
+                }
+            }
+            parentId = parents.get(key);
+        }
+        const catalogVariantId = await v2CatalogVariantId(connection, item.productId, item.variantId);
+        if (!catalogVariantId) throw rentalError(`Product #${item.productId} is not available from the selected branch.`);
+        await connection.execute(
+            `INSERT INTO booking_items
+             (store_id, booking_id, parent_item_id, variant_id, item_type, item_name_snapshot,
+              variant_name_snapshot, quantity, unit_price_snapshot, line_total, used_quantity, item_status)
+             VALUES (?, ?, ?, ?, 'consumable', ?, ?, ?, ?, ?, 0, 'pending')`,
+            [item.storeId, item.bookingId, parentId, catalogVariantId,
+                String(item.productName || `Product #${item.productId}`).slice(0, 180),
+                item.variantName ? String(item.variantName).slice(0, 150) : null,
+                item.bookedQuantity, item.unitPrice, item.estimatedSubtotal]);
+    }
 }
 
 
 async function getBookingV2InventoryForUpdate(connection, storeId, branchId, productId, variantId) {
-    const [rows] = await connection.execute(
-        `SELECT id, store_id, branch_id, product_id, variant_id,
-                quantity_on_hand, cost_price
-         FROM branch_inventory
-         WHERE store_id = ?
-           AND branch_id = ?
-           AND product_id = ?
-           AND variant_id <=> ?
-           AND status = 'active'
-         LIMIT 1
-         FOR UPDATE`,
-        [storeId, branchId, productId, variantId || null]
-    );
-    return rows[0] || null;
+    return v2LockInventory(connection, {storeId, branchId, productId, variantId: variantId || null});
 }
 
 async function consumeBookingV2Batches(connection, inventoryId, quantity, eventDate) {
-    let remaining = Math.max(0, Number(quantity || 0));
+    const remaining = Math.max(0, Number(quantity || 0));
     if (remaining <= 0) return;
-
-    const [batches] = await connection.execute(
-        `SELECT id, remaining_quantity
-         FROM inventory_batches
-         WHERE branch_inventory_id = ? AND remaining_quantity > 0
-           AND status = 'active'
-           AND (expiration_date IS NULL OR expiration_date >= ?)
-         ORDER BY (expiration_date IS NULL) ASC,
-                  expiration_date ASC,
-                  received_at ASC,
-                  id ASC
-             FOR UPDATE`,
-        [inventoryId,eventDate]
-    );
-
-    for (const batch of batches) {
-        if (remaining <= 0) break;
-        const available = Math.max(0, Number(batch.remaining_quantity || 0));
-        const take = Math.min(available, remaining);
-        if (take <= 0) continue;
-
-        await connection.execute(
-            `UPDATE inventory_batches
-             SET remaining_quantity = remaining_quantity - ?,
-                 status = CASE WHEN remaining_quantity - ? <= 0 THEN 'depleted' ELSE status END,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?`,
-            [take, take, batch.id]
-        );
-        remaining -= take;
-    }
-
-    if (remaining > 0) {
-        throw rentalError(
-            `Sellable stock is short by ${remaining} unit(s) for inventory #${inventoryId} on ${eventDate}. ` +
-            `Check available, non-expired batches before confirming this booking.`
-        );
+    const [rows] = await connection.execute(
+        `SELECT CASE WHEN expiration_date IS NULL OR expiration_date >= ?
+                         THEN GREATEST(on_hand_quantity - reserved_quantity - unavailable_quantity, 0)
+                     ELSE 0 END AS eligible
+         FROM branch_inventory WHERE id = ? FOR UPDATE`,
+        [eventDate || new Date().toISOString().slice(0, 10), inventoryId]);
+    const eligible = Number(rows[0]?.eligible || 0);
+    if (eligible < remaining) {
+        throw rentalError(`Not enough non-expired stock is available for the event date (short by ${remaining - eligible}).`);
     }
 }
 
-async function addBookingReturnBatch(connection, inventoryRow, quantity, bookingId, bookingItemId) {
-    const qty = Math.max(0, Number(quantity || 0));
-    if (qty <= 0) return;
-
-    const batchCode = `V2-BKG-RETURN-${bookingId}-${bookingItemId}-${inventoryRow.id}`.slice(0, 100);
-    await connection.execute(
-        `INSERT INTO inventory_batches
-         (store_id, branch_id, branch_inventory_id, batch_code,
-          received_quantity, remaining_quantity, unit_cost, received_at,
-          expiration_date, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, 'active')`,
-        [
-            inventoryRow.store_id,
-            inventoryRow.branch_id,
-            inventoryRow.id,
-            batchCode,
-            qty,
-            qty,
-            Number(inventoryRow.cost_price || 0),
-        ]
-    );
+async function addBookingReturnBatch() {
+    return null;
 }
 
 async function adjustBookingV2Inventory(connection, options) {
@@ -963,65 +1824,43 @@ async function adjustBookingV2Inventory(connection, options) {
         options.productId,
         options.variantId
     );
-
     if (!row) {
         throw new Error(
-            `Database V2 inventory row is missing for product ${options.productId}` +
-            `${options.variantId ? ` variant ${options.variantId}` : ""}. Run the V2 backfill/verification.`
+            `Branch inventory row is missing for product ${options.productId}` +
+            `${options.variantId ? ` variant ${options.variantId}` : ""}.`
         );
     }
-
     const delta = Number(options.quantityDelta || 0);
     const before = Number(row.quantity_on_hand || 0);
     const after = before + delta;
-
     if (after < 0) {
         throw new Error(
-            `Database V2 stock mismatch for product ${options.productId}. Available: ${before}, needed: ${Math.abs(delta)}.`
+            `Stock mismatch for product ${options.productId}. Available: ${before}, needed: ${Math.abs(delta)}.`
         );
     }
-
     if (delta < 0) {
-        await consumeBookingV2Batches(connection, row.id, Math.abs(delta),options.eventDate);
-    } else if (delta > 0) {
-        await addBookingReturnBatch(
-            connection,
-            row,
-            delta,
-            options.bookingId,
-            options.bookingItemId
-        );
+        await consumeBookingV2Batches(connection, row.id, Math.abs(delta), options.eventDate);
     }
-
     await connection.execute(
         `UPDATE branch_inventory
-         SET quantity_on_hand = ?, updated_at = CURRENT_TIMESTAMP
+         SET on_hand_quantity = ?
          WHERE id = ?`,
         [after, row.id]
     );
-
     const actor = options.actor || { id: null, role: "SYSTEM", name: "StockNBook" };
-    await connection.execute(
-        `INSERT INTO inventory_movements
-         (store_id, branch_id, branch_inventory_id, movement_type,
-          quantity_delta, quantity_before, quantity_after,
-          reference_type, reference_id, actor_id, actor_role, actor_name, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'BOOKING', ?, ?, ?, ?, ?)`,
-        [
-            options.storeId,
-            options.branchId,
-            row.id,
-            options.movementType,
-            delta,
-            before,
-            after,
-            String(options.bookingId),
-            actor.id ?? null,
-            actor.role || null,
-            actor.name || null,
-            options.notes || null,
-        ]
-    );
+    await v2RecordMovement(connection, {
+        storeId: options.storeId,
+        branchId: options.branchId,
+        inventoryId: row.id,
+        movementType: options.movementType,
+        delta,
+        before,
+        after,
+        referenceType: "BOOKING",
+        referenceId: options.bookingId,
+        actorId: actor.id ?? null,
+        notes: options.notes || null,
+    });
 }
 
 async function reserveBookingInventory(connection, options) {
@@ -1033,38 +1872,18 @@ async function reserveBookingInventory(connection, options) {
          WHERE id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
     if(!bookingDateRows.length)throw rentalError('Booking is not assigned to this inventory branch.');
     const eventDate=bookingDateRows[0].eventDate;
-
-    const params = [Number(bookingId), Number(storeId)];
-    let branchFilter = "";
-
-    if (branchId) {
-        branchFilter = " AND branch_id = ?";
-        params.push(Number(branchId));
-    }
-
+    await connection.execute(
+        `SELECT id FROM booking_items WHERE booking_id=? AND store_id=? AND item_type='consumable' AND item_status='pending' FOR UPDATE`,
+        [Number(bookingId), Number(storeId)]);
     const [items] = await connection.execute(
-        `
-            SELECT
-                id,
-                product_id,
-                variant_id,
-                product_name,
-                variant_name,
-                booked_quantity,
-                reserved_quantity,
-                inventory_status
-            FROM booking_items
-            WHERE booking_id = ?
-              AND store_id = ?
-                ${branchFilter}
-          AND inventory_status = 'pending'
-        FOR UPDATE
-        `,
-        params
+        `SELECT bi.id, bi.product_id, bi.variant_id, bi.product_name, bi.variant_name,
+                bi.booked_quantity, bi.reserved_quantity, bi.inventory_status
+         FROM ${V2_BOOKING_LINES} bi
+         WHERE bi.booking_id = ? AND bi.store_id = ? AND bi.branch_id = ?
+           AND bi.inventory_status = 'pending'`,
+        [Number(bookingId), Number(storeId), Number(branchId)]
     );
-
     let reservedCount = 0;
-
     for (const item of items) {
         const bookingItemId = Number(item.id);
         const productId = Number(item.product_id);
@@ -1072,134 +1891,39 @@ async function reserveBookingInventory(connection, options) {
         const bookedQty = Number(item.booked_quantity || 0);
         const alreadyReserved = Number(item.reserved_quantity || 0);
         const qtyToReserve = bookedQty - alreadyReserved;
-
         if (!productId || !Number.isSafeInteger(bookedQty) || bookedQty<=0)
             throw rentalError('A booking item is missing its valid product or quantity.');
         if (qtyToReserve<=0) continue;
         // Check the actual item/variant against the booking's event date.
+        await connection.execute(`SELECT id FROM products WHERE id=? AND store_id=? FOR UPDATE`,[productId,storeId]);
         const [productCheck]=await connection.execute(
             `SELECT p.id,p.expiration_date,p.deleted_at,p.has_variants,
                     pv.id AS variant_found,pv.expiration_date AS variant_expiration,pv.deleted_at AS variant_deleted
-             FROM products p LEFT JOIN product_variants pv ON pv.product_id=p.id AND pv.id <=> ?
-             WHERE p.id=? AND p.store_id=? AND p.branch_id=? LIMIT 1 FOR UPDATE`,
+             FROM ${V2_PRODUCTS} p LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.product_id=p.id AND pv.id <=> ?
+             WHERE p.id=? AND p.store_id=? AND p.branch_id=? LIMIT 1`,
             [variantId,productId,storeId,branchId]);
         const product=productCheck[0];
-        // Do not reject fresh batches based on an old catalog-level expiration.
-        // consumeBookingV2Batches below enforces per-batch expiry on eventDate.
         if(!product || product.deleted_at ||
             (variantId && (!product.variant_found||product.variant_deleted)) ||
             (!variantId && Number(product.has_variants)===1))
             throw rentalError(`One booking item is inactive for ${eventDate}. Refresh the branch inventory.`);
-
         const itemLabel = item.variant_name
             ? `${item.product_name} — ${item.variant_name}`
             : item.product_name;
-
-        if (variantId) {
-            const [variantRows] = await connection.execute(
-                `
-                    SELECT stock
-                    FROM product_variants
-                    WHERE id = ?
-                      AND product_id = ?
-                        FOR UPDATE
-                `,
-                [variantId, productId]
-            );
-
-            if (!variantRows.length) {
-                return {
-                    ok: false,
-                    error: `Variant stock record not found for ${itemLabel}.`,
-                };
-            }
-
-            const currentStock = Number(variantRows[0].stock || 0);
-
-            if (currentStock < qtyToReserve) {
-                return {
-                    ok: false,
-                    error: `Not enough stock for ${itemLabel}. Available: ${currentStock}, needed: ${qtyToReserve}.`,
-                };
-            }
-
-            await connection.execute(
-                `
-                    UPDATE product_variants
-                    SET stock = stock - ?
-                    WHERE id = ?
-                      AND product_id = ?
-                `,
-                [qtyToReserve, variantId, productId]
-            );
-
-            await connection.execute(
-                `
-                    UPDATE products
-                    SET stock = GREATEST(stock - ?, 0)
-                    WHERE id = ?
-                      AND store_id = ?
-                `,
-                [qtyToReserve, productId, storeId]
-            );
-        } else {
-            const productParams = [productId, storeId];
-            let productBranchFilter = "";
-
-            if (branchId) {
-                productBranchFilter = " AND branch_id = ?";
-                productParams.push(Number(branchId));
-            }
-
-            const [productRows] = await connection.execute(
-                `
-                    SELECT stock
-                    FROM products
-                    WHERE id = ?
-                      AND store_id = ?
-                        ${productBranchFilter}
-                FOR UPDATE
-                `,
-                productParams
-            );
-
-            if (!productRows.length) {
-                return {
-                    ok: false,
-                    error: `Product stock record not found for ${itemLabel}.`,
-                };
-            }
-
-            const currentStock = Number(productRows[0].stock || 0);
-
-            if (currentStock < qtyToReserve) {
-                return {
-                    ok: false,
-                    error: `Not enough stock for ${itemLabel}. Available: ${currentStock}, needed: ${qtyToReserve}.`,
-                };
-            }
-
-            const updateParams = [qtyToReserve, productId, storeId];
-
-            let updateBranchFilter = "";
-
-            if (branchId) {
-                updateBranchFilter = " AND branch_id = ?";
-                updateParams.push(Number(branchId));
-            }
-
-            await connection.execute(
-                `
-                    UPDATE products
-                    SET stock = stock - ?
-                    WHERE id = ?
-                      AND store_id = ?
-                        ${updateBranchFilter}
-                `,
-                updateParams
-            );
+        const stockRow = await getBookingV2InventoryForUpdate(connection, storeId, branchId, productId, variantId);
+        if (!stockRow) {
+            return {
+                ok: false,
+                error: `${variantId ? "Variant" : "Product"} stock record not found for ${itemLabel}.`,
+            };
         }
-
+        const currentStock = Number(stockRow.quantity_on_hand || 0);
+        if (currentStock < qtyToReserve) {
+            return {
+                ok: false,
+                error: `Not enough stock for ${itemLabel}. Available: ${currentStock}, needed: ${qtyToReserve}.`,
+            };
+        }
         await adjustBookingV2Inventory(connection, {
             storeId,
             branchId,
@@ -1213,22 +1937,14 @@ async function reserveBookingInventory(connection, options) {
             actor,
             notes: `Reserved ${qtyToReserve} unit(s) for ${itemLabel}.`,
         });
-
         await connection.execute(
-            `
-                UPDATE booking_items
-                SET
-                    reserved_quantity = booked_quantity,
-                    inventory_status = 'reserved',
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            `,
+            `UPDATE booking_items
+             SET item_status = 'reserved'
+             WHERE id = ?`,
             [bookingItemId]
         );
-
         reservedCount += 1;
     }
-
     return {
         ok: true,
         reservedCount,
@@ -1279,111 +1995,58 @@ function getUsedQuantityForItem(item, usedItems) {
 
 async function restoreBookingInventoryOnCancel(connection, options) {
     const { bookingId, storeId, branchId, usedItems = [], actor = null } = options;
-
     const params = [Number(bookingId), Number(storeId)];
     let branchFilter = "";
-
     if (branchId) {
-        branchFilter = " AND branch_id = ?";
+        branchFilter = " AND bi.branch_id = ?";
         params.push(Number(branchId));
     }
-
+    await connection.execute(
+        `SELECT id FROM booking_items WHERE booking_id=? AND store_id=? AND item_type='consumable' AND item_status='reserved' FOR UPDATE`,
+        [Number(bookingId), Number(storeId)]);
     const [items] = await connection.execute(
         `
             SELECT
-                id,
-                product_id,
-                variant_id,
-                product_name,
-                variant_name,
-                reserved_quantity,
-                used_quantity,
-                restored_quantity,
-                unit_price,
-                inventory_status
-            FROM booking_items
-            WHERE booking_id = ?
-              AND store_id = ?
+                bi.id,
+                bi.product_id,
+                bi.variant_id,
+                bi.product_name,
+                bi.variant_name,
+                bi.reserved_quantity,
+                bi.used_quantity,
+                bi.restored_quantity,
+                bi.unit_price,
+                bi.inventory_status
+            FROM ${V2_BOOKING_LINES} bi
+            WHERE bi.booking_id = ?
+              AND bi.store_id = ?
                 ${branchFilter}
-          AND inventory_status = 'reserved'
-        FOR UPDATE
+          AND bi.inventory_status = 'reserved'
         `,
         params
     );
-
     let restoredCount = 0;
     let restoredQuantity = 0;
     let usedQuantity = 0;
-
     for (const item of items) {
         const bookingItemId = Number(item.id);
         const productId = Number(item.product_id);
         const variantId = item.variant_id ? Number(item.variant_id) : null;
         const reservedQty = Number(item.reserved_quantity || 0);
-        const unitPrice = toNumber(item.unit_price, 0);
-
         if (!productId || reservedQty <= 0) continue;
-
         // Never restore units already physically issued through the Staff Sales queue,
         // even if a caller supplies a lower manually reported used quantity.
         const usedQty = Math.max(Number(item.used_quantity || 0), getUsedQuantityForItem(item, usedItems));
-
         const itemLabel = item.variant_name
             ? `${item.product_name} — ${item.variant_name}`
             : item.product_name;
-
         if (usedQty > reservedQty) {
             return {
                 ok: false,
                 error: `Used quantity for ${itemLabel} cannot exceed reserved quantity. Reserved: ${reservedQty}, used: ${usedQty}.`,
             };
         }
-
         const qtyToRestore = reservedQty - usedQty;
-
-        if (qtyToRestore > 0) {
-            if (variantId) {
-                await connection.execute(
-                    `
-                        UPDATE product_variants
-                        SET stock = stock + ?
-                        WHERE id = ?
-                          AND product_id = ?
-                    `,
-                    [qtyToRestore, variantId, productId]
-                );
-
-                await connection.execute(
-                    `
-                        UPDATE products
-                        SET stock = stock + ?
-                        WHERE id = ?
-                          AND store_id = ?
-                    `,
-                    [qtyToRestore, productId, storeId]
-                );
-            } else {
-                const updateParams = [qtyToRestore, productId, storeId];
-                let updateBranchFilter = "";
-
-                if (branchId) {
-                    updateBranchFilter = " AND branch_id = ?";
-                    updateParams.push(Number(branchId));
-                }
-
-                await connection.execute(
-                    `
-                        UPDATE products
-                        SET stock = stock + ?
-                        WHERE id = ?
-                          AND store_id = ?
-                            ${updateBranchFilter}
-                    `,
-                    updateParams
-                );
-            }
-        }
-
         if (qtyToRestore > 0) {
             await adjustBookingV2Inventory(connection, {
                 storeId,
@@ -1398,39 +2061,32 @@ async function restoreBookingInventoryOnCancel(connection, options) {
                 notes: `Released ${qtyToRestore} unused reserved unit(s) for ${itemLabel}.`,
             });
         }
-
         const nextInventoryStatus =
             usedQty <= 0
                 ? "cancelled_restored"
                 : qtyToRestore <= 0
                     ? "cancelled_used"
                     : "cancelled_partial_used";
-
         await connection.execute(
             `
                 UPDATE booking_items
                 SET
                     used_quantity = ?,
-                    restored_quantity = ?,
-                    used_subtotal = ?,
-                    inventory_status = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    returned_quantity = ?,
+                    item_status = ?
                 WHERE id = ?
             `,
             [
                 usedQty,
                 qtyToRestore,
-                unitPrice * usedQty,
                 nextInventoryStatus,
                 bookingItemId,
             ]
         );
-
         restoredCount += 1;
         restoredQuantity += qtyToRestore;
         usedQuantity += usedQty;
     }
-
     return {
         ok: true,
         restoredCount,
@@ -1517,46 +2173,45 @@ function packageRentalsMatchBookedLines(snapshot, bookedRentals) {
     });
 }
 
-async function loadBookingApproval(connection, id, storeId, branchId) {
-    const [rows] = await connection.execute(
-        `SELECT status, reason FROM booking_approval_requests
-         WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1`,
-        [id,storeId,branchId]
-    );
-    return rows[0] || null;
+async function loadBookingApproval(connection, id, storeId) {
+    return v2BookingApproval(connection, id, storeId);
 }
 
 async function inspectBookingForConfirmation(connection, {bookingId,storeId,branchId,lock=false}) {
+    if (lock) {
+        await connection.execute(`SELECT id FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+            [bookingId,storeId,branchId]);
+    }
     const [rows] = await connection.execute(
-        `SELECT id,store_id,branch_id,status,booking_reference,name,booking_type,custom_order,
-                package_json,package_price,agreed_price,required_down_payment,amount_paid,phone,
-                booking_no_dp_approved_by
-         FROM bookings WHERE id=? AND store_id=? AND branch_id=? ${lock ? "FOR UPDATE" : ""}`,
+        `SELECT b.id,b.store_id,b.branch_id,b.status,b.booking_reference,b.name,b.booking_type,b.custom_order,
+                b.package_id,b.package_price,b.agreed_price,b.required_down_payment,b.amount_paid,b.phone,
+                b.approved_by AS booking_no_dp_approved_by
+         FROM ${V2_BOOKINGS} b WHERE b.id=? AND b.store_id=? AND b.branch_id=?`,
         [bookingId,storeId,branchId]
     );
     const booking=rows[0];
     if(!booking)throw rentalError('Booking does not belong to your assigned branch.');
+    booking.package_json = await v2BookingPackageJson(connection, booking);
     if(!['Pending Review','Awaiting Down Payment'].includes(normalizeBookingStatus(booking.status)))
         throw rentalError('Only a reviewed, not-yet-confirmed booking can be approved or confirmed.');
-
     const reasons=[];
     const isCustom=String(booking.booking_type||'').toLowerCase().includes('custom');
     const [items]=await connection.execute(
-        `SELECT source_type,product_id,variant_id,product_name,booked_quantity,unit_price,estimated_subtotal
-         FROM booking_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
+        `SELECT bi.source_type,bi.product_id,bi.variant_id,bi.product_name,bi.booked_quantity,bi.unit_price,bi.estimated_subtotal
+         FROM ${V2_BOOKING_LINES} bi WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?`,
         [bookingId,storeId,branchId]);
     const [rentals]=await connection.execute(
         `SELECT r.equipment_id AS equipmentId,r.quantity,r.billable_days,r.daily_rate_snapshot,r.agreed_line_total,
                 e.name AS equipment_name
-         FROM booking_rental_items r JOIN rental_equipment e
+         FROM ${V2_BOOKING_RENTAL_ITEMS} r JOIN ${V2_RENTAL_EQUIPMENT} e
                                           ON e.id=r.equipment_id AND e.store_id=r.store_id AND e.branch_id=r.branch_id
-         WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=?`,
+         WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=? AND r.item_status<>'cancelled'`,
         [bookingId,storeId,branchId]);
     if(isCustom && !catalogOnlyBookingText(booking.custom_order,items,rentals))
         reasons.push('Customer requested work outside the verified catalog; Manager must review scope and quotation.');
     const [charges]=await connection.execute(
-        `SELECT package_base,rental_subtotal,delivery_fee,setup_fee
-         FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1`,
+        `SELECT f.package_base,f.rental_subtotal,f.delivery_fee,f.setup_fee
+         FROM ${V2_BOOKING_FINANCIALS} f WHERE f.booking_id=? AND f.store_id=? AND f.branch_id=? LIMIT 1`,
         [bookingId,storeId,branchId]);
     if(!charges.length)reasons.push('Booking quotation is missing; Manager must review the charges.');
     const billing=charges[0]||{};
@@ -1612,43 +2267,40 @@ async function checkAvailableBeforePayment(db,{bookingId,storeId,branchId}) {
     const [bk]=await db.execute(`SELECT DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate
                                  FROM bookings WHERE id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
     if(!bk.length || !bk[0].eventDate)throw rentalError('Booking event date is missing.');
-    const [sales]=await db.execute(`SELECT product_id,variant_id,booked_quantity FROM booking_items
-                                    WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
+    const [sales]=await db.execute(`SELECT bi.product_id,bi.variant_id,bi.booked_quantity FROM ${V2_BOOKING_LINES} bi
+                                    WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?`,[bookingId,storeId,branchId]);
     for(const line of sales){
         const [p]=await db.execute(`SELECT p.name,p.deleted_at,DATE_FORMAT(p.expiration_date,'%Y-%m-%d') AS pExpiry,
                                            v.deleted_at AS vDeleted,DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS vExpiry,
                                            bi.quantity_on_hand AS available
-                                    FROM products p LEFT JOIN product_variants v ON v.product_id=p.id AND v.id <=> ?
-            LEFT JOIN branch_inventory bi ON bi.product_id=p.id AND bi.variant_id <=> ?
+                                    FROM ${V2_PRODUCTS} p LEFT JOIN ${V2_PRODUCT_VARIANTS} v ON v.product_id=p.id AND v.id <=> ?
+            LEFT JOIN ${V2_BRANCH_INVENTORY} bi ON bi.product_id=p.id AND bi.variant_id <=> ?
                                         AND bi.store_id=p.store_id AND bi.branch_id=p.branch_id AND bi.status='active'
                                     WHERE p.id=? AND p.store_id=? AND p.branch_id=? LIMIT 1`,
             [line.variant_id,line.variant_id,line.product_id,storeId,branchId]);
         const row=p[0];
         if(!row || row.deleted_at || row.vDeleted || Number(row.available||0)<Number(line.booked_quantity))
             throw rentalError('Insufficient sales inventory for the requested booking inclusions.');
-        // Legacy product/variant expiry dates are not proof that a newly
-        // received batch is expired. Check actual eligible batches below.
-        // Approval must use the same expiration-aware batch availability as
+        // Approval must use the same expiration-aware availability as
         // the Items tab and the actual reservation transaction.
         const [eligible] = await db.execute(
-            `SELECT COALESCE(SUM(batch.remaining_quantity),0) AS available
-             FROM inventory_batches batch
-                      JOIN branch_inventory bi ON bi.id=batch.branch_inventory_id
+            `SELECT COALESCE(SUM(CASE WHEN bi.expiration_date IS NULL OR bi.expiration_date>=?
+                                          THEN GREATEST(bi.quantity_on_hand-bi.reserved_quantity-bi.unavailable_quantity,0)
+                                      ELSE 0 END),0) AS available
+             FROM ${V2_BRANCH_INVENTORY} bi
              WHERE bi.store_id=? AND bi.branch_id=? AND bi.product_id=?
-               AND bi.variant_id <=> ? AND bi.status='active'
-               AND batch.status='active' AND batch.remaining_quantity>0
-               AND (batch.expiration_date IS NULL OR batch.expiration_date>=?)`,
-            [storeId,branchId,line.product_id,line.variant_id,bk[0].eventDate]);
+               AND bi.variant_id <=> ? AND bi.status='active'`,
+            [bk[0].eventDate,storeId,branchId,line.product_id,line.variant_id]);
         if(Number(eligible[0]?.available||0)<Number(line.booked_quantity))
             throw rentalError(`Not enough eligible inventory batches for ${row.name} on the event date.`);
     }
-    const [rentals]=await db.execute(`SELECT equipment_id,quantity,
-                                             DATE_FORMAT(start_date,'%Y-%m-%d') AS fromDate,
-                                             DATE_FORMAT(end_date,'%Y-%m-%d') AS toDate FROM booking_rental_items
-                                      WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,storeId,branchId]);
+    const [rentals]=await db.execute(`SELECT r.equipment_id,r.quantity,
+                                             DATE_FORMAT(r.start_date,'%Y-%m-%d') AS fromDate,
+                                             DATE_FORMAT(r.end_date,'%Y-%m-%d') AS toDate FROM ${V2_BOOKING_RENTAL_ITEMS} r
+                                      WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=? AND r.item_status<>'cancelled'`,[bookingId,storeId,branchId]);
     for(const line of rentals){
-        const [rows]=await db.execute(`SELECT total_units,maintenance_units,missing_units FROM rental_equipment
-                                       WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL`,
+        const [rows]=await db.execute(`SELECT e.total_units,e.maintenance_units,e.missing_units FROM ${V2_RENTAL_EQUIPMENT} e
+                                       WHERE e.id=? AND e.store_id=? AND e.branch_id=? AND e.archived_at IS NULL`,
             [line.equipment_id,storeId,branchId]);
         if(!rows.length)throw rentalError('Requested rental equipment is no longer active.');
         const overlaps=await rentalOverlapAllocations(db,{storeId,branchId,equipmentId:line.equipment_id,
@@ -1705,16 +2357,13 @@ async function getOperationalAccess(connection, decoded, moduleName) {
     const role = String(decoded?.role || "").trim().toLowerCase();
     if (role === "owner") return "full";
     if (role !== "manager" && role !== "staff") return "none";
-
     const storeId = Number(decoded?.store_id);
     const branchId = Number(decoded?.branch_id);
     const employeeId = Number(role === "manager" ? decoded?.manager_id : decoded?.staff_id);
     if (![storeId, branchId, employeeId].every((id) => Number.isSafeInteger(id) && id > 0)) return "none";
-
-    const table = role === "manager" ? "managers" : "staff";
     const [rows] = await connection.execute(
-        `SELECT permissions FROM ${table} WHERE id = ? AND store_id = ? AND branch_id = ? AND LOWER(status) = 'active' LIMIT 1`,
-        [employeeId, storeId, branchId]
+        `SELECT permissions FROM users WHERE id = ? AND store_id = ? AND branch_id = ? AND role = ? AND LOWER(status) = 'active' LIMIT 1`,
+        [employeeId, storeId, branchId, role]
     );
     if (!rows.length) return "none";
     return normalizeOperationalAccess(rows[0].permissions, moduleName, role);
@@ -1726,7 +2375,7 @@ async function getStaffSalesInventoryAccess(connection, decoded) {
     if(String(decoded?.role || '').toLowerCase()!=='staff') return 'none';
     const storeId=Number(decoded?.store_id),branchId=Number(decoded?.branch_id),staffId=Number(decoded?.staff_id);
     if(![storeId,branchId,staffId].every(value=>Number.isSafeInteger(value)&&value>0)) return 'none';
-    const [rows]=await connection.execute(`SELECT permissions FROM staff WHERE id=? AND store_id=?
+    const [rows]=await connection.execute(`SELECT permissions FROM users WHERE id=? AND store_id=? AND role='staff'
                                                                            AND branch_id=? AND LOWER(status)='active' LIMIT 1`,[staffId,storeId,branchId]);
     if(!rows.length)return 'none';
     let permissions=rows[0].permissions;
@@ -1773,7 +2422,7 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "manager" && decoded?.manager_id) {
         const [rows] = await connection.execute(
-            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS manager_name FROM users WHERE id = ? AND store_id = ? AND role = 'manager' LIMIT 1`,
             [Number(decoded.manager_id), storeId]
         );
 
@@ -1786,7 +2435,7 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "staff" && decoded?.staff_id) {
         const [rows] = await connection.execute(
-            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS staff_name FROM users WHERE id = ? AND store_id = ? AND role = 'staff' LIMIT 1`,
             [Number(decoded.staff_id), storeId]
         );
 
@@ -1799,12 +2448,12 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "owner") {
         const [rows] = await connection.execute(
-            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            `SELECT id AS owner_user_id, full_name AS owner_name FROM users WHERE store_id = ? AND role = 'owner' ORDER BY id ASC LIMIT 1`,
             [storeId]
         );
 
         return {
-            id: null,
+            id: rows[0]?.owner_user_id ? Number(rows[0].owner_user_id) : null,
             name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
             role: "Owner",
         };
@@ -1819,22 +2468,28 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
  * action succeed or fail together.
  */
 async function logEmployeeAction(connection, entry) {
+    // employee_actions.user_id references users.id (owners included).
+    const userId = Number(entry?.employee?.id);
+    if (!Number.isSafeInteger(userId) || userId <= 0) return;
+    const entityId = Number(entry.referenceId);
     await connection.execute(
         `INSERT INTO employee_actions
-         (store_id, branch_id, employee_id, employee_name, employee_role,
-          module, reference_number, action, reference_id, details)
+         (store_id, branch_id, user_id, user_name, user_role,
+          module, reference_number, action, entity_id, details)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             entry.storeId,
             entry.branchId ?? null,
-            entry.employee.id,
-            entry.employee.name,
+            userId,
+            String(entry.employee.name || "Unknown").slice(0, 150),
             entry.employee.role,
             entry.module,
             entry.referenceNumber ?? null,
             entry.action,
-            entry.referenceId ?? null,
-            entry.details ?? null,
+            Number.isSafeInteger(entityId) && entityId > 0 ? entityId : null,
+            entry.details === undefined || entry.details === null
+                ? null
+                : JSON.stringify(entry.details),
         ]
     );
 }
@@ -2027,23 +2682,18 @@ async function effectiveSubscriptionLimit(connection, storeId, resourceColumn) {
     let eligible = !!paid && ['active', 'expiring'].includes(paid.status) &&
         Number(paid.not_expired) === 1;
     if (paid && !eligible && ['active', 'expiring'].includes(paid.status) && Number(paid.price) > 0) {
-        const [columns] = await connection.query('SHOW COLUMNS FROM payments');
-        const available = new Set(columns.map((c) => c.Field));
-        const dateColumn = ['created_at', 'submitted_at', 'payment_date'].find((name) => available.has(name));
-        if (dateColumn) {
-            const [graceRows] = await connection.execute(
-                `SELECT id FROM payments WHERE store_id = ? AND UPPER(status) = 'PENDING'
-                                           AND DATE(${dateColumn}) <= DATE(?)
-                                           AND CURDATE() <= DATE_ADD(DATE(?), INTERVAL 2 DAY)
-                    LIMIT 1`, [storeId, paid.expires_at, paid.expires_at]);
-            eligible = graceRows.length > 0;
-        }
+        const [graceRows] = await connection.execute(
+            `SELECT id FROM subscription_payments WHERE store_id = ? AND UPPER(status) = 'PENDING'
+                                       AND DATE(submitted_at) <= DATE(?)
+                                       AND CURDATE() <= DATE_ADD(DATE(?), INTERVAL 2 DAY)
+                LIMIT 1`, [storeId, paid.expires_at, paid.expires_at]);
+        eligible = graceRows.length > 0;
     }
     let plan = eligible ? paid : null;
     if (!plan) {
         const [starter] = await connection.execute(
             `SELECT max_inventory, max_bookings FROM plans
-             WHERE is_archived = 0 AND (LOWER(name) = 'starter' OR price = 0)
+             WHERE is_archived = 0 AND (LOWER(plan_code) = 'starter' OR LOWER(plan_name) = 'starter' OR price = 0)
              ORDER BY price ASC, id ASC LIMIT 1`);
         plan = starter[0] || null;
     }
@@ -2105,8 +2755,8 @@ exports.handler = async (event) => {
             const [items]=await connection.execute(`SELECT e.id,e.name,c.name AS category,e.rental_rate_per_day AS dailyRate,
                                                            e.total_units AS totalUnits,e.rented_out_units AS rentedOutUnits,
                                                            e.maintenance_units AS maintenanceUnits,e.missing_units AS missingUnits
-                                                    FROM rental_equipment e
-                                                    LEFT JOIN rental_categories c ON c.id=e.category_id AND c.store_id=e.store_id AND c.branch_id=e.branch_id
+                                                    FROM ${V2_RENTAL_EQUIPMENT} e
+                                                    LEFT JOIN ${V2_RENTAL_CATEGORIES} c ON c.id=e.category_id AND c.store_id=e.store_id
                                                     WHERE e.store_id=? AND e.branch_id=? AND e.archived_at IS NULL
                                                     AND e.rental_rate_per_day>0 AND e.total_units>e.maintenance_units+e.missing_units
                                                     ORDER BY e.name LIMIT 200`,[targetStoreId,requestedBranch]);
@@ -2123,8 +2773,7 @@ exports.handler = async (event) => {
                 const [allocations]=await connection.execute(`SELECT equipment_id AS equipmentId,quantity,status,
                                                                      DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
                                                                      DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
-                                                              FROM rental_booking_allocations
-                                                              WHERE store_id=? AND branch_id=? AND equipment_id IN (${placeholders})
+                                                              FROM ${V2_RENTAL_ALLOCATIONS} rental_booking_allocations WHERE store_id=? AND branch_id=? AND equipment_id IN (${placeholders})
                                                                 AND status IN ('reserved','checked_out')
                                                                 AND start_date<=? AND (end_date>=? OR status='checked_out')`,
                     [targetStoreId,requestedBranch,...ids,queryTo,queryFrom]);
@@ -2160,7 +2809,7 @@ exports.handler = async (event) => {
             // Booking reference AND matching contact details are required to access customer finances.
             const ref=String(body.bookingReference||'').trim(),phone=String(body.phone||'').trim();
             if(!ref||!phone)return response(400,{error:'Booking reference and phone required.'});
-            const [bs]=await connection.execute('SELECT id,store_id,branch_id FROM bookings WHERE booking_reference=? AND phone=? LIMIT 1',[ref,phone]);
+            const [bs]=await connection.execute(`SELECT id,store_id,branch_id FROM ${V2_BOOKINGS} bookings WHERE booking_reference=? AND phone=? LIMIT 1`,[ref,phone]);
             if(!bs.length)return response(404,{error:'Booking not found.'});
             return response(200,{statement:await getBookingStatement(connection,bs[0].id,bs[0].store_id,bs[0].branch_id)});
         }
@@ -2244,8 +2893,7 @@ exports.handler = async (event) => {
             const bookingLimit = await effectiveSubscriptionLimit(connection, targetStoreId, 'max_bookings');
             if (bookingLimit !== null) {
                 const [monthlyCount] = await connection.execute(
-                    `SELECT COUNT(*) AS total FROM bookings
-                     WHERE store_id = ? AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+                    `SELECT COUNT(*) AS total FROM ${V2_BOOKINGS} bookings WHERE store_id = ? AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
                        AND created_at < DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')`,
                     [targetStoreId]
                 );
@@ -2375,6 +3023,21 @@ exports.handler = async (event) => {
 
             await connection.beginTransaction();
             try {
+                // Customer details are kept once per store in customers.
+                const customerId = await v2EnsureCustomer(connection, {
+                    storeId: targetStoreId,
+                    name,
+                    facebookName: facebookName || facebook_name || null,
+                    phone,
+                    email: email || null,
+                });
+                // Package name/snapshot, amount paid, balance and payment status are
+                // derived from packages, package_items and payments in stocknbook_v2.
+                void packageNameForSave;
+                void packageJsonForSave;
+                void amountPaid;
+                void balance;
+                void paymentStatus;
                 const [result] = await connection.execute(
                     `
                         INSERT INTO bookings
@@ -2382,61 +3045,53 @@ exports.handler = async (event) => {
                             store_id,
                             branch_id,
                             booking_reference,
+                            customer_id,
+                            package_id,
                             booking_type,
-                            name,
-                            facebook_name,
-                            phone,
-                            email,
+                            event_type,
+                            theme,
                             event_date,
                             event_end_date,
                             event_time,
-                            event_type,
-                            package_name,
-                            package_json,
-                            custom_order,
-                            theme,
                             venue,
+                            custom_order,
                             notes,
                             status,
+                            package_price_snapshot,
                             agreed_price,
-                            package_price,
                             required_down_payment,
-                            amount_paid,
-                            balance,
-                            payment_status
+                            refundable_deposit_required
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     `,
                     [
                         targetStoreId,
                         targetBranchId,
-                        finalBookingReference,
+                        finalBookingReference || `BKG-NEW-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+                        customerId,
+                        isCustom ? null : (packageSnapshot?.id || packageId || null),
                         finalBookingType,
-                        name,
-                        facebookName || facebook_name || null,
-                        phone,
-                        email || null,
+                        finalEventType,
+                        theme || null,
                         finalDate,
                         finalEventEndDate,
                         finalEventTime,
-                        finalEventType,
-                        packageNameForSave,
-                        packageJsonForSave,
-                        finalCustomOrder,
-                        theme || null,
                         venue || null,
+                        finalCustomOrder,
                         notes || "",
                         "Pending Review", // Public clients cannot create confirmed bookings.
+                        isCustom ? null : packagePrice,
                         null,
-                        packagePrice,
                         requiredDownPayment,
-                        amountPaid,
-                        balance,
-                        paymentStatus,
                     ]
                 );
-
                 const bookingId = result.insertId;
+                if (!finalBookingReference) {
+                    await connection.execute(
+                        "UPDATE bookings SET booking_reference=? WHERE id=?",
+                        [buildBookingReference(null, bookingId), bookingId]
+                    );
+                }
 
                 const verifiedCustomItems = isCustom ? await validatePublicBookingSalesItems(
                     connection,getBookingItemsInput(body),targetStoreId,targetBranchId) : [];
@@ -2473,8 +3128,7 @@ exports.handler = async (event) => {
                 if(rentalSelections.length){
                     if(!finalBookingReference || String(finalBookingReference).length>100)
                         throw rentalError("Rental bookings need a booking reference of at most 100 characters.");
-                    const [duplicate]=await connection.execute(`SELECT id FROM bookings
-                                                                WHERE store_id=? AND booking_reference=? AND id<>? LIMIT 1`,
+                    const [duplicate]=await connection.execute(`SELECT id FROM ${V2_BOOKINGS} bookings WHERE store_id=? AND booking_reference=? AND id<>? LIMIT 1`,
                         [targetStoreId,finalBookingReference,bookingId]);
                     if(duplicate.length)throw rentalError("Booking reference is already used. Try again.");
                     rentalQuote=await saveRentalRequestLines(connection,{
@@ -2498,10 +3152,8 @@ exports.handler = async (event) => {
                 const delivery=wantsDelivery&&!(packageSnapshot&&policy.deliveryIncludedPackage)?policy.deliveryFee:0;
                 const setup=wantsSetup&&!(packageSnapshot&&policy.setupIncludedPackage)?policy.setupFee:0;
                 const quoteTotal=Math.round((packagePrice+rentalQuote.amount+delivery+setup)*100)/100;
-                await connection.execute(`INSERT INTO booking_financial_details
-                                          (booking_id,store_id,branch_id,package_base,rental_subtotal,delivery_fee,setup_fee,refundable_deposit_required)
-                                          VALUES (?,?,?,?,?,?,?,?)`,[bookingId,targetStoreId,targetBranchId,packagePrice,rentalQuote.amount,
-                    delivery,setup,0]);
+                // The package base, rental subtotal and deposit terms are stored on the
+                // booking and its lines; delivery/setup fees are not part of stocknbook_v2.
                 // For catalog-only custom requests, save the quote directly from verified
                 // Products/Rental line prices. Free-form bespoke work must be reviewed by Manager.
                 const customSalesTotal=bookingItemsToSave.filter(i=>i.sourceType==='custom')
@@ -2509,7 +3161,7 @@ exports.handler = async (event) => {
                 const authoritativeTotal=Math.round((quoteTotal+customSalesTotal)*100)/100;
                 const [savedRentalLines]=await connection.execute(
                     `SELECT equipment_name,quantity,billable_days,agreed_line_total
-                     FROM booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                     FROM ${V2_BOOKING_RENTAL_ITEMS} booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
                     [bookingId,targetStoreId,targetBranchId]);
                 const savedSalesLines=bookingItemsToSave.map(item=>({
                     source_type:item.sourceType,product_name:item.productName,
@@ -2518,8 +3170,8 @@ exports.handler = async (event) => {
                 const verifiedCatalogOnly = !isCustom || catalogOnlyBookingText(
                     finalCustomOrder,savedSalesLines,savedRentalLines);
                 if(verifiedCatalogOnly && authoritativeTotal>0) {
-                    await connection.execute(`UPDATE bookings SET agreed_price=?,balance=? WHERE id=?`,
-                        [authoritativeTotal,authoritativeTotal,bookingId]);
+                    await connection.execute(`UPDATE bookings SET agreed_price=? WHERE id=?`,
+                        [authoritativeTotal,bookingId]);
                 }
                 await connection.commit();
                 return response(201, {
@@ -2556,8 +3208,7 @@ exports.handler = async (event) => {
                 `
                     SELECT
                         ${bookingSelectFields()}
-                    FROM bookings
-                             LEFT JOIN branches
+                    FROM ${V2_BOOKINGS_FULL} bookings LEFT JOIN branches
                                        ON bookings.branch_id = branches.id
                                            AND bookings.store_id = branches.store_id
                     WHERE bookings.booking_reference = ?
@@ -2586,8 +3237,7 @@ exports.handler = async (event) => {
                 `
                     SELECT
                         ${bookingSelectFields()}
-                    FROM bookings
-                             LEFT JOIN branches
+                    FROM ${V2_BOOKINGS_FULL} bookings LEFT JOIN branches
                                        ON bookings.branch_id = branches.id
                                            AND bookings.store_id = branches.store_id
                     WHERE bookings.phone = ?
@@ -2616,8 +3266,7 @@ exports.handler = async (event) => {
                         name,
                         event_date AS date,
                     status
-                    FROM bookings
-                    WHERE store_id = ?
+                    FROM ${V2_BOOKINGS} bookings WHERE store_id = ?
                     ORDER BY created_at DESC
                 `,
                 [targetStoreId]
@@ -2720,9 +3369,9 @@ exports.handler = async (event) => {
                                                                 bi.id AS itemId,bi.product_name AS productName,bi.variant_name AS variantName,
                                                                 bi.booked_quantity AS quantity,
                                                                 f.prepared_at AS preparedAt,f.issued_at AS issuedAt
-                                                         FROM bookings b JOIN booking_items bi ON bi.booking_id=b.id
+                                                         FROM ${V2_BOOKINGS} b JOIN ${V2_BOOKING_LINES} bi ON bi.booking_id=b.id
                                                              AND bi.store_id=b.store_id AND bi.branch_id=b.branch_id
-                                                                         LEFT JOIN booking_sales_fulfillment f ON f.booking_item_id=bi.id
+                                                                         LEFT JOIN ${V2_BOOKING_LINES} f ON f.booking_item_id=bi.id
                                                              AND f.store_id=b.store_id AND f.branch_id=b.branch_id
                                                          WHERE b.store_id=? AND b.branch_id=?
                                                            AND LOWER(b.status) IN ('confirmed','preparing','released','return inspection','pending settlement')
@@ -2754,18 +3403,19 @@ exports.handler = async (event) => {
             if(!Number.isSafeInteger(bookingId)||bookingId<1)return response(400,{error:'Valid booking ID required.'});
             await connection.beginTransaction();
             try {
+                await connection.execute(`SELECT id FROM bookings WHERE id=? AND store_id=? FOR UPDATE`, [bookingId,store_id]);
                 const [bookings]=await connection.execute(`SELECT id,booking_reference,status,
                                                                   DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDay,
-                                                                  agreed_price,amount_paid,balance FROM bookings
-                                                           WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,store_id,branchId]);
+                                                                  agreed_price,amount_paid,balance FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=? AND branch_id=?`,[bookingId,store_id,branchId]);
                 if(!bookings.length)throw rentalError('Booking is not in your assigned branch.');
                 const booking=bookings[0];
                 if(!['confirmed','preparing','released','return inspection','pending settlement'].includes(String(booking.status||'').toLowerCase()))
                     throw rentalError('Only confirmed or preparing bookings can be fulfilled.');
+                await connection.execute(`SELECT id FROM booking_items WHERE booking_id=? AND item_type='consumable' FOR UPDATE`, [bookingId]);
                 const [lines]=await connection.execute(`SELECT id,booked_quantity,reserved_quantity,
                                                                used_quantity,inventory_status,unit_price,product_name
-                                                        FROM booking_items WHERE booking_id=? AND store_id=? AND branch_id=?
-                                                                             AND product_id IS NOT NULL AND booked_quantity>0 ORDER BY id FOR UPDATE`,
+                                                        FROM ${V2_BOOKING_LINES} booking_items WHERE booking_id=? AND store_id=? AND branch_id=?
+                                                                             AND product_id IS NOT NULL AND booked_quantity>0 ORDER BY id`,
                     [bookingId,store_id,branchId]);
                 if(!lines.length)throw rentalError('This booking has no Sales inventory inclusions.');
                 if(lines.some(line=>String(line.inventory_status)!=='reserved'||
@@ -2773,8 +3423,7 @@ exports.handler = async (event) => {
                     Number(line.used_quantity||0)>0))
                     throw rentalError('Sales inclusions have already been used, cancelled, or need reconciliation.');
                 const [records]=await connection.execute(`SELECT booking_item_id AS itemId,prepared_at AS preparedAt,
-                                                                 issued_at AS issuedAt FROM booking_sales_fulfillment
-                                                          WHERE store_id=? AND branch_id=? AND booking_id=? FOR UPDATE`,[store_id,branchId,bookingId]);
+                                                                 issued_at AS issuedAt FROM ${V2_BOOKING_LINES} booking_sales_fulfillment WHERE store_id=? AND branch_id=? AND booking_id=?`,[store_id,branchId,bookingId]);
                 const recordById=new Map(records.map(r=>[Number(r.itemId),r]));
                 const employee=await getActingEmployee(connection,decodedToken,tokenRole,store_id);
                 if(action==='prepare_staff_sales_booking_item'){
@@ -2784,9 +3433,9 @@ exports.handler = async (event) => {
                         throw rentalError('Select a valid product inclusion in this booking.');
                     if(recordById.get(itemId)?.preparedAt||recordById.get(itemId)?.issuedAt)
                         throw rentalError('This product was already prepared or handed over.');
-                    await connection.execute(`INSERT INTO booking_sales_fulfillment
-                                              (booking_item_id,booking_id,store_id,branch_id,prepared_at,prepared_by)
-                                              VALUES (?,?,?,?,NOW(),?)`,[itemId,bookingId,store_id,branchId,employee.name]);
+                    await connection.execute(`UPDATE booking_items SET prepared_at=NOW(),prepared_by=?
+                                              WHERE id=? AND booking_id=? AND store_id=?`,
+                        [await v2UserIdOf(connection,store_id,employee.id),itemId,bookingId,store_id]);
                     await connection.execute(`UPDATE bookings SET status='Preparing'
                                               WHERE id=? AND store_id=? AND branch_id=? AND status='Confirmed'`,
                         [bookingId,store_id,branchId]);
@@ -2797,13 +3446,11 @@ exports.handler = async (event) => {
                     const total=Number(booking.agreed_price),paid=Number(booking.amount_paid),balance=Number(booking.balance);
                     if(!Number.isFinite(total)||total<=0||!Number.isFinite(paid)||!Number.isFinite(balance)||
                         paid+0.005<total||balance>0.005)throw rentalError('Full verified booking payment is required before Sales product handover.');
-                    const [rentalCount]=await connection.execute(`SELECT COUNT(*) AS count FROM booking_rental_items
-                                                                  WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                    const [rentalCount]=await connection.execute(`SELECT COUNT(*) AS count FROM ${V2_BOOKING_RENTAL_ITEMS} booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
                         [bookingId,store_id,branchId]);
                     if(Number(rentalCount[0]?.count||0)>0){
                         const [depositTerms]=await connection.execute(`SELECT refundable_deposit_required,deposit_collected
-                                                                       FROM booking_financial_details
-                                                                       WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                                       FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
                             [bookingId,store_id,branchId]);
                         if(!depositTerms.length)throw rentalError('Booking security-deposit terms are unavailable. Ask the Manager to review Billing.');
                         const required=Number(depositTerms[0].refundable_deposit_required);
@@ -2820,26 +3467,23 @@ exports.handler = async (event) => {
                         throw rentalError('Every Sales product inclusion must be prepared and not yet handed over.');
                     for(const line of lines){
                         const quantity=Number(line.booked_quantity);
-                        await connection.execute(`UPDATE booking_sales_fulfillment SET issued_at=NOW(),issued_by=?
-                                                  WHERE booking_item_id=? AND booking_id=? AND store_id=? AND branch_id=? AND issued_at IS NULL`,
-                            [employee.name,line.id,bookingId,store_id,branchId]);
+                        await connection.execute(`UPDATE booking_items SET released_at=NOW(),released_by=?
+                                                  WHERE id=? AND booking_id=? AND store_id=? AND released_at IS NULL`,
+                            [await v2UserIdOf(connection,store_id,employee.id),line.id,bookingId,store_id]);
                         // Inventory was deducted at confirmation; only mark physical usage.
-                        await connection.execute(`UPDATE booking_items SET used_quantity=?,used_subtotal=?,updated_at=CURRENT_TIMESTAMP
-                                                  WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
-                            [quantity,Math.round(quantity*Number(line.unit_price||0)*100)/100,line.id,bookingId,store_id,branchId]);
+                        await connection.execute(`UPDATE booking_items SET used_quantity=?
+                                                  WHERE id=? AND booking_id=? AND store_id=?`,
+                            [quantity,line.id,bookingId,store_id]);
                     }
                     const [rentals]=await connection.execute(`SELECT COUNT(*) AS remaining
-                                                              FROM rental_booking_allocations
-                                                              WHERE store_id=? AND branch_id=? AND booking_reference=?
+                                                              FROM ${V2_RENTAL_ALLOCATIONS} rental_booking_allocations WHERE store_id=? AND branch_id=? AND booking_reference=?
                                                                 AND status='reserved'`,
                         [store_id,branchId,booking.booking_reference]);
                     const [rentalExpected]=await connection.execute(`SELECT COUNT(*) AS expected
-                                                                     FROM booking_rental_items
-                                                                     WHERE store_id=? AND branch_id=? AND booking_id=?`,
+                                                                     FROM ${V2_BOOKING_RENTAL_ITEMS} booking_rental_items WHERE store_id=? AND branch_id=? AND booking_id=?`,
                         [store_id,branchId,bookingId]);
                     const [rentalAllocated]=await connection.execute(`SELECT COUNT(*) AS actual
-                                                                      FROM rental_booking_allocations
-                                                                      WHERE store_id=? AND branch_id=? AND booking_reference=?`,
+                                                                      FROM ${V2_RENTAL_ALLOCATIONS} rental_booking_allocations WHERE store_id=? AND branch_id=? AND booking_reference=?`,
                         [store_id,branchId,booking.booking_reference]);
                     if(Number(rentals[0]?.remaining||0)===0 &&
                         Number(rentalExpected[0]?.expected||0)===Number(rentalAllocated[0]?.actual||0)) {
@@ -2881,20 +3525,11 @@ exports.handler = async (event) => {
             const branchId=Number(body.branchId);
             const [br]=await connection.execute('SELECT id FROM branches WHERE id=? AND store_id=?',[branchId,store_id]);
             if(!br.length)return response(404,{error:'Store branch not found.'});
-            const delivery=financeCurrency(body.deliveryFee,'Delivery fee');
-            const setup=financeCurrency(body.setupFee,'Setup fee');
-            // Branch service fees remain Owner-configurable. Rental security
-            // deposits are optional and set by the Manager per booking.
-            const depositMode='optional';
-            const deposit=0;
-            await connection.execute(`INSERT INTO booking_fee_policies
-                                      (store_id,branch_id,delivery_fee,setup_fee,refundable_deposit,rental_deposit_policy,delivery_included_package,setup_included_package)
-                                      VALUES(?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE delivery_fee=VALUES(delivery_fee),setup_fee=VALUES(setup_fee),
-                                          refundable_deposit=VALUES(refundable_deposit),rental_deposit_policy=VALUES(rental_deposit_policy),
-                                          delivery_included_package=VALUES(delivery_included_package),
-                                          setup_included_package=VALUES(setup_included_package)`,
-                [store_id,branchId,delivery,setup,deposit,depositMode,body.deliveryIncludedPackage?1:0,body.setupIncludedPackage?1:0]);
-            return response(200,{success:true,policy:await getFeePolicy(connection,store_id,branchId)});
+            financeCurrency(body.deliveryFee,'Delivery fee');
+            financeCurrency(body.setupFee,'Setup fee');
+            // Delivery and setup fee policies are not part of stocknbook_v2.
+            return response(410,{error:'Delivery and setup fee policies are no longer available.',
+                policy:await getFeePolicy(connection,store_id,branchId)});
         }
         // Manager customer follow-up and future-booking review. These actions NEVER
         // transfer money, issue refunds, notify the customer or adjudicate liability.
@@ -2905,8 +3540,7 @@ exports.handler = async (event) => {
             if(!Number.isSafeInteger(bookingId)||bookingId<=0)
                 return response(400,{error:'Valid booking ID is required.'});
             const [matched]=await connection.execute(`SELECT id,store_id,branch_id,
-                                                             booking_reference AS reference,phone,email,facebook_name AS facebookName,name,status FROM bookings
-                                                      WHERE id=? AND store_id=? LIMIT 1`,[bookingId,store_id]);
+                                                             booking_reference AS reference,phone,email,facebook_name AS facebookName,name,status FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=? LIMIT 1`,[bookingId,store_id]);
             if(!matched.length)return response(404,{error:'Booking not found.'});
             const book=matched[0],branchId=Number(book.branch_id);
             if(tokenRole!=='manager'||Number(tokenBranchId)!==branchId ||
@@ -2920,7 +3554,7 @@ exports.handler = async (event) => {
                 const [events]=await connection.execute(`SELECT id,event_type AS eventType,
                                                                 notes,channel,DATE_FORMAT(follow_up_on,'%Y-%m-%d') AS followUpOn,
                                                                 actor_name AS actorName,DATE_FORMAT(created_at,'%Y-%m-%d %H:%i') AS createdAt
-                                                         FROM booking_customer_case_events WHERE store_id=? AND branch_id=? AND booking_id=?
+                                                         FROM ${V2_CASE_EVENTS} booking_customer_case_events WHERE store_id=? AND branch_id=? AND booking_id=?
                                                          ORDER BY id DESC LIMIT 60`,[store_id,branchId,bookingId]);
                 // Other bookings are queried only if the Manager has already verified
                 // and deliberately flagged the customer's identity. A typed name alone
@@ -2930,7 +3564,7 @@ exports.handler = async (event) => {
                     // The Manager sees only previous debts from the assigned branch.
                     const [scoped]=await connection.execute(`SELECT b.booking_reference AS reference,
                                                                     b.phone,COALESCE(SUM(GREATEST(c.approved_amount-c.amount_paid-c.deposit_applied,0)),0) AS due
-                                                             FROM booking_customer_claims c JOIN bookings b ON b.id=c.booking_id AND b.store_id=c.store_id
+                                                             FROM ${V2_BOOKING_CLAIMS} c JOIN ${V2_BOOKINGS} b ON b.id=c.booking_id AND b.store_id=c.store_id
                                                              WHERE c.store_id=? AND b.branch_id=? AND b.id<>? AND c.status='approved'
                                                              GROUP BY b.id,b.booking_reference,b.phone HAVING due>0.005`,[store_id,branchId,bookingId]);
                     earlierOutstanding=scoped.filter(row=>customerPhoneHash(row.phone)===phoneHash)
@@ -2938,7 +3572,7 @@ exports.handler = async (event) => {
                 }
                 const [activeClaims]=await connection.execute(`SELECT
                                                                    COALESCE(SUM(GREATEST(approved_amount-amount_paid-deposit_applied,0)),0) AS due
-                                                               FROM booking_customer_claims WHERE booking_id=? AND store_id=? AND branch_id=? AND status='approved'`,
+                                                               FROM ${V2_BOOKING_CLAIMS} booking_customer_claims WHERE booking_id=? AND store_id=? AND branch_id=? AND status='approved'`,
                     [bookingId,store_id,branchId]);
                 const latestScheduledFollowUp=events.find(entry=>entry.followUpOn)?.followUpOn||null;
                 const claimDue=Number(activeClaims[0]?.due||0);
@@ -2958,9 +3592,10 @@ exports.handler = async (event) => {
                 Number.isNaN(Date.parse(`${followUp}T12:00:00Z`))))
                 return response(400,{error:'Use a valid follow-up date.'});
             const channel=String(body.channel||'none').trim().slice(0,30);
-            const insertEvent=async(type,notes=reason)=>connection.execute(`INSERT INTO booking_customer_case_events
-                                                                            (booking_id,store_id,branch_id,event_type,customer_phone_hash,channel,notes,follow_up_on,actor_name)
-                                                                            VALUES(?,?,?,?,?,?,?,?,?)`,[bookingId,store_id,branchId,type,phoneHash,channel,notes,followUp||null,actor]);
+            // Customer case notes are kept in employee_actions (module 'Customer Review').
+            const insertEvent=async(type,notes=reason)=>v2LogBookingEvent(connection,{storeId:store_id,branchId,bookingId,
+                reference:book.reference,userId:person.id,userName:actor,userRole:'Manager',module:'Customer Review',
+                action:`Customer case: ${type}`,details:{phoneHash,channel,notes,followUpOn:followUp||null}});
             if(action==='record_customer_case_event'){
                 if(!['contact_attempt','notice_recorded','customer_response','dispute_recorded',
                     'payment_promise','collection_escalation'].includes(eventName))
@@ -2975,12 +3610,13 @@ exports.handler = async (event) => {
                     return response(409,{error:'Verify that the customer controls the contact information before placing a review flag.'});
                 await connection.beginTransaction();
                 try{
-                    await connection.execute(`INSERT INTO booking_customer_review_profiles
-                                              (store_id,phone_hash,review_required,identity_verified,reason,updated_by)
-                                              VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE
-                                                  review_required=VALUES(review_required),identity_verified=VALUES(identity_verified),
-                                                  reason=VALUES(reason),updated_by=VALUES(updated_by),updated_at=CURRENT_TIMESTAMP`,
-                        [store_id,phoneHash,hold?1:0,hold?1:0,reason,actor]);
+                    // The review flag is kept on the store's customer record.
+                    const reviewCustomerId=await v2EnsureCustomer(connection,{storeId:store_id,name:book.name,
+                        facebookName:book.facebookName||null,phone:book.phone,email:book.email||null});
+                    await connection.execute(`UPDATE customers
+                                              SET review_required=?,identity_verified=?,review_reason=?,updated_at=CURRENT_TIMESTAMP
+                                              WHERE id=? AND store_id=?`,
+                        [hold?1:0,hold?1:0,reason,reviewCustomerId,store_id]);
                     await insertEvent(hold?'review_placed':'review_cleared');
                     await connection.commit();
                 }catch(e){await connection.rollback();throw e;}
@@ -2992,11 +3628,10 @@ exports.handler = async (event) => {
                     return response(409,{error:'This booking has no verified customer-review restriction.'});
                 if(!['pending review','awaiting down payment'].includes(String(book.status||'').trim().toLowerCase()))
                     return response(409,{error:'An exception is only valid before booking confirmation.'});
-                const [previous]=await connection.execute(`SELECT id FROM booking_customer_case_events
-                                                           WHERE store_id=? AND branch_id=? AND booking_id=? AND event_type='confirmation_exception'
-                                                             AND customer_phone_hash=? AND created_at >= (SELECT updated_at FROM booking_customer_review_profiles
-                                                                                                          WHERE store_id=? AND phone_hash=?) LIMIT 1`,
-                    [store_id,branchId,bookingId,phoneHash,store_id,phoneHash]);
+                const reviewedCustomer=await v2CustomerForPhone(connection,store_id,book.phone);
+                const [previous]=await connection.execute(`SELECT id FROM ${V2_CASE_EVENTS} booking_customer_case_events WHERE store_id=? AND branch_id=? AND booking_id=? AND event_type='confirmation_exception'
+                                                             AND customer_phone_hash=? AND created_at >= ? LIMIT 1`,
+                    [store_id,branchId,bookingId,phoneHash,reviewedCustomer?.updated_at||'1970-01-01']);
                 if(previous.length)return response(409,{error:'This booking already has a Manager exception.'});
                 await insertEvent('confirmation_exception');
                 return response(200,{success:true});
@@ -3006,13 +3641,15 @@ exports.handler = async (event) => {
                 if(!Number.isSafeInteger(claimId)||claimId<=0)return response(400,{error:'Select a valid claim.'});
                 await connection.beginTransaction();
                 try{
+                    await connection.execute(`SELECT id FROM booking_items WHERE id=? AND booking_id=? FOR UPDATE`, [claimId,bookingId]);
                     const [claims]=await connection.execute(`SELECT id,status,approved_amount,amount_paid,deposit_applied
-                                                             FROM booking_customer_claims WHERE id=? AND booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                             FROM ${V2_BOOKING_CLAIMS} booking_customer_claims WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
                         [claimId,bookingId,store_id,branchId]);
                     if(!claims.length||claims[0].status!=='approved')throw rentalError('Only an existing approved claim can be waived.');
                     if(Number(claims[0].amount_paid)>0 || Number(claims[0].deposit_applied)>0)
                         throw rentalError('Recorded claim payments or applied deposits cannot be erased. Reconcile refunds through an audited financial correction first.');
-                    await connection.execute(`UPDATE booking_customer_claims SET status='waived',approved_amount=0,reason=CONCAT(LEFT(reason,260),' | Waived: ',?) WHERE id=?`,
+                    await connection.execute(`UPDATE booking_items SET item_status='claim_waived',line_total=0,
+                                                                         notes=CONCAT(LEFT(COALESCE(notes,''),260),' | Waived: ',?) WHERE id=? AND item_status LIKE 'claim%'`,
                         [reason.slice(0,200),claimId]);
                     await insertEvent('claim_waived_after_dispute',
                         `Previously approved ₱${Number(claims[0].approved_amount).toFixed(2)} waived after documented Manager investigation. ${reason}`.slice(0,500));
@@ -3032,7 +3669,7 @@ exports.handler = async (event) => {
             action==='settle_booking_security_deposit') {
             const bookingId=Number(body.bookingId||body.booking_id);
             if(!Number.isSafeInteger(bookingId)||bookingId<=0)return response(400,{error:'Valid booking ID required.'});
-            const [bs]=await connection.execute('SELECT id,store_id,branch_id,booking_reference FROM bookings WHERE id=? AND store_id=?',[bookingId,store_id]);
+            const [bs]=await connection.execute(`SELECT id,store_id,branch_id,booking_reference FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=?`,[bookingId,store_id]);
             if(!bs.length)return response(404,{error:'Booking not found.'});
             const book=bs[0];
             if(tokenRole!=='owner'&&Number(book.branch_id)!==Number(tokenBranchId))return response(403,{error:'Different branch.'});
@@ -3045,14 +3682,14 @@ exports.handler = async (event) => {
                 // An issue with an approved/waived decision is no longer selectable.
                 const [missing]=await connection.execute(`SELECT m.id,m.equipment_id AS equipmentId,
                                                                  COALESCE(e.name,CONCAT('Equipment #',m.equipment_id)) AS equipmentName,
-                                                                 GREATEST(0,m.quantity-COALESCE((SELECT SUM(mv.quantity) FROM rental_stock_movements mv
+                                                                 GREATEST(0,m.quantity-COALESCE((SELECT SUM(mv.quantity) FROM ${V2_RENTAL_MOVEMENTS} mv
                                                                                                  WHERE mv.store_id=m.store_id AND mv.branch_id=m.branch_id
                                                                                                    AND mv.equipment_id=m.equipment_id AND mv.type IN ('missing_resolved','missing_replaced')
                                                                                                    AND mv.reference_number=CONCAT('MISS-',LPAD(m.id,6,'0'))),0)) AS quantity,
                                                                  m.reason,m.status,c.status AS decisionStatus
-                                                          FROM rental_missing_unit_reports m LEFT JOIN booking_customer_claims c
+                                                          FROM ${V2_MISSING_REPORTS} m LEFT JOIN ${V2_BOOKING_CLAIMS} c
                                                                                                        ON c.source_type='missing' AND c.source_record_id=m.id AND c.booking_id=?
-                                                                                             LEFT JOIN rental_equipment e
+                                                                                             LEFT JOIN ${V2_RENTAL_EQUIPMENT} e
                                                                                                        ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
                                                           WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?`,
                     [bookingId,store_id,book.branch_id,book.booking_reference]);
@@ -3060,15 +3697,15 @@ exports.handler = async (event) => {
                                                                 COALESCE(e.name,CONCAT('Equipment #',m.equipment_id)) AS equipmentName,
                                                                 m.quantity_started AS quantity,m.start_reason AS reason,
                                                                 m.quantity_remaining AS outstanding,c.status AS decisionStatus
-                                                         FROM rental_maintenance_records m LEFT JOIN booking_customer_claims c
+                                                         FROM ${V2_MAINTENANCE_RECORDS} m LEFT JOIN ${V2_BOOKING_CLAIMS} c
                                                                                                      ON c.source_type='damage' AND c.source_record_id=m.id AND c.booking_id=?
-                                                                                           LEFT JOIN rental_equipment e
+                                                                                           LEFT JOIN ${V2_RENTAL_EQUIPMENT} e
                                                                                                      ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
                                                          WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?
                                                            AND m.start_reason LIKE 'Rental damage %'`,
                     [bookingId,store_id,book.branch_id,book.booking_reference]);
                 const [recoveredInspections]=await connection.execute(`SELECT COUNT(*) AS pending
-                                                                       FROM rental_maintenance_records WHERE store_id=? AND branch_id=? AND booking_reference=?
+                                                                       FROM ${V2_MAINTENANCE_RECORDS} rental_maintenance_records WHERE store_id=? AND branch_id=? AND booking_reference=?
                                                                                                          AND start_reason LIKE 'Recovered missing equipment (report #%'
                                                                                                          AND quantity_remaining>0`,[store_id,book.branch_id,book.booking_reference]);
                 // Return inspection records entered by Staff. Keep this read-only;
@@ -3080,9 +3717,9 @@ exports.handler = async (event) => {
                                                                       a.status AS allocationStatus,
                                                                       COALESCE(e.name,CONCAT('Equipment #',a.equipment_id)) AS equipmentName,
                                                                       w.*
-                                                               FROM rental_booking_allocations a
-                                                                        LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id
-                                                                        LEFT JOIN rental_equipment e ON e.id=a.equipment_id
+                                                               FROM ${V2_RENTAL_ALLOCATIONS} a
+                                                                        LEFT JOIN ${V2_RENTAL_ALLOCATIONS} w ON w.allocation_id=a.id
+                                                                        LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=a.equipment_id
                                                                             AND e.store_id=a.store_id AND e.branch_id=a.branch_id
                                                                WHERE a.store_id=? AND a.branch_id=?
                                                                  AND a.booking_reference COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
@@ -3135,15 +3772,13 @@ exports.handler = async (event) => {
                 await connection.beginTransaction();
                 try {
                     const keys=[`${requestKey}-ap`,`${requestKey}-cash`,`${requestKey}-rf`];
-                    const [prior]=await connection.execute(`SELECT id FROM booking_financial_events
-                                                            WHERE store_id=? AND (request_key IN (?,?,?) OR request_key LIKE ?) LIMIT 1`,
-                        [store_id,...keys,`${requestKey}-%`]);
-                    if(prior.length){
+                    if(await v2FinancialEventExists(connection,store_id,keys,`${requestKey}-%`)){
                         await connection.rollback();
                         return response(200,{success:true,alreadyRecorded:true});
                     }
+                    await connection.execute(`SELECT id FROM bookings WHERE id=? AND store_id=? FOR UPDATE`, [bookingId,store_id]);
                     const [locked]=await connection.execute(`SELECT status,agreed_price,amount_paid,balance
-                                                             FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                             FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=? AND branch_id=?`,
                         [bookingId,store_id,branchId]);
                     if(String(locked[0]?.status||'').toLowerCase()!=='pending settlement')
                         throw rentalError('Security deposit settlement is available only after Staff finishes return inspection (Pending Settlement).');
@@ -3153,10 +3788,10 @@ exports.handler = async (event) => {
                         throw rentalError('Booking price must be fully paid before return settlement.');
                     await requireRentalReturnBeforeCompletion(connection,{bookingId,storeId:store_id,branchId});
                     const [unchecked]=await connection.execute(`SELECT COUNT(*) AS pending
-                                                                FROM rental_booking_allocations a
-                                                                         JOIN booking_rental_items ri ON ri.booking_reference=a.booking_reference
+                                                                FROM ${V2_RENTAL_ALLOCATIONS} a
+                                                                         JOIN ${V2_BOOKING_RENTAL_ITEMS} ri ON ri.booking_reference=a.booking_reference
                                                                     AND ri.equipment_id=a.equipment_id AND ri.store_id=a.store_id AND ri.branch_id=a.branch_id
-                                                                         LEFT JOIN rental_staff_allocation_workflow w ON w.allocation_id=a.id
+                                                                         LEFT JOIN ${V2_RENTAL_ALLOCATIONS} w ON w.allocation_id=a.id
                                                                 WHERE ri.booking_id=? AND a.store_id=? AND a.branch_id=?
                                                                   AND COALESCE(w.returned_received_units,a.quantity)>0
                                                                   AND (w.inspected_at IS NULL OR w.inspection_status IN ('pending','cleaning'))`,
@@ -3164,8 +3799,7 @@ exports.handler = async (event) => {
                     if(Number(unchecked[0]?.pending||0)>0)
                         throw rentalError('Staff must finish return inspection and cleaning before financial settlement.');
                     const [details]=await connection.execute(`SELECT refundable_deposit_required,deposit_collected,deposit_applied,deposit_refunded
-                                                              FROM booking_financial_details
-                                                              WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                              FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
                         [bookingId,store_id,branchId]);
                     if(!details.length)throw rentalError('Booking financial details are missing.');
                     const d=details[0];
@@ -3179,22 +3813,22 @@ exports.handler = async (event) => {
                     const employee=await getActingEmployee(connection,decodedToken,tokenRole,store_id);
                     const saveEvent=async(type,amount,claim,key)=>{
                         if(amount<=0)return;
-                        await connection.execute(`INSERT INTO booking_financial_events
-                                                  (booking_id,store_id,branch_id,claim_id,event_type,amount,request_key,actor_role,actor_name)
-                                                  VALUES(?,?,?,?,?,?,?,?,?)`,
-                            [bookingId,store_id,branchId,claim,type,amount,key,'manager',String(employee.name||'Manager').slice(0,150)]);
+                        await v2SaveBookingFinancialEvent(connection,{bookingId,storeId:store_id,branchId,claimId:claim,
+                            type,amount,requestKey:key,userId:employee.id,userName:String(employee.name||'Manager').slice(0,150),
+                            userRole:'Manager'});
                     };
                     if(mode==='damage'){
-                        const table=sourceType==='missing'?'rental_missing_unit_reports':'rental_maintenance_records';
-                        const [sources]=await connection.execute(`SELECT id,equipment_id,
-                                                                         ${sourceType==='missing'?'quantity':'quantity_started'} AS quantity,
-                                                                         ${sourceType==='missing'?'status':'start_reason'} AS issueState
-                                                                  FROM ${table} WHERE id=? AND store_id=? AND branch_id=? AND booking_reference=? FOR UPDATE`,
+                        const table=sourceType==='missing'?V2_MISSING_REPORTS:V2_MAINTENANCE_RECORDS;
+                        await connection.execute(`SELECT id FROM stock_issues WHERE id=? AND store_id=? FOR UPDATE`,[sourceId,store_id]);
+                        const [sources]=await connection.execute(`SELECT src.id,src.equipment_id,
+                                                                         ${sourceType==='missing'?'src.quantity':'src.quantity_started'} AS quantity,
+                                                                         ${sourceType==='missing'?'src.status':'src.start_reason'} AS issueState
+                                                                  FROM ${table} src WHERE src.id=? AND src.store_id=? AND src.branch_id=? AND src.booking_reference=?`,
                             [sourceId,store_id,branchId,book.booking_reference]);
                         if(!sources.length)throw rentalError('The selected incident is not linked to this booking.');
                         if(sourceType==='missing'){
                             const [recoveries]=await connection.execute(`SELECT COALESCE(SUM(quantity),0) AS recovered
-                                                                         FROM rental_stock_movements WHERE store_id=? AND branch_id=? AND equipment_id=?
+                                                                         FROM ${V2_RENTAL_MOVEMENTS} rental_stock_movements WHERE store_id=? AND branch_id=? AND equipment_id=?
                                                                                                        AND type IN ('missing_resolved','missing_replaced') AND reference_number=?`,
                                 [store_id,branchId,sources[0].equipment_id,`MISS-${String(sourceId).padStart(6,'0')}`]);
                             const remaining=Number(sources[0].quantity)-Number(recoveries[0].recovered);
@@ -3210,44 +3844,39 @@ exports.handler = async (event) => {
                             if(reason.length<10)
                                 throw rentalError('Explain the verified missing-item decision (at least 10 characters).');
                             const qty=Number(sources[0].quantity);
+                            await connection.execute(`SELECT id FROM equipment WHERE id=? AND store_id=? FOR UPDATE`, [sources[0].equipment_id,store_id]);
                             const [equipment]=await connection.execute(`SELECT id,total_units,rented_out_units,maintenance_units,missing_units
-                                                                        FROM rental_equipment WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                                        FROM ${V2_RENTAL_EQUIPMENT} rental_equipment WHERE id=? AND store_id=? AND branch_id=?`,
                                 [sources[0].equipment_id,store_id,branchId]);
                             if(!equipment.length||!Number.isSafeInteger(qty)||qty<1||
                                 qty>Number(equipment[0].missing_units)||
                                 qty>Number(equipment[0].total_units)-Number(equipment[0].rented_out_units)-Number(equipment[0].maintenance_units))
                                 throw rentalError('Missing-unit stock quantities need reconciliation before confirming the loss.');
-                            await connection.execute(`UPDATE rental_equipment
-                                                      SET missing_units=missing_units-?,total_units=total_units-? WHERE id=?`,
-                                [qty,qty,equipment[0].id]);
-                            await connection.execute(`UPDATE rental_missing_unit_reports
-                                                      SET status='writeoff',resolved_by=?,resolved_at=NOW(),resolution_notes=? WHERE id=?`,
-                                [String(employee.name||'Manager').slice(0,150),reason,sourceId]);
-                            await connection.execute(`INSERT INTO rental_stock_movements
-                                                      (store_id,branch_id,equipment_id,type,quantity,reference_number,description,actor_name)
-                                                      VALUES(?,?,?,'adjustment',?,?,?,?)`,
-                                [store_id,branchId,equipment[0].id,qty,`MISS-${String(sourceId).padStart(6,'0')}`,
-                                    `Booking-confirmed permanent loss: ${reason}`.slice(0,500),String(employee.name||'Manager').slice(0,150)]);
+                            await v2AdjustEquipmentStock(connection,
+                                await v2EquipmentInventoryId(connection,store_id,branchId,equipment[0].id),{missing:-qty,total:-qty});
+                            await connection.execute(`UPDATE stock_issues
+                                                      SET status='writeoff',resolved_by=?,resolved_at=NOW(),resolution_notes=?,
+                                                          quantity_resolved=quantity WHERE id=? AND issue_type='missing'`,
+                                [await v2UserIdOf(connection,store_id,employee.id),reason,sourceId]);
+                            await v2RecordRentalMovement(connection,{storeId:store_id,branchId,actorId:employee.id},
+                                equipment[0].id,'adjustment',qty,`MISS-${String(sourceId).padStart(6,'0')}`,
+                                `Booking-confirmed permanent loss: ${reason}`.slice(0,500),-1);
                         } else if(sourceType==='missing'&&sources[0].issueState!=='writeoff'){
                             throw rentalError('This missing item was found or already resolved. Refresh the booking incidents.');
                         }
                         if(sourceType==='damage'&&!String(sources[0].issueState||'').startsWith('Rental damage '))
                             throw rentalError('The damage charge must relate to a documented Staff return-inspection incident.');
-                        const [claims]=await connection.execute(`SELECT * FROM booking_customer_claims
-                                                                 WHERE booking_id=? AND store_id=? AND branch_id=?
-                                                                   AND source_type=? AND source_record_id=? FOR UPDATE`,
+                        const [claims]=await connection.execute(`SELECT * FROM ${V2_BOOKING_CLAIMS} booking_customer_claims WHERE booking_id=? AND store_id=? AND branch_id=?
+                                                                   AND source_type=? AND source_record_id=?`,
                             [bookingId,store_id,branchId,sourceType,sourceId]);
                         let claim=claims[0];
                         if(!claim){
                             // Zero is an explicit Manager waiver, never an implicit payment.
                             // All documented incidents still get an auditable decision.
                             if(reason.length<10)throw rentalError('Document why the customer is responsible (at least 10 characters).');
-                            const [created]=await connection.execute(`INSERT INTO booking_customer_claims
-                                                                      (booking_id,store_id,branch_id,source_type,source_record_id,equipment_id,quantity,reason,approved_amount,status,approved_by)
-                                                                      VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-                                [bookingId,store_id,branchId,sourceType,sourceId,sources[0].equipment_id,
-                                    sources[0].quantity,reason,newCharge,newCharge>0?'approved':'waived',String(employee.name||'Manager').slice(0,150)]);
-                            claimId=Number(created.insertId);
+                            claimId=await v2InsertBookingClaim(connection,{bookingId,storeId:store_id,sourceType,sourceId,
+                                equipmentId:sources[0].equipment_id,quantity:sources[0].quantity,reason,amount:newCharge,
+                                status:newCharge>0?'approved':'waived',userId:employee.id});
                             createdClaim=true;
                             claim={id:claimId,approved_amount:newCharge,amount_paid:0,deposit_applied:0,status:newCharge>0?'approved':'waived'};
                         }else {
@@ -3261,14 +3890,11 @@ exports.handler = async (event) => {
                             throw rentalError('Additional customer payment exceeds the unpaid damage/missing-item charge.');
                         await saveEvent('deposit_applied',applyCents/100,claimId,keys[0]);
                         await saveEvent('claim_paid',cashCents/100,claimId,keys[1]);
-                        if(applyCents>0)await connection.execute(`UPDATE booking_financial_details
-                                                                  SET deposit_applied=deposit_applied+? WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                        if(applyCents>0)await connection.execute(`UPDATE bookings
+                                                                  SET deposit_applied_amount=deposit_applied_amount+? WHERE id=? AND store_id=? AND branch_id=?`,
                             [applyCents/100,bookingId,store_id,branchId]);
-                        if(claim.status!=='waived')await connection.execute(`UPDATE booking_customer_claims
-                                                                             SET status=IF(approved_amount<=amount_paid+deposit_applied+?+?+0.005,'settled','approved'),
-                                                                                 deposit_applied=deposit_applied+?,amount_paid=amount_paid+?
-                                                                             WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
-                            [applyCents/100,cashCents/100,applyCents/100,cashCents/100,claimId,bookingId,store_id,branchId]);
+                        if(claim.status!=='waived')await v2UpdateBookingClaimSettlement(connection,
+                            {claimId,bookingId,storeId:store_id,depositApplied:applyCents/100});
                     }
                     if(mode==='combined'){
                         // The Manager enters ONE total charge for the entire Staff-recorded
@@ -3277,30 +3903,27 @@ exports.handler = async (event) => {
                         // Additional affected items covered by a positive combined charge
                         // receive a settled companion record (not a waiver). No duplicate
                         // customer charge is generated.
+                        await connection.execute(`SELECT id FROM stock_issues WHERE booking_id=? AND store_id=? FOR UPDATE`,[bookingId,store_id]);
                         const [missingSources]=await connection.execute(`SELECT m.id,m.equipment_id AS equipmentId,
-                                                                                GREATEST(0,m.quantity-COALESCE((SELECT SUM(mv.quantity) FROM rental_stock_movements mv
-                                                                                                                WHERE mv.store_id=m.store_id AND mv.branch_id=m.branch_id
-                                                                                                                  AND mv.equipment_id=m.equipment_id AND mv.type IN ('missing_resolved','missing_replaced')
-                                                                                                                  AND mv.reference_number=CONCAT('MISS-',LPAD(m.id,6,'0'))),0)) AS quantity,
+                                                                                GREATEST(0,m.quantity-m.recovered) AS quantity,
                                                                                 m.status AS issueState,COALESCE(e.name,CONCAT('Equipment #',m.equipment_id)) AS equipmentName
-                                                                         FROM rental_missing_unit_reports m
-                                                                                  LEFT JOIN rental_equipment e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
+                                                                         FROM ${V2_MISSING_REPORTS} m
+                                                                                  LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
                                                                          WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?
-                                                                         ORDER BY m.id FOR UPDATE`,[store_id,branchId,book.booking_reference]);
+                                                                         ORDER BY m.id`,[store_id,branchId,book.booking_reference]);
                         const [damageSources]=await connection.execute(`SELECT m.id,m.equipment_id AS equipmentId,
                                                                                m.quantity_started AS quantity,m.start_reason AS issueState,
                                                                                COALESCE(e.name,CONCAT('Equipment #',m.equipment_id)) AS equipmentName
-                                                                        FROM rental_maintenance_records m
-                                                                                 LEFT JOIN rental_equipment e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
+                                                                        FROM ${V2_MAINTENANCE_RECORDS} m
+                                                                                 LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
                                                                         WHERE m.store_id=? AND m.branch_id=? AND m.booking_reference=?
                                                                           AND m.start_reason LIKE 'Rental damage %'
-                                                                        ORDER BY m.id FOR UPDATE`,[store_id,branchId,book.booking_reference]);
+                                                                        ORDER BY m.id`,[store_id,branchId,book.booking_reference]);
                         const sources=[...damageSources.map(r=>({...r,sourceType:'damage'})),
                             ...missingSources.filter(r=>['pending','writeoff'].includes(String(r.issueState).toLowerCase())
                                 && Number(r.quantity)>0).map(r=>({...r,sourceType:'missing'}))];
                         if(!sources.length)throw rentalError('No Staff-recorded damaged or missing equipment is available for a combined charge.');
-                        const [existingClaims]=await connection.execute(`SELECT * FROM booking_customer_claims
-                                                                         WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,store_id,branchId]);
+                        const [existingClaims]=await connection.execute(`SELECT * FROM ${V2_BOOKING_CLAIMS} booking_customer_claims WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,store_id,branchId]);
                         const existingBySource=new Map(existingClaims.map(c=>[`${c.source_type}:${c.source_record_id}`,c]));
                         const pendingLosses=sources.filter(r=>r.sourceType==='missing'&&r.issueState==='pending');
                         // Staff-reported missing rental units are permanent losses in this workflow.
@@ -3327,28 +3950,26 @@ exports.handler = async (event) => {
                         pendingLossesResolved=pendingLosses.length;
                         for(const r of pendingLosses){
                             const qty=Number(r.quantity);
+                            await connection.execute(`SELECT id FROM equipment WHERE id=? AND store_id=? FOR UPDATE`, [r.equipmentId,store_id]);
                             const [eq]=await connection.execute(`SELECT id,total_units,rented_out_units,maintenance_units,missing_units
-                                                                 FROM rental_equipment WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                                 FROM ${V2_RENTAL_EQUIPMENT} rental_equipment WHERE id=? AND store_id=? AND branch_id=?`,
                                 [r.equipmentId,store_id,branchId]);
                             if(!eq.length||!Number.isSafeInteger(qty)||qty<1||qty>Number(eq[0].missing_units)||
                                 qty>Number(eq[0].total_units)-Number(eq[0].rented_out_units)-Number(eq[0].maintenance_units))
                                 throw rentalError('Missing equipment stock quantities need reconciliation before permanent loss is recorded.');
                             // The report is locked and only pending reports are processed,
                             // preventing the stock deduction from being applied twice.
-                            await connection.execute(`UPDATE rental_equipment SET missing_units=missing_units-?,
-                                                                                  total_units=total_units-? WHERE id=?`,[qty,qty,eq[0].id]);
-                            await connection.execute(`UPDATE rental_missing_unit_reports
-                                                      SET status='writeoff',resolved_by=?,resolved_at=NOW(),resolution_notes=?
-                                                      WHERE id=? AND status='pending'`,
-                                [String(employee.name||'Manager').slice(0,150),
+                            await v2AdjustEquipmentStock(connection,
+                                await v2EquipmentInventoryId(connection,store_id,branchId,eq[0].id),{missing:-qty,total:-qty});
+                            await connection.execute(`UPDATE stock_issues
+                                                      SET status='writeoff',resolved_by=?,resolved_at=NOW(),resolution_notes=?,
+                                                          quantity_resolved=quantity
+                                                      WHERE id=? AND issue_type='missing' AND status='pending'`,
+                                [await v2UserIdOf(connection,store_id,employee.id),
                                     `Automatically recorded as permanent loss in booking settlement: ${decisionNotes}`.slice(0,500),r.id]);
-                            await connection.execute(`INSERT INTO rental_stock_movements
-                                                      (store_id,branch_id,equipment_id,type,quantity,reference_number,description,actor_name)
-                                                      VALUES(?,?,?,?,?,?,?,?)`,
-                                [store_id,branchId,eq[0].id,'adjustment',qty,
-                                    `MISS-${String(r.id).padStart(6,'0')}`,
-                                    `Booking permanent loss: ${decisionNotes}`.slice(0,500),
-                                    String(employee.name||'Manager').slice(0,150)]);
+                            await v2RecordRentalMovement(connection,{storeId:store_id,branchId,actorId:employee.id},
+                                eq[0].id,'adjustment',qty,`MISS-${String(r.id).padStart(6,'0')}`,
+                                `Booking permanent loss: ${decisionNotes}`.slice(0,500),-1);
                         }
                         const affectedNames=undecided.map(r=>r.equipmentName).join(', ').slice(0,180);
                         const activeClaims=[];
@@ -3366,13 +3987,11 @@ exports.handler = async (event) => {
                             const combinedReason=(i===0
                                 ? `Combined booking-wide ${amount>0?'charge':'waiver'} for ${undecided.length} newly reviewed item(s) (${affectedNames}): ${reason}`
                                 : `Covered by the same combined booking-wide charge; no separate charge for ${r.equipmentName}. ${reason}`).slice(0,500);
-                            const [created]=await connection.execute(`INSERT INTO booking_customer_claims
-                                                                      (booking_id,store_id,branch_id,source_type,source_record_id,equipment_id,quantity,reason,approved_amount,status,approved_by)
-                                                                      VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-                                [bookingId,store_id,branchId,r.sourceType,r.id,r.equipmentId,r.quantity,
-                                    combinedReason,amount,amount>0?'approved':newCharge>0?'settled':'waived',String(employee.name||'Manager').slice(0,150)]);
+                            const createdClaimId=await v2InsertBookingClaim(connection,{bookingId,storeId:store_id,
+                                sourceType:r.sourceType,sourceId:r.id,equipmentId:r.equipmentId,quantity:r.quantity,
+                                reason:combinedReason,amount,status:amount>0?'approved':newCharge>0?'settled':'waived',userId:employee.id});
                             createdClaim=true;
-                            if(amount>0)activeClaims.push({id:Number(created.insertId),due:Math.round(amount*100)});
+                            if(amount>0)activeClaims.push({id:createdClaimId,due:Math.round(amount*100)});
                         }
                         const totalDueCents=activeClaims.reduce((n,c)=>n+c.due,0);
                         if(cashCents>Math.max(0,totalDueCents-Math.min(heldCents,totalDueCents)))
@@ -3388,15 +4007,12 @@ exports.handler = async (event) => {
                             const claimKey=`${requestKey}-${i}`;
                             await saveEvent('deposit_applied',fromDeposit/100,c.id,`${claimKey}-ap`);
                             await saveEvent('claim_paid',fromCash/100,c.id,`${claimKey}-cash`);
-                            if(fromDeposit||fromCash)await connection.execute(`UPDATE booking_customer_claims
-                                                                               SET status=IF(approved_amount<=amount_paid+deposit_applied+?+?+0.005,'settled','approved'),
-                                                                                   deposit_applied=deposit_applied+?,amount_paid=amount_paid+?
-                                                                               WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
-                                [fromDeposit/100,fromCash/100,fromDeposit/100,fromCash/100,c.id,bookingId,store_id,branchId]);
+                            if(fromDeposit||fromCash)await v2UpdateBookingClaimSettlement(connection,
+                                {claimId:c.id,bookingId,storeId:store_id,depositApplied:fromDeposit/100});
                         }
                         applyCents=Math.min(heldCents,totalDueCents);
-                        if(applyCents>0)await connection.execute(`UPDATE booking_financial_details
-                                                                  SET deposit_applied=deposit_applied+? WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                        if(applyCents>0)await connection.execute(`UPDATE bookings
+                                                                  SET deposit_applied_amount=deposit_applied_amount+? WHERE id=? AND store_id=? AND branch_id=?`,
                             [applyCents/100,bookingId,store_id,branchId]);
                     }
                     if(refundCents>heldCents-applyCents)
@@ -3405,10 +4021,8 @@ exports.handler = async (event) => {
                         // Never refund money while any incident remains undecided or
                         // any approved claim has an unpaid balance.
                         await requireRentalIncidentSettlement(connection,{bookingId,storeId:store_id,branchId});
+                        // The refunds row is written by the financial event.
                         await saveEvent('deposit_refunded',refundCents/100,null,keys[2]);
-                        await connection.execute(`UPDATE booking_financial_details SET deposit_refunded=deposit_refunded+?
-                                                  WHERE booking_id=? AND store_id=? AND branch_id=?`,
-                            [refundCents/100,bookingId,store_id,branchId]);
                     }
                     if(mode==='refund'&&refundCents<=0&&heldCents>0)
                         throw rentalError('Enter a positive refund amount, or select damage settlement with a documented incident.');
@@ -3440,16 +4054,16 @@ exports.handler = async (event) => {
                 const amount=waiver?0:financePositive(body.amount,'Claim charge');
                 const reason=String(body.reason||'').trim().slice(0,500);
                 if(reason.length<10)return response(400,{error:'Document the charge or waiver reason (at least 10 characters).'});
-                const table=source==='missing'?'rental_missing_unit_reports':'rental_maintenance_records';
-                const [sources]=await connection.execute(`SELECT equipment_id,
-                                                                 ${source==='missing'?'quantity':'quantity_started'} AS quantity,
-                                                                 ${source==='missing'?'status':'start_reason'} AS issueState
-                                                          FROM ${table} WHERE id=? AND store_id=? AND branch_id=? AND booking_reference=?`,
+                const table=source==='missing'?V2_MISSING_REPORTS:V2_MAINTENANCE_RECORDS;
+                const [sources]=await connection.execute(`SELECT src.equipment_id,
+                                                                 ${source==='missing'?'src.quantity':'src.quantity_started'} AS quantity,
+                                                                 ${source==='missing'?'src.status':'src.start_reason'} AS issueState
+                                                          FROM ${table} src WHERE src.id=? AND src.store_id=? AND src.branch_id=? AND src.booking_reference=?`,
                     [sourceId,store_id,book.branch_id,book.booking_reference]);
                 if(!sources.length)return response(409,{error:'This booking has no matching documented equipment incident.'});
                 if(source==='missing'){
                     const [recoveries]=await connection.execute(`SELECT COALESCE(SUM(quantity),0) AS recovered
-                                                                 FROM rental_stock_movements WHERE store_id=? AND branch_id=? AND equipment_id=?
+                                                                 FROM ${V2_RENTAL_MOVEMENTS} rental_stock_movements WHERE store_id=? AND branch_id=? AND equipment_id=?
                                                                                                AND type IN ('missing_resolved','missing_replaced') AND reference_number=?`,
                         [store_id,book.branch_id,sources[0].equipment_id,`MISS-${String(sourceId).padStart(6,'0')}`]);
                     sources[0].quantity=Number(sources[0].quantity)-Number(recoveries[0].recovered);
@@ -3461,16 +4075,14 @@ exports.handler = async (event) => {
                 if(source==='damage'&&!String(sources[0].issueState||'').startsWith('Rental damage '))
                     return response(409,{error:'Only rental-return inspection damage can be charged to this customer.'});
                 const managerEmployee=await getActingEmployee(connection,decodedToken,tokenRole,store_id);
-                try {
-                    await connection.execute(`INSERT INTO booking_customer_claims
-                                              (booking_id,store_id,branch_id,source_type,source_record_id,equipment_id,quantity,reason,approved_amount,status,approved_by)
-                                              VALUES(?,?,?,?,?,?,?,?,?,?,?)`,[bookingId,store_id,book.branch_id,source,sourceId,
-                        sources[0].equipment_id,sources[0].quantity,reason,amount,waiver?'waived':'approved',
-                        String(managerEmployee.name||'Manager').slice(0,150)]);
-                } catch(e) {
-                    if(e.code==='ER_DUP_ENTRY')return response(409,{error:'This physical incident already has a recorded charge or waiver.'});
-                    throw e;
-                }
+                // One charge or waiver per physical incident.
+                const [existingClaim]=await connection.execute(`SELECT c.id FROM ${V2_BOOKING_CLAIMS} c
+                                                                WHERE c.booking_id=? AND c.source_type=? AND c.source_record_id=? LIMIT 1`,
+                    [bookingId,source,sourceId]);
+                if(existingClaim.length)return response(409,{error:'This physical incident already has a recorded charge or waiver.'});
+                await v2InsertBookingClaim(connection,{bookingId,storeId:store_id,sourceType:source,sourceId,
+                    equipmentId:sources[0].equipment_id,quantity:sources[0].quantity,reason,amount,
+                    status:waiver?'waived':'approved',userId:managerEmployee.id});
                 await automaticallyCompleteSettledBooking(connection,bookingId,store_id,Number(book.branch_id));
                 return response(200,{success:true,statement:await getBookingStatement(connection,bookingId,store_id,book.branch_id)});
             }
@@ -3487,16 +4099,15 @@ exports.handler = async (event) => {
             const claimId=type==='deposit_applied'||type==='claim_paid'?Number(body.claimId):null;
             await connection.beginTransaction();
             try{
-                const [prior]=await connection.execute(`SELECT id FROM booking_financial_events WHERE store_id=? AND request_key=?`,[store_id,requestKey]);
-                if(prior.length){await connection.rollback();return response(200,{success:true,alreadyRecorded:true});}
-                const [details]=await connection.execute(`SELECT * FROM booking_financial_details
-                                                          WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,[bookingId,store_id,book.branch_id]);
+                if(await v2FinancialEventExists(connection,store_id,[requestKey])){await connection.rollback();return response(200,{success:true,alreadyRecorded:true});}
+                const [details]=await connection.execute(`SELECT * FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,[bookingId,store_id,book.branch_id]);
                 if(!details.length)throw rentalError('This booking has no financial snapshot. Existing bookings require migration/backfill.');
                 const d=details[0];
                 const held=Math.round((Number(d.deposit_collected)-Number(d.deposit_applied)-Number(d.deposit_refunded))*100)/100;
                 let claim=null;
                 if(claimId!==null){
-                    const [c]=await connection.execute(`SELECT * FROM booking_customer_claims WHERE id=? AND booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                    await connection.execute(`SELECT id FROM booking_items WHERE id=? AND booking_id=? FOR UPDATE`, [claimId,bookingId]);
+                    const [c]=await connection.execute(`SELECT * FROM ${V2_BOOKING_CLAIMS} booking_customer_claims WHERE id=? AND booking_id=? AND store_id=? AND branch_id=?`,
                         [claimId,bookingId,store_id,book.branch_id]);
                     if(!c.length||c[0].status==='waived')throw rentalError('Active approved claim not found.');
                     claim=c[0];
@@ -3512,26 +4123,24 @@ exports.handler = async (event) => {
                     const [bookingStatus]=await connection.execute('SELECT status FROM bookings WHERE id=? AND store_id=? FOR UPDATE',[bookingId,store_id]);
                     if(!['pending settlement','completed','cancelled'].includes(String(bookingStatus[0]?.status||'').toLowerCase()))
                         throw rentalError('Refund the deposit only after Staff has returned and inspected the booking, or after a reconciled cancellation.');
-                    const [unsettled]=await connection.execute(`SELECT COUNT(*) AS pending FROM booking_customer_claims
-                                                                WHERE booking_id=? AND status='approved' AND approved_amount>amount_paid+deposit_applied`,[bookingId]);
+                    const [unsettled]=await connection.execute(`SELECT COUNT(*) AS pending FROM ${V2_BOOKING_CLAIMS} booking_customer_claims WHERE booking_id=? AND status='approved' AND approved_amount>amount_paid+deposit_applied`,[bookingId]);
                     if(Number(unsettled[0].pending)>0)throw rentalError('Resolve outstanding loss/damage claims before refunding the deposit.');
-                    const [unreturned]=await connection.execute(`SELECT COUNT(*) AS pending FROM booking_rental_items i
-                                                                                                     JOIN rental_booking_allocations a ON a.store_id=i.store_id AND a.branch_id=i.branch_id
+                    const [unreturned]=await connection.execute(`SELECT COUNT(*) AS pending FROM ${V2_BOOKING_RENTAL_ITEMS} i
+                                                                                                     JOIN ${V2_RENTAL_ALLOCATIONS} a ON a.store_id=i.store_id AND a.branch_id=i.branch_id
                         AND a.booking_reference COLLATE utf8mb4_unicode_ci=i.booking_reference COLLATE utf8mb4_unicode_ci
                         AND a.equipment_id=i.equipment_id
                                                                  WHERE i.booking_id=? AND a.status IN ('reserved','checked_out')`,[bookingId]);
                     if(Number(unreturned[0].pending)>0)throw rentalError('Rental equipment must be returned or cancelled before deposit refund.');
                 }
                 if(type==='deposit_applied'&&claim===null)throw rentalError('Choose an approved loss or damage claim.');
-                await connection.execute(`INSERT INTO booking_financial_events
-                                          (booking_id,store_id,branch_id,claim_id,event_type,amount,request_key,actor_role,actor_name)
-                                          VALUES(?,?,?,?,?,?,?,?,?)`,[bookingId,store_id,book.branch_id,claimId,type,amount,requestKey,
-                    tokenRole,tokenRole]);
-                const map={deposit_received:'deposit_collected',deposit_refunded:'deposit_refunded',deposit_applied:'deposit_applied'};
-                if(map[type])await connection.execute(`UPDATE booking_financial_details SET ${map[type]}=${map[type]}+? WHERE booking_id=?`,[amount,bookingId]);
-                if(claim!==null){await connection.execute(`UPDATE booking_customer_claims SET
-                                                                                              ${type==='deposit_applied'?'deposit_applied':'amount_paid'}=${type==='deposit_applied'?'deposit_applied':'amount_paid'}+?,
-                                                                                              status=IF(approved_amount<=amount_paid+deposit_applied,'settled','approved') WHERE id=?`,[amount,claimId]);}
+                // Deposits and charge payments become payments rows, deposit refunds a refunds row.
+                const eventEmployee=await getActingEmployee(connection,decodedToken,tokenRole,store_id);
+                await v2SaveBookingFinancialEvent(connection,{bookingId,storeId:store_id,branchId:Number(book.branch_id),
+                    claimId,type,amount,requestKey,userId:eventEmployee.id,userName:eventEmployee.name,userRole:eventEmployee.role});
+                if(type==='deposit_applied')await connection.execute(
+                    `UPDATE bookings SET deposit_applied_amount=deposit_applied_amount+? WHERE id=? AND store_id=?`,[amount,bookingId,store_id]);
+                if(claim!==null)await v2UpdateBookingClaimSettlement(connection,{claimId,bookingId,storeId:store_id,
+                    depositApplied:type==='deposit_applied'?amount:0});
                 await automaticallyCompleteSettledBooking(connection,bookingId,store_id,Number(book.branch_id));
                 await connection.commit();
             }catch(e){await connection.rollback();if(e.rentalValidation)return response(409,{error:e.message});throw e;}
@@ -3544,12 +4153,12 @@ exports.handler = async (event) => {
                                                        COALESCE(SUM(CASE WHEN LOWER(b.status)='completed' AND b.event_date<=CURDATE() THEN f.delivery_fee ELSE 0 END),0) AS delivery,
                                                        COALESCE(SUM(CASE WHEN LOWER(b.status)='completed' AND b.event_date<=CURDATE() THEN f.setup_fee ELSE 0 END),0) AS setup,
                                                        COALESCE(SUM(f.deposit_collected-f.deposit_refunded-f.deposit_applied),0) AS heldDeposits
-                                                   FROM booking_financial_details f JOIN bookings b ON b.id=f.booking_id
+                                                   FROM ${V2_BOOKING_FINANCIALS} f JOIN ${V2_BOOKINGS} b ON b.id=f.booking_id
                                                    WHERE f.store_id=?`,[store_id]);
             const [claims]=await connection.execute(`SELECT COALESCE(SUM(approved_amount),0) AS approved,
                                                             COALESCE(SUM(amount_paid),0) AS recoveredCash,COALESCE(SUM(deposit_applied),0) AS appliedDeposits,
                                                             COALESCE(SUM(GREATEST(approved_amount-amount_paid-deposit_applied,0)),0) AS outstanding
-                                                     FROM booking_customer_claims WHERE store_id=? AND status <> 'waived'`,[store_id]);
+                                                     FROM ${V2_BOOKING_CLAIMS} booking_customer_claims WHERE store_id=? AND status <> 'waived'`,[store_id]);
             return response(200,{overview:{deliveryFees:Number(fees[0].delivery),setupFees:Number(fees[0].setup),
                     refundableDepositsHeld:Number(fees[0].heldDeposits),approvedClaims:Number(claims[0].approved),
                     cashRecovered:Number(claims[0].recoveredCash),depositsApplied:Number(claims[0].appliedDeposits),
@@ -3582,8 +4191,8 @@ exports.handler = async (event) => {
                        f.package_base AS packageBase,
                        f.rental_subtotal AS rentalSubtotal,
                        f.delivery_fee AS deliveryFee, f.setup_fee AS setupFee
-                FROM bookings b
-                         LEFT JOIN booking_financial_details f
+                FROM ${V2_BOOKINGS} b
+                         LEFT JOIN ${V2_BOOKING_FINANCIALS} f
                                    ON f.booking_id=b.id AND f.store_id=b.store_id AND f.branch_id=b.branch_id
                 WHERE b.store_id=? AND LOWER(TRIM(b.status))='completed'
                   AND b.event_date >= ? AND b.event_date <= ?
@@ -3594,7 +4203,7 @@ exports.handler = async (event) => {
                                              THEN bi.estimated_subtotal ELSE 0 END),0) AS customSales,
                        COALESCE(SUM(CASE WHEN LOWER(TRIM(bi.source_type))='package'
                                              THEN bi.booked_quantity ELSE 0 END),0) AS packageUnits
-                FROM booking_items bi JOIN bookings b
+                FROM ${V2_BOOKING_LINES} bi JOIN ${V2_BOOKINGS} b
                                            ON b.id=bi.booking_id AND b.store_id=bi.store_id AND b.branch_id=bi.branch_id
                 WHERE b.store_id=? AND LOWER(TRIM(b.status))='completed'
                   AND b.event_date >= ? AND b.event_date <= ?
@@ -3603,7 +4212,7 @@ exports.handler = async (event) => {
                 SELECT ri.booking_id AS bookingId,ri.equipment_id AS equipmentId,
                        ri.equipment_name AS equipmentName,ri.quantity,
                        ri.agreed_line_total AS lineRevenue
-                FROM booking_rental_items ri JOIN bookings b
+                FROM ${V2_BOOKING_RENTAL_ITEMS} ri JOIN ${V2_BOOKINGS} b
                                                   ON b.id=ri.booking_id AND b.store_id=ri.store_id AND b.branch_id=ri.branch_id
                 WHERE b.store_id=? AND LOWER(TRIM(b.status))='completed'
                   AND b.event_date >= ? AND b.event_date <= ?`, [store_id, yearStart, today]);
@@ -3739,11 +4348,10 @@ exports.handler = async (event) => {
             let query = `
                 SELECT
                     ${bookingPageSelectFields()}
-                FROM bookings
-                         LEFT JOIN branches
+                FROM ${V2_BOOKINGS} bookings LEFT JOIN branches
                                    ON bookings.branch_id = branches.id
                                        AND bookings.store_id = branches.store_id
-                         LEFT JOIN booking_approval_requests appr
+                         LEFT JOIN ${V2_BOOKING_APPROVALS} appr
                                    ON appr.booking_id=bookings.id AND appr.store_id=bookings.store_id
                                        AND appr.branch_id=bookings.branch_id
                 WHERE bookings.store_id = ?
@@ -3787,8 +4395,7 @@ exports.handler = async (event) => {
                             `SELECT booking_id AS bookingId,
                                     refundable_deposit_required AS requiredDeposit,
                                     deposit_collected AS collectedDeposit
-                             FROM booking_financial_details
-                             WHERE store_id=? AND booking_id IN (${placeholders})`,
+                             FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE store_id=? AND booking_id IN (${placeholders})`,
                             [store_id, ...slice]
                         );
                         for (const detail of details) {
@@ -3829,8 +4436,7 @@ exports.handler = async (event) => {
             let query = `
                 SELECT
                     ${dashboardBookingSelectFields()}
-                FROM bookings
-                         LEFT JOIN branches
+                FROM ${V2_BOOKINGS} bookings LEFT JOIN branches
                                    ON bookings.branch_id = branches.id
                                        AND bookings.store_id = branches.store_id
                 WHERE bookings.store_id = ?
@@ -3861,8 +4467,7 @@ exports.handler = async (event) => {
             let query = `
                 SELECT
                     ${bookingSelectFields()}
-                FROM bookings
-                         LEFT JOIN branches
+                FROM ${V2_BOOKINGS_FULL} bookings LEFT JOIN branches
                                    ON bookings.branch_id = branches.id
                                        AND bookings.store_id = branches.store_id
                 WHERE bookings.store_id = ?
@@ -3922,13 +4527,13 @@ exports.handler = async (event) => {
                     bi.variant_id AS variantId,
                     ${quantityExpression} AS quantityUsed,
                     ${unitCostExpression} AS unitCost
-                FROM booking_items bi
-                         INNER JOIN bookings b
+                FROM ${V2_BOOKING_LINES} bi
+                         INNER JOIN ${V2_BOOKINGS} b
                                     ON b.id = bi.booking_id
-                         LEFT JOIN products p
+                         LEFT JOIN ${V2_PRODUCTS} p
                                    ON p.id = bi.product_id
                                        AND p.store_id = b.store_id
-                         LEFT JOIN product_variants pv
+                         LEFT JOIN ${V2_PRODUCT_VARIANTS} pv
                                    ON pv.id = bi.variant_id
                                        AND pv.product_id = bi.product_id
                 WHERE b.store_id = ?
@@ -4004,8 +4609,7 @@ exports.handler = async (event) => {
             let bookingQuery = `
                 SELECT id, status, store_id, branch_id, booking_reference,
                        DATE_FORMAT(event_date,'%Y-%m-%d') AS event_date
-                FROM bookings
-                WHERE id = ?
+                FROM ${V2_BOOKINGS} bookings WHERE id = ?
                   AND store_id = ?
             `;
 
@@ -4041,8 +4645,7 @@ exports.handler = async (event) => {
                     estimated_subtotal,
                     used_subtotal,
                     inventory_status
-                FROM booking_items
-                WHERE booking_id = ?
+                FROM ${V2_BOOKING_LINES} booking_items WHERE booking_id = ?
                   AND store_id = ?
             `;
 
@@ -4064,11 +4667,10 @@ exports.handler = async (event) => {
                         DATE_FORMAT(start_date,'%Y-%m-%d') AS start_date,
                         DATE_FORMAT(end_date,'%Y-%m-%d') AS end_date,
                         billable_days,agreed_line_total
-                 FROM booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=? ORDER BY id`,
+                 FROM ${V2_BOOKING_RENTAL_ITEMS} booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=? ORDER BY id`,
                 [Number(booking_id),store_id,recordedBranchId]);
             const [allocations]=rentalItems.length ? await connection.execute(
-                `SELECT equipment_id,status FROM rental_booking_allocations
-                 WHERE booking_reference=? AND store_id=? AND branch_id=?`,
+                `SELECT equipment_id,status FROM ${V2_RENTAL_ALLOCATIONS} rental_booking_allocations WHERE booking_reference=? AND store_id=? AND branch_id=?`,
                 [bookingRows[0].booking_reference,store_id,recordedBranchId]) : [[]];
             const allocationStates=new Map(allocations.map(a=>[Number(a.equipment_id),String(a.status)]));
 
@@ -4092,9 +4694,9 @@ exports.handler = async (event) => {
                                     v.id AS matchingVariant,v.deleted_at AS variantDeleted,
                                     DATE_FORMAT(v.expiration_date,'%Y-%m-%d') AS variantExpiry,
                                     bi.id AS inventoryId,bi.quantity_on_hand AS onHand
-                             FROM products p
-                                      LEFT JOIN product_variants v ON v.product_id=p.id AND v.id <=> ?
-                             LEFT JOIN branch_inventory bi ON bi.product_id=p.id AND bi.variant_id <=> ?
+                             FROM ${V2_PRODUCTS} p
+                                      LEFT JOIN ${V2_PRODUCT_VARIANTS} v ON v.product_id=p.id AND v.id <=> ?
+                             LEFT JOIN ${V2_BRANCH_INVENTORY} bi ON bi.product_id=p.id AND bi.variant_id <=> ?
                                  AND bi.store_id=p.store_id AND bi.branch_id=p.branch_id AND bi.status='active'
                              WHERE p.id=? AND p.store_id=? AND p.branch_id=? LIMIT 1`,
                             [variantId,variantId,productId,store_id,recordedBranchId]);
@@ -4107,7 +4709,7 @@ exports.handler = async (event) => {
                         }else{
                             const [batches]=await connection.execute(
                                 `SELECT COALESCE(SUM(remaining_quantity),0) AS eligible
-                                 FROM inventory_batches WHERE branch_inventory_id=?
+                                 FROM ${V2_INVENTORY_BATCHES} inventory_batches WHERE branch_inventory_id=?
                                                           AND remaining_quantity>0 AND status='active'
                                                           AND (expiration_date IS NULL OR expiration_date>=?)`,
                                 [record.inventoryId,eventDate]);
@@ -4137,16 +4739,14 @@ exports.handler = async (event) => {
                         reason='Rental dates are unavailable.';
                     }else{
                         const [equipment]=await connection.execute(
-                            `SELECT total_units,maintenance_units,missing_units FROM rental_equipment
-                             WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL LIMIT 1`,
+                            `SELECT total_units,maintenance_units,missing_units FROM ${V2_RENTAL_EQUIPMENT} rental_equipment WHERE id=? AND store_id=? AND branch_id=? AND archived_at IS NULL LIMIT 1`,
                             [item.equipment_id,store_id,recordedBranchId]);
                         if(!equipment.length){reason='Rental equipment is unavailable in this branch.';}
                         else{
                             const [otherAllocations]=await connection.execute(
                                 `SELECT quantity,status,DATE_FORMAT(start_date,'%Y-%m-%d') AS startDate,
                                         DATE_FORMAT(end_date,'%Y-%m-%d') AS endDate
-                                 FROM rental_booking_allocations
-                                 WHERE store_id=? AND branch_id=? AND equipment_id=?
+                                 FROM ${V2_RENTAL_ALLOCATIONS} rental_booking_allocations WHERE store_id=? AND branch_id=? AND equipment_id=?
                                    AND booking_reference <> ?
                                    AND status IN ('reserved','checked_out')
                                    AND start_date<=? AND (end_date>=? OR status='checked_out')`,
@@ -4194,12 +4794,10 @@ exports.handler = async (event) => {
                 if(action==='request_booking_approval'){
                     const why=String(body.reason||'').trim().slice(0,500);
                     if(why.length<10)throw rentalError('Describe the exception for Manager review (at least 10 characters).');
-                    await connection.execute(`INSERT INTO booking_approval_requests
-                                              (booking_id,store_id,branch_id,status,reason,requested_by,requested_at,reviewed_by,reviewed_at)
-                                              VALUES (?,?,?,'pending',?,?,NOW(),NULL,NULL)
-                                                  ON DUPLICATE KEY UPDATE status='pending',reason=VALUES(reason),requested_by=VALUES(requested_by),
-                                requested_at=NOW(),reviewed_by=NULL,reviewed_at=NULL`,
-                        [bookingId,store_id,branchId,why,employee.name]);
+                    // Approval requests are kept in employee_actions (latest decision wins).
+                    await v2LogBookingEvent(connection,{storeId:store_id,branchId,bookingId,
+                        reference:result.booking.booking_reference||String(bookingId),userId:employee.id,
+                        userName:employee.name,userRole:employee.role,action:'Requested booking approval',details:{reason:why}});
                     await logEmployeeAction(connection,{storeId:store_id,branchId,employee,module:'Bookings',
                         referenceNumber:result.booking.booking_reference||String(bookingId),action:'Requested Manager approval',
                         referenceId:String(bookingId),details:why});
@@ -4262,11 +4860,12 @@ exports.handler = async (event) => {
             const branchId = Number(tokenBranchId);
             await connection.beginTransaction();
             try {
+                await connection.execute(`SELECT id FROM bookings WHERE id=? AND store_id=? FOR UPDATE`, [bookingId,store_id]);
                 const [rows] = await connection.execute(`SELECT id,booking_reference,name,status,
                                                                 DATE_FORMAT(event_date,'%Y-%m-%d') AS eventDate,
                                                                 DATE_FORMAT(COALESCE(event_end_date,event_date),'%Y-%m-%d') AS eventEndDate,
                                                                 agreed_price,package_price,required_down_payment,amount_paid
-                                                         FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                         FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=? AND branch_id=?`,
                     [bookingId,store_id,branchId]);
                 if (!rows.length) throw rentalError("Booking not found in your assigned branch.");
                 const booking = rows[0];
@@ -4275,8 +4874,7 @@ exports.handler = async (event) => {
                 if (current !== expected)
                     throw rentalError(`Booking must be ${expected} before Staff can mark it ${target}.`);
 
-                const [approvalRows] = await connection.execute(`SELECT status FROM booking_approval_requests
-                                                                 WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1`, [bookingId,store_id,branchId]);
+                const [approvalRows] = await connection.execute(`SELECT status FROM ${V2_BOOKING_APPROVALS} booking_approval_requests WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1`, [bookingId,store_id,branchId]);
                 if (["pending", "rejected"].includes(String(approvalRows[0]?.status || "").toLowerCase()))
                     throw rentalError("Manager approval is unresolved for this booking.");
                 const agreed = Number(booking.agreed_price ?? booking.package_price ?? 0);
@@ -4288,20 +4886,20 @@ exports.handler = async (event) => {
 
                 // Reservation is made on confirmation. Ensure the actual Sales lines
                 // still reflect that reservation before Staff begins fulfillment.
+                await connection.execute(`SELECT id FROM booking_items WHERE booking_id=? FOR UPDATE`, [bookingId]);
                 const [sales] = await connection.execute(`SELECT booked_quantity,reserved_quantity,inventory_status
-                                                          FROM booking_items WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                          FROM ${V2_BOOKING_LINES} booking_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
                     [bookingId,store_id,branchId]);
                 if (sales.some(line => Number(line.booked_quantity) <= 0 ||
                     Number(line.reserved_quantity) !== Number(line.booked_quantity) ||
                     String(line.inventory_status || "").toLowerCase() !== "reserved"))
                     throw rentalError("Booking sales inventory is not fully reserved. Ask Manager to reconcile the booking.");
 
-                const [rentals] = await connection.execute(`SELECT r.equipment_id,r.quantity,
-                                                                   a.quantity AS allocatedQuantity,a.status AS allocationStatus
-                                                            FROM booking_rental_items r LEFT JOIN rental_booking_allocations a
-                                                                                                  ON a.store_id=r.store_id AND a.branch_id=r.branch_id AND a.equipment_id=r.equipment_id
-                                                                                                      AND a.booking_reference COLLATE utf8mb4_unicode_ci=r.booking_reference COLLATE utf8mb4_unicode_ci
-                                                            WHERE r.booking_id=? AND r.store_id=? AND r.branch_id=? FOR UPDATE`,
+                const [rentals] = await connection.execute(`SELECT a.equipment_id,a.quantity,
+                                                                   CASE WHEN a.status='requested' THEN NULL ELSE a.quantity END AS allocatedQuantity,
+                                                                   CASE WHEN a.status='requested' THEN NULL ELSE a.status END AS allocationStatus
+                                                            FROM ${V2_RENTAL_ALLOCATIONS} a
+                                                            WHERE a.booking_id=? AND a.store_id=? AND a.branch_id=?`,
                     [bookingId,store_id,branchId]);
                 if (!sales.length && !rentals.length)
                     throw rentalError("Booking has no verified inventory or rental equipment to fulfill.");
@@ -4321,7 +4919,7 @@ exports.handler = async (event) => {
                         throw rentalError("Record the remaining customer payment before completing the booking.");
                     // Booking completion must not bypass the Staff Sales handover.
                     const [pendingSales]=await connection.execute(`SELECT COUNT(*) AS pendingCount
-                                                                   FROM booking_items bi LEFT JOIN booking_sales_fulfillment f
+                                                                   FROM ${V2_BOOKING_LINES} bi LEFT JOIN ${V2_BOOKING_LINES} f
                                                                                                    ON f.booking_item_id=bi.id AND f.store_id=bi.store_id AND f.branch_id=bi.branch_id
                                                                    WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?
                                                                      AND bi.product_id IS NOT NULL AND bi.booked_quantity>0
@@ -4334,7 +4932,7 @@ exports.handler = async (event) => {
                     await requireRentalIncidentSettlement(connection,{bookingId,storeId:store_id,branchId});
                     if (rentals.length) {
                         const [finance] = await connection.execute(`SELECT refundable_deposit_required,deposit_collected
-                                                                    FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                                                                    FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
                             [bookingId,store_id,branchId]);
                         if (!finance.length || Number(finance[0].deposit_collected) + 0.005 <
                             Number(finance[0].refundable_deposit_required))
@@ -4382,8 +4980,7 @@ exports.handler = async (event) => {
 
             let selectQuery = `
                 SELECT id, status, store_id, branch_id, package_json, booking_reference, name
-                FROM bookings
-                WHERE id = ?
+                FROM ${V2_BOOKINGS_FULL} bookings WHERE id = ?
                   AND store_id = ?
             `;
             const selectParams = [Number(booking_id), store_id];
@@ -4434,11 +5031,11 @@ exports.handler = async (event) => {
                     if(currentStatus==='Pending Review'){
                         const branchId=Number(requestedBranchId||rows[0].branch_id);
                         const [rentalLines]=await connection.execute(`SELECT COUNT(*) AS units
-                                                                      FROM booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                                                                      FROM ${V2_BOOKING_RENTAL_ITEMS} booking_rental_items WHERE booking_id=? AND store_id=? AND branch_id=?`,
                             [Number(booking_id),store_id,branchId]);
                         if(Number(rentalLines[0]?.units||0)>0){
                             const [terms]=await connection.execute(`SELECT refundable_deposit_required
-                                                                    FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                                    FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
                                 [Number(booking_id),store_id,branchId]);
                             if(!terms.length)throw rentalError('Booking deposit terms are missing. Review and save payment terms first.');
                             const deposit=Number(terms[0].refundable_deposit_required);
@@ -4467,9 +5064,13 @@ exports.handler = async (event) => {
                         const reason=String(body.noDpReason||'').trim();
                         if(Number(review.booking.required_down_payment||0)!==0 || reason.length<10)
                             throw rentalError('Direct confirmation requires a zero DP and a Manager waiver reason (10+ characters).');
-                        await connection.execute(`UPDATE bookings SET booking_no_dp_approved_by=?,booking_no_dp_reason=?
+                        // The approving Manager is saved on the booking; the waiver reason in its audit trail.
+                        await connection.execute(`UPDATE bookings SET approved_by=?,approved_at=NOW()
                                                   WHERE id=? AND store_id=? AND branch_id=?`,
-                            [String(actingEmployee.name||'Manager'),reason,Number(booking_id),store_id,Number(requestedBranchId||rows[0].branch_id)]);
+                            [await v2UserIdOf(connection,store_id,actingEmployee.id),Number(booking_id),store_id,Number(requestedBranchId||rows[0].branch_id)]);
+                        await v2LogBookingEvent(connection,{storeId:store_id,branchId:Number(requestedBranchId||rows[0].branch_id),
+                            bookingId:Number(booking_id),reference:rows[0].booking_reference||String(booking_id),userId:actingEmployee.id,
+                            userName:actingEmployee.name,userRole:actingEmployee.role,action:'Approved zero down payment',details:{reason}});
                         review.booking.booking_no_dp_approved_by=String(actingEmployee.name||'Manager');
                     }
                     if(status==='Confirmed'){
@@ -4477,16 +5078,18 @@ exports.handler = async (event) => {
                         await requireCustomerReviewClear(connection,{bookingId:Number(booking_id),storeId:store_id,
                             branchId:Number(requestedBranchId||rows[0].branch_id),phone:review.booking.phone});
                     }
-                    await connection.execute(`UPDATE booking_approval_requests SET status='approved',reviewed_by=?,reviewed_at=NOW()
-                                              WHERE booking_id=? AND store_id=? AND branch_id=? AND status='pending'`,
-                        [String(actingEmployee.name||'Manager'),Number(booking_id),store_id,Number(requestedBranchId||rows[0].branch_id)]);
+                    if(review.approval?.status==='pending'){
+                        await v2LogBookingEvent(connection,{storeId:store_id,branchId:Number(requestedBranchId||rows[0].branch_id),
+                            bookingId:Number(booking_id),reference:rows[0].booking_reference||String(booking_id),userId:actingEmployee.id,
+                            userName:actingEmployee.name,userRole:actingEmployee.role,action:'Approved booking request',details:{reason:null}});
+                    }
                 }
                 // 1️⃣ Update booking status. Approval does not allocate inventory.
                 let query = `UPDATE bookings SET status = ?`;
                 const params = [status];
                 if (agreed_price !== undefined && agreed_price !== null) {
                     const newPrice=financeCurrency(agreed_price,'Agreed booking price');
-                    const [f]=await connection.execute('SELECT package_base,rental_subtotal,delivery_fee,setup_fee FROM booking_financial_details WHERE booking_id=?',[Number(booking_id)]);
+                    const [f]=await connection.execute(`SELECT package_base,rental_subtotal,delivery_fee,setup_fee FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE booking_id=?`,[Number(booking_id)]);
                     if(f.length && newPrice + 0.005 < Number(f[0].package_base)+Number(f[0].rental_subtotal)+Number(f[0].delivery_fee)+Number(f[0].setup_fee))
                         throw rentalError('Booking price cannot be below package, rental and service charges.');
                     query += `, agreed_price = ?`; params.push(newPrice);
@@ -4520,18 +5123,18 @@ exports.handler = async (event) => {
                         bookingId:Number(booking_id),storeId:store_id,
                         branchId:requestedBranchId||rows[0].branch_id,
                         price:agreed_price??(await connection.execute(
-                            "SELECT agreed_price FROM bookings WHERE id=? AND store_id=?",[Number(booking_id),store_id]))[0][0]?.agreed_price
+                            `SELECT agreed_price FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=?`,[Number(booking_id),store_id]))[0][0]?.agreed_price
                     });
                 }
                 if(status === "Completed") {
-                    const [bill]=await connection.execute(`SELECT agreed_price,amount_paid FROM bookings
-                                                           WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                    await connection.execute(`SELECT id FROM bookings WHERE id=? AND store_id=? FOR UPDATE`, [Number(booking_id),store_id]);
+                    const [bill]=await connection.execute(`SELECT agreed_price,amount_paid FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=? AND branch_id=?`,
                         [Number(booking_id),store_id,Number(requestedBranchId||rows[0].branch_id)]);
                     if(!bill.length || Number(bill[0].agreed_price||0)<=0 ||
                         Number(bill[0].amount_paid||0)+0.005<Number(bill[0].agreed_price))
                         throw rentalError('Booking balance must be fully paid before completion.');
                     const [pendingSales]=await connection.execute(`SELECT COUNT(*) AS pendingCount
-                                                                   FROM booking_items bi LEFT JOIN booking_sales_fulfillment f
+                                                                   FROM ${V2_BOOKING_LINES} bi LEFT JOIN ${V2_BOOKING_LINES} f
                                                                                                    ON f.booking_item_id=bi.id AND f.store_id=bi.store_id AND f.branch_id=bi.branch_id
                                                                    WHERE bi.booking_id=? AND bi.store_id=? AND bi.branch_id=?
                                                                      AND bi.product_id IS NOT NULL AND bi.booked_quantity>0
@@ -4647,8 +5250,7 @@ exports.handler = async (event) => {
 
             let priceSelectQuery = `
                 SELECT id, branch_id, booking_reference, name, status, agreed_price, required_down_payment
-                FROM bookings
-                WHERE id = ?
+                FROM ${V2_BOOKINGS} bookings WHERE id = ?
                   AND store_id = ?
             `;
             const priceSelectParams = [Number(booking_id), store_id];
@@ -4673,7 +5275,7 @@ exports.handler = async (event) => {
             const rentalQuote=await rentalQuoteTotal(connection,Number(booking_id),store_id,
                 requestedBranchId||previousBooking.branch_id);
             const [financeLines]=await connection.execute(`SELECT package_base,rental_subtotal,delivery_fee,setup_fee
-                                                           FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
+                                                           FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
                 [Number(booking_id),store_id,requestedBranchId||previousBooking.branch_id]);
             const requiredMinimum=financeLines.length ?
                 Number(financeLines[0].package_base)+Number(financeLines[0].rental_subtotal)+
@@ -4681,7 +5283,7 @@ exports.handler = async (event) => {
             if(depositSpecified && rentalQuote.count===0 && depositAmount>0)
                 return response(400,{error:'Rental security deposits apply only to bookings containing rental equipment.'});
             if(rentalQuote.count || requiredMinimum>0){
-                const [state]=await connection.execute("SELECT status FROM bookings WHERE id=? AND store_id=?",
+                const [state]=await connection.execute(`SELECT status FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=?`,
                     [Number(booking_id),store_id]);
                 if(normalizeBookingStatus(state[0]?.status)!=='Pending Review')
                     return response(409,{error:"Rental booking prices cannot be changed after confirmation."});
@@ -4690,30 +5292,18 @@ exports.handler = async (event) => {
             }
 
 
+            // Balance and payment status are calculated from payments in stocknbook_v2.
             let query = `
                 UPDATE bookings
                 SET
                     agreed_price = ?,
-                    required_down_payment = ?,
-                    balance = GREATEST(? - COALESCE(amount_paid, 0), 0),
-                    payment_status = CASE
-                                         WHEN COALESCE(amount_paid, 0) >= ? THEN 'Fully Paid'
-                                         WHEN COALESCE(amount_paid, 0) >= ? AND ? > 0 THEN 'Down Payment Paid'
-                                         WHEN COALESCE(amount_paid, 0) > 0 THEN 'Partial'
-                                         WHEN ? = 0 THEN 'Unpaid'
-                                         ELSE 'Down Payment Required'
-                        END
+                    required_down_payment = ?
                 WHERE id = ?
                   AND store_id = ?
             `;
 
             const params = [
                 total,
-                requiredDp,
-                total,
-                total,
-                requiredDp,
-                requiredDp,
                 requiredDp,
                 Number(booking_id),
                 store_id,
@@ -4730,16 +5320,13 @@ exports.handler = async (event) => {
                 await connection.execute(query, params);
                 if(depositSpecified){
                     const [existingDeposit]=await connection.execute(`SELECT deposit_collected,deposit_applied,deposit_refunded
-                                                                      FROM booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                                      FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=?`,
                         [Number(booking_id),store_id,bookingBranchId]);
                     if(existingDeposit.length && depositAmount+0.005<Number(existingDeposit[0].deposit_collected||0))
                         throw rentalError('The agreed deposit cannot be lower than funds already collected; settle them first.');
-                    await connection.execute(`INSERT INTO booking_financial_details
-                                              (booking_id,store_id,branch_id,refundable_deposit_required,deposit_waiver_reason)
-                                              VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE
-                                                  refundable_deposit_required=VALUES(refundable_deposit_required),
-                                                  deposit_waiver_reason=VALUES(deposit_waiver_reason)`,
-                        [Number(booking_id),store_id,bookingBranchId,depositAmount,null]);
+                    await connection.execute(`UPDATE bookings SET refundable_deposit_required=?
+                                              WHERE id=? AND store_id=? AND branch_id=?`,
+                        [depositAmount,Number(booking_id),store_id,bookingBranchId]);
                 }
 
                 const priceBookingRef = buildBookingReference(previousBooking, booking_id);
@@ -4805,15 +5392,18 @@ exports.handler = async (event) => {
 
             await connection.beginTransaction();
             try {
+                await connection.execute(`SELECT id FROM bookings WHERE id=? AND store_id=? FOR UPDATE`, [bookingId,store_id]);
                 const [bookings] = await connection.execute(`SELECT id,booking_reference,name,status,
                                                                     agreed_price,package_price,required_down_payment,amount_paid
-                                                             FROM bookings WHERE id=? AND store_id=? AND branch_id=? FOR UPDATE`,
+                                                             FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=? AND branch_id=?`,
                     [bookingId,store_id,branchId]);
                 if (!bookings.length) throw rentalError("Booking not found in the Manager's assigned branch.");
                 const booking = bookings[0];
-                const [prior] = await connection.execute(`SELECT booking_id,event_type,amount FROM booking_financial_events
-                                                          WHERE store_id=? AND request_key=? LIMIT 1 FOR UPDATE`,
-                    [store_id,requestKey]);
+                const [prior] = await connection.execute(`SELECT booking_id,
+                                                                 CASE WHEN payment_type='Security Deposit' THEN 'deposit_received' ELSE 'booking_payment' END AS event_type,
+                                                                 amount FROM payments
+                                                          WHERE store_id=? AND request_key IN (?,?) ORDER BY payment_type='Security Deposit' DESC LIMIT 1 FOR UPDATE`,
+                    [store_id,requestKey,`${requestKey}-booking`]);
                 if (prior.length) {
                     if (Number(prior[0].booking_id) !== bookingId ||
                         String(prior[0].event_type) !== "deposit_received" ||
@@ -4831,8 +5421,7 @@ exports.handler = async (event) => {
                 if (Math.abs(currentPaid - expectedBookingPaid) > 0.005)
                     throw rentalError("Booking payments changed. Close and reopen the payment dialog before recording more money.");
                 const [terms] = await connection.execute(`SELECT refundable_deposit_required,deposit_collected
-                                                          FROM booking_financial_details
-                                                          WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1 FOR UPDATE`,
+                                                          FROM ${V2_BOOKING_FINANCIALS} booking_financial_details WHERE booking_id=? AND store_id=? AND branch_id=? LIMIT 1`,
                     [bookingId,store_id,branchId]);
                 if (!terms.length)
                     throw rentalError("Booking financial details are unavailable. Ask the Manager to review Billing.");
@@ -4855,18 +5444,17 @@ exports.handler = async (event) => {
                     down > 0 && newPaid + 0.005 >= down ? "Down Payment Paid" :
                         newPaid > 0 ? "Partial" : "Unpaid";
 
-                await connection.execute(`UPDATE bookings SET amount_paid=?,balance=?,payment_status=?
-                                          WHERE id=? AND store_id=? AND branch_id=?`,
-                    [newPaid,newBalance,paymentStatus,bookingId,store_id,branchId]);
+                // Booking payment and security deposit are separate payments rows.
+                const payingEmployee = await getActingEmployee(connection,decodedToken,tokenRole,store_id);
+                const paymentMethod = String(body.paymentMethod || body.payment_method || "Cash").slice(0,50);
+                if (bookingPayment > 0) {
+                    await v2RecordBookingBillPayment(connection,{bookingId,storeId:store_id,branchId,amount:bookingPayment,
+                        method:paymentMethod,requestKey:`${requestKey}-booking`,userId:payingEmployee.id});
+                }
                 if (depositPayment > 0) {
-                    const employee = await getActingEmployee(connection,decodedToken,tokenRole,store_id);
-                    await connection.execute(`INSERT INTO booking_financial_events
-                                              (booking_id,store_id,branch_id,claim_id,event_type,amount,request_key,actor_role,actor_name)
-                                              VALUES (?,?,?,NULL,'deposit_received',?,?,?,?)`,
-                        [bookingId,store_id,branchId,depositPayment,requestKey,tokenRole,employee.name]);
-                    await connection.execute(`UPDATE booking_financial_details SET deposit_collected=deposit_collected+?
-                                              WHERE booking_id=? AND store_id=? AND branch_id=?`,
-                        [depositPayment,bookingId,store_id,branchId]);
+                    await v2RecordBookingPayment(connection,{storeId:store_id,branchId,bookingId,paymentType:'Security Deposit',
+                        amount:depositPayment,method:paymentMethod,requestKey,userId:payingEmployee.id,
+                        notes:'Refundable security deposit'});
                 }
                 const employee = await getActingEmployee(connection,decodedToken,tokenRole,store_id);
                 await logEmployeeAction(connection,{
@@ -4922,7 +5510,7 @@ exports.handler = async (event) => {
 
             // Do not accept a self-declared Fully Paid status at less than the agreed charge.
             const [monetaryState]=await connection.execute(`SELECT agreed_price,package_price,required_down_payment
-                                                            FROM bookings WHERE id=? AND store_id=?`,[Number(booking_id),store_id]);
+                                                            FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=?`,[Number(booking_id),store_id]);
             if(!monetaryState.length)return response(404,{error:'Booking not found.'});
             const monetaryTotal=Number(monetaryState[0].agreed_price||monetaryState[0].package_price||0);
             if((payment_status==='Fully Paid'||payment_status==='Down Payment Paid')&&monetaryTotal<=0)
@@ -4938,8 +5526,7 @@ exports.handler = async (event) => {
 
             let selectQuery = `
                 SELECT id, status, store_id, branch_id, booking_reference, name
-                FROM bookings
-                WHERE id = ?
+                FROM ${V2_BOOKINGS} bookings WHERE id = ?
                   AND store_id = ?
             `;
 
@@ -4961,37 +5548,7 @@ exports.handler = async (event) => {
             // operation with branch, quotation and inventory validation.
             const willAutoConfirm = false;
 
-            let query = `
-                UPDATE bookings
-                SET
-                    amount_paid = ?,
-                    payment_status = ?,
-                    balance = CASE
-                                  WHEN ? IS NULL THEN GREATEST(
-                                          COALESCE(NULLIF(agreed_price, 0), NULLIF(package_price, 0), 0) - ?,
-                                          0
-                                                      )
-                                  ELSE ?
-                        END,
-                    status = status
-                WHERE id = ?
-                  AND store_id = ?
-            `;
-
-            const params = [
-                paid,
-                payment_status,
-                safeBalance,
-                paid,
-                safeBalance,
-                Number(booking_id),
-                store_id,
-            ];
-
-            if (requestedBranchId) {
-                query += ` AND branch_id = ?`;
-                params.push(Number(requestedBranchId));
-            }
+            // amount_paid, balance and payment_status are derived from payments in stocknbook_v2.
 
             let inventoryResult = {
                 ok: true,
@@ -5001,7 +5558,11 @@ exports.handler = async (event) => {
             await connection.beginTransaction();
 
             try {
-                await connection.execute(query, params);
+                // Recorded payments are brought to the entered total (payments / refunds).
+                const updatingEmployee = await getActingEmployee(connection,decodedToken,tokenRole,store_id);
+                await v2SetBookingAmountPaid(connection,{bookingId:Number(booking_id),storeId:store_id,
+                    branchId:Number(requestedBranchId||bookingRows[0].branch_id),target:paid,
+                    method:String(body.payment_method||body.paymentMethod||'Cash').slice(0,50),userId:updatingEmployee.id});
 
                 if (willAutoConfirm) {
                     inventoryResult = await reserveBookingInventory(connection, {
@@ -5020,7 +5581,7 @@ exports.handler = async (event) => {
                 }
 
                 if(willAutoConfirm){
-                    const [priceRows]=await connection.execute("SELECT agreed_price,package_price FROM bookings WHERE id=? AND store_id=?",
+                    const [priceRows]=await connection.execute(`SELECT agreed_price,package_price FROM ${V2_BOOKINGS} bookings WHERE id=? AND store_id=?`,
                         [Number(booking_id),store_id]);
                     await confirmRentalAllocations(connection,{
                         bookingId:Number(booking_id),storeId:store_id,branchId:requestedBranchId||bookingRows[0].branch_id,

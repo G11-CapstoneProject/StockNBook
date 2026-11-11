@@ -8,7 +8,7 @@ const dbConfig = {
     host: process.env.DB_HOST || "127.0.0.1",
     user: process.env.DB_USER || "root",
     password: process.env.DB_PASSWORD || "BTA5EYVWLfWcebF",
-    database: process.env.DB_NAME || "stocknbook",
+    database: process.env.DB_NAME || "stocknbook_v2",
     port: Number(process.env.DB_PORT || 3306),
     ssl: { rejectUnauthorized: false },
 };
@@ -88,7 +88,7 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "manager" && decoded?.manager_id) {
         const [rows] = await connection.execute(
-            `SELECT manager_name FROM managers WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS manager_name FROM users WHERE id = ? AND store_id = ? AND role = 'manager' LIMIT 1`,
             [Number(decoded.manager_id), storeId]
         );
 
@@ -101,7 +101,7 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "staff" && decoded?.staff_id) {
         const [rows] = await connection.execute(
-            `SELECT staff_name FROM staff WHERE id = ? AND store_id = ? LIMIT 1`,
+            `SELECT full_name AS staff_name FROM users WHERE id = ? AND store_id = ? AND role = 'staff' LIMIT 1`,
             [Number(decoded.staff_id), storeId]
         );
 
@@ -114,12 +114,12 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
 
     if (role === "owner") {
         const [rows] = await connection.execute(
-            `SELECT owner_name FROM stores WHERE id = ? LIMIT 1`,
+            `SELECT id AS owner_user_id, full_name AS owner_name FROM users WHERE store_id = ? AND role = 'owner' ORDER BY id ASC LIMIT 1`,
             [storeId]
         );
 
         return {
-            id: null,
+            id: rows[0]?.owner_user_id ? Number(rows[0].owner_user_id) : null,
             name: toSafeString(rows[0]?.owner_name, 255) || "Owner",
             role: "Owner",
         };
@@ -134,22 +134,28 @@ async function getActingEmployee(connection, decoded, tokenRole, storeId) {
  * action succeed or fail together.
  */
 async function logEmployeeAction(connection, entry) {
+    // employee_actions.user_id references users.id (owners included).
+    const userId = Number(entry?.employee?.id);
+    if (!Number.isSafeInteger(userId) || userId <= 0) return;
+    const entityId = Number(entry.referenceId);
     await connection.execute(
         `INSERT INTO employee_actions
-         (store_id, branch_id, employee_id, employee_name, employee_role,
-          module, reference_number, action, reference_id, details)
+         (store_id, branch_id, user_id, user_name, user_role,
+          module, reference_number, action, entity_id, details)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             entry.storeId,
             entry.branchId ?? null,
-            entry.employee.id,
-            entry.employee.name,
+            userId,
+            String(entry.employee.name || "Unknown").slice(0, 150),
             entry.employee.role,
             entry.module,
             entry.referenceNumber ?? null,
             entry.action,
-            entry.referenceId ?? null,
-            entry.details ?? null,
+            Number.isSafeInteger(entityId) && entityId > 0 ? entityId : null,
+            entry.details === undefined || entry.details === null
+                ? null
+                : JSON.stringify(entry.details),
         ]
     );
 }
@@ -182,7 +188,8 @@ async function ensureDefaultCategories(connection, storeId) {
     const [rows] = await connection.execute(
         `SELECT category_name
          FROM categories
-         WHERE store_id = ?`,
+         WHERE store_id = ?
+           AND category_type = 'product'`,
         [parsedStoreId]
     );
 
@@ -196,7 +203,7 @@ async function ensureDefaultCategories(connection, storeId) {
 
     if (missing.length === 0) return;
 
-    const placeholders = missing.map(() => "(?, ?, ?)").join(", ");
+    const placeholders = missing.map(() => "(?, ?, ?, 'product')").join(", ");
     const params = missing.flatMap((categoryName) => [
         parsedStoreId,
         categoryName,
@@ -204,7 +211,7 @@ async function ensureDefaultCategories(connection, storeId) {
     ]);
 
     await connection.execute(
-        `INSERT INTO categories (store_id, category_name, status)
+        `INSERT INTO categories (store_id, category_name, status, category_type)
          VALUES ${placeholders}`,
         params
     );
@@ -239,9 +246,9 @@ async function canManageCategories(connection, decoded, role, storeId) {
         !Number.isInteger(branchId) || branchId <= 0) return false;
 
     const [rows] = await connection.execute(
-        `SELECT permissions FROM managers
-         WHERE id = ? AND store_id = ? AND branch_id = ? AND status = 'active'
-         LIMIT 1`,
+        `SELECT permissions FROM users
+         WHERE id = ? AND store_id = ? AND branch_id = ? AND role = 'manager' AND status = 'active'
+             LIMIT 1`,
         [managerId, storeId, branchId]
     );
     if (!rows.length) return false;
@@ -316,6 +323,7 @@ exports.handler = async (event) => {
                      updated_at AS updatedAt
                  FROM categories
                  WHERE store_id = ?
+                   AND category_type = 'product'
                  ORDER BY created_at DESC`,
                 [storeId]
             );
@@ -403,6 +411,7 @@ exports.handler = async (event) => {
                 `SELECT id
                  FROM categories
                  WHERE store_id = ?
+                   AND category_type = 'product'
                    AND LOWER(category_name) = LOWER(?)
                      LIMIT 1`,
                 [storeId, safeName]
@@ -421,9 +430,10 @@ exports.handler = async (event) => {
                 `INSERT INTO categories (
                     store_id,
                     category_name,
-                    status
+                    status,
+                    category_type
                 )
-                 VALUES (?, ?, ?)`,
+                 VALUES (?, ?, ?, 'product')`,
                 [storeId, safeName, "active"]
             );
 
@@ -488,6 +498,7 @@ exports.handler = async (event) => {
                      updated_at AS updatedAt
                  FROM categories
                  WHERE store_id = ?
+                   AND category_type = 'product'
                  ORDER BY created_at DESC`,
                 [storeId]
             );
@@ -530,6 +541,7 @@ exports.handler = async (event) => {
                 `SELECT id
                  FROM categories
                  WHERE store_id = ?
+                   AND category_type = 'product'
                    AND LOWER(category_name) = LOWER(?)
                    AND id <> ?
                      LIMIT 1`,
@@ -544,7 +556,7 @@ exports.handler = async (event) => {
             }
 
             const [beforeRows] = await connection.execute(
-                `SELECT category_name FROM categories WHERE id = ? AND store_id = ? LIMIT 1`,
+                `SELECT category_name FROM categories WHERE id = ? AND store_id = ? AND category_type = 'product' LIMIT 1`,
                 [categoryId, storeId]
             );
 
@@ -558,7 +570,8 @@ exports.handler = async (event) => {
                      category_name = ?,
                      updated_at = CURRENT_TIMESTAMP
                  WHERE id = ?
-                   AND store_id = ?`,
+                   AND store_id = ?
+                   AND category_type = 'product'`,
                 [safeName, categoryId, storeId]
             );
 
@@ -619,7 +632,7 @@ exports.handler = async (event) => {
             }
 
             const [existingRows] = await connection.execute(
-                `SELECT category_name FROM categories WHERE id = ? AND store_id = ? LIMIT 1`,
+                `SELECT category_name FROM categories WHERE id = ? AND store_id = ? AND category_type = 'product' LIMIT 1`,
                 [categoryId, storeId]
             );
 
@@ -637,10 +650,17 @@ exports.handler = async (event) => {
 
             await connection.beginTransaction();
 
+            // Products keep existing; they simply lose the deleted category.
+            await connection.execute(
+                `UPDATE products SET category_id = NULL WHERE category_id = ? AND store_id = ?`,
+                [categoryId, storeId]
+            );
+
             const [result] = await connection.execute(
                 `DELETE FROM categories
                  WHERE id = ?
-                   AND store_id = ?`,
+                   AND store_id = ?
+                   AND category_type = 'product'`,
                 [categoryId, storeId]
             );
 

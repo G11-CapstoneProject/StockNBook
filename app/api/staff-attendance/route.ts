@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import jwt from "jsonwebtoken";
-import mysql, { type Pool, type PoolConnection, type RowDataPacket } from "mysql2/promise";
+import mysql, { type Pool, type RowDataPacket } from "mysql2/promise";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +24,7 @@ function getPool(): Pool {
             port: Number(process.env.DB_PORT || process.env.MYSQL_PORT || 3306),
             user: process.env.DB_USER || process.env.MYSQL_USER || "root",
             password: process.env.DB_PASSWORD || process.env.MYSQL_PASSWORD || "BTA5EYVWLfWcebF",
-            database: process.env.DB_NAME || process.env.MYSQL_DATABASE || "stocknbook",
+            database: process.env.DB_NAME || process.env.MYSQL_DATABASE || "stocknbook_v2",
             waitForConnections: true,
             connectionLimit: 10,
             queueLimit: 100,
@@ -90,35 +90,22 @@ async function verifyStaffPrincipal(request: NextRequest): Promise<Principal> {
     const signedEmail = String(claims.email ?? claims.user_email ?? nested.email ?? "").trim().toLowerCase();
     if (!staffId && !userId && !signedEmail) throw new AttendanceAuthError(403, "Your verified login has no staff ID or email identifier. Contact the administrator.");
     const db = getPool();
-    // Prefer a staff-specific claim. If the JWT signs users.id instead, resolve
-    // staff.user_id when that column exists; NEVER trust posted staff identifiers.
+    // Staff accounts are users rows with role 'staff' (users.id is the staff ID).
     let staffRows: RowDataPacket[] = [];
     if (staffId) {
-        [staffRows] = await db.query<RowDataPacket[]>("SELECT * FROM staff WHERE id = ? LIMIT 1", [staffId]);
+        [staffRows] = await db.query<RowDataPacket[]>(
+            "SELECT *, full_name AS staff_name FROM users WHERE id = ? AND role = 'staff' LIMIT 1", [staffId]);
     }
-    if (!staffRows.length && userId) {
-        const [columns] = await db.query<RowDataPacket[]>("SHOW COLUMNS FROM staff");
-        const names = new Set(columns.map(column => String(column.Field || "")));
-        if (names.has("user_id")) {
-            [staffRows] = await db.query<RowDataPacket[]>("SELECT * FROM staff WHERE user_id = ? LIMIT 1", [userId]);
-        }
-        if (!staffRows.length && !staffId) {
-            // Original StockNBook versions sign staff.id as `id` or `sub`.
-            [staffRows] = await db.query<RowDataPacket[]>("SELECT * FROM staff WHERE id = ? LIMIT 1", [userId]);
-        }
+    if (!staffRows.length && userId && !staffId) {
+        [staffRows] = await db.query<RowDataPacket[]>(
+            "SELECT *, full_name AS staff_name FROM users WHERE id = ? AND role = 'staff' LIMIT 1", [userId]);
     }
-    if (!staffRows.length) {
-        if (signedEmail && signedEmail.length <= 254) {
-            const [columns] = await db.query<RowDataPacket[]>("SHOW COLUMNS FROM staff");
-            const fields = new Set(columns.map(col => String(col.Field || "")));
-            if (fields.has("email")) {
-                // Only a SIGNED email claim is used; the JWT's store/branch must
-                // still match the selected staff row and its database assignment.
-                [staffRows] = await db.query<RowDataPacket[]>(
-                    "SELECT * FROM staff WHERE LOWER(email) = ? LIMIT 2", [signedEmail]);
-                if (staffRows.length !== 1) staffRows = [];
-            }
-        }
+    if (!staffRows.length && signedEmail && signedEmail.length <= 254) {
+        // Only a SIGNED email claim is used; the JWT's store/branch must
+        // still match the selected staff row and its database assignment.
+        [staffRows] = await db.query<RowDataPacket[]>(
+            "SELECT *, full_name AS staff_name FROM users WHERE LOWER(email) = ? AND role = 'staff' LIMIT 2", [signedEmail]);
+        if (staffRows.length !== 1) staffRows = [];
     }
     if (!staffRows.length) throw new AttendanceAuthError(403, "Your verified login does not match a staff record. Check the JWT staff ID/email and staff table assignment.");
     const member = staffRows[0] as Record<string, unknown>;
@@ -174,23 +161,8 @@ function readDay(value: string | null): string | null {
     const date = new Date(`${value}T00:00:00Z`);
     return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value ? value : null;
 }
-const PH_NOW = "CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')";
-const PH_TODAY = `DATE(${PH_NOW})`;
 
 // Do not cache private employee data.
-// Employee IDs live in managers/staff.employee_code (added automatically by the
-// app). Until that column exists, Employee ID is shown as empty.
-let employeeCodeCheck: Promise<boolean> | null = null;
-function hasEmployeeCodes(db: Pool): Promise<boolean> {
-    employeeCodeCheck ||= Promise.all(["managers", "staff"].map(table => db.query<RowDataPacket[]>(
-        `SELECT 1 AS x FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`, [table, "employee_code"])))
-        .then(results => results.every(([rows]) => rows.length > 0))
-        .catch(() => false)
-        .then(ready => { if (!ready) employeeCodeCheck = null; return ready; });
-    return employeeCodeCheck;
-}
-
 export async function GET(request: NextRequest) {
     try {
         const principal = await verifyStaffPrincipal(request);
@@ -202,68 +174,9 @@ export async function GET(request: NextRequest) {
         const startDate = readDay(url.get("startDate")) || `${datePart("year")}-01-01`;
         const endDate = readDay(url.get("endDate")) || localDay;
         if (startDate > endDate) return invalid("Start date must be before end date.");
-        const db = getPool();
-        // Employee ID shown on the staff member's own attendance exports: the permanent
-        // STORE-BRANCH-EMP-XXXX from the staff record (falls back to the internal ID).
-        const employeeNumber = (await hasEmployeeCodes(db))
-            ? "COALESCE((SELECT st.employee_code FROM staff st WHERE st.id = employee_id LIMIT 1), CAST(employee_id AS CHAR))"
-            : "CAST(employee_id AS CHAR)";
-        const [attendanceRows] = await db.query<RowDataPacket[]>(`
-            SELECT CONCAT('A-',id) AS id, store_name AS storeName, branch_name AS branchName,
-                   employee_name AS employeeName, ${employeeNumber} AS employeeNumber,
-                   DATE_FORMAT(attendance_date, '%Y-%m-%d') AS date,
-                DATE_FORMAT(time_in, '%Y-%m-%dT%H:%i:%s') AS timeIn,
-                DATE_FORMAT(time_out, '%Y-%m-%dT%H:%i:%s') AS timeOut,
-                CASE WHEN time_in IS NOT NULL AND time_out IS NOT NULL
-                    THEN ROUND(TIMESTAMPDIFF(MINUTE, time_in, time_out) / 60, 2) ELSE NULL END AS hoursWorked,
-                CASE WHEN attendance_status = 'Present' AND time_out IS NULL THEN 'On Duty'
-                    WHEN attendance_status = 'Present' THEN 'Completed'
-                    ELSE attendance_status END AS status,
-                '' AS reason, '' AS leaveType, '' AS approvalStatus
-            FROM stocknbook_staff_attendance
-            WHERE employee_id = ? AND employee_role = 'staff' AND attendance_date BETWEEN ? AND ?
-        `, [principal.employeeId, startDate, endDate]);
-        // The staff leave tab shows every application, including future dates.
-        // Existing PDF exports (export=1) continue to use the chosen report period.
-        const filterLeaveForExport = url.get("export") === "1";
-        const leavePeriodSql = filterLeaveForExport
-            ? " AND leave_date <= ? AND COALESCE(leave_end_date, leave_date) >= ?"
-            : "";
-        const leaveParams = filterLeaveForExport
-            ? [principal.employeeId, principal.storeId, principal.branchId, endDate, startDate]
-            : [principal.employeeId, principal.storeId, principal.branchId];
-        const [leaveRows] = await db.query<RowDataPacket[]>(`
-            SELECT CONCAT('L-',id) AS id, store_name AS storeName, branch_name AS branchName,
-                   employee_name AS employeeName, ${employeeNumber} AS employeeNumber,
-                   DATE_FORMAT(leave_date, '%Y-%m-%d') AS date,
-                DATE_FORMAT(COALESCE(leave_end_date, leave_date), '%Y-%m-%d') AS endDate,
-                NULL AS timeIn, NULL AS timeOut, NULL AS hoursWorked,
-                'Leave' AS status, reason, leave_type AS leaveType,
-                approval_status AS approvalStatus,
-                DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS requestCreatedAt,
-                decision_reason AS decisionReason,
-                DATE_FORMAT(reviewed_at, '%Y-%m-%d %H:%i:%s') AS reviewedAt
-            FROM stocknbook_staff_leave_requests
-            WHERE employee_id = ? AND employee_role = 'staff'
-              AND store_id = ? AND branch_id = ? ${leavePeriodSql}
-            ORDER BY created_at DESC, leave_date ASC
-        `, leaveParams);
-        const records = [...attendanceRows, ...leaveRows].sort((a, b) =>
-            String(b.date).localeCompare(String(a.date)) || String(b.id).localeCompare(String(a.id)));
-        // Always load today's clock state, even when a user filters an older date.
-        const [todayRows] = await db.query<RowDataPacket[]>(`
-            SELECT CONCAT('A-', id) AS id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS date,
-                   DATE_FORMAT(time_in, '%Y-%m-%dT%H:%i:%s') AS timeIn,
-                   DATE_FORMAT(time_out, '%Y-%m-%dT%H:%i:%s') AS timeOut,
-                   CASE WHEN time_in IS NOT NULL AND time_out IS NOT NULL
-                     THEN ROUND(TIMESTAMPDIFF(MINUTE, time_in, time_out) / 60, 2)
-                     ELSE NULL END AS hoursWorked,
-                   attendance_status AS status
-            FROM stocknbook_staff_attendance
-            WHERE employee_id = ? AND employee_role = 'staff' AND attendance_date = ${PH_TODAY}
-            LIMIT 1
-        `, [principal.employeeId]);
-        return NextResponse.json({ success: true, records, todayRecord: todayRows[0] || null },
+        void principal;
+        // Employee attendance and leave are not part of stocknbook_v2.
+        return NextResponse.json({ success: true, records: [], todayRecord: null },
             { headers: { "Cache-Control": "private, no-store" } });
     } catch (error) {
         const authenticationProblem = responseForAuthError(error);
@@ -276,126 +189,19 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-    let connection: PoolConnection | null = null;
     try {
-        const principal = await verifyStaffPrincipal(request);
+        await verifyStaffPrincipal(request);
         const payload = await request.json().catch(() => null) as Record<string, unknown> | null;
         if (!payload) return invalid("Invalid request body.");
         const action = String(payload.action || "");
         if (!["time_in", "time_out", "request_leave"].includes(action)) return invalid("Unsupported attendance action.");
-        connection = await getPool().getConnection();
-        await connection.beginTransaction();
-        if (action === "time_in") {
-            // Staff clock-in #1 for the day. Uniqueness prevents a second time-in.
-            const [existing] = await connection.query<RowDataPacket[]>(`
-                SELECT id FROM stocknbook_staff_attendance
-                WHERE employee_id = ? AND employee_role = 'staff' AND attendance_date = ${PH_TODAY} LIMIT 1 FOR UPDATE
-            `, [principal.employeeId]);
-            if (existing.length) { await connection.rollback(); return invalid("Today's attendance is already recorded."); }
-            const [approvedLeave] = await connection.query<RowDataPacket[]>(`
-                SELECT id FROM stocknbook_staff_leave_requests
-                WHERE employee_id = ? AND employee_role = 'staff'
-                  AND leave_date <= ${PH_TODAY} AND COALESCE(leave_end_date, leave_date) >= ${PH_TODAY}
-                  AND approval_status = 'Approved' LIMIT 1
-            `, [principal.employeeId]);
-            if (approvedLeave.length) { await connection.rollback(); return invalid("You have approved leave today. Contact your manager for corrections."); }
-            await connection.execute(`
-                INSERT INTO stocknbook_staff_attendance
-                (store_id, branch_id, employee_id, employee_role, store_name, branch_name,
-                 employee_name, employee_number, attendance_date, time_in, attendance_status)
-                VALUES (?, ?, ?, 'staff', ?, ?, ?, ?, ${PH_TODAY}, ${PH_NOW}, 'Present')
-            `, [principal.storeId, principal.branchId, principal.employeeId, principal.storeName,
-                principal.branchName, principal.employeeName, principal.employeeNumber]);
-        } else if (action === "time_out") {
-            // Staff clock-out #2 for the day. Locking prevents repeated time-outs.
-            const [rows] = await connection.query<RowDataPacket[]>(`
-                SELECT id, time_in, time_out, attendance_status FROM stocknbook_staff_attendance
-                WHERE employee_id = ? AND employee_role = 'staff' AND attendance_date = ${PH_TODAY} LIMIT 1 FOR UPDATE
-            `, [principal.employeeId]);
-            if (!rows.length || !rows[0].time_in || rows[0].time_out || rows[0].attendance_status !== "Present") {
-                await connection.rollback(); return invalid("You must have an active time-in to time out.");
-            }
-            await connection.execute(`UPDATE stocknbook_staff_attendance SET time_out = ${PH_NOW}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [rows[0].id]);
-        } else {
-            // One leave application is stored as one row with start/end dates.
-            // The manager reviews the whole date range in a single decision.
-            const startDate = readDay(typeof payload.start_date === "string" ? payload.start_date :
-                typeof payload.leave_date === "string" ? payload.leave_date : null);
-            const endDate = readDay(typeof payload.end_date === "string" ? payload.end_date :
-                typeof payload.leave_date === "string" ? payload.leave_date : null);
-            const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
-            const kind = String(payload.leave_type || "Personal");
-            if (!startDate || !endDate || startDate > endDate ||
-                reason.length < 3 || reason.length > 1000 ||
-                !["Personal", "Sick", "Emergency", "Vacation", "Other"].includes(kind)) {
-                await connection.rollback();
-                return invalid("Enter a valid single date or date range, leave type, and reason (3–1000 characters).");
-            }
-            const countDays = Math.round((Date.parse(`${endDate}T00:00:00Z`) -
-                Date.parse(`${startDate}T00:00:00Z`)) / 86_400_000) + 1;
-            if (countDays > 90) {
-                await connection.rollback(); return invalid("A leave request can cover up to 90 calendar days.");
-            }
-            const [dateCheck] = await connection.query<RowDataPacket[]>(
-                `SELECT DATE_FORMAT(${PH_TODAY}, '%Y-%m-%d') AS today`);
-            if (startDate < String(dateCheck[0].today).slice(0, 10)) {
-                await connection.rollback(); return invalid("Leave dates cannot be in the past.");
-            }
-            const [attendance] = await connection.query<RowDataPacket[]>(`
-                SELECT DATE_FORMAT(attendance_date, '%Y-%m-%d') AS date
-                FROM stocknbook_staff_attendance
-                WHERE employee_id = ? AND employee_role = 'staff' AND attendance_date BETWEEN ? AND ?
-                    LIMIT 1 FOR UPDATE
-            `, [principal.employeeId, startDate, endDate]);
-            if (attendance.length) {
-                await connection.rollback();
-                return NextResponse.json({ success: false,
-                        error: `Recorded attendance exists on ${attendance[0].date}; choose another leave period.` },
-                    { status: 409 });
-            }
-            // Serialize requests by this staff member so concurrent submissions cannot overlap.
-            const [lockedStaff] = await connection.query<RowDataPacket[]>(
-                "SELECT id FROM staff WHERE id = ? AND store_id = ? AND branch_id = ? FOR UPDATE",
-                [principal.employeeId, principal.storeId, principal.branchId],
-            );
-            if (!lockedStaff.length) {
-                await connection.rollback();
-                return invalid("Your staff assignment could not be confirmed.");
-            }
-            const [existingLeave] = await connection.query<RowDataPacket[]>(`
-                SELECT DATE_FORMAT(leave_date, '%Y-%m-%d') AS date
-                FROM stocknbook_staff_leave_requests
-                WHERE employee_id = ? AND employee_role = 'staff'
-                  AND leave_date <= ? AND COALESCE(leave_end_date, leave_date) >= ?
-                    LIMIT 1 FOR UPDATE
-            `, [principal.employeeId, endDate, startDate]);
-            if (existingLeave.length) {
-                await connection.rollback();
-                return NextResponse.json({ success: false,
-                        error: `A leave request already exists on ${existingLeave[0].date}.` },
-                    { status: 409 });
-            }
-            // Exactly one INSERT regardless of how many calendar days are requested.
-            await connection.execute(`
-                INSERT INTO stocknbook_staff_leave_requests
-                (store_id, branch_id, employee_id, employee_role, store_name, branch_name,
-                 employee_name, employee_number, leave_date, leave_end_date,
-                 leave_type, reason, approval_status)
-                VALUES (?, ?, ?, 'staff', ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')
-            `, [principal.storeId, principal.branchId, principal.employeeId, principal.storeName,
-                principal.branchName, principal.employeeName, principal.employeeNumber,
-                startDate, endDate, kind, reason]);
-        }
-        await connection.commit();
-        return NextResponse.json({ success: true, message: "Attendance action saved." }, { headers: { "Cache-Control": "no-store" } });
-    } catch (error: unknown) {
-        if (connection) await connection.rollback().catch(() => undefined);
+        // Employee attendance (time in / time out) and leave requests are not part of stocknbook_v2.
+        return NextResponse.json({ success: false, error: "Employee attendance and leave requests are no longer available." },
+            { status: 410, headers: { "Cache-Control": "no-store" } });
+    } catch (error) {
         const authenticationProblem = responseForAuthError(error);
         if (authenticationProblem) return authenticationProblem;
-        const databaseProblem = responseForDatabaseError(error);
-        if (databaseProblem) return databaseProblem;
-        const duplicate = Boolean(error && typeof error === "object" && "code" in error && error.code === "ER_DUP_ENTRY");
-        if (!duplicate) console.error("Attendance POST failed", error);
-        return NextResponse.json({ success: false, error: duplicate ? "An attendance or leave record already exists for this date." : "Unable to save attendance. Please try again." }, { status: duplicate ? 409 : 500 });
-    } finally { connection?.release(); }
+        console.error("Attendance POST failed", error);
+        return NextResponse.json({ success: false, error: "Unable to save attendance. Please try again." }, { status: 500 });
+    }
 }

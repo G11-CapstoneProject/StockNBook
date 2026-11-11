@@ -422,10 +422,10 @@ const dbPool = mysql.createPool({
 // ===== BEGIN StockNBook v2 rentals & bookings (identical in lambda-rental-inventory and lambda-bookings) =====
 /*
  * stocknbook_v2 rental model
- *  - equipment + its default equipment_variants row (is_default = 1) hold the
- *    item, daily rate and average cost. A rental item belongs to the branch
- *    holding the branch_inventory row of that default variant.
- *  - branch_inventory (equipment_variant_id):
+ *  - equipment holds the item, its daily rate and average cost (rental items
+ *    have no variants). A rental item belongs to the branch holding its
+ *    branch_inventory row.
+ *  - branch_inventory (equipment_id):
  *      on_hand_quantity     = total units owned by the branch
  *      reserved_quantity    = units currently out with customers (rented out)
  *      unavailable_quantity = units on hold (maintenance, inspection, cleaning)
@@ -456,19 +456,18 @@ const V2_MISSING_UNITS_SQL = (bi) => `COALESCE((SELECT SUM(mi.quantity - mi.quan
 const V2_RENTAL_EQUIPMENT = `(SELECT
         e.id, e.store_id, ebi.branch_id, e.category_id, e.equipment_number,
         e.equipment_name AS name, LOWER(TRIM(e.equipment_name)) AS name_key,
-        ebi.reorder_level AS alert_level, ev.rental_rate_per_day,
+        ebi.reorder_level AS alert_level, e.rental_rate_per_day,
         'manual' AS pricing_method, NULL AS pricing_recovery_days, NULL AS pricing_residual_value,
         NULL AS pricing_operating_cost_per_day, NULL AS pricing_margin_percent, NULL AS pricing_unit_cost_basis,
         ebi.on_hand_quantity AS total_units,
         ebi.reserved_quantity AS rented_out_units,
         ebi.unavailable_quantity - ${V2_MISSING_UNITS_SQL("ebi")} AS maintenance_units,
         ${V2_MISSING_UNITS_SQL("ebi")} AS missing_units,
-        ev.cost_price AS average_unit_cost, NULL AS last_supplier,
+        e.cost_price AS average_unit_cost,
         e.deleted_at AS archived_at, e.created_at, e.updated_at,
-        ev.id AS equipment_variant_id, ebi.id AS inventory_id
+        ebi.id AS inventory_id
     FROM equipment e
-             JOIN equipment_variants ev ON ev.equipment_id = e.id AND ev.is_default = 1
-             JOIN branch_inventory ebi ON ebi.equipment_variant_id = ev.id)`;
+             JOIN branch_inventory ebi ON ebi.equipment_id = e.id)`;
 
 // Rental categories (store-wide categories with category_type 'equipment').
 const V2_RENTAL_CATEGORIES = `(SELECT
@@ -480,7 +479,7 @@ const V2_RENTAL_CATEGORIES = `(SELECT
 // Equipment lines of bookings in the legacy allocation + staff workflow shape.
 const V2_RENTAL_ALLOCATIONS = `(SELECT
         bki.id, bki.id AS allocation_id, bki.store_id, rb.branch_id, rb.id AS booking_id, rb.booking_reference,
-        ev.equipment_id, bki.equipment_variant_id, bki.quantity,
+        bki.equipment_id, bki.quantity,
         COALESCE(rb.rental_start_date, rb.event_date) AS start_date,
         COALESCE(rb.rental_end_date, rb.event_end_date, rb.rental_start_date, rb.event_date) AS end_date,
         CASE
@@ -505,58 +504,56 @@ const V2_RENTAL_ALLOCATIONS = `(SELECT
         (SELECT di.id FROM stock_issues di
           WHERE di.booking_id = rb.id AND di.issue_type = 'maintenance'
             AND di.branch_inventory_id = (SELECT dbi.id FROM branch_inventory dbi
-                                          WHERE dbi.equipment_variant_id = bki.equipment_variant_id
+                                          WHERE dbi.equipment_id = bki.equipment_id
                                             AND dbi.branch_id = rb.branch_id LIMIT 1)
             AND di.reason LIKE 'Rental damage %'
           ORDER BY di.id DESC LIMIT 1) AS maintenance_record_id,
         bki.created_at, bki.updated_at
     FROM booking_items bki
              JOIN bookings rb ON rb.id = bki.booking_id AND rb.store_id = bki.store_id
-             JOIN equipment_variants ev ON ev.id = bki.equipment_variant_id
     WHERE ${V2_RENTAL_LINE_SQL})`;
 
 // Maintenance / inspection holds.
 const V2_MAINTENANCE_RECORDS = `(SELECT
-        si.id, si.store_id, si.branch_id, mev.equipment_id,
+        si.id, si.store_id, si.branch_id, mbi.equipment_id,
         si.quantity AS quantity_started, si.quantity - si.quantity_resolved AS quantity_remaining,
         si.reason AS start_reason, si.status AS condition_status,
         si.estimated_completion_date, si.created_at AS opened_at,
         mb.booking_reference, si.booking_id,
         si.approved_at AS repair_approved_at, si.approved_by AS repair_approved_by,
-        si.resolution_notes AS completion_notes, si.resolved_at AS completed_at
+        si.resolution_notes AS completion_notes, si.resolved_at AS completed_at,
+        COALESCE(mru.full_name, '') AS reported_by
     FROM stock_issues si
              JOIN branch_inventory mbi ON mbi.id = si.branch_inventory_id
-             JOIN equipment_variants mev ON mev.id = mbi.equipment_variant_id
              LEFT JOIN bookings mb ON mb.id = si.booking_id
+             LEFT JOIN users mru ON mru.id = si.reported_by
     WHERE si.issue_type = 'maintenance')`;
 
 // Missing-unit reports.
 const V2_MISSING_REPORTS = `(SELECT
-        si.id, si.store_id, si.branch_id, mev.equipment_id, si.quantity, si.quantity_resolved AS recovered,
+        si.id, si.store_id, si.branch_id, mbi.equipment_id, si.quantity, si.quantity_resolved AS recovered,
         si.reason, COALESCE(ru.full_name, '') AS reported_by, mb.booking_reference, si.booking_id,
         si.status, si.resolved_by, si.resolved_at, si.resolution_notes, si.created_at
     FROM stock_issues si
              JOIN branch_inventory mbi ON mbi.id = si.branch_inventory_id
-             JOIN equipment_variants mev ON mev.id = mbi.equipment_variant_id
              LEFT JOIN bookings mb ON mb.id = si.booking_id
              LEFT JOIN users ru ON ru.id = si.reported_by
     WHERE si.issue_type = 'missing')`;
 
 // Staff repair completion requests awaiting Manager approval.
 const V2_COMPLETION_REQUESTS = `(SELECT
-        si.id, si.store_id, si.branch_id, mev.equipment_id,
+        si.id, si.store_id, si.branch_id, mbi.equipment_id,
         CAST(SUBSTRING_INDEX(SUBSTRING(si.reason, 5), ':', 1) AS UNSIGNED) AS maintenance_record_id,
         si.quantity, SUBSTRING(si.reason, LOCATE(': ', si.reason) + 2) AS notes,
         si.status, si.reported_by AS requested_by, si.resolved_by AS reviewed_by,
         si.resolved_at AS reviewed_at, si.created_at
     FROM stock_issues si
              JOIN branch_inventory mbi ON mbi.id = si.branch_inventory_id
-             JOIN equipment_variants mev ON mev.id = mbi.equipment_variant_id
     WHERE si.issue_type = 'repair_completion')`;
 
 // Rental activity (inventory_movements of equipment stock rows).
 const V2_RENTAL_MOVEMENTS = `(SELECT
-        mm.id, mm.store_id, mm.branch_id, rev.equipment_id, mm.movement_type AS type,
+        mm.id, mm.store_id, mm.branch_id, rbi.equipment_id, mm.movement_type AS type,
         ABS(mm.quantity_change) AS quantity,
         CASE WHEN mm.reason LIKE 'Ref %: %'
                  THEN SUBSTRING_INDEX(SUBSTRING(mm.reason, 5), ': ', 1)
@@ -567,7 +564,6 @@ const V2_RENTAL_MOVEMENTS = `(SELECT
         COALESCE(mu.full_name, 'System') AS actor_name, mm.created_at AS occurred_at
     FROM inventory_movements mm
              JOIN branch_inventory rbi ON rbi.id = mm.branch_inventory_id
-             JOIN equipment_variants rev ON rev.id = rbi.equipment_variant_id
              LEFT JOIN users mu ON mu.id = mm.performed_by)`;
 
 // Booking bill payments (security deposits and damage/loss charge payments are separate).
@@ -629,7 +625,7 @@ const V2_BOOKING_CLAIMS = `(SELECT
         cl.id, cl.booking_id, cl.store_id, cb.branch_id,
         SUBSTRING_INDEX(cl.variant_name_snapshot, '#', 1) AS source_type,
         CAST(SUBSTRING_INDEX(cl.variant_name_snapshot, '#', -1) AS UNSIGNED) AS source_record_id,
-        cev.equipment_id, cl.quantity, cl.notes AS reason,
+        cl.equipment_id, cl.quantity, cl.notes AS reason,
         cl.line_total AS approved_amount,
         COALESCE((SELECT SUM(cp.amount) FROM payments cp
                   WHERE cp.booking_id = cl.booking_id AND cp.status <> 'voided'
@@ -640,7 +636,6 @@ const V2_BOOKING_CLAIMS = `(SELECT
         cl.inspected_by AS approved_by, cl.created_at, cl.updated_at
     FROM booking_items cl
              JOIN bookings cb ON cb.id = cl.booking_id AND cb.store_id = cl.store_id
-             JOIN equipment_variants cev ON cev.id = cl.equipment_variant_id
     WHERE cl.item_type = 'rental' AND cl.item_status LIKE 'claim%')`;
 
 // Applies a change to the rental stock buckets of one equipment branch row.
@@ -659,8 +654,7 @@ async function v2AdjustEquipmentStock(db, inventoryId, {total = 0, rentedOut = 0
 async function v2EquipmentInventoryId(db, storeId, branchId, equipmentId) {
     const [rows] = await db.execute(
         `SELECT ebi.id FROM branch_inventory ebi
-                                JOIN equipment_variants ev ON ev.id = ebi.equipment_variant_id AND ev.is_default = 1
-         WHERE ev.equipment_id = ? AND ebi.store_id = ? AND ebi.branch_id = ? LIMIT 1`,
+         WHERE ebi.equipment_id = ? AND ebi.store_id = ? AND ebi.branch_id = ? LIMIT 1`,
         [equipmentId, storeId, branchId]
     );
     return rows.length ? Number(rows[0].id) : null;
@@ -759,22 +753,14 @@ function isoDate(v, label, optional = false) {
 function todayPh() { return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
 const intMoney = n => n / 100;
 function purchaseData(input) {
-    if (!input || typeof input !== "object" || Array.isArray(input)) fail(400, "Purchase details are required.");
-    const supplier = requiredText(input.supplier, 150, "Supplier");
-    const purchaseDate = isoDate(input.purchaseDate, "Purchase date");
-    if (purchaseDate > todayPh()) fail(400, "Purchase date cannot be in the future.");
+    if (!input || typeof input !== "object" || Array.isArray(input)) fail(400, "Received stock details are required.");
     const quantity = whole(input.quantity, "Quantity", true);
-    const unitCents = cents(input.unitCost, "Unit cost");
-    const totalCents = quantity * unitCents;
+    // Restock only adds quantity; without a unit cost the current average cost is kept.
+    const unitCostGiven = input.unitCost !== undefined && input.unitCost !== null && String(input.unitCost).trim() !== "";
+    const unitCents = unitCostGiven ? cents(input.unitCost, "Unit cost") : null;
+    const totalCents = quantity * (unitCents ?? 0);
     if (!Number.isSafeInteger(totalCents) || totalCents > 99999999999999) fail(400, "Purchase total is too large.");
-    const paymentMethod = String(input.paymentMethod ?? "").toLowerCase();
-    if (!["cash", "credit"].includes(paymentMethod)) fail(400, "Payment method must be cash or credit.");
-    const paidCents = paymentMethod === "cash" ? totalCents : cents(input.amountPaid ?? 0, "Amount paid");
-    if (paidCents > totalCents) fail(400, "Amount paid cannot exceed the purchase total.");
-    const due = paymentMethod === "credit" ? isoDate(input.paymentDueDate, "Payment due date", true) : null;
-    if (paidCents < totalCents && (!due || due < purchaseDate)) fail(400, "Unpaid credit requires a due date on or after the purchase date.");
-    return { supplier, purchaseDate, quantity, unitCents, totalCents, paidCents, paymentMethod, due,
-        invoice: trim(input.supplierInvoiceNumber, 80) || null };
+    return { quantity, unitCents, totalCents };
 }
 // Suggested rental pricing is a cost-recovery estimate, not an automatic age discount.
 // Always verify it on the server; never rely on a browser-calculated price.
@@ -845,10 +831,9 @@ async function lockBranch(db, scope) {
     if (!rows.length) fail(403, "Branch not assigned to this store.");
 }
 async function lockEquipment(db, scope, equipmentId) {
-    // Lock the equipment, its default variant and its branch stock row.
+    // Lock the equipment and its branch stock row.
     const [locked] = await db.execute(`SELECT e.id FROM equipment e
-                                                            JOIN equipment_variants ev ON ev.equipment_id=e.id AND ev.is_default=1
-                                                            JOIN branch_inventory ebi ON ebi.equipment_variant_id=ev.id
+                                                            JOIN branch_inventory ebi ON ebi.equipment_id = e.id
                                        WHERE e.id=? AND e.store_id=? AND ebi.branch_id=? AND e.deleted_at IS NULL FOR UPDATE`,
         [equipmentId, scope.storeId, scope.branchId]);
     if (!locked.length) fail(404, "Active rental equipment not found in this branch.");
@@ -872,10 +857,10 @@ async function postRentalPurchaseReceipt(db, scope, equipmentRow, purchaseId, pu
     if (!Number.isSafeInteger(next) || next > 2147483647)
         fail(409, "Rental stock exceeds the equipment quantity limit.");
     const previousCostCents = Math.round(Number(equipmentRow.average_unit_cost || 0) * 100);
-    const averageCostCents = Math.round((existing * previousCostCents + quantity * unitCents) / next);
+    const averageCostCents = Math.round((existing * previousCostCents + quantity * (unitCents ?? previousCostCents)) / next);
     await v2AdjustEquipmentStock(db, equipmentRow.inventory_id, {total: quantity});
-    await db.execute("UPDATE equipment_variants SET cost_price=? WHERE id=?",
-        [intMoney(averageCostCents), equipmentRow.equipment_variant_id]);
+    await db.execute("UPDATE equipment SET cost_price=? WHERE id=?",
+        [intMoney(averageCostCents), equipmentRow.id]);
     await appendMovement(db, scope, equipmentRow.id, "received", quantity, referenceNumber,
         "Rental stock received");
     const [movement] = await db.execute("SELECT MAX(id) AS id FROM inventory_movements WHERE branch_inventory_id=?",
@@ -886,16 +871,14 @@ async function postRentalPurchaseReceipt(db, scope, equipmentRow, purchaseId, pu
 
 async function receivePurchase(db, scope, equipmentRow, data, source) {
     // Parent equipment row MUST already be locked to protect the moving average.
-    // Supplier purchases are not stored in stocknbook_v2; the delivery is still
-    // validated and received into stock.
+    // The delivery is validated and received into stock.
     const purchase = purchaseData(data);
     void source;
     const prefix = await branchCodes(db, scope);
     const purchaseNumber = `${prefix}-RPUR-${String(scope.requestKey || Date.now()).replace(/[^A-Za-z0-9-]/g, "").slice(-12)}`;
     const receivingNumber = await postRentalPurchaseReceipt(db, scope, equipmentRow, null, null,
         purchase.quantity, purchase.unitCents, purchaseNumber);
-    return {purchaseId: null, purchaseNumber, receivingNumber, amountPaid: intMoney(purchase.paidCents),
-        outstandingBalance: intMoney(purchase.totalCents - purchase.paidCents), awaitingReceipt: false};
+    return {purchaseNumber, receivingNumber, awaitingReceipt: false};
 }
 async function createEquipment(db,scope,raw,source, importedUnitCost = null) {
     const e = equipmentInput(raw, raw.initialPurchase?.unitCost ?? importedUnitCost);
@@ -909,36 +892,29 @@ async function createEquipment(db,scope,raw,source, importedUnitCost = null) {
     // sequence it shares with sales products.
     const equipmentNumber = await identifiers.allocateProductNumber(db,{storeId:scope.storeId,branchId:scope.branchId});
     const [created] = await db.execute(`INSERT INTO equipment
-                                        (store_id,category_id,equipment_number,equipment_name,has_variants,status)
-                                        VALUES(?,?,?,?,0,'active')`,
-        [scope.storeId,cid,equipmentNumber,e.name]);
+                                        (store_id,category_id,equipment_number,equipment_name,rental_rate_per_day,cost_price,status)
+                                        VALUES(?,?,?,?,?,0,'active')`,
+        [scope.storeId,cid,equipmentNumber,e.name,e.pricing.rate]);
     const equipmentId = Number(created.insertId);
-    const [variant] = await db.execute(`INSERT INTO equipment_variants
-                                        (store_id,equipment_id,variant_number,variant_name,is_default,rental_rate_per_day,cost_price,status)
-                                        VALUES(?,?,?,?,1,?,0,'active')`,
-        [scope.storeId,equipmentId,equipmentNumber,e.name.slice(0,150),e.pricing.rate]);
     await db.execute(`INSERT INTO branch_inventory
-                      (store_id,branch_id,equipment_variant_id,on_hand_quantity,reorder_level,status)
+                      (store_id,branch_id,equipment_id,on_hand_quantity,reorder_level,status)
                       VALUES(?,?,?,0,?,'active')`,
-        [scope.storeId,scope.branchId,Number(variant.insertId),e.alertLevel]);
+        [scope.storeId,scope.branchId,equipmentId,e.alertLevel]);
     let purchase = null;
     if (raw.initialPurchase != null) {
         const row = await lockEquipment(db, scope,equipmentId);
         purchase = await receivePurchase(db, scope,row,raw.initialPurchase,source);
     }
-    return { equipmentId,equipmentNumber,purchase,referenceNumber:purchase?.purchaseNumber || equipmentNumber };
+    return { equipmentId,equipmentNumber,purchase,referenceNumber:equipmentNumber };
 }
 async function mutate(db,scope,body) {
     switch(body.action) {
         case "create_equipment": return createEquipment(db,scope,body,"add");
         case "import_equipment": {
-            // One Excel workbook = one supplier delivery. Individual equipment are
+            // One Excel workbook = one delivery. Individual equipment are
             // separate receipt lines.
-            if (body.importMode !== "single_purchase") fail(400, "Use the single-purchase rental import format.");
             if (!Array.isArray(body.rows) || !body.rows.length || body.rows.length > 500)
                 fail(400, "Import requires 1–500 equipment rows.");
-            const p = body.purchase;
-            if (!p || typeof p !== "object" || Array.isArray(p)) fail(400, "Supplier purchase details are required.");
             const normalizedRows = [];
             const uniqueNames = new Set();
             let totalCents = 0;
@@ -954,23 +930,9 @@ async function mutate(db,scope,body) {
                 const lineCents = quantity * unitCents;
                 totalCents += lineCents;
                 if (!Number.isSafeInteger(totalCents) || totalCents > 99999999999999)
-                    fail(400, "Combined supplier purchase total is too large.");
+                    fail(400, "Combined purchase total is too large.");
                 normalizedRows.push({ name, category, quantity, unitCents, pricing });
             }
-            requiredText(p.supplier, 150, "Supplier");
-            const purchaseDate = isoDate(p.purchaseDate, "Purchase date");
-            if (purchaseDate > todayPh()) fail(400, "Purchase date cannot be in the future.");
-            const paymentMethod = String(p.paymentMethod || "").toLowerCase();
-            if (!["cash", "credit"].includes(paymentMethod)) fail(400, "Payment method must be cash or credit.");
-            const requestedPaidCents = cents(p.amountPaid ?? 0, "Amount paid");
-            const paidCents = paymentMethod === "cash" ? totalCents : requestedPaidCents;
-            if (paymentMethod === "cash" && requestedPaidCents !== 0 && requestedPaidCents !== totalCents)
-                fail(400, "Cash purchase must be paid in full.");
-            if (paidCents > totalCents) fail(400, "Amount paid cannot exceed the purchase total.");
-            const due = paymentMethod === "credit" ? isoDate(p.paymentDueDate, "Payment due date", true) : null;
-            if (due && due < purchaseDate) fail(400, "Payment due date cannot precede purchase date.");
-            if (paidCents < totalCents && !due) fail(400, "Outstanding credit requires a payment due date.");
-
             const createdRows = [];
             for (const line of normalizedRows) {
                 const newEquipment = await createEquipment(db, scope, {
@@ -987,7 +949,6 @@ async function mutate(db,scope,body) {
                 createdRows.push({ ...line, equipmentId: newEquipment.equipmentId,
                     equipmentNumber: newEquipment.equipmentNumber });
             }
-            // Supplier purchases are not stored in stocknbook_v2.
             const prefix = await branchCodes(db, scope);
             const purchaseNumber = `${prefix}-RPUR-${String(scope.requestKey || Date.now()).replace(/[^A-Za-z0-9-]/g, "").slice(-12)}`;
             for (const line of createdRows) {
@@ -998,8 +959,7 @@ async function mutate(db,scope,body) {
             }
             return { imported: createdRows.length, equipment: createdRows.map(line=>({
                     equipmentId:line.equipmentId,equipmentNumber:line.equipmentNumber,name:line.name
-                })), purchaseId:null,purchaseNumber,purchaseTotal:intMoney(totalCents),
-                amountPaid:intMoney(paidCents),outstandingBalance:intMoney(totalCents-paidCents),
+                })), purchaseNumber,purchaseTotal:intMoney(totalCents),
                 referenceNumber:purchaseNumber };
         }
         case "update_equipment": {
@@ -1019,12 +979,11 @@ async function mutate(db,scope,body) {
             if (sameName.length) fail(409, "A rental record with that name, number, or request key already exists.");
             const cat = await categoryId(db,scope,category);
             await db.execute(`UPDATE equipment e
-                                  JOIN equipment_variants ev ON ev.equipment_id=e.id AND ev.is_default=1
                                   JOIN branch_inventory ebi ON ebi.id=?
-                                  SET e.equipment_name=?,e.category_id=?,ev.variant_name=?,ev.rental_rate_per_day=?,
+                                  SET e.equipment_name=?,e.category_id=?,e.rental_rate_per_day=?,
                                       ebi.reorder_level=?
                               WHERE e.id=? AND e.store_id=?`,
-                [current.inventory_id,name,cat,name.slice(0,150),pricing.rate,alert,current.id,scope.storeId]);
+                [current.inventory_id,name,cat,pricing.rate,alert,current.id,scope.storeId]);
             return { equipmentId:current.id,referenceNumber:current.equipment_number };
         }
         case "correct_equipment_stock": {
@@ -1035,15 +994,15 @@ async function mutate(db,scope,body) {
             const reason=requiredText(body.reason,500,"Stock correction reason");
             if(reason.length<10)fail(400,"Explain the stock count correction in at least 10 characters.");
             if(body.physicalCountVerified!==true)
-                fail(400,"Confirm that the corrected quantity was physically counted. Use Restock for supplier purchases.");
+                fail(400,"Confirm that the corrected quantity was physically counted. Use Restock for newly received units.");
             const before=Number(current.total_units);
             if(target===before)fail(400,"The corrected total must differ from the current total.");
             // Lock commitments under the equipment row (same order as Booking
             // confirmation), then calculate peak overlapping reservations.
             await db.execute(`SELECT bki.id FROM booking_items bki
-                              WHERE bki.store_id=? AND bki.equipment_variant_id=? AND bki.item_type='rental'
+                              WHERE bki.store_id=? AND bki.equipment_id=? AND bki.item_type='rental'
                                 AND bki.item_status IN ('reserved','released') FOR UPDATE`,
-                [scope.storeId,current.equipment_variant_id]);
+                [scope.storeId,current.id]);
             const [reservations]=await db.execute(`SELECT a.quantity,a.status,
                                                           DATE_FORMAT(a.start_date,'%Y-%m-%d') AS startDate,
                                                           DATE_FORMAT(a.end_date,'%Y-%m-%d') AS endDate
@@ -1067,7 +1026,7 @@ async function mutate(db,scope,body) {
         case "receive_equipment": {
             const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
             const purchase=await receivePurchase(db,scope,current,body,"receive");
-            return {equipmentId:current.id,...purchase,referenceNumber:purchase.purchaseNumber};
+            return {equipmentId:current.id,...purchase,referenceNumber:current.equipment_number};
         }
         case "start_maintenance": {
             const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
@@ -1234,11 +1193,6 @@ async function mutate(db,scope,body) {
             await db.execute("DELETE FROM categories WHERE id=? AND store_id=? AND category_type='equipment'",[found[0].id,scope.storeId]);
             return {referenceNumber:""};
         }
-        case "pay_rental_supplier_purchase": {
-            // Supplier purchases and payments are not part of stocknbook_v2.
-            fail(410,"Supplier payments are no longer recorded in StockNBook.");
-            return {};
-        }
         default: fail(400,"Unsupported rental inventory action.");
     }
 }
@@ -1265,7 +1219,7 @@ async function getInventory(db,scope) {
                                                c.name AS category,e.total_units AS totalUnits,e.rented_out_units AS rentedOutUnits,
                                                e.maintenance_units AS maintenanceUnits,e.missing_units AS missingUnits,e.alert_level AS alertLevel,
                                                IF(e.archived_at IS NULL,1,0) AS active,e.rental_rate_per_day AS rentalRatePerDay,
-                                               e.average_unit_cost AS averageUnitCost,e.last_supplier AS lastSupplier,
+                                               e.average_unit_cost AS averageUnitCost,
                                                e.pricing_method AS pricingMethod,
                                                e.pricing_recovery_days AS pricingRecoveryDays,
                                                e.pricing_residual_value AS pricingResidualValue,
@@ -1277,7 +1231,7 @@ async function getInventory(db,scope) {
     const [activity]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,
                                               COALESCE(e.name,'Archived equipment') AS equipmentName,m.type,m.quantity,
                                               DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
-                                              COALESCE(m.reference_number,'') AS referenceNumber,m.description AS description
+                                              COALESCE(e.equipment_number,'') AS referenceNumber,m.description AS description
                                        FROM ${V2_RENTAL_MOVEMENTS} m LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
                                        WHERE m.store_id=? AND m.branch_id=? ORDER BY m.occurred_at DESC,m.id DESC LIMIT 100`,
         [scope.storeId,scope.branchId]);
@@ -1287,7 +1241,7 @@ async function getInventory(db,scope) {
                                                         m.type,m.quantity,
                                                         DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
                                                         COALESCE(m.reference_number,'') AS referenceNumber,
-                                                        m.actor_name AS actorName,m.description AS notes,
+                                                        m.actor_name AS actorName,m.description AS notes,mr.condition_status AS conditionStatus,
                                                         COALESCE(mr.booking_reference,miss.booking_reference) AS bookingReference
                                                  FROM ${V2_RENTAL_MOVEMENTS} m
                                                           LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id
@@ -1311,10 +1265,11 @@ async function getInventory(db,scope) {
                                                         COALESCE(a.returned_received_units,a.quantity) AS units,
                                                         COALESCE(a.inspection_damaged_units,0) AS observedDamageUnits,
                                                         a.inspection_notes AS notes,
-                                                        DATE_FORMAT(COALESCE(a.returned_at,a.updated_at),'%Y-%m-%d') AS reportedAt
+                                                        DATE_FORMAT(COALESCE(a.returned_at,a.updated_at),'%Y-%m-%d') AS reportedAt,COALESCE(ru.full_name,'') AS receivedBy
                                                  FROM ${V2_RENTAL_ALLOCATIONS} a
                                                           JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=a.equipment_id
                                                      AND e.store_id=a.store_id AND e.branch_id=a.branch_id
+                                                          LEFT JOIN users ru ON ru.id=a.returned_by
                                                  WHERE a.store_id=? AND a.branch_id=? AND a.status='returned'
                                                    AND COALESCE(a.returned_received_units,a.quantity)>0
                                                    AND (a.inspected_at IS NULL OR a.inspection_status='pending')
@@ -1325,7 +1280,7 @@ async function getInventory(db,scope) {
                                                         m.equipment_id AS equipmentId,
                                                         COALESCE(e.name,'Archived equipment') AS equipmentName,
                                                         m.quantity_started AS quantityStarted,m.quantity_remaining AS units,
-                                                        m.start_reason AS reason,
+                                                        m.start_reason AS reason,m.reported_by AS reportedBy,
                                                         DATE_FORMAT(m.opened_at,'%Y-%m-%d') AS dateReported,
                                                         DATE_FORMAT(m.estimated_completion_date,'%Y-%m-%d') AS estimatedCompletion,
                                                         m.condition_status AS status,m.booking_reference AS bookingReference,
@@ -1396,14 +1351,6 @@ async function getInventory(db,scope) {
         missingReports:missingReports.map(r=>({...r,id:Number(r.id),equipmentId:Number(r.equipmentId),
             quantity:Number(r.quantity),remainingUnits:Number(r.remainingUnits)})),
         categories:categories.map(c=>c.name) };
-}
-async function getPayables() {
-    return {success:true,payables:[]};
-}
-async function getPurchaseItems(db,scope,body) {
-    id(body.purchaseId,"Purchase ID");
-    fail(404,"Purchase not found.");
-    return {};
 }
 function addCalendarDay(date) { const d=new Date(`${date}T00:00:00Z`); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); }
 function computePeak(rows, from, to, today) {
@@ -1575,7 +1522,7 @@ async function staffRentalWorkspace(db, scope) {
                                             ORDER BY a.end_date ASC,a.start_date ASC,a.id ASC LIMIT 300`,[scope.storeId,scope.branchId]);
     const [activity] = await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,COALESCE(e.name,'Archived equipment') AS equipmentName,
                                                 m.type,m.quantity,DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
-                                                COALESCE(m.reference_number,'') AS referenceNumber
+                                                COALESCE(e.equipment_number,'') AS referenceNumber
                                          FROM ${V2_RENTAL_MOVEMENTS} m LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
                                          WHERE m.store_id=? AND m.branch_id=? ORDER BY m.occurred_at DESC,m.id DESC LIMIT 30`,[scope.storeId,scope.branchId]);
     // Staff receiving tasks are not part of stocknbook_v2.
@@ -2238,7 +2185,7 @@ function rentalInventoryPermission(permissions, role) {
 // Completed write responses by request key (see the handler).
 const RENTAL_REQUEST_CACHE = new Map();
 
-const READ_ACTIONS = new Set(["get_manager_inventory","check_availability","get_rental_supplier_payables","get_rental_purchase_items","get_owner_supplier_payables"]);
+const READ_ACTIONS = new Set(["get_manager_inventory","check_availability"]);
 const STAFF_READ_ACTIONS = new Set(["get_staff_rental_workspace","get_staff_equipment_schedule","get_staff_equipment_calendar"]);
 const STAFF_WRITE_ACTIONS = new Set(["prepare_rental_allocation","release_rental_allocation",
     "return_rental_allocation","inspect_rental_allocation","clean_rental_allocation",
@@ -2248,7 +2195,7 @@ const STAFF_WRITE_ACTIONS = new Set(["prepare_rental_allocation","release_rental
 const WRITE_ACTIONS = new Set(["create_equipment","import_equipment","update_equipment","correct_equipment_stock","receive_equipment",
     "approve_maintenance_repair","approve_repair_completion","resolve_missing_equipment","archive_equipment",
     "create_rental_category","rename_rental_category",
-    "delete_rental_category","pay_rental_supplier_purchase"]);
+    "delete_rental_category"]);
 
 exports.handler = async (event) => {
     if((event?.requestContext?.http?.method||event?.httpMethod)==="OPTIONS")return reply(204,{});
@@ -2271,19 +2218,12 @@ exports.handler = async (event) => {
         if(!body||typeof body!=="object"||Array.isArray(body))fail(400,"Invalid request body.");
         const action=String(body.action||"");
         if(!READ_ACTIONS.has(action)&&!WRITE_ACTIONS.has(action)&&!STAFF_READ_ACTIONS.has(action)&&!STAFF_WRITE_ACTIONS.has(action))fail(400,"Unknown rental inventory action.");
-        if(role==="staff"&&!STAFF_READ_ACTIONS.has(action)&&!STAFF_WRITE_ACTIONS.has(action))fail(403,"Staff cannot access rental catalog, supplier, or purchasing operations.");
+        if(role==="staff"&&!STAFF_READ_ACTIONS.has(action)&&!STAFF_WRITE_ACTIONS.has(action))fail(403,"Staff cannot access rental catalog operations.");
         if(role!=="staff"&&(STAFF_READ_ACTIONS.has(action)||STAFF_WRITE_ACTIONS.has(action)))
             fail(403,"Only Staff can perform daily rental operations.");
         // Owners retain financial oversight. Catalog changes and physical repair approvals belong to managers.
-        if(role==="owner" && !READ_ACTIONS.has(action) && !["pay_rental_supplier_purchase"].includes(action))
+        if(role==="owner" && !READ_ACTIONS.has(action))
             fail(403,"Owner cannot perform branch equipment operations.");
-        // Owner-wide rental supplier balances (read-only; no branch selection required).
-        // Separate from the regular Sales Inventory supplier ledger.
-        if(action==="get_owner_supplier_payables") {
-            if(role!=="owner")fail(403,"Only the Owner may view all branch rental supplier balances.");
-            // Supplier purchases and payables are not part of stocknbook_v2.
-            return reply(200,{success:true,payables:[]});
-        }
         // Resolve the manager's assigned branch from the verified manager record,
         // not from the browser's branch_id. Owner must select a store-owned branch.
         let branchId = role==="owner" ? id(body.branch_id||body.branchId,"Branch ID") : null;
@@ -2301,7 +2241,7 @@ exports.handler = async (event) => {
             if(Number(session.branch_id)!==branchId)fail(403,"Branch assignment changed. Please sign in again.");
             const access=rentalInventoryPermission(managers[0].permissions,"manager");
             if(access==="none")fail(403,"Inventory access is not assigned to this Manager.");
-            if(WRITE_ACTIONS.has(action) && access!=="full")fail(403,"Full Inventory access is required to change equipment or supplier records.");
+            if(WRITE_ACTIONS.has(action) && access!=="full")fail(403,"Full Inventory access is required to change equipment records.");
             actor=trim(managers[0].managerName,150)||actor;
             actorId=managerId;
         }
@@ -2337,8 +2277,6 @@ exports.handler = async (event) => {
         if(action==="get_staff_equipment_calendar")return reply(200,await staffEquipmentCalendar(db,scope,body));
         if(action==="get_manager_inventory")return reply(200,await getInventory(db,scope));
         if(action==="check_availability")return reply(200,await checkAvailability(db,scope,body));
-        if(action==="get_rental_supplier_payables")return reply(200,await getPayables(db,scope));
-        if(action==="get_rental_purchase_items")return reply(200,await getPurchaseItems(db,scope,body));
         const requestKey=requiredText(body.requestKey,90,"Request key");
         scope.requestKey=requestKey;
         if(!(await identifiers.ensureIdentifierSchema(db)))

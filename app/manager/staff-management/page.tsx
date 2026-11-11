@@ -20,7 +20,7 @@ import {
     UserPlus,
     UsersRound,
     UserX,
-    Bell, CalendarDays, Download, ArrowUpRight,
+    Download, ArrowUpRight,
     X,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -147,16 +147,10 @@ export default function ManagerStaffManagementPage() {
     const [pageLoading, setPageLoading] = useState(true);
 
     const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
-    const [employeeRequests, setEmployeeRequests] = useState<SMLeaveRow[]>([]);
-    const [requestError, setRequestError] = useState("");
-    const [requestLoading, setRequestLoading] = useState(false);
-    const [requestStatusFilter, setRequestStatusFilter] = useState("all");
-    const [requestTypeFilter, setRequestTypeFilter] = useState("all");
-    const [reviewingRequest, setReviewingRequest] = useState<SMLeaveGroup | null>(null);
-    const [activeTeamDetail, setActiveTeamDetail] = useState<"attendance" | "requests" | "invites" | null>(null);
+    const [activeTeamDetail, setActiveTeamDetail] = useState<"invites" | null>(null);
     const teamDetailTriggerRef = useRef<HTMLButtonElement | null>(null);
     const teamDetailCloseRef = useRef<HTMLButtonElement | null>(null);
-    const openTeamDetail = (detail: "attendance" | "requests" | "invites", trigger: HTMLButtonElement) => {
+    const openTeamDetail = (detail: "invites", trigger: HTMLButtonElement) => {
         teamDetailTriggerRef.current = trigger;
         setActiveTeamDetail(detail);
     };
@@ -172,17 +166,6 @@ export default function ManagerStaffManagementPage() {
         return () => { document.body.style.overflow = originalOverflow; };
     }, [activeTeamDetail]);
 
-    const [requestDecisionNote, setRequestDecisionNote] = useState("");
-    const [requestDecisionError, setRequestDecisionError] = useState("");
-    const [savingDecision, setSavingDecision] = useState(false);
-    const [canApproveRequests, setCanApproveRequests] = useState(false);
-    // Staff attendance recorded from staff dashboards, returned by the same
-    // manager-staff-overview request (branch-scoped on the server).
-    const [teamAttendance, setTeamAttendance] = useState<SMAttendanceRow[]>([]);
-    const [attendanceSummary, setAttendanceSummary] = useState<SMAttendanceSummary | null>(null);
-    const [attendancePeriod, setAttendancePeriod] = useState("today");
-    const [attendanceStatusFilter, setAttendanceStatusFilter] = useState("all");
-    const [attendanceError, setAttendanceError] = useState("");
     const [staffList, setStaffList] = useState<StaffMember[]>([]);
     const [staffSearch, setStaffSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState<StaffStatusFilter>("all");
@@ -306,52 +289,6 @@ export default function ManagerStaffManagementPage() {
         }
     }, [router]);
 
-    const loadEmployeeRequests = useCallback(async () => {
-        const token = getToken();
-        if (!token) return;
-        setRequestLoading(true);
-        try {
-            const res = await fetch("/api/manager-staff-overview", {
-                headers: { Authorization: `Bearer ${token}` }, cache: "no-store",
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok || data.success !== true) throw new Error(data.error || "Unable to load employee requests.");
-            setEmployeeRequests(Array.isArray(data.leaves) ? data.leaves : []);
-            setTeamAttendance(Array.isArray(data.teamAttendance) ? data.teamAttendance : []);
-            setAttendanceSummary(data.attendanceSummary && typeof data.attendanceSummary === "object"
-                ? data.attendanceSummary as SMAttendanceSummary : null);
-            setCanApproveRequests(data.mayReviewLeave === true);
-            setRequestError("");
-            setAttendanceError("");
-        } catch (error) {
-            setRequestError(error instanceof Error ? error.message : "Employee requests unavailable.");
-            setAttendanceError(error instanceof Error ? error.message : "Staff attendance unavailable.");
-        } finally { setRequestLoading(false); }
-    }, []);
-
-    const leaveApplications = useMemo(() => smGroupLeaves(employeeRequests), [employeeRequests]);
-    const pendingApplications = leaveApplications.filter(request => request.status === "Pending").length;
-    const types = useMemo(() => [...new Set(leaveApplications.map(request => request.leaveType))].sort(), [leaveApplications]);
-    const filteredApplications = leaveApplications.filter(request =>
-        (requestStatusFilter === "all" || request.status.toLowerCase() === requestStatusFilter) &&
-        (requestTypeFilter === "all" || request.leaveType === requestTypeFilter));
-
-    const submitReview = async (decision: "Approved" | "Rejected") => {
-        if (!reviewingRequest || savingDecision) return;
-        setSavingDecision(true); setRequestDecisionError("");
-        try {
-            const res = await fetch("/api/manager-staff-overview", {
-                method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
-                body: JSON.stringify({ action: "review_leave", decision,
-                    requestIds: reviewingRequest.ids, decisionReason: requestDecisionNote.trim() }),
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok || data.success !== true) throw new Error(data.error || "Unable to review request.");
-            setReviewingRequest(null); setRequestDecisionNote("");
-            await loadEmployeeRequests();
-        } catch (error) { setRequestDecisionError(error instanceof Error ? error.message : "Review failed."); }
-        finally { setSavingDecision(false); }
-    };
     const exportStaffListAsPdf = () => {
         void import("@/components/dashboard/_shared")
             .then(module => module.exportTableAsPdf({
@@ -375,64 +312,6 @@ export default function ManagerStaffManagementPage() {
             }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
                 branch: branchName, dateRange: "Pending invitations" }, "manager_staff_invites"))
             .catch(() => setStaffStatusToast({ kind: "error", title: "Export unavailable", message: "Could not export pending staff invitations." }));
-    };
-
-    const exportRequestsAsPdf = () => {
-        void import("@/components/dashboard/_shared")
-            .then(module => module.exportTableAsPdf({
-                title: "Employee Leave Requests",
-                headers: ["Employee", "Employee ID", "Leave Type", "Date Range", "Status", "Reason"],
-                rows: filteredApplications.map(request => [request.employeeName, request.employeeNumber,
-                    request.leaveType, smDatesLabel(request), request.status, request.reason]),
-            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook", branch: branchName,
-                dateRange: "All requests" }, "manager_employee_requests"))
-            .catch(() => setRequestError("PDF export could not be completed."));
-    };
-
-    // Same presentation rule as the Manager Dashboard Team Attendance panel: show only
-    // recorded attendance plus approved leave days. Never invent absence or clock records.
-    const attendanceToday = currentDateTime ? smManilaDay(currentDateTime) : "";
-    const staffAttendanceRows = useMemo(() => {
-        const rows: SMAttendanceRow[] = [...teamAttendance];
-        if (!attendanceToday) return rows;
-        const recorded = new Set(rows.map(row => `${row.employeeId}:${row.date}`));
-        const earliest = smShiftDay(attendanceToday, -90);
-        for (const leave of employeeRequests) {
-            if (leave.approvalStatus !== "Approved") continue;
-            const start = leave.leaveDate;
-            const end = leave.leaveEndDate && leave.leaveEndDate >= start ? leave.leaveEndDate : start;
-            if (end < earliest || start > attendanceToday) continue;
-            let day = start < earliest ? earliest : start;
-            const last = end > attendanceToday ? attendanceToday : end;
-            for (let index = 0; day <= last && index < 91; index++) {
-                const key = `${leave.employeeId}:${day}`;
-                if (!recorded.has(key)) {
-                    rows.push({ id: -(leave.id * 100 + index + 1), employeeId: leave.employeeId,
-                        employeeCode: leave.employeeNumber || null,
-                        employeeName: leave.employeeName, date: day, timeIn: null, timeOut: null,
-                        hoursWorked: null, status: "On Leave" });
-                    recorded.add(key);
-                }
-                day = smAddDay(day);
-            }
-        }
-        return rows.sort((a, b) => b.date.localeCompare(a.date) || a.employeeName.localeCompare(b.employeeName));
-    }, [teamAttendance, employeeRequests, attendanceToday]);
-    const visibleStaffAttendance = staffAttendanceRows.filter(row =>
-        smInPeriod(row.date, attendancePeriod, attendanceToday) &&
-        (attendanceStatusFilter === "all" || row.status === attendanceStatusFilter));
-    const attendancePeriodLabel = { today: "Today", month: "This Month", previous: "Last Month", all: "Last 90 Days" }[attendancePeriod] || "Today";
-    const exportStaffAttendanceAsPdf = () => {
-        void import("@/components/dashboard/_shared")
-            .then(module => module.exportTableAsPdf({
-                title: "Staff Attendance",
-                headers: ["Employee ID", "Staff Name", "Date", "Time In", "Time Out", "Hours Worked", "Status"],
-                rows: visibleStaffAttendance.map(row => [row.employeeCode || "—", row.employeeName,
-                    smFormatDate(row.date), smClockTime(row.timeIn), smClockTime(row.timeOut),
-                    smHours(row.hoursWorked), row.status]),
-            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook", branch: branchName,
-                dateRange: attendancePeriodLabel }, "manager_staff_attendance"))
-            .catch(() => setAttendanceError("PDF export could not be completed."));
     };
 
     useEffect(() => {
@@ -460,9 +339,8 @@ export default function ManagerStaffManagementPage() {
 
         setBranchName(sessionStorage.getItem("branch_name") || "Assigned branch");
         loadStaff();
-        void loadEmployeeRequests();
         void loadPlanAccess();
-    }, [router, loadStaff, loadPlanAccess, loadEmployeeRequests]);
+    }, [router, loadStaff, loadPlanAccess]);
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -818,7 +696,7 @@ export default function ManagerStaffManagementPage() {
 
                                 <button
                                     type="button"
-                                    onClick={() => { void loadStaff(); void loadEmployeeRequests(); }}
+                                    onClick={() => { void loadStaff(); }}
                                     disabled={pageLoading}
                                     aria-label="Refresh staff"
                                     className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
@@ -1148,19 +1026,7 @@ export default function ManagerStaffManagementPage() {
                         </section>
 
                         {/* Compact navigation preserves the detailed records in their original tables. */}
-                        <section aria-label="Team records" className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-                            <button type="button" onClick={(event) => openTeamDetail("attendance", event.currentTarget)}
-                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
-                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Staff Attendance</span><span className="block text-xs text-[#7A6A84]">Daily time records and attendance status</span></span></span>
-                                <span className="text-xs font-semibold text-[#5F4E75]">{`Present ${attendanceSummary?.present ?? 0} · Not recorded ${attendanceSummary?.notRecorded ?? 0}`}</span>
-                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Attendance <ArrowUpRight size={15}/></span>
-                            </button>
-                            <button type="button" onClick={(event) => openTeamDetail("requests", event.currentTarget)}
-                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
-                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Employee Requests</span><span className="block text-xs text-[#7A6A84]">Review staff leave and absence requests</span></span></span>
-                                <span className="text-xs font-semibold text-[#A56607]">{pendingApplications} pending</span>
-                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Requests <ArrowUpRight size={15}/></span>
-                            </button>
+                        <section aria-label="Team records" className="grid grid-cols-1 gap-3">
                             <button type="button" onClick={(event) => openTeamDetail("invites", event.currentTarget)}
                                     className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
                                 <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Pending Invites</span><span className="block text-xs text-[#7A6A84]">Staff awaiting account activation</span></span></span>
@@ -1171,74 +1037,16 @@ export default function ManagerStaffManagementPage() {
 
                         {activeTeamDetail && (
                             <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-3 backdrop-blur-[2px] sm:p-5"
-                                 onMouseDown={(event) => { if (event.target === event.currentTarget && !reviewingRequest && !savingDecision) closeTeamDetail(); }}
-                                 onKeyDown={(event) => { if (event.key === "Escape" && !reviewingRequest && !savingDecision) { event.stopPropagation(); closeTeamDetail(); } }}>
+                                 onMouseDown={(event) => { if (event.target === event.currentTarget) closeTeamDetail(); }}
+                                 onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeTeamDetail(); } }}>
                                 <div role="dialog" aria-modal="true" aria-labelledby="staff-team-detail-title"
                                      className="flex max-h-[90vh] w-full max-w-[1120px] flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-[#FFFDF8] shadow-2xl">
                                     <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#E6DDF0] bg-white px-5 py-4">
-                                        <h2 id="staff-team-detail-title" className="text-[18px] font-bold text-[#1A1220]">{activeTeamDetail === "attendance" ? "Staff Attendance" : activeTeamDetail === "requests" ? "Employee Requests" : "Pending Invites"}</h2>
+                                        <h2 id="staff-team-detail-title" className="text-[18px] font-bold text-[#1A1220]">Pending Invites</h2>
                                         <button ref={teamDetailCloseRef} type="button" aria-label="Close details" onClick={closeTeamDetail}
                                                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] hover:bg-[#F7F1FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#6D35D4]"><X size={19}/></button>
                                     </div>
                                     <div className="min-h-0 overflow-y-auto p-3 sm:p-5">
-                                        {activeTeamDetail === "attendance" && (
-                                            <section id="staff-attendance" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                                    <div className="flex items-center gap-3"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span>
-                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Staff Attendance</h2><p className="text-xs text-[#7A6A84]">Time In and Time Out recorded by staff of {branchName} from their dashboards.</p></div>
-                                                    </div>
-                                                    <div className="flex flex-wrap items-center gap-2">
-                                                        <select aria-label="Filter staff attendance by period" value={attendancePeriod} onChange={e => setAttendancePeriod(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]"><option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Last 90 Days</option></select>
-                                                        <select aria-label="Filter staff attendance by status" value={attendanceStatusFilter} onChange={e => setAttendanceStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]"><option value="all">All Statuses</option><option value="On Duty">On Duty</option><option value="Completed">Completed</option><option value="On Leave">On Leave</option><option value="Absent">Absent</option></select>
-                                                        <button type="button" onClick={exportStaffAttendanceAsPdf} title="Export staff attendance to PDF" aria-label="Export staff attendance to PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
-                                                    </div>
-                                                </div>
-                                                {attendanceSummary && <div className="flex flex-wrap items-center gap-2 border-b border-[#EEE7F2] bg-[#FFFCF7] px-5 py-2.5 text-xs">
-                                                    <span className="mr-1 font-semibold text-[#5F4E75]">Today · {attendanceSummary.total} {attendanceSummary.total === 1 ? "staff member" : "staff members"}</span>
-                                                    <SMAttendanceCount label="Present" value={attendanceSummary.present} tone="green"/>
-                                                    <SMAttendanceCount label="On Leave" value={attendanceSummary.onLeave} tone="gold"/>
-                                                    <SMAttendanceCount label="Absent" value={attendanceSummary.absent} tone="red"/>
-                                                    <SMAttendanceCount label="Not Recorded" value={attendanceSummary.notRecorded} tone="gray"/>
-                                                </div>}
-                                                {attendanceError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{attendanceError}</p>}
-                                                <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]"><thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee ID", "Staff Name", "Date", "Time In", "Time Out", "Hours Worked", "Status"].map(label => <th className="px-2.5 py-2.5 text-center" key={label}>{label}</th>)}</tr></thead>
-                                                    <tbody>{visibleStaffAttendance.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={`${row.employeeId}-${row.id}-${row.date}`}>
-                                                        <td className="whitespace-nowrap px-2.5 py-2.5 font-semibold text-[#4E2C66]">{row.employeeCode || "—"}</td>
-                                                        <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{row.employeeName}</td>
-                                                        <td className="whitespace-nowrap px-2.5 py-2.5">{smFormatDate(row.date)}</td>
-                                                        <td className="whitespace-nowrap px-2.5 py-2.5">{smClockTime(row.timeIn)}</td>
-                                                        <td className="whitespace-nowrap px-2.5 py-2.5">{smClockTime(row.timeOut)}</td>
-                                                        <td className="whitespace-nowrap px-2.5 py-2.5">{smHours(row.hoursWorked)}</td>
-                                                        <td className="px-2.5 py-2.5"><SMAttendanceBadge status={row.status}/></td>
-                                                    </tr>)}{visibleStaffAttendance.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-[#8A7D92]">{requestLoading && teamAttendance.length === 0 ? "Loading staff attendance..." : attendanceStatusFilter !== "all" ? "No attendance records match the selected status." : attendancePeriod === "today" ? "No staff attendance recorded today yet. Time In records from staff dashboards will appear here." : "No staff attendance or approved leave for this period."}</td></tr>}</tbody>
-                                                </table></div>
-                                                <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {visibleStaffAttendance.length} {visibleStaffAttendance.length === 1 ? "record" : "records"} · Hours are shown after Time Out</div>
-                                            </section>
-                                        )}
-                                        {activeTeamDetail === "requests" && (
-                                            <section id="employee-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                                    <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span>
-                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Employee Requests</h2><p className="text-xs text-[#7A6A84]">Review staff leave and absence requests for {branchName}.</p></div>
-                                                        <span className="rounded-full bg-[#FFF3D8] px-2.5 py-1 text-[10px] font-bold text-[#A56607]">{pendingApplications} pending</span>
-                                                    </div>
-                                                    <div className="flex flex-wrap items-center gap-2">
-                                                        <select aria-label="Filter leave requests by status" value={requestStatusFilter} onChange={e => setRequestStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] px-2 text-xs text-[#2B174C]"><option value="all">All Statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
-                                                        <select aria-label="Filter leave requests by type" value={requestTypeFilter} onChange={e => setRequestTypeFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] px-2 text-xs text-[#2B174C]"><option value="all">All Leave Types</option>{types.map(type => <option key={type} value={type}>{type}</option>)}</select>
-                                                        <button type="button" onClick={exportRequestsAsPdf} title="Export employee requests to PDF" aria-label="Export employee requests to PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
-                                                    </div>
-                                                </div>
-                                                {requestError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestError}</p>}
-                                                <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]"><thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee", "Employee ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-2.5 py-2.5 text-center" key={label}>{label}</th>)}</tr></thead>
-                                                    <tbody>{filteredApplications.map(request => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={request.key}>
-                                                        <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{request.employeeName}</td><td className="px-2.5 py-2.5">{request.employeeNumber}</td><td className="px-2.5 py-2.5">{request.leaveType}</td><td className="px-2.5 py-2.5">{smDatesLabel(request)}</td>
-                                                        <td className="px-2.5 py-2.5"><span className={`text-[11px] font-semibold ${request.status === "Approved" ? "text-green-700" : request.status === "Rejected" ? "text-red-700" : "text-amber-700"}`}>{request.status}</span></td>
-                                                        <td className="px-2.5 py-2.5"><button type="button" onClick={() => { setReviewingRequest(request); setRequestDecisionNote(""); setRequestDecisionError(""); }} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF]">Review</button></td>
-                                                    </tr>)}{filteredApplications.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-[#8A7D92]">{requestLoading ? "Loading employee requests..." : "No matching leave requests."}</td></tr>}</tbody>
-                                                </table></div>
-                                                <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {filteredApplications.length} of {leaveApplications.length} requests</div>
-                                            </section>
-                                        )}
                                         {activeTeamDetail === "invites" && (
                                             <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
                                                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
@@ -1390,7 +1198,7 @@ export default function ManagerStaffManagementPage() {
                                 </p>
                                 <div className="rounded-xl border border-[#E9E1EE] bg-[#FBF8FE] px-4 py-3 text-xs leading-6">
                                     {staffStatusTarget.status === "Accepted"
-                                        ? "The employee will not be able to sign in again while inactive. Their name, email, account, attendance, and other existing records remain in the database. You can reactivate access later."
+                                        ? "The employee will not be able to sign in again while inactive. Their name, email, account, and other existing records remain in the database. You can reactivate access later."
                                         : "The employee can use their existing account again, subject to your store's available staff slots and current permissions. No new invitation is required."}
                                 </div>
                             </div>
@@ -1421,23 +1229,6 @@ export default function ManagerStaffManagementPage() {
                                 className="rounded-lg p-1 text-[#806A8C] hover:bg-[#F7F1FF]"><X size={16} /></button>
                     </div>
                 )}
-
-                {reviewingRequest && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !savingDecision) setReviewingRequest(null); }}>
-                    <div role="dialog" aria-modal="true" aria-labelledby="staff-leave-review-title" className="flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white shadow-2xl">
-                        <div className="flex items-start justify-between border-b border-[#E6DDF0] p-5"><div><h2 id="staff-leave-review-title" className="text-lg font-bold text-[#1A1220]">Review Employee Request</h2><p className="text-xs text-[#7A6A84]">Review the reason and dates before deciding.</p></div><button type="button" disabled={savingDecision} onClick={() => setReviewingRequest(null)} className="text-[#7A6A84]" aria-label="Close review"><X size={20}/></button></div>
-                        <div className="space-y-4 overflow-y-auto p-5 text-sm">
-                            <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#FBF8FE] p-4"><div><span className="text-xs text-[#7A6A84]">Employee</span><p className="font-semibold">{reviewingRequest.employeeName}</p></div><div><span className="text-xs text-[#7A6A84]">Employee ID</span><p className="font-semibold">{reviewingRequest.employeeNumber}</p></div><div><span className="text-xs text-[#7A6A84]">Leave Type</span><p className="font-semibold">{reviewingRequest.leaveType}</p></div><div><span className="text-xs text-[#7A6A84]">Status</span><p className="font-semibold">{reviewingRequest.status}</p></div><div className="col-span-2"><span className="text-xs text-[#7A6A84]">Date / Range</span><p className="font-semibold">{smDatesLabel(reviewingRequest)}</p></div></div>
-                            <div><h3 className="text-xs font-bold text-[#5F4E75]">Employee's Reason</h3><p className="mt-1 whitespace-pre-wrap rounded-xl border border-[#E6DDF0] p-3">{reviewingRequest.reason}</p></div>
-                            {reviewingRequest.status !== "Pending" && reviewingRequest.decisionReason && <div><h3 className="text-xs font-bold">Decision Reason</h3><p className="mt-1 rounded-xl bg-[#FBF8FE] p-3">{reviewingRequest.decisionReason}</p></div>}
-                            {reviewingRequest.status === "Pending" && <div><label htmlFor="staff-decision-note" className="mb-1 block text-xs font-bold text-[#5F4E75]">Decision Note (required when disapproving)</label><textarea id="staff-decision-note" value={requestDecisionNote} onChange={e => setRequestDecisionNote(e.target.value)} rows={3} maxLength={500} className="w-full rounded-xl border border-[#E6DDF0] p-3 outline-none focus:border-[#8058BA]" placeholder="Explain the decision"/></div>}
-                            {requestDecisionError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestDecisionError}</p>}
-                            {!canApproveRequests && <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">Staff Management approval permission is required.</p>}
-                        </div>
-                        <div className="flex justify-end gap-2 border-t border-[#E6DDF0] p-4"><button type="button" onClick={() => setReviewingRequest(null)} disabled={savingDecision} className="rounded-xl border px-4 py-2 text-xs font-semibold">Close</button>
-                            {reviewingRequest.status === "Pending" && canApproveRequests && <><button type="button" disabled={savingDecision || requestDecisionNote.trim().length < 3} onClick={() => void submitReview("Rejected")} className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-red-700 disabled:opacity-50">Disapprove</button><button type="button" disabled={savingDecision} onClick={() => void submitReview("Approved")} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">{savingDecision ? "Saving..." : "Approve"}</button></>}
-                        </div>
-                    </div>
-                </div>}
 
                 {showAddDialog && (
                     <div
@@ -2034,90 +1825,4 @@ function getInitials(name: string) {
 
     const parts = cleaned.split(/\s+/).slice(0, 2);
     return parts.map((part) => part.charAt(0).toUpperCase()).join("");
-}
-
-// One leave request can span one day or a date range. Legacy daily rows from
-// one submission are grouped only when all identifying fields match.
-type SMLeaveRow = { id: number; employeeId: number; employeeName: string; employeeNumber: string;
-    leaveDate: string; leaveEndDate?: string; leaveType: string; reason: string; approvalStatus: string;
-    decisionReason: string | null; createdAt: string };
-type SMLeaveGroup = { key: string; ids: number[]; employeeName: string; employeeNumber: string;
-    leaveType: string; reason: string; status: string; decisionReason: string | null;
-    createdAt: string; start: string; end: string };
-function smAddDay(value: string) {
-    const date = new Date(value + "T00:00:00Z"); date.setUTCDate(date.getUTCDate()+1);
-    return date.toISOString().slice(0, 10);
-}
-function smGroupLeaves(rows: SMLeaveRow[]): SMLeaveGroup[] {
-    const result: SMLeaveGroup[] = [];
-    for (const row of [...rows].sort((a,b) => a.employeeId-b.employeeId || a.createdAt.localeCompare(b.createdAt) || a.leaveDate.localeCompare(b.leaveDate))) {
-        const end = row.leaveEndDate && row.leaveEndDate >= row.leaveDate ? row.leaveEndDate : row.leaveDate;
-        const last = result[result.length - 1];
-        if (last && last.employeeNumber === String(row.employeeNumber) && last.createdAt === row.createdAt &&
-            last.leaveType === row.leaveType && last.reason === row.reason && last.status === row.approvalStatus &&
-            smAddDay(last.end) === row.leaveDate) {
-            last.ids.push(row.id); last.end = end;
-        } else result.push({ key: String(row.id), ids: [row.id], employeeName: row.employeeName,
-            employeeNumber: String(row.employeeNumber), leaveType: row.leaveType, reason: row.reason,
-            status: row.approvalStatus, decisionReason: row.decisionReason, createdAt: row.createdAt,
-            start: row.leaveDate, end });
-    }
-    return result.sort((a,b) => Number(b.status === "Pending") - Number(a.status === "Pending") || b.createdAt.localeCompare(a.createdAt));
-}
-function smFormatDate(date: string) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
-    return new Date(date + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
-}
-function smDatesLabel(req: SMLeaveGroup) {
-    return req.start === req.end ? smFormatDate(req.start) : `${smFormatDate(req.start)} – ${smFormatDate(req.end)}`;
-}
-
-// Staff attendance rows come from stocknbook_staff_attendance via manager-staff-overview.
-// hoursWorked is calculated by the server (same SQL as the staff Attendance Log).
-type SMAttendanceRow = { id: number; employeeId: number; employeeCode?: string | null; employeeName: string; date: string;
-    timeIn: string | null; timeOut: string | null; hoursWorked: number | string | null; status: string };
-type SMAttendanceSummary = { total: number; present: number; onLeave: number; absent: number; notRecorded: number };
-function smManilaDay(date: Date) {
-    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
-    const part = (name: string) => parts.find(item => item.type === name)?.value || "";
-    return `${part("year")}-${part("month")}-${part("day")}`;
-}
-function smShiftDay(value: string, days: number) {
-    const date = new Date(value + "T00:00:00Z"); date.setUTCDate(date.getUTCDate() + days);
-    return date.toISOString().slice(0, 10);
-}
-function smInPeriod(day: string, period: string, today: string) {
-    if (!today) return false;
-    if (period === "all") return true;
-    if (period === "today") return day === today;
-    if (period === "month") return day.slice(0, 7) === today.slice(0, 7);
-    if (period === "previous") {
-        const [year, month] = today.slice(0, 7).split("-").map(Number);
-        return day.slice(0, 7) === new Date(Date.UTC(year, month - 2, 1)).toISOString().slice(0, 7);
-    }
-    return false;
-}
-function smClockTime(value?: string | null) {
-    const match = value?.match(/T(\d{2}):(\d{2})/);
-    if (!match) return "—";
-    const hour = Number(match[1]);
-    return `${hour % 12 || 12}:${match[2]} ${hour < 12 ? "AM" : "PM"}`;
-}
-function smHours(value?: number | string | null) {
-    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return "—";
-    const minutes = Math.max(0, Math.round(Number(value) * 60));
-    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-function SMAttendanceBadge({ status }: { status: string }) {
-    const label = String(status || "Not Recorded");
-    const classes = label === "On Duty" || label === "Completed" || label === "Present"
-        ? "text-[#16834A]"
-        : label === "On Leave" ? "text-[#A56607]"
-            : label === "Absent" ? "text-[#D52B2B]" : "text-[#806A8C]";
-    return <span className={`inline-flex whitespace-nowrap text-[11px] font-semibold ${classes}`}>{label}</span>;
-}
-function SMAttendanceCount({ label, value, tone }: { label: string; value: number; tone: "green" | "gold" | "red" | "gray" }) {
-    const classes = { green: "bg-[#E6F7EE] text-[#16834A]", gold: "bg-[#FFF3D8] text-[#A56607]",
-        red: "bg-[#FFF0F0] text-[#D52B2B]", gray: "bg-[#F2EFF5] text-[#806A8C]" }[tone];
-    return <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-semibold ${classes}`}>{label}<span className="font-bold">{Number(value) || 0}</span></span>;
 }

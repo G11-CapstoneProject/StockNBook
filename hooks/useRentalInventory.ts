@@ -24,7 +24,6 @@ export type RentalEquipment = {
     // Rental equipment purchase cost and rental charges are different amounts.
     rentalRatePerDay: number | null;
     averageUnitCost: number | null;
-    lastSupplier: string | null;
     // Cost-based pricing uses an explicit total paid-rental-day recovery target.
     pricingMethod: RentalPricingMethod;
     pricingRecoveryDays: number | null;
@@ -95,6 +94,7 @@ export type RentalMaintenanceRecord = {
     pendingCompletionUnits: number | null;
     pendingCompletionNotes?: string | null;
     bookingReference?: string | null;
+    reportedBy?: string;
 };
 
 // Read-only preliminary observations: not Manager-approved repair or billing claims.
@@ -113,13 +113,13 @@ export type RentalMissingReport = {
 export type RentalPendingInspection = {
     allocationId:number; equipmentId:number; equipmentName:string;
     bookingReference:string; units:number; observedDamageUnits:number;
-    notes:string|null; reportedAt:string;
+    notes:string|null; reportedAt:string; receivedBy?:string|null;
 };
 export type RentalMaintenanceHistory = {
     id:number; equipmentId:number; equipmentName:string;
     type:'maintenance_completed'|'missing_resolved'|'missing_replaced'; quantity:number;
     occurredAt:string; referenceNumber:string; actorName:string;
-    notes:string|null; bookingReference:string|null;
+    notes:string|null; bookingReference:string|null; conditionStatus?:string|null;
 };
 
 export type RentalPendingReceipt = {
@@ -176,14 +176,8 @@ function optionalMoney(value: unknown): number | null {
 }
 
 export type RentalPurchaseDetails = {
-    supplier: string;
-    supplierInvoiceNumber?: string;
-    purchaseDate: string;
     quantity: number;
     unitCost: number;
-    paymentMethod: "cash" | "credit";
-    amountPaid: number;
-    paymentDueDate?: string | null;
 };
 
 export type RentalImportRow = {
@@ -193,16 +187,6 @@ export type RentalImportRow = {
     unitCost: number;
     rentalRatePerDay: number;
 } & RentalPricingSelection;
-
-// One supplier purchase for the ENTIRE XLSX file, as in Sales Inventory.
-export type RentalBulkPurchase = {
-    supplier: string;
-    supplierInvoiceNumber?: string;
-    purchaseDate: string;
-    paymentMethod: "cash" | "credit";
-    amountPaid: number;
-    paymentDueDate: string | null;
-};
 
 // Derive this from physical stock, never from reservations or Sales product counts.
 export function availableNow(item: RentalEquipment): number {
@@ -278,7 +262,6 @@ function normalizeEquipment(value: unknown): RentalEquipment | null {
         active: raw.active !== false,
         rentalRatePerDay: optionalMoney(raw.rentalRatePerDay),
         averageUnitCost: optionalMoney(raw.averageUnitCost),
-        lastSupplier: typeof raw.lastSupplier === "string" ? raw.lastSupplier.trim() || null : null,
         pricingMethod: raw.pricingMethod === "cost_based" ? "cost_based" : "manual",
         pricingRecoveryDays: optionalMoney(raw.pricingRecoveryDays),
         pricingResidualValue: optionalMoney(raw.pricingResidualValue),
@@ -323,7 +306,7 @@ function normalizeMaintenanceRecord(value: unknown): RentalMaintenanceRecord | n
         quantityStarted < units || !status || !/^\d{4}-\d{2}-\d{2}$/.test(dateReported) ||
         (estimatedCompletion !== null && !/^\d{4}-\d{2}-\d{2}$/.test(estimatedCompletion))) return null;
     return { id, equipmentId, equipmentName: String(raw.equipmentName ?? "Equipment"),
-        units, quantityStarted, reason: String(raw.reason ?? ""),
+        units, quantityStarted, reason: String(raw.reason ?? ""), reportedBy: String(raw.reportedBy ?? ""),
         dateReported, estimatedCompletion, status,
         repairApproved:raw.repairApproved===true || raw.repairApproved===1,
         pendingCompletionId:raw.pendingCompletionId==null?null:Number(raw.pendingCompletionId),
@@ -339,11 +322,11 @@ export type RentalMutation =
     rentalRatePerDay?: number } & RentalPricingSelection
     | { action: "correct_equipment_stock"; equipmentId:number; totalUnits:number;
     reason:string; physicalCountVerified:true }
-    | ({ action: "receive_equipment"; equipmentId: number } & RentalPurchaseDetails)
+    | { action: "receive_equipment"; equipmentId: number; quantity: number }
     | { action: "start_maintenance"; equipmentId: number; quantity: number; reason: string;
     conditionStatus?: "In Repair" | "For Inspection"; estimatedCompletionDate?: string | null }
     | { action: "complete_maintenance"; equipmentId: number; quantity: number; reason: string }
-    | { action: "import_equipment"; importMode: "single_purchase"; rows: RentalImportRow[]; purchase: RentalBulkPurchase }
+    | { action: "import_equipment"; rows: RentalImportRow[] }
     | { action: "create_rental_category"; name: string }
     | { action: "rename_rental_category"; previousName: string; name: string }
     | { action: "delete_rental_category"; name: string }

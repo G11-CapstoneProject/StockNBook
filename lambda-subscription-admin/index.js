@@ -305,7 +305,7 @@ async function listPaymentSubmissions(connection, status, search) {
 
     const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
     const createdSelect = c.createdAt ? `p.${c.createdAt}` : "NULL";
-    const receiptSelect = c.receipt ? `p.${c.receipt}` : "NULL";
+    const receiptSelect = "(p.receipt_data IS NOT NULL)";
     const reviewerSelect = c.reviewer ? `p.${c.reviewer}` : "NULL";
     const reviewedSelect = c.reviewedAt ? `p.${c.reviewedAt}` : "NULL";
 
@@ -316,7 +316,7 @@ async function listPaymentSubmissions(connection, status, search) {
              p.${c.planId} AS requested_plan_id,
              p.${c.amount} AS amount_submitted,
              p.${c.reference} AS reference_number,
-             ${receiptSelect} AS receipt_url,
+             ${receiptSelect} AS has_receipt,
              p.${c.status} AS raw_status,
              ${createdSelect} AS submitted_at,
              ${reviewedSelect} AS reviewed_at,
@@ -354,7 +354,9 @@ async function listPaymentSubmissions(connection, status, search) {
         amount_submitted: Number(row.amount_submitted || 0),
         reference_number: row.reference_number,
         payment_date: row.submitted_at,
-        proof_file_url: row.receipt_url,
+        // Never return a publicly reachable receipt URL.
+        has_receipt: Boolean(row.has_receipt),
+        proof_file_url: null,
         status: normalizeStatus(row.raw_status),
         submitted_at: row.submitted_at,
         verified_at: row.reviewed_at,
@@ -368,7 +370,7 @@ async function listPaymentSubmissions(connection, status, search) {
 async function getPaymentSubmission(connection, paymentId) {
     const c = await getPaymentColumns(connection);
     const createdSelect = c.createdAt ? `p.${c.createdAt}` : "NULL";
-    const receiptSelect = c.receipt ? `p.${c.receipt}` : "NULL";
+    const receiptSelect = "(p.receipt_data IS NOT NULL)";
     const reviewerSelect = c.reviewer ? `p.${c.reviewer}` : "NULL";
     const reviewedSelect = c.reviewedAt ? `p.${c.reviewedAt}` : "NULL";
 
@@ -379,7 +381,7 @@ async function getPaymentSubmission(connection, paymentId) {
              p.${c.planId} AS requested_plan_id,
              p.${c.amount} AS amount_submitted,
              p.${c.reference} AS reference_number,
-             ${receiptSelect} AS receipt_url,
+             ${receiptSelect} AS has_receipt,
              p.${c.status} AS raw_status,
              ${createdSelect} AS submitted_at,
              ${reviewedSelect} AS reviewed_at,
@@ -421,7 +423,9 @@ async function getPaymentSubmission(connection, paymentId) {
         required_amount: Number(row.plan_price || 0),
         amount_submitted: Number(row.amount_submitted || 0),
         reference_number: row.reference_number,
-        proof_file_url: row.receipt_url,
+        // Never return a publicly reachable receipt URL.
+        has_receipt: Boolean(row.has_receipt),
+        proof_file_url: null,
         status: normalizeStatus(row.raw_status),
         submitted_at: row.submitted_at,
         verified_at: row.reviewed_at,
@@ -1717,6 +1721,28 @@ exports.handler = async (event) => {
 
             case "get_payment_submission":
                 return response(event, 200, { payment: await getPaymentSubmission(connection, positiveId(body.payment_submission_id, "payment_submission_id")) });
+
+            case "get_subscription_receipt": {
+                const paymentId = positiveId(body.payment_submission_id, "payment_submission_id");
+                // requirePlatformAdmin() is called above the switch (JWT + active DB account).
+                const [receipts] = await connection.execute(
+                    `SELECT receipt_data, receipt_mime_type
+                     FROM subscription_payments WHERE id = ? LIMIT 1`,
+                    [paymentId]
+                );
+                const receipt = receipts[0];
+                if (!receipt || !receipt.receipt_data) {
+                    throw httpError(404, "Receipt not found.");
+                }
+                const mimeType = String(receipt.receipt_mime_type || "");
+                if (!["image/png", "image/jpeg", "image/webp"].includes(mimeType)) {
+                    throw httpError(500, "Invalid stored receipt format.");
+                }
+                return response(event, 200, {
+                    mime_type: mimeType,
+                    receipt_base64: Buffer.from(receipt.receipt_data).toString("base64"),
+                });
+            }
 
             case "approve_payment_submission":
                 return response(event, 200, await approvePayment(connection, positiveId(body.payment_submission_id, "payment_submission_id"), admin));

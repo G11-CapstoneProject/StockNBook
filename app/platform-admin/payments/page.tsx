@@ -39,7 +39,7 @@ interface Payment {
     proofFileName: string;
     rejectionReason?: string;
     initials: string;
-    receiptUrl?: string | null;
+    hasReceipt: boolean;
 }
 
 const REJECTION_REASONS = [
@@ -109,8 +109,8 @@ export default function PaymentsPage() {
                     paymentDate: p.payment_date ? new Date(p.payment_date).toLocaleDateString() : "N/A",
                     submittedAt: p.submitted_at,
                     status: p.status,
-                    proofFileName: p.proof_file_url ? "View GCash Receipt" : "GCash Receipt",
-                    receiptUrl: p.proof_file_url || null,
+                    proofFileName: p.has_receipt ? "View GCash Receipt" : "GCash Receipt",
+                    hasReceipt: Boolean(p.has_receipt),
                     initials: (p.store_name_snapshot || "ST").substring(0, 2).toUpperCase(),
                     rejectionReason: p.rejection_reason
                 }));
@@ -148,6 +148,57 @@ export default function PaymentsPage() {
         setSelectedPayment(null);
         setReviewAction(null);
         setRejectionReason("");
+    }
+
+    async function openSecureReceipt(payment: Payment) {
+        // Open a tab in the user's click gesture (before the async request),
+        // otherwise browser popup blockers can prevent the preview.
+        const preview = window.open("", "_blank");
+        if (preview) {
+            preview.opener = null;
+            preview.document.title = "GCash Receipt";
+            preview.document.body.textContent = "Loading receipt securely...";
+        }
+        try {
+            const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+            const res = await fetch(API_ENDPOINT, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    action: "get_subscription_receipt",
+                    payment_submission_id: payment.id,
+                }),
+                cache: "no-store",
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.message || "Unable to open the receipt.");
+            if (!["image/png", "image/jpeg", "image/webp"].includes(data.mime_type) ||
+                typeof data.receipt_base64 !== "string") {
+                throw new Error("Invalid receipt returned by the server.");
+            }
+            const binary = atob(data.receipt_base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index += 1) {
+                bytes[index] = binary.charCodeAt(index);
+            }
+            const url = URL.createObjectURL(new Blob([bytes], { type: data.mime_type }));
+            if (preview && !preview.closed) {
+                preview.location.replace(url);
+                window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+            } else {
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = `subscription-receipt-${payment.id}`;
+                link.click();
+                window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+            }
+        } catch (error) {
+            if (preview && !preview.closed) preview.close();
+            window.alert(error instanceof Error ? error.message : "Unable to open the receipt.");
+        }
     }
 
     async function confirmApproval() {
@@ -335,8 +386,8 @@ export default function PaymentsPage() {
                             <FileImage size={24} className="mx-auto text-[#6D35D4]" />
                             <p className="mt-1 font-bold text-[#1A1220]">{selectedPayment.proofFileName}</p>
                             <p className="text-[10px] text-[#8A7D92]">GCash Receipt Proof</p>
-                            {selectedPayment.receiptUrl && (
-                                <a href={selectedPayment.receiptUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex rounded-lg bg-[#F1EBFF] px-3 py-1.5 text-[10px] font-semibold text-[#6D35D4]">Open receipt</a>
+                            {selectedPayment.hasReceipt && (
+                                <button type="button" onClick={() => openSecureReceipt(selectedPayment)} className="mt-2 inline-flex rounded-lg bg-[#F1EBFF] px-3 py-1.5 text-[10px] font-semibold text-[#6D35D4]">Open receipt</button>
                             )}
                         </div>
                     </div>

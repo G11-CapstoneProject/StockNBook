@@ -20,8 +20,6 @@ import {
     ShoppingCart,
     Trash2,
     Upload,
-    Wallet,
-    ArrowRight,
 } from "lucide-react";
 import {
     useInventoryController,
@@ -110,7 +108,6 @@ type Product = {
 };
 
 type ProductSaveData = {
-    initialPurchase?: InitialPurchaseInput;
     storeId?: number | null;
     branchId?: number | null;
     branchName?: string | null;
@@ -235,6 +232,10 @@ type RestockHistoryRecord = {
     created_at?: string | null;
     restockDate?: string | null;
     restock_date?: string | null;
+    time?: string | null;
+    productNumber?: string | null;
+    movementType?: string | null;
+    isParentRow?: boolean;
     branchId?: number | string | null;
     branch_id?: number | string | null;
 };
@@ -270,23 +271,6 @@ type LastStockInRecord = {
     variantId?: number | string | null;
     variantName?: string | null;
     stockInDate: string;
-};
-
-// Purchase-linked receipt data is read only to label the EXISTING activity rows.
-type StockPurchaseReference = {
-    productId: number | string;
-    productName: string;
-    variantName?: string | null;
-    quantity: number | string;
-    recordedAt?: string | null;
-    purchaseNumber?: string | null;
-    purchaseSource?: string | null;
-};
-
-type StockPurchaseReferencesResponse = {
-    success?: boolean;
-    stockInMovements?: StockPurchaseReference[];
-    error?: string;
 };
 
 type ExpiredDisposalActivityRecord = {
@@ -690,17 +674,27 @@ function buildRestockMovements(
             );
 
             if (quantity <= 0) return null;
+            // A variant product's parent row is never shown; only its variants are.
+            if (record.isParentRow) return null;
 
             const productId = getActivityRecordProductId(record);
+            const recordedDay = record.date ?? record.restockDate ?? record.restock_date ?? null;
 
             return {
                 id: `restock-${String(record.id ?? index)}`,
                 productId,
                 productName: getActivityRecordProductName(record),
                 quantity,
-                date: getRestockActionDate(record, employeeActions),
+                // Each stock-in movement carries its own exact time.
+                date: record.time
+                    ? parseStockActivityDateTime(recordedDay, record.time)
+                    : getRestockActionDate(record, employeeActions),
                 movement: "Stock In" as const,
-                source: "Restock" as const,
+                // New-product opening stock is "Added"; later receipts are "Restock".
+                source: String(record.movementType || "").toUpperCase() === "OPENING_STOCK"
+                    ? "Added" as const
+                    : "Restock" as const,
+                referenceNumber: String(record.productNumber || "").trim(),
             };
         })
         .filter(
@@ -709,217 +703,6 @@ function buildRestockMovements(
         );
 }
 
-function getAddedProductName(
-    action: InventoryEmployeeAction,
-    product?: Product
-) {
-    if (product?.name) return product.name;
-
-    const details = String(action.details || "").trim();
-    const match = details.match(
-        /^Added\s+(.+?)(?:\s+with\s+\d+\s+variant\(s\))?\s+to inventory$/i
-    );
-
-    return match?.[1]?.trim() || "New Product";
-}
-
-function getMovementMatchesProduct(
-    movement: RecentStockMovement | SalesMovement,
-    product: Product
-) {
-    if (movement.productId && String(product.id) === movement.productId) {
-        return true;
-    }
-
-    return (
-        normalizeSalesProductName(movement.productName) ===
-        normalizeSalesProductName(product.name)
-    );
-}
-
-function buildAddedProductMovements(
-    employeeActions: InventoryEmployeeAction[],
-    products: Product[],
-    salesMovements: SalesMovement[],
-    restockMovements: RecentStockMovement[],
-    branchId?: number,
-    initialStockByProduct: Record<number, number> = {}
-): RecentStockMovement[] {
-    return employeeActions
-        .filter((action) => {
-            const moduleName = String(action.module || "").trim().toLowerCase();
-            const actionName = String(action.action || "").trim().toLowerCase();
-
-            if (
-                moduleName &&
-                !moduleName.includes("inventory")
-            ) {
-                return false;
-            }
-
-            if (!actionName.includes("added product")) return false;
-
-            if (!branchId || !Number.isFinite(branchId) || branchId <= 0) {
-                return true;
-            }
-
-            const rawBranchId = action.branchId ?? action.branch_id;
-            return (
-                rawBranchId === null ||
-                rawBranchId === undefined ||
-                rawBranchId === "" ||
-                Number(rawBranchId) === branchId
-            );
-        })
-        .map((action, index) => {
-            const productId = String(
-                action.referenceId ??
-                action.reference_id ??
-                ""
-            ).trim();
-
-            const product = products.find(
-                (candidate) =>
-                    (productId && String(candidate.id) === productId) ||
-                    (
-                        getProductNumber(candidate) &&
-                        getProductNumber(candidate) ===
-                        String(
-                            action.referenceNumber ??
-                            action.reference_number ??
-                            ""
-                        ).trim()
-                    )
-            );
-
-            const date = parseStockActivityDateTime(
-                action.createdAt ??
-                action.created_at ??
-                action.date ??
-                null,
-                action.time ?? null
-            );
-
-            // Use the original purchase receipt quantity when available. Today's
-            // inventory quantity can be lower after POS sales or stock corrections.
-            const recordedInitialStock = Number(initialStockByProduct[Number(productId)]);
-            let quantity = Number.isSafeInteger(recordedInitialStock) && recordedInitialStock > 0
-                ? recordedInitialStock
-                : product ? getProductTotalStock(product) : 0;
-
-            /*
-             * Reconstruct the initial stock as closely as possible from the
-             * movements that happened after the product was created:
-             *
-             * initial stock = current stock + units sold - later restocks
-             *
-             * This keeps "Added" useful even if the product has already been
-             * sold or restocked since creation.
-             */
-            if (product && date && !(Number.isSafeInteger(recordedInitialStock) && recordedInitialStock > 0)) {
-                const salesAfterCreation = salesMovements
-                    .filter(
-                        (movement) =>
-                            getMovementMatchesProduct(movement, product) &&
-                            movement.date &&
-                            movement.date.getTime() >= date.getTime()
-                    )
-                    .reduce(
-                        (sum, movement) => sum + Number(movement.quantity || 0),
-                        0
-                    );
-
-                const restocksAfterCreation = restockMovements
-                    .filter(
-                        (movement) =>
-                            getMovementMatchesProduct(movement, product) &&
-                            movement.date &&
-                            movement.date.getTime() >= date.getTime()
-                    )
-                    .reduce(
-                        (sum, movement) => sum + Number(movement.quantity || 0),
-                        0
-                    );
-
-                quantity = Math.max(
-                    0,
-                    getProductTotalStock(product) +
-                    salesAfterCreation -
-                    restocksAfterCreation
-                );
-            }
-
-            return {
-                id: `added-${String(action.id ?? productId ?? index)}`,
-                productId,
-                productName: getAddedProductName(action, product),
-                quantity,
-                date,
-                movement: "Stock In" as const,
-                source: "Added" as const,
-            };
-        })
-        // Creation with zero quantity is not a physical Stock In transaction.
-        .filter((movement) => movement.quantity > 0);
-}
-
-function getMatchingPurchaseReference(
-    movement: RecentStockMovement,
-    purchaseReferences: StockPurchaseReference[]
-): string {
-    if (movement.movement !== "Stock In" || !movement.productId || !movement.date) return "";
-    const isAdded = movement.source === "Added";
-    const isRestock = movement.source === "Restock";
-    if (!isAdded && !isRestock) return "";
-
-    // Keep IDs tied to the same product, stock action, and Philippine business day.
-    // Never assign an unrelated purchase when a legacy record has no matching receipt.
-    const dayKey = (date: Date) =>
-        `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-    const activityDay = dayKey(movement.date);
-    const sameAction = (source: unknown) => {
-        const normalized = String(source || "").toLowerCase();
-        return isAdded ? normalized === "add" || normalized === "import"
-            : normalized === "receive";
-    };
-    const matches = purchaseReferences.filter((record) => {
-        const ref = String(record.purchaseNumber || "").trim();
-        if (!ref || String(record.productId) !== movement.productId || !sameAction(record.purchaseSource)) return false;
-        const recordedAt = parseStockActivityDateTime(record.recordedAt);
-        return recordedAt !== null && dayKey(recordedAt) === activityDay;
-    });
-
-    let candidates: string[];
-    if (isAdded) {
-        // Add Product / Excel import logs one product movement even when it has
-        // several variant receipt lines. Sum only lines of the SAME purchase.
-        const quantities = new Map<string, number>();
-        matches.forEach((record) => {
-            const reference = String(record.purchaseNumber).trim();
-            quantities.set(reference, (quantities.get(reference) || 0) + Number(record.quantity || 0));
-        });
-        candidates = [...quantities.entries()]
-            .filter(([, quantity]) => quantity === movement.quantity)
-            .map(([reference]) => reference);
-    } else {
-        // For restocks, match the actual product/variant and received quantity.
-        const normalize = (value: string) => value.trim().replace(/\s+/g, " ").toLowerCase();
-        candidates = matches
-            .filter((record) => {
-                const name = record.variantName
-                    ? `${record.productName} - ${record.variantName}`
-                    : record.productName;
-                return Number(record.quantity) === movement.quantity &&
-                    normalize(name) === normalize(movement.productName);
-            })
-            .map((record) => String(record.purchaseNumber).trim());
-    }
-    const distinct = [...new Set(candidates)];
-    return distinct.length === 1 ? distinct[0] : "";
-}
-
-// The disposal is already recorded by the Products Lambda in inventory_movements.
-// Present that audited record; never infer disposal from current quantities.
 function buildExpiredDisposalMovements(records: ExpiredDisposalActivityRecord[]): RecentStockMovement[] {
     return records.map((record) => {
         let variantValues: Record<string, unknown> = {};
@@ -954,34 +737,21 @@ function buildRecentStockMovements({
                                        salesMovements,
                                        restockRecords,
                                        employeeActions,
-                                       products,
                                        branchId,
-                                       initialStockByProduct,
-                                       purchaseReferences,
                                        disposalRecords,
                                    }: {
     salesMovements: SalesMovement[];
     restockRecords: RestockHistoryRecord[];
     employeeActions: InventoryEmployeeAction[];
-    products: Product[];
     branchId?: number;
-    initialStockByProduct?: Record<number, number>;
-    purchaseReferences?: StockPurchaseReference[];
     disposalRecords: ExpiredDisposalActivityRecord[];
 }) {
+    // Added and restocked stock both come from the recorded stock-in movements,
+    // one row per product or variant, so each stock-in appears exactly once.
     const restockMovements = buildRestockMovements(
         restockRecords,
         employeeActions,
         branchId
-    );
-
-    const addedMovements = buildAddedProductMovements(
-        employeeActions,
-        products,
-        salesMovements,
-        restockMovements,
-        branchId,
-        initialStockByProduct || {}
     );
 
     const stockOutMovements: RecentStockMovement[] = salesMovements.map(
@@ -999,14 +769,10 @@ function buildRecentStockMovements({
     );
 
     return [
-        ...addedMovements,
         ...restockMovements,
         ...stockOutMovements,
         ...buildExpiredDisposalMovements(disposalRecords),
     ]
-        .map((movement) => movement.movement === "Stock In"
-            ? { ...movement, referenceNumber: getMatchingPurchaseReference(movement, purchaseReferences || []) }
-            : movement)
         .filter((movement) => Boolean(movement.productName))
         .sort((a, b) => {
             const aTime = a.date?.getTime() ?? 0;
@@ -2068,35 +1834,6 @@ function exportManagerInventoryPdf(
 
 type InventoryPricingMethod = "markup" | "manual";
 
-type InitialPurchaseInput = {
-    supplier: string;
-    supplierInvoiceNumber?: string | null;
-    purchaseDate: string;
-    paymentMethod: "cash" | "credit";
-    amountPaid: number;
-    paymentDueDate: string | null;
-    expectedAmountPaid?: number; // Reject stale historical payment corrections.
-};
-
-type PurchaseDraft = {
-    supplier: string;
-    supplierInvoiceNumber: string;
-    purchaseDate: string;
-    paymentMethod: "cash" | "credit";
-    amountPaid: string;
-    paymentDueDate: string;
-};
-
-const EMPTY_PURCHASE: PurchaseDraft = {
-    supplier: "", supplierInvoiceNumber: "", purchaseDate: "", paymentMethod: "cash",
-    amountPaid: "", paymentDueDate: "",
-};
-
-function isPurchaseDraftUsed(value: PurchaseDraft) {
-    return Boolean(value.supplier.trim() || value.supplierInvoiceNumber.trim() || value.purchaseDate ||
-        value.amountPaid.trim() || value.paymentDueDate || value.paymentMethod === "credit");
-}
-
 
 function isValidMarkupPercentage(value: string) {
     return value.trim() !== "" && Number.isFinite(Number(value)) && Number(value) >= 0;
@@ -2200,7 +1937,6 @@ export default function ManagerInventory() {
     const [restockHistory, setRestockHistory] = React.useState<
         RestockHistoryRecord[]
     >([]);
-    const [stockPurchaseReferences, setStockPurchaseReferences] = React.useState<StockPurchaseReference[]>([]);
     const [expiredDisposalActivity, setExpiredDisposalActivity] = React.useState<ExpiredDisposalActivityRecord[]>([]);
     const [inventoryEmployeeActions, setInventoryEmployeeActions] =
         React.useState<InventoryEmployeeAction[]>([]);
@@ -2213,12 +1949,10 @@ export default function ManagerInventory() {
     >({});
     const [variantNumbersById, setVariantNumbersById] = React.useState<Record<number,string>>({});
     const [lastStockInRecords, setLastStockInRecords] = React.useState<LastStockInRecord[]>([]);
-    const [initialStockByProduct, setInitialStockByProduct] = React.useState<Record<number, number>>({});
     const [receivingProduct, setReceivingProduct] = React.useState<Product | null>(null);
     const [disposalSelection, setDisposalSelection] = React.useState<{product: Product; variantId: number | null} | null>(null);
     const [restockToast, setRestockToast] = React.useState<SuccessToastMessage | null>(null);
     const closeRestockToast = React.useCallback(() => setRestockToast(null), []);
-    const [showSupplierPayables, setShowSupplierPayables] = React.useState(false);
 
     React.useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -2644,43 +2378,6 @@ export default function ManagerInventory() {
         };
     }, []);
 
-    // Read actual purchase numbers for display only; leave the existing
-    // activity fetch, movement totals, ordering and timestamps untouched.
-    React.useEffect(() => {
-        let cancelled = false;
-        const loadPurchaseReferences = async () => {
-            const token = sessionStorage.getItem("token");
-            if (!token || !Number.isInteger(managerBranchId) || managerBranchId <= 0) {
-                if (!cancelled) setStockPurchaseReferences([]);
-                return;
-            }
-            try {
-                const response = await fetch("/api/products", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        action: "get_recent_purchased_stock_in",
-                        branch_id: managerBranchId,
-                    }),
-                    cache: "no-store",
-                });
-                const result = (await response.json().catch(() => ({}))) as StockPurchaseReferencesResponse;
-                if (!response.ok || result.success === false || !Array.isArray(result.stockInMovements)) {
-                    throw new Error(result.error || "Unable to load purchase references.");
-                }
-                if (!cancelled) setStockPurchaseReferences(result.stockInMovements);
-            } catch (error) {
-                console.warn("Manager inventory purchase references are unavailable:", error);
-                if (!cancelled) setStockPurchaseReferences([]);
-            }
-        };
-        void loadPurchaseReferences();
-        return () => { cancelled = true; };
-    }, [managerBranchId, stockActivityRefreshKey]);
-
     // Fetch the full recorded stock-in history independently of the
     // 30-day Recent Stock Activity feed. No stock/price/write operations.
     React.useEffect(() => {
@@ -2688,7 +2385,7 @@ export default function ManagerInventory() {
         const loadLastStockInDates = async () => {
             const token = sessionStorage.getItem("token");
             if (!token || !Number.isInteger(managerBranchId) || managerBranchId <= 0) {
-                if (!cancelled) { setLastStockInRecords([]); setInitialStockByProduct({}); }
+                if (!cancelled) setLastStockInRecords([]);
                 return;
             }
             try {
@@ -2705,21 +2402,10 @@ export default function ManagerInventory() {
                 if (!response.ok || result.success === false || !Array.isArray(result.stockInRecords)) {
                     throw new Error(result.error || "Unable to load stock-in dates.");
                 }
-                if (!cancelled) {
-                    setLastStockInRecords(result.stockInRecords);
-                    const quantities: Record<number, number> = {};
-                    for (const line of Array.isArray(result.initialStockQuantities) ? result.initialStockQuantities : []) {
-                        const id = Number(line.productId);
-                        const quantity = Number(line.initialQuantity);
-                        if (Number.isSafeInteger(id) && id > 0 && Number.isSafeInteger(quantity) && quantity > 0) {
-                            quantities[id] = quantity;
-                        }
-                    }
-                    setInitialStockByProduct(quantities);
-                }
+                if (!cancelled) setLastStockInRecords(result.stockInRecords);
             } catch (error) {
                 console.warn("Manager inventory stock-in date lookup failed:", error);
-                if (!cancelled) { setLastStockInRecords([]); setInitialStockByProduct({}); }
+                if (!cancelled) setLastStockInRecords([]);
             }
         };
         void loadLastStockInDates();
@@ -2777,21 +2463,15 @@ export default function ManagerInventory() {
             salesMovements: recentSales.movements,
             restockRecords: restockHistory,
             employeeActions: inventoryEmployeeActions,
-            products: managerProducts,
             branchId: managerBranchId,
-            initialStockByProduct,
-            purchaseReferences: stockPurchaseReferences,
             disposalRecords: expiredDisposalActivity,
         });
     }, [
         inventoryEmployeeActions,
         expiredDisposalActivity,
         managerBranchId,
-        managerProducts,
-        initialStockByProduct,
         recentSales.movements,
         restockHistory,
-        stockPurchaseReferences,
     ]);
 
     const trailingTwelveMonthSales = React.useMemo(
@@ -2980,31 +2660,6 @@ export default function ManagerInventory() {
                             />
                         </div>
 
-                        {/* Supplier payments have a separate entry point above the product inventory list. */}
-                        <section aria-label="Supplier payments" className="rounded-[16px] border border-[#E7DFEC] bg-white px-4 py-3.5 shadow-sm">
-                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                                <div className="flex items-start gap-3">
-                                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
-                                        <Wallet size={18} />
-                                    </span>
-                                    <div>
-                                        <h2 className="text-[15px] font-bold text-[#21132E]">Supplier Payments</h2>
-                                        <p className="mt-0.5 text-[11px] text-[#86778F]">
-                                            Track and settle outstanding balances for supplier purchases.
-                                        </p>
-                                    </div>
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={() => setShowSupplierPayables(true)}
-                                    className="inline-flex h-[42px] shrink-0 items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                                >
-                                    Supplier Payables
-                                    <ArrowRight size={16} />
-                                </button>
-                            </div>
-                        </section>
-
                         <ManagerInventoryTable
                             inv={inv}
                             products={tableProducts}
@@ -3029,7 +2684,6 @@ export default function ManagerInventory() {
 
             <InventoryDialogs inv={inv} />
             <SuccessToast toast={restockToast} onClose={closeRestockToast} />
-            {showSupplierPayables && <SupplierPayablesDialog onClose={() => setShowSupplierPayables(false)} />}
             {disposalSelection && (
                 <ExpiredStockDisposalDialog
                     product={disposalSelection.product}
@@ -3106,8 +2760,6 @@ function ManagerMetricCard({label, value, helper, icon, tone, loading = false}: 
 /*              RECEIVE STOCK -- NEVER OPENS THE EDIT PRODUCT FORM            */
 /* -------------------------------------------------------------------------- */
 
-type ReceiveStockPricingDecision = "keep" | "suggested" | "manual";
-
 type ReceiveStockLine = {
     variantId: number | null;
     variantNumber?: string | null;
@@ -3118,46 +2770,9 @@ type ReceiveStockLine = {
     currentSellingPrice: number;
     pricingMethod: InventoryPricingMethod;
     markupPercentage: number | null;
-    pricingDecision: ReceiveStockPricingDecision;
-    pricingMarkupInput: string;
-    manualSellingPrice: string;
     quantity: string;
-    unitPurchaseCost: string;
     expirationDate: string;
 };
-
-// This is the moving weighted average of remaining stock plus the new receipt,
-// NOT the weighted moving average used by StockNBook demand forecasting.
-function getReceiveStockPriceReview(line: ReceiveStockLine) {
-    const quantity = Math.max(0, Number(line.quantity) || 0);
-    const currentStock = Math.max(0, line.currentStock);
-    const incomingUnitCost = Math.max(0, Number(line.unitPurchaseCost) || 0);
-    const totalUnits = currentStock + quantity;
-    // Moving weighted-average inventory cost; when no stock remains the new
-    // purchase becomes the entire cost basis. This is not WMA demand forecasting.
-    const newAverageCost = totalUnits > 0
-        ? Math.round(((currentStock * line.currentAverageCost + quantity * incomingUnitCost) /
-        totalUnits + Number.EPSILON) * 100) / 100
-        : incomingUnitCost;
-    const markup = Number(line.pricingMarkupInput || 0);
-    const suggestedPrice = Math.round((newAverageCost * (1 + markup / 100) + Number.EPSILON) * 100) / 100;
-    const finalPrice = line.pricingDecision === "suggested"
-        ? suggestedPrice
-        : line.pricingDecision === "manual"
-            ? Number(line.manualSellingPrice || 0)
-            : line.currentSellingPrice;
-    return { newAverageCost, markup, suggestedPrice, finalPrice };
-}
-
-function receiveStockInitialMarkup(cost: number, sellingPrice: number, savedMarkup?: number | null) {
-    if (savedMarkup !== null && savedMarkup !== undefined &&
-        Number.isFinite(Number(savedMarkup)) && Number(savedMarkup) >= 0) {
-        return String(savedMarkup);
-    }
-    // For products previously configured as manual, an implied markup provides
-    // an editable starting suggestion; it does not force a change in pricing.
-    return cost > 0 ? String(Number(Math.max(0, (sellingPrice / cost - 1) * 100).toFixed(4))) : "0";
-}
 
 // An expired batch is never deleted automatically. Managers record only the
 // physically disposed quantity; the backend retains batch and movement history.
@@ -3303,15 +2918,8 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
     const savingRef = React.useRef(false);
     const receivingRequestKey = React.useRef(crypto.randomUUID());
     const [error, setError] = React.useState("");
-    const [supplier, setSupplier] = React.useState("");
-    const [supplierOptions, setSupplierOptions] = React.useState<string[]>([]);
-    const [invoice, setInvoice] = React.useState("");
-    const [receivedDate, setReceivedDate] = React.useState(() =>
-        new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" })
-    );
-    const [paymentMethod, setPaymentMethod] = React.useState<"cash" | "credit">("cash");
-    const [amountPaid, setAmountPaid] = React.useState("0");
-    const [dueDate, setDueDate] = React.useState("");
+    // Restock only adds quantity; the receiving date is always today (Philippine time).
+    const receivedDate = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" });
 
     React.useEffect(() => {
         const abort = new AbortController();
@@ -3344,12 +2952,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                         currentSellingPrice: Number(v.salesPrice || 0),
                         pricingMethod: v.pricingMethod === "markup" ? "markup" : "manual",
                         markupPercentage: v.markupPercentage == null ? null : Number(v.markupPercentage),
-                        pricingDecision: Number(v.stock || 0) > 0 ? "keep" :
-                            v.pricingMethod === "markup" ? "suggested" : "manual",
-                        pricingMarkupInput: receiveStockInitialMarkup(Number(v.originalPrice || 0),
-                            Number(v.salesPrice || 0), v.markupPercentage),
-                        manualSellingPrice: String(v.salesPrice ?? 0), quantity: "",
-                        unitPurchaseCost: String(v.originalPrice ?? 0), expirationDate: "",
+                        quantity: "", expirationDate: "",
                     }))
                     : [{
                         variantId: null, variantName: "Regular",
@@ -3359,28 +2962,9 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                         currentSellingPrice: Number(current.salesPrice || 0),
                         pricingMethod: current.pricingMethod === "markup" ? "markup" : "manual",
                         markupPercentage: current.markupPercentage == null ? null : Number(current.markupPercentage),
-                        pricingDecision: Number(current.stock || 0) > 0 ? "keep" :
-                            current.pricingMethod === "markup" ? "suggested" : "manual",
-                        pricingMarkupInput: receiveStockInitialMarkup(Number(current.originalPrice || 0),
-                            Number(current.salesPrice || 0), current.markupPercentage),
-                        manualSellingPrice: String(current.salesPrice ?? 0), quantity: "",
-                        unitPurchaseCost: String(current.originalPrice ?? 0), expirationDate: "",
+                        quantity: "", expirationDate: "",
                     }];
                 setLines(stockLines);
-                if (result.purchase?.supplier) setSupplier(String(result.purchase.supplier));
-                // Optional suggestions only: users may also enter a new supplier.
-                try {
-                    const supplierResponse = await fetch("/api/products", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_stock_suppliers", branch_id: current.branchId }),
-                        cache: "no-store", signal: abort.signal,
-                    });
-                    const supplierResult = await supplierResponse.json().catch(() => ({}));
-                    if (!abort.signal.aborted && supplierResponse.ok && Array.isArray(supplierResult.suppliers)) {
-                        setSupplierOptions(supplierResult.suppliers.filter((v: unknown): v is string => typeof v === "string"));
-                    }
-                } catch { /* Supplier suggestions are optional. */ }
             } catch (e) {
                 if (!abort.signal.aborted) setError(e instanceof Error ? e.message : "Unable to load product.");
             } finally {
@@ -3392,7 +2976,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
 
     // A receiving dialog may remain open while Staff completes another receipt
     // or POS/Bookings changes stock. Refresh its read-only balances without
-    // resetting quantities, expiration dates, supplier, or pricing inputs.
+    // resetting quantities or expiration dates.
     React.useEffect(() => {
         if (loading || saving) return;
         const controller = new AbortController();
@@ -3425,17 +3009,11 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
         return () => { controller.abort(); window.clearInterval(interval); };
     }, [product.id, loading, saving]);
 
-    const updateLine = (index: number, field: "quantity" | "unitPurchaseCost" | "expirationDate" |
-        "pricingDecision" | "manualSellingPrice" | "pricingMarkupInput", value: string) => {
+    const updateLine = (index: number, field: "quantity" | "expirationDate", value: string) => {
         setLines(previous => previous.map((line, i) => i === index ? { ...line, [field]: value } : line));
     };
     const totalQuantity = lines.reduce((sum, line) => sum + (Number(line.quantity) || 0), 0);
-    const totalCost = Math.round((lines.reduce((sum, line) => sum +
-        (Number(line.quantity) || 0) * (Number(line.unitPurchaseCost) || 0), 0) + Number.EPSILON) * 100) / 100;
-    const paid = paymentMethod === "cash" ? totalCost : Number(amountPaid || 0);
-    const outstanding = Math.max(0, Math.round((totalCost - paid + Number.EPSILON) * 100) / 100);
-    // Cost calculations use catalog stock. The receiving summary must instead
-    // show the exact sellable balance used by POS and Bookings.
+    // The receiving summary shows the exact sellable balance used by POS and Bookings.
     const catalogStockBefore = lines.reduce((sum, line) => sum + line.currentStock, 0);
     const availableBefore = lines.reduce((sum, line) => sum + line.currentSellableStock, 0);
     const inventoryNeedsReconciliation = lines.some(line => line.currentStock !== line.currentSellableStock);
@@ -3449,33 +3027,8 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
             (!Number.isInteger(Number(line.quantity)) || Number(line.quantity) < 0))) {
             setError("Enter a positive whole quantity for at least one product or variant."); return;
         }
-        if (selected.some(line => line.unitPurchaseCost.trim() === "" || !Number.isFinite(Number(line.unitPurchaseCost)) || Number(line.unitPurchaseCost) < 0)) {
-            setError("Each selected item requires a valid nonnegative unit purchase cost."); return;
-        }
-        if (selected.some(line => line.pricingDecision === "manual" &&
-            (!/^(?:\d+)(?:\.\d{1,2})?$/.test(line.manualSellingPrice.trim()) ||
-                !Number.isFinite(Number(line.manualSellingPrice)) || Number(line.manualSellingPrice) > 100000000))) {
-            setError("Final Selling Price must be a nonnegative peso amount with at most two decimal places."); return;
-        }
-        if (selected.some(line => line.pricingDecision === "suggested" &&
-            (!/^(?:\d+)(?:\.\d{1,4})?$/.test(line.pricingMarkupInput.trim()) ||
-                !Number.isFinite(Number(line.pricingMarkupInput)) || Number(line.pricingMarkupInput) > 99999 ||
-                !Number.isFinite(getReceiveStockPriceReview(line).suggestedPrice) ||
-                getReceiveStockPriceReview(line).suggestedPrice > 100000000))) {
-            setError("Markup Percentage must be between 0 and 99999 (up to four decimal places) and produce a valid selling price."); return;
-        }
-        if (!supplier.trim() || !receivedDate) { setError("Supplier and Date Received are required."); return; }
-        if (paymentMethod === "credit" && (!Number.isFinite(paid) || paid < 0 || paid > totalCost)) {
-            setError("Amount Paid must be between zero and the total purchase cost."); return;
-        }
-        if (paymentMethod === "credit" && outstanding > 0 && !dueDate) {
-            setError("Enter a Payment Due Date for the outstanding balance."); return;
-        }
-        if (dueDate && paymentMethod === "credit" && dueDate < receivedDate) {
-            setError("Payment Due Date cannot be earlier than Date Received."); return;
-        }
         if (selected.some(line => line.expirationDate && line.expirationDate < receivedDate)) {
-            setError("A received batch cannot already be expired on its receiving date."); return;
+            setError("Do not add stock that has already expired."); return;
         }
         savingRef.current = true;
         setSaving(true);
@@ -3489,20 +3042,12 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                     action: "receive_stock", requestKey: receivingRequestKey.current,
                     product_id: details.id,
                     branch_id: details.branchId,
-                    supplier: supplier.trim(), supplierInvoiceNumber: invoice.trim() || null,
-                    receivedDate, paymentMethod, amountPaid: paid,
-                    paymentDueDate: paymentMethod === "credit" && outstanding > 0 ? dueDate : null,
+                    receivedDate,
+                    // Quantity only: cost and selling price stay as they are.
                     lines: selected.map(line => ({
                         variantId: line.variantId, quantity: Number(line.quantity),
-                        unitPurchaseCost: Number(line.unitPurchaseCost),
                         expirationDate: line.expirationDate || null,
-                        pricingDecision: line.pricingDecision,
-                        ...(line.pricingDecision === "manual" ? {
-                            manualSellingPrice: Number(line.manualSellingPrice),
-                        } : {}),
-                        ...(line.pricingDecision === "suggested" ? {
-                            pricingMarkupPercentage: Number(line.pricingMarkupInput),
-                        } : {}),
+                        pricingDecision: "keep",
                         expectedPricing: {
                             stock: line.currentStock,
                             averageCost: line.currentAverageCost,
@@ -3553,8 +3098,8 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                         {loading ? <p className="text-sm text-[#806A8C]">Loading receiving details...</p> : (
                             <>
                                 <section className="space-y-3">
-                                    <h3 className="text-sm font-bold text-[#21132E]">1. {details.hasVariants ? "Variants to Restock" : "Stock to Receive"}</h3>
-                                    <p className="text-xs text-[#806A8C]">Enter received quantities and unit purchase costs. Leave other variants blank to keep them unchanged.</p>
+                                    <h3 className="text-sm font-bold text-[#21132E]">{details.hasVariants ? "Variants to Restock" : "Stock to Receive"}</h3>
+                                    <p className="text-xs text-[#806A8C]">Enter the quantity to add. Leave other variants blank to keep them unchanged.</p>
                                     {lines.map((line, i) => (
                                         <div key={String(line.variantId ?? "regular")} className="space-y-3 rounded-xl border border-[#E3D8EA] p-4">
                                             <div className="flex justify-between gap-3">
@@ -3567,145 +3112,17 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                                                     <input type="number" min="0" step="1" value={line.quantity}
                                                            onChange={e => updateLine(i, "quantity", e.target.value)}
                                                            placeholder="0" className={fieldClass}/></div>
-                                                <div className="space-y-1"><label className={labelClass}>Unit Purchase Cost (₱)</label>
-                                                    <input type="number" min="0" step="0.01" value={line.unitPurchaseCost}
-                                                           onChange={e => updateLine(i, "unitPurchaseCost", e.target.value)}
+                                                <div className="space-y-1"><label className={labelClass}>Expiration Date (Optional)</label>
+                                                    <input type="date" value={line.expirationDate}
+                                                           onChange={e => updateLine(i, "expirationDate", e.target.value)}
                                                            className={fieldClass}/></div>
                                             </div>
-                                            <div className="space-y-1"><label className={labelClass}>Expiration Date (Optional)</label>
-                                                <input type="date" value={line.expirationDate}
-                                                       onChange={e => updateLine(i, "expirationDate", e.target.value)}
-                                                       className={fieldClass}/></div>
                                             <p className="text-xs text-[#806A8C]">Available after receiving: {line.currentStock !== line.currentSellableStock ? "Reconciliation required" : `${formatNumber(line.currentSellableStock + (Number(line.quantity) || 0))} pcs`}</p>
                                         </div>
                                     ))}
                                     <div className="flex justify-between border-t border-[#E3D8EA] pt-3 text-sm font-semibold text-[#2B174C]">
                                         <span>Total Stock to Add</span><span>+{formatNumber(totalQuantity)} pcs</span>
                                     </div>
-                                </section>
-                                {lines.some(line => Number(line.quantity) > 0) && (
-                                    <section className="space-y-4 border-t border-[#E3D8EA] pt-5">
-                                        <h3 className="text-sm font-bold text-[#21132E]">Selling Price &amp; Pricing Method</h3>
-                                        <p className="text-xs text-[#806A8C]">Review the pricing for each item being received. Changes are applied only after Confirm Stock In.</p>
-                                        {lines.map((line, index) => {
-                                            if (Number(line.quantity) <= 0) return null;
-                                            const review = getReceiveStockPriceReview(line);
-                                            const hasRemainingStock = line.currentStock > 0;
-                                            return (
-                                                <div key={`price-${String(line.variantId ?? "regular")}`} className="space-y-4 rounded-xl border border-[#E3D8EA] bg-[#FDFBFF] p-4">
-                                                    <h4 className="text-sm font-bold text-[#2B174C]">{details.hasVariants ? line.variantName : details.name}</h4>
-                                                    {hasRemainingStock ? (
-                                                        <>
-                                                            <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#F7F1FF] p-3">
-                                                                <div><p className="text-xs text-[#806A8C]">Current Selling Price</p>
-                                                                    <strong className="text-lg text-[#2B174C]">{money(line.currentSellingPrice)}</strong></div>
-                                                                <div><p className="text-xs text-[#806A8C]">Suggested Selling Price</p>
-                                                                    <strong className="text-lg text-[#2B174C]">{money(review.suggestedPrice)}</strong></div>
-                                                            </div>
-                                                            <div className="space-y-1 text-xs text-[#5A476A]">
-                                                                <div className="flex justify-between"><span>Existing / incoming stock</span><span>{formatNumber(line.currentStock)} / +{formatNumber(Number(line.quantity))} pcs</span></div>
-                                                                <div className="flex justify-between"><span>Previous Average Unit Cost</span><span>{money(line.currentAverageCost)}</span></div>
-                                                                <div className="flex justify-between"><span>New Purchase Unit Cost</span><span>{money(Number(line.unitPurchaseCost))}</span></div>
-                                                                <div className="flex justify-between font-semibold"><span>New Weighted Average Unit Cost</span><span>{money(review.newAverageCost)}</span></div>
-                                                            </div>
-                                                        </>
-                                                    ) : (
-                                                        <p className="rounded-lg bg-[#F7F1FF] p-3 text-xs text-[#5A476A]">
-                                                            No remaining stock. The new unit cost is {money(review.newAverageCost)}; choose the selling price for this receipt.
-                                                        </p>
-                                                    )}
-                                                    <div className="grid gap-3 sm:grid-cols-2">
-                                                        <div className="space-y-1">
-                                                            <label className={labelClass} htmlFor={`receiving-method-${index}`}>Pricing Method</label>
-                                                            <select id={`receiving-method-${index}`} className={fieldClass}
-                                                                    value={line.pricingDecision === "suggested" ? "markup" : "manual"}
-                                                                    onChange={e => updateLine(index, "pricingDecision", e.target.value === "markup" ? "suggested" : "manual")}>
-                                                                <option value="manual">Manual Selling Price</option>
-                                                                <option value="markup">Percentage Markup</option>
-                                                            </select>
-                                                        </div>
-                                                        {line.pricingDecision === "suggested" && (
-                                                            <div className="space-y-1">
-                                                                <label className={labelClass} htmlFor={`receiving-markup-${index}`}>Markup Percentage (%)</label>
-                                                                <input id={`receiving-markup-${index}`} type="number" min="0" max="99999" step="0.0001"
-                                                                       value={line.pricingMarkupInput} required className={fieldClass}
-                                                                       onChange={e => updateLine(index, "pricingMarkupInput", e.target.value)}/>
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                    {hasRemainingStock && (
-                                                        <fieldset className="space-y-2 text-sm text-[#2B174C]">
-                                                            <legend className="mb-2 font-semibold">Selling Price Decision</legend>
-                                                            <label className="flex items-center gap-2"><input type="radio" name={`receive-price-${index}`}
-                                                                                                              checked={line.pricingDecision === "keep"} onChange={() => updateLine(index, "pricingDecision", "keep")}/>
-                                                                Keep Current Selling Price — {money(line.currentSellingPrice)}</label>
-                                                            <label className="flex items-center gap-2"><input type="radio" name={`receive-price-${index}`}
-                                                                                                              checked={line.pricingDecision === "suggested"} onChange={() => updateLine(index, "pricingDecision", "suggested")}/>
-                                                                Apply Suggested Selling Price — {money(review.suggestedPrice)}</label>
-                                                            <label className="flex items-center gap-2"><input type="radio" name={`receive-price-${index}`}
-                                                                                                              checked={line.pricingDecision === "manual"} onChange={() => updateLine(index, "pricingDecision", "manual")}/>
-                                                                Set a Manual Selling Price</label>
-                                                        </fieldset>
-                                                    )}
-                                                    <div className="space-y-1">
-                                                        <label className={labelClass} htmlFor={`receiving-final-price-${index}`}>Final Selling Price (₱)</label>
-                                                        <input id={`receiving-final-price-${index}`} type="number" min="0" max="100000000" step="0.01"
-                                                               value={line.pricingDecision === "manual" ? line.manualSellingPrice : String(review.finalPrice)}
-                                                               readOnly={line.pricingDecision !== "manual"}
-                                                               required={line.pricingDecision === "manual"}
-                                                               onChange={e => updateLine(index, "manualSellingPrice", e.target.value)}
-                                                               className={`${fieldClass} ${line.pricingDecision !== "manual" ? "bg-[#F7F1FF]" : ""}`}/>
-                                                        {line.pricingDecision === "suggested" && (
-                                                            <p className="text-xs text-[#806A8C]">Selling price = {money(review.newAverageCost)} × (1 + {line.pricingMarkupInput || "0"} ÷ 100).</p>
-                                                        )}
-                                                        {hasRemainingStock && line.pricingDecision === "keep" && (
-                                                            <p className="text-xs text-[#806A8C]">The current selling price stays unchanged. If it no longer matches the markup formula, the saved method becomes Manual.</p>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
-                                    </section>
-                                )}
-                                <section className="space-y-3 border-t border-[#E3D8EA] pt-5">
-                                    <h3 className="text-sm font-bold text-[#21132E]">2. Supplier &amp; Receiving Information</h3>
-                                    <div className="space-y-1"><label className={labelClass}>Supplier</label>
-                                        <input list={`receive-stock-suppliers-${product.id}`} value={supplier} onChange={e => setSupplier(e.target.value)}
-                                               maxLength={150} required placeholder="Select or enter supplier" className={fieldClass}/>
-                                        <datalist id={`receive-stock-suppliers-${product.id}`}>
-                                            {supplierOptions.map(name => <option key={name} value={name}/>) }
-                                        </datalist></div>
-                                    <div className="space-y-1"><label className={labelClass}>Date Received</label>
-                                        <input type="date" value={receivedDate} onChange={e => setReceivedDate(e.target.value)} required className={fieldClass}/></div>
-                                    <div className="space-y-1"><label className={labelClass}>Supplier Invoice Number (Optional)</label>
-                                        <input value={invoice} onChange={e => setInvoice(e.target.value)} maxLength={80}
-                                               placeholder="Enter invoice or receipt number" className={fieldClass}/></div>
-                                </section>
-                                <section className="space-y-3 border-t border-[#E3D8EA] pt-5">
-                                    <h3 className="text-sm font-bold text-[#21132E]">3. Purchase Payment Details</h3>
-                                    <div className="space-y-1"><label className={labelClass}>Payment Method</label>
-                                        <div className="flex gap-5 text-sm text-[#2B174C]">
-                                            <label className="flex items-center gap-2"><input type="radio" checked={paymentMethod === "cash"}
-                                                                                              onChange={() => setPaymentMethod("cash")}/>Cash</label>
-                                            <label className="flex items-center gap-2"><input type="radio" checked={paymentMethod === "credit"}
-                                                                                              onChange={() => setPaymentMethod("credit")}/>Credit (Utang)</label>
-                                        </div></div>
-                                    {paymentMethod === "credit" && (
-                                        <div className="grid gap-3 sm:grid-cols-2">
-                                            <div className="space-y-1"><label className={labelClass}>Amount Paid (₱)</label>
-                                                <input type="number" value={amountPaid} min="0" step="0.01"
-                                                       onChange={e => setAmountPaid(e.target.value)} className={fieldClass}/></div>
-                                            <div className="space-y-1"><label className={labelClass}>Payment Due Date</label>
-                                                <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} className={fieldClass}/></div>
-                                        </div>
-                                    )}
-                                </section>
-                                <section className="space-y-2 rounded-xl bg-[#F7F1FF] p-4 text-sm text-[#2B174C]">
-                                    <h3 className="font-bold">Stock Receiving Summary</h3>
-                                    <div className="flex justify-between"><span>Total Units Received</span><strong>{formatNumber(totalQuantity)} pcs</strong></div>
-                                    <div className="flex justify-between"><span>Total Purchase Cost</span><strong>{money(totalCost)}</strong></div>
-                                    <div className="flex justify-between"><span>Amount Paid</span><strong>{money(paid)}</strong></div>
-                                    <div className="flex justify-between border-t border-[#E3D8EA] pt-2"><strong>Outstanding Balance</strong><strong>{money(outstanding)}</strong></div>
                                 </section>
                             </>
                         )}
@@ -4066,7 +3483,7 @@ function StockActionReviewDialog({
                     )}
                     <p className="rounded-xl border border-[#E9E1EE] bg-[#FCF9FF] p-3 text-xs leading-5 text-[#5A476A]">
                         <strong>Before removal:</strong> StockNBook checks active bookings/packages and recorded POS,
-                        purchase, restock and adjustment history. Only the selected variant (or regular product) can be removed.
+                        restock and adjustment history. Only the selected variant (or regular product) can be removed.
                         Referenced inventory is archived; unused inventory may be permanently deleted. Other active variants stay untouched.
                     </p>
                     {selectedVariant && (
@@ -4208,8 +3625,8 @@ function RecentStockActivity({
                 <div className="min-h-0 flex-1 w-full overflow-y-auto overflow-x-hidden">
                     <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                         <colgroup>
-                            <col className="w-[16%]" />
-                            <col className="w-[30%]" />
+                            <col className="w-[19%]" />
+                            <col className="w-[27%]" />
                             <col className="w-[18%]" />
                             <col className="w-[9%]" />
                             <col className="w-[27%]" />
@@ -4233,10 +3650,10 @@ function RecentStockActivity({
                                     className="border-b border-[#EFE8F2] last:border-b-0"
                                 >
                                     <td className="py-2 text-[#4F3A5A] px-4 text-left">
-                                        <div className="font-medium">
+                                        <div className="whitespace-nowrap font-medium">
                                             {formatStockActivityDate(movement.date)}
                                         </div>
-                                        <div className="mt-0.5 text-[10px] text-[#8A7D90]">
+                                        <div className="mt-0.5 whitespace-nowrap text-[10px] text-[#8A7D90]">
                                             {movement.source === "POS Sale" && movement.hasRecordedTime === false
                                                 ? "Time not recorded"
                                                 : formatStockActivityTime(movement.date)}
@@ -4344,522 +3761,6 @@ function ManagerSearchActions({ inv }: { inv: InventoryController }) {
             </button>
         </div>
     );
-}
-
-/* Stock corrections are performed inside Edit Product, not through a table action.
- * Each confirmed correction is a separate audited adjustment; never a purchase. */
-function EditProductStockCorrection({inv}: {inv: InventoryController}) {
-    const productId = Number(inv.editingId || 0);
-    const [current, setCurrent] = React.useState<Product | null>(null);
-    const [loading, setLoading] = React.useState(true);
-    const [line, setLine] = React.useState("");
-    const [newStock, setNewStock] = React.useState("");
-    const [correctionExpiry,setCorrectionExpiry]=React.useState("");
-    const [reason, setReason] = React.useState("");
-    const [confirm, setConfirm] = React.useState(false);
-    const [saving, setSaving] = React.useState(false);
-    const [error, setError] = React.useState("");
-    const [notice, setNotice] = React.useState("");
-    const requestKey = React.useRef(crypto.randomUUID());
-
-    React.useEffect(() => {
-        let cancelled = false;
-        setLoading(true);
-        setCurrent(null);
-        setError("");
-        setNotice("");
-        const load = async () => {
-            try {
-                const token = sessionStorage.getItem("token");
-                if (!token) throw new Error("Please sign in again.");
-                const res = await fetch("/api/products", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json", Authorization: `Bearer ${token}`},
-                    body: JSON.stringify({action: "get_product_editor_details", id: productId}),
-                    cache: "no-store",
-                });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok || !data.product) throw new Error(data.error || "Unable to load current stock.");
-                if (cancelled) return;
-                const product = data.product as Product;
-                setCurrent(product);
-                const firstVariant = product.hasVariants ? product.variants?.[0] : null;
-                setLine(firstVariant ? String(firstVariant.id) : "regular");
-                setNewStock(String(firstVariant ? firstVariant.stock : product.stock ?? 0));
-            } catch (e) {
-                if (!cancelled) setError(e instanceof Error ? e.message : "Unable to load current stock.");
-            } finally {
-                if (!cancelled) setLoading(false);
-            }
-        };
-        if (productId > 0) void load();
-        return () => {cancelled = true;};
-    }, [productId]);
-
-    const selectedVariant = current?.hasVariants
-        ? current.variants?.find(v => String(v.id) === line) : null;
-    const before = Number(selectedVariant ? selectedVariant.stock : current?.stock ?? 0);
-    const target = Number(newStock);
-    const valid = Boolean(current && line && newStock.trim() !== "" &&
-        Number.isSafeInteger(target) && target >= 0 && target <= 2147483647 &&
-        target !== before && reason.trim().length >= 8);
-
-    const save = async () => {
-        if (!valid || saving || !current) return;
-        setSaving(true);
-        setError("");
-        setNotice("");
-        try {
-            const token = sessionStorage.getItem("token");
-            if (!token) throw new Error("Please sign in again.");
-            const res = await fetch("/api/products", {
-                method: "POST",
-                headers: {"Content-Type": "application/json", Authorization: `Bearer ${token}`},
-                body: JSON.stringify({action: "adjust_stock", productId: current.id,
-                    variantId: selectedVariant?.id ?? null,
-                    expectedStock: before, newStock: target,
-                    expirationDate: target>before ? (correctionExpiry||null) : null,
-                    reason: reason.trim(), requestKey: requestKey.current}),
-            });
-            const result = await res.json().catch(() => ({}));
-            if (!res.ok || !result.success) throw new Error(result.error || `Stock correction failed (HTTP ${res.status}).`);
-            // Update both the inline correction panel and Edit Product's original
-            // stock field, so saving other product details cannot submit stale stock.
-            if (selectedVariant) {
-                const index = (inv as VariantEditorController).variants?.findIndex(v => Number(v.id) === selectedVariant.id) ?? -1;
-                if (index >= 0) (inv as VariantEditorController).updateVariantField(index, "stock", String(target));
-            } else {
-                inv.setStock(String(target));
-            }
-            setCurrent(previous => {
-                if (!previous) return previous;
-                if (selectedVariant) return {
-                    ...previous, stock: Number(result.totalStock),
-                    variants: previous.variants?.map(v => v.id === selectedVariant.id ? {...v, stock: target} : v),
-                };
-                return {...previous, stock: target};
-            });
-            setNewStock(String(target));
-            setReason("");
-            requestKey.current = crypto.randomUUID();
-            setConfirm(false);
-            setNotice(`Recorded stock corrected from ${before} to ${target} pcs.`);
-            await inv.refreshAll();
-            window.dispatchEvent(new Event("stocknbook:stock-activity-refresh"));
-        } catch (e) {
-            setError(e instanceof Error ? e.message : "Unable to correct stock.");
-            setConfirm(false);
-        } finally {setSaving(false);}
-    };
-
-    return <section className="space-y-3 rounded-xl border border-[#E6DDF0] bg-[#FFFCF8] p-4">
-        <h4 className="text-sm font-bold text-[#2B174C]">Correct Recorded Stock</h4>
-        <p className="text-xs text-[#806A8C]">Fix an incorrectly entered stock count here in Edit Product. This is not a restock or supplier payment. A reason and confirmation are required; the correction is saved to the database audit history.</p>
-        {loading ? <p className="text-xs text-[#806A8C]">Loading current stock...</p> : current && <>
-            {current.hasVariants && <div className="space-y-1">
-                <label className={labelClass}>Variant to correct</label>
-                <select className={fieldClass} value={line} onChange={e => {
-                    const v = current.variants?.find(v => String(v.id) === e.target.value);
-                    setLine(e.target.value); setNewStock(String(v?.stock ?? 0)); setReason(""); setError(""); setNotice("");
-                }}>
-                    {(current.variants || []).map(v => <option key={v.id} value={v.id}>{getVariantName(v)} {v.variantNumber ? `(${v.variantNumber})` : ""}</option>)}
-                </select>
-            </div>}
-            <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1"><label className={labelClass}>Current Stock</label><p className="rounded-xl bg-[#F7F1FF] p-3 text-sm font-semibold text-[#2B174C]">{before} pcs</p></div>
-                <div className="space-y-1"><label className={labelClass}>Corrected Stock</label>
-                    <input className={fieldClass} type="number" min="0" max="2147483647" step="1" value={newStock} onChange={e => {setNewStock(e.target.value);setNotice("");}} /></div>
-            </div>
-            {target>before && <div className="space-y-1">
-                <label className={labelClass}>Expiration Date for Additional Units (if applicable)</label>
-                <input type="date" className={fieldClass} value={correctionExpiry} onChange={e=>setCorrectionExpiry(e.target.value)}/>
-                <p className="text-[11px] text-[#806A8C]">Only leave blank for verified non-expiring stock. For supplier deliveries use Receive Stock instead.</p>
-            </div>}
-            <div className="space-y-1"><label className={labelClass}>Reason for Correction (Required)</label>
-                <textarea className={fieldClass} rows={2} value={reason} onChange={e => setReason(e.target.value)} placeholder="Example: Physical recount found five missing items" /></div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs text-[#806A8C]">Change: {target - before > 0 ? "+" : ""}{newStock.trim() === "" || !Number.isFinite(target) ? "—" : target - before} pcs</p>
-                <button type="button" disabled={!valid || saving} onClick={() => setConfirm(true)} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">Confirm Stock Correction</button>
-            </div>
-        </>}
-        {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
-        {notice && <p role="status" className="text-xs font-semibold text-green-700">{notice}</p>}
-        {confirm && <div className="fixed inset-0 z-[165] flex items-center justify-center bg-black/60 p-4">
-            <div role="alertdialog" aria-modal="true" className="w-full max-w-sm space-y-3 rounded-xl bg-white p-5 shadow-xl">
-                <h3 className="font-bold">Confirm Stock Correction</h3>
-                <p className="text-sm">Change the recorded stock from <strong>{before}</strong> to <strong>{target}</strong> pcs? This creates an audit record and does not record a new supplier purchase.</p>
-                <div className="flex justify-end gap-2">
-                    <button type="button" disabled={saving} onClick={() => setConfirm(false)} className="rounded-lg border px-4 py-2 text-sm">Back</button>
-                    <button type="button" disabled={saving} onClick={() => void save()} className="rounded-lg bg-[#2B174C] px-4 py-2 text-sm text-white">{saving ? "Saving..." : "Confirm"}</button>
-                </div>
-            </div>
-        </div>}
-    </section>;
-}
-
-// Minimal purchase-specific settlement screen. Payments never change stock.
-type SupplierPayable = {
-    purchaseId:number;purchaseNumber:string;supplier:string;supplierInvoiceNumber:string|null;
-    purchaseTotal:number;amountPaid:number;outstandingBalance:number;paymentStatus:string;
-    paymentMethod:"cash"|"credit";
-    purchaseDate:string;recordedAt?:string|null;paymentDueDate:string|null;
-};
-type SupplierPurchaseItem = {
-    productId:number; productNumber:string|null; productName:string; variantId:number|null;
-    variantNumber:string|null; variantValues:Record<string,string>|string|null;
-    quantity:number; unitCost:number; lineTotal:number;
-};
-function SupplierPurchaseEditDialog({purchase,onClose,onSave}:{
-    purchase:SupplierPayable;
-    onClose:()=>void;
-    onSave:(details:InitialPurchaseInput,expected:SupplierPayable)=>Promise<void>;
-}) {
-    const [draft,setDraft]=React.useState<PurchaseDraft>(()=>({
-        supplier:purchase.supplier || "",
-        supplierInvoiceNumber:purchase.supplierInvoiceNumber || "",
-        purchaseDate:purchase.purchaseDate || "",
-        paymentMethod:purchase.paymentMethod,
-        amountPaid:String(purchase.amountPaid),
-        paymentDueDate:purchase.paymentDueDate || "",
-    }));
-    const [error,setError]=React.useState("");
-    const [saving,setSaving]=React.useState(false);
-    const [confirm,setConfirm]=React.useState(false);
-    const saveInFlight=React.useRef(false);
-    const purchaseTotal=Number(purchase.purchaseTotal);
-    const amountPaid=draft.paymentMethod === "cash" ? purchaseTotal : Number(draft.amountPaid || 0);
-    const outstandingBalance=Math.max(0,Math.round((purchaseTotal-amountPaid)*100)/100);
-    const updatePurchase=(patch:Partial<PurchaseDraft>)=>{
-        setDraft(previous=>({...previous,...patch}));setError("");
-    };
-    const prepareSave=(event:React.SyntheticEvent)=>{
-        event.preventDefault();if(saving)return;
-        if(!draft.supplier.trim() || !draft.purchaseDate){setError("Supplier and Purchase Date are required.");return;}
-        if(!Number.isFinite(amountPaid) || amountPaid<0 || amountPaid>purchaseTotal ||
-            Math.abs(amountPaid*100-Math.round(amountPaid*100))>0.00001){
-            setError("Total Amount Paid must be between zero and the original purchase total, with at most two decimal places.");return;
-        }
-        if(draft.paymentMethod === "credit" && outstandingBalance>0 && !draft.paymentDueDate){
-            setError("Payment Due Date is required for an outstanding credit purchase.");return;
-        }
-        if(draft.paymentMethod === "credit" && draft.paymentDueDate && draft.paymentDueDate<draft.purchaseDate){
-            setError("Payment Due Date cannot be before Purchase Date.");return;
-        }
-        setError("");setConfirm(true);
-    };
-    const save=async()=>{
-        if(saveInFlight.current)return;
-        saveInFlight.current=true;setSaving(true);setError("");
-        try{
-            await onSave({
-                supplier:draft.supplier.trim(),supplierInvoiceNumber:draft.supplierInvoiceNumber.trim() || null,
-                purchaseDate:draft.purchaseDate,paymentMethod:draft.paymentMethod,amountPaid,
-                paymentDueDate:draft.paymentMethod === "credit" ? draft.paymentDueDate || null : null,
-                expectedAmountPaid:Number(purchase.amountPaid),
-            },purchase);
-            onClose();
-        }catch(e){setError(e instanceof Error?e.message:"Unable to save purchase details.");setConfirm(false);}
-        finally{saveInFlight.current=false;setSaving(false);}
-    };
-    return <div role="dialog" aria-modal="true" aria-labelledby="supplier-purchase-edit-title"
-                className="fixed inset-0 z-[155] flex items-center justify-center bg-black/50 p-4"
-                onKeyDown={event=>{if(event.key === "Escape" && !saving){event.stopPropagation();if(confirm)setConfirm(false);else onClose();}}}>
-        <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl" inert={confirm || undefined}>
-            <div className="flex items-center justify-between border-b border-[#E3D8EA] px-6 py-4">
-                <div><h2 id="supplier-purchase-edit-title" className="text-lg font-bold text-[#2B174C]">Initial Purchase Details</h2>
-                    <p className="mt-1 text-xs text-[#806A8C]">{purchase.purchaseNumber}</p></div>
-                <button type="button" disabled={saving} onClick={onClose} className="text-sm text-[#806A8C] disabled:opacity-50">Close</button>
-            </div>
-            <form onSubmit={prepareSave} className="space-y-4 overflow-y-auto p-6">
-                <p className="text-xs text-[#806A8C]">You may correct saved purchase details. The original purchase total and stock receiving history stay unchanged; corrections are recorded in the audit history.</p>
-                <p role="note" className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">Supplier and payment corrections apply to this entire purchase, including all linked products and variants.</p>
-                <fieldset disabled={saving} className="space-y-3">
-                    <div className="space-y-1"><label htmlFor="purchase-edit-supplier" className={labelClass}>Supplier</label>
-                        <input id="purchase-edit-supplier" autoFocus required maxLength={150} value={draft.supplier} onChange={e=>updatePurchase({supplier:e.target.value})}
-                               placeholder="Enter supplier name" className={fieldClass}/></div>
-                    <div className="space-y-1"><label htmlFor="purchase-edit-invoice" className={labelClass}>Supplier Invoice Number (Optional)</label>
-                        <input id="purchase-edit-invoice" maxLength={80} value={draft.supplierInvoiceNumber} onChange={e=>updatePurchase({supplierInvoiceNumber:e.target.value})}
-                               placeholder="Enter invoice or receipt number" className={fieldClass}/></div>
-                    <div className="space-y-1"><label htmlFor="purchase-edit-date" className={labelClass}>Purchase Date</label>
-                        <input id="purchase-edit-date" required type="date" value={draft.purchaseDate} onChange={e=>updatePurchase({purchaseDate:e.target.value})} className={fieldClass}/></div>
-                    <div className="space-y-1"><p className={labelClass}>Payment Method</p>
-                        <div role="group" aria-label="Payment Method" className="grid grid-cols-2 gap-2">
-                            {(["cash","credit"] as const).map(method=><button key={method} type="button" aria-pressed={draft.paymentMethod === method}
-                                                                              onClick={()=>updatePurchase({paymentMethod:method})}
-                                                                              className={`rounded-xl border px-3 py-2.5 text-sm font-semibold ${draft.paymentMethod === method
-                                                                                  ? "border-[#2B174C] bg-[#2B174C] text-white" : "border-[#E6DDF0] bg-white text-[#2B174C]"}`}>
-                                {method === "cash" ? "Cash" : "Credit (Utang)"}</button>)}
-                        </div></div>
-                    <p className="text-xs text-[#806A8C]">Original Purchase Total: <strong>{money(purchaseTotal)}</strong></p>
-                    {draft.paymentMethod === "credit" && <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-1"><label htmlFor="purchase-edit-paid" className={labelClass}>Total Amount Paid (₱)</label>
-                            <input id="purchase-edit-paid" type="number" min="0" max={purchaseTotal} step="0.01" required className={fieldClass}
-                                   value={draft.amountPaid} onChange={e=>updatePurchase({amountPaid:e.target.value})}/></div>
-                        <div className="space-y-1"><label htmlFor="purchase-edit-due" className={labelClass}>Payment Due Date</label>
-                            <input id="purchase-edit-due" type="date" min={draft.purchaseDate || undefined} required={outstandingBalance>0} className={fieldClass}
-                                   value={draft.paymentDueDate} onChange={e=>updatePurchase({paymentDueDate:e.target.value})}/></div>
-                        <div className="rounded-xl bg-[#F7F1FF] px-4 py-3 sm:col-span-2">
-                            <p className="text-xs text-[#806A8C]">Outstanding Balance</p>
-                            <p className="text-lg font-bold text-[#2B174C]">{money(outstandingBalance)}</p>
-                            <p className="text-[11px] text-[#806A8C]">This balance is saved and recalculated by the server when you confirm.</p>
-                        </div>
-                    </div>}
-                </fieldset>
-                {error && <p role="alert" className="rounded-lg bg-red-50 p-2 text-xs text-red-600">{error}</p>}
-                <div className="flex justify-end gap-2 border-t border-[#E3D8EA] pt-4">
-                    <button type="button" disabled={saving} onClick={onClose} className="rounded-xl border border-[#E6DDF0] px-4 py-2.5 text-sm disabled:opacity-50">Cancel</button>
-                    <button type="submit" disabled={saving} className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50">Save Purchase Details</button>
-                </div>
-            </form>
-        </div>
-        {confirm && <div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/50 p-4">
-            <div role="alertdialog" aria-modal="true" aria-labelledby="supplier-purchase-confirm-title" className="w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-xl">
-                <h3 id="supplier-purchase-confirm-title" className="font-bold text-[#2B174C]">Confirm Purchase Changes</h3>
-                <p className="text-sm">Save the corrected details for <strong>{purchase.purchaseNumber}</strong>? Changes apply to all its linked products and variants.</p>
-                <p className="text-xs text-[#806A8C]">Total amount paid: {money(amountPaid)}. Outstanding balance: {money(outstandingBalance)}. The original purchase total and stock receiving history stay unchanged. Use Record Payment for a new supplier payment.</p>
-                <div className="flex justify-end gap-2">
-                    <button type="button" disabled={saving} onClick={()=>setConfirm(false)} className="rounded-lg border px-4 py-2 text-sm disabled:opacity-50">Back</button>
-                    <button type="button" autoFocus disabled={saving} onClick={()=>void save()} className="rounded-lg bg-[#2B174C] px-4 py-2 text-sm text-white disabled:opacity-50">{saving?"Saving...":"Confirm Changes"}</button>
-                </div>
-            </div>
-        </div>}
-    </div>;
-}
-
-function formatSupplierPurchaseDate(value?: string | null) {
-    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value || "");
-    if (!match) return "—";
-    const year = Number(match[1]);
-    const month = Number(match[2]);
-    const day = Number(match[3]);
-    const date = new Date(Date.UTC(year, month - 1, day));
-    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== `${match[1]}-${match[2]}-${match[3]}`) return "—";
-    const months = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "Jun.", "Jul.", "Aug.", "Sep.", "Oct.", "Nov.", "Dec."];
-    return `${months[month - 1]} ${day}, ${year}`;
-}
-function formatPurchaseRecordedTime(value?: string | null) {
-    // created_at records when StockNBook saved the purchase, not the supplier's transaction time.
-    // The API returns database-local clock text; avoid converting an unknown timezone.
-    const match = /^\d{4}-\d{2}-\d{2}[ T](\d{2}):(\d{2})/.exec(value || "");
-    if (!match || Number(match[1]) > 23) return "—";
-    const hour = Number(match[1]);
-    return `${hour % 12 || 12}:${match[2]} ${hour >= 12 ? "PM" : "AM"}`;
-}
-
-function SupplierPayablesDialog({onClose}:{onClose:()=>void}) {
-    const [rows,setRows]=React.useState<SupplierPayable[]>([]);
-    const [loading,setLoading]=React.useState(true);
-    const [saving,setSaving]=React.useState(false);
-    const [error,setError]=React.useState("");
-    const [notice,setNotice]=React.useState("");
-    const [search,setSearch]=React.useState("");
-    const [paymentMethodFilter,setPaymentMethodFilter]=React.useState<"all"|"cash"|"credit">("all");
-    const [viewPurchase,setViewPurchase]=React.useState<SupplierPayable|null>(null);
-    const [purchaseItems,setPurchaseItems]=React.useState<SupplierPurchaseItem[]>([]);
-    const [itemsLoading,setItemsLoading]=React.useState(false);
-    const [selectedId,setSelectedId]=React.useState("");
-    const [paymentAmount,setPaymentAmount]=React.useState("");
-    const [paymentDate,setPaymentDate]=React.useState(()=>new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"}));
-    const [confirmPayment,setConfirmPayment]=React.useState<{id:number; number:string; amount:number;date:string}|null>(null);
-    const [editPurchase,setEditPurchase]=React.useState<SupplierPayable|null>(null);
-    const editTriggerRef=React.useRef<HTMLButtonElement|null>(null);
-    const closePurchaseEditor=()=>{
-        setEditPurchase(null);
-        window.setTimeout(()=>editTriggerRef.current?.focus(),0);
-    };
-    const paymentRequestKey=React.useRef(crypto.randomUUID());
-    const request=React.useCallback(async (body:Record<string,unknown>)=>{
-        const token=sessionStorage.getItem("token");if(!token)throw new Error("Session expired.");
-        const response=await fetch("/api/products",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
-            body:JSON.stringify(body),cache:"no-store"});
-        const result=await response.json().catch(()=>({}));
-        if(!response.ok || !result.success)throw new Error(result.error || `Request failed (HTTP ${response.status}).`);
-        return result;
-    },[]);
-    // One request at a time: old responses must never overwrite a newer payment update.
-    const latestPayablesRequest=React.useRef(0);
-    const reload=React.useCallback(async()=>{
-        const requestNumber=++latestPayablesRequest.current;
-        const result=await request({action:"get_supplier_payables"});
-        if(requestNumber!==latestPayablesRequest.current)return;
-        const latestRows:SupplierPayable[]=Array.isArray(result.payables)?result.payables:[];
-        setRows(latestRows);
-        setViewPurchase(previous=>previous
-            ? latestRows.find(row=>row.purchaseId===previous.purchaseId)??null : null);
-        setError("");
-    },[request]);
-    React.useEffect(()=>{
-        let active=true;
-        void reload().catch(e=>{if(active)setError(e instanceof Error?e.message:"Unable to load payables.");})
-            .finally(()=>{if(active)setLoading(false);});
-        return ()=>{active=false;latestPayablesRequest.current+=1;};
-    },[reload]);
-    React.useEffect(()=>{
-        const refresh=()=>{
-            if(document.visibilityState!=="visible")return;
-            void reload().catch(e=>setError(e instanceof Error?e.message:"Unable to update supplier payables."));
-        };
-        const onVisible=()=>{if(document.visibilityState==="visible")refresh();};
-        window.addEventListener("stocknbook:purchase-updated",refresh);
-        window.addEventListener("focus",refresh);
-        document.addEventListener("visibilitychange",onVisible);
-        // Also pick up MySQL changes made from another browser/session.
-        const interval=window.setInterval(refresh,10000);
-        return ()=>{
-            window.clearInterval(interval);
-            window.removeEventListener("stocknbook:purchase-updated",refresh);
-            window.removeEventListener("focus",refresh);
-            document.removeEventListener("visibilitychange",onVisible);
-        };
-    },[reload]);
-    // These totals cover the entire branch, even when the list is filtered.
-    const needToPay=rows.reduce((sum,row)=>sum+Number(row.outstandingBalance||0),0);
-    const totalPaid=rows.reduce((sum,row)=>sum+Number(row.amountPaid||0),0);
-    const filtered=rows.filter(row=>
-        (paymentMethodFilter==="all"||row.paymentMethod===paymentMethodFilter) &&
-        [row.purchaseNumber,row.supplier,row.supplierInvoiceNumber,row.paymentMethod,row.paymentStatus]
-            .some(value=>String(value??"").toLowerCase().includes(search.trim().toLowerCase())));
-    const selected=rows.find(r=>String(r.purchaseId)===selectedId);
-    const openPurchase=async(row:SupplierPayable)=>{
-        setViewPurchase(row);setPurchaseItems([]);setItemsLoading(true);setError("");
-        try{const response=await request({action:"get_supplier_purchase_items",purchaseId:row.purchaseId});
-            setPurchaseItems(Array.isArray(response.items)?response.items:[]);
-        }catch(e){setError(e instanceof Error?e.message:"Unable to load purchase items.");}
-        finally{setItemsLoading(false);}
-    };
-    const preparePayment=(e:React.SyntheticEvent)=>{
-        e.preventDefault();if(saving||!selected)return;
-        const amount=Number(paymentAmount);
-        if(!Number.isFinite(amount)||amount<=0||amount>selected.outstandingBalance){
-            setError("Payment must be positive and cannot exceed this purchase's outstanding balance.");return;
-        }
-        if(!paymentDate){setError("Payment Date is required.");return;}
-        setError("");setConfirmPayment({id:selected.purchaseId,number:selected.purchaseNumber,amount,date:paymentDate});
-    };
-    const pay=async()=>{
-        if(!confirmPayment||saving)return;
-        setSaving(true);setError("");setNotice("");
-        try{
-            const result=await request({action:"pay_supplier_purchase",purchaseId:confirmPayment.id,
-                amount:confirmPayment.amount,paymentDate:confirmPayment.date,requestKey:paymentRequestKey.current});
-            paymentRequestKey.current=crypto.randomUUID();
-            setNotice(result.alreadyProcessed?"This payment was already recorded.":`Payment recorded for ${confirmPayment.number}.`);
-            setConfirmPayment(null);setSelectedId("");setPaymentAmount("");
-            await reload();
-        }catch(e){setError(e instanceof Error?e.message:"Unable to record payment.");}
-        finally{setSaving(false);}
-    };
-    const savePurchaseDetails=async(details:InitialPurchaseInput,expected:SupplierPayable)=>{
-        await request({action:"update_supplier_purchase",purchaseId:expected.purchaseId,details,expected});
-        setNotice(`Purchase details updated for ${expected.purchaseNumber}.`);
-        if(selectedId===String(expected.purchaseId)){setSelectedId("");setPaymentAmount("");}
-        try{await reload();}
-        catch(e){setError(e instanceof Error?`Changes saved, but the list could not refresh: ${e.message}`:"Changes saved. Reopen Supplier Payables to refresh the list.");}
-        window.dispatchEvent(new Event("stocknbook:purchase-updated"));
-    };
-    return <div role="dialog" aria-modal="true" aria-label="Supplier Payables"
-                className="fixed inset-0 z-[140] flex items-center justify-center bg-black/50 p-4">
-        <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-2xl" inert={editPurchase ? true : undefined}>
-            <div className="flex items-center justify-between border-b border-[#E3D8EA] px-6 py-4">
-                <h2 className="text-lg font-bold text-[#2B174C]">Supplier Payables</h2>
-                <div className="flex items-center gap-3">
-                    <button type="button" title="Download filtered supplier payables PDF" aria-label="Download supplier payables"
-                            onClick={() => void downloadManagerInventoryReport("Consumable Supplier Payables",
-                                ["Purchase No.", "Purchase Date", "Supplier", "Method", "Total", "Paid", "Outstanding", "Status"],
-                                filtered.map(row => [row.purchaseNumber, formatSupplierPurchaseDate(row.purchaseDate), row.supplier,
-                                    row.paymentMethod, money(row.purchaseTotal), money(row.amountPaid), money(row.outstandingBalance), row.paymentStatus]),
-                                sessionStorage.getItem("branch_name") || "Assigned Branch",
-                                paymentMethodFilter === "all" ? "All payments" : paymentMethodFilter,
-                                "stocknbook_consumable_supplier_payables")
-                                .catch(() => setError("Unable to download the supplier payables report."))}
-                            className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]"><Download size={16}/></button>
-                    <button type="button" onClick={onClose} className="text-sm text-[#806A8C]">Close</button>
-                </div>
-            </div>
-            <div className="space-y-4 overflow-y-auto p-6">
-                <p className="text-xs text-[#806A8C]">Balances belong to the purchase, not each product. Use Edit on a purchase row to correct its supplier and payment details.</p>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-label="Supplier payment totals for all purchases">
-                    <div className="rounded-xl border border-[#E3D8EA] bg-[#FBF8FF] p-4">
-                        <p className="text-xs font-medium text-[#806A8C]">Need to Pay</p>
-                        <p className="mt-1 text-xl font-bold text-[#2B174C]">{money(needToPay)}</p>
-                        <p className="mt-1 text-xs text-[#806A8C]">Total outstanding across all purchases</p>
-                    </div>
-                    <div className="rounded-xl border border-[#E3D8EA] bg-[#FBF8FF] p-4">
-                        <p className="text-xs font-medium text-[#806A8C]">Paid</p>
-                        <p className="mt-1 text-xl font-bold text-[#2B174C]">{money(totalPaid)}</p>
-                        <p className="mt-1 text-xs text-[#806A8C]">Total payments recorded across all purchases</p>
-                    </div>
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                    <input aria-label="Search supplier purchases" className={`${fieldClass} min-w-0 flex-1`} placeholder="Search Purchase No., supplier, invoice, status..." value={search} onChange={e=>setSearch(e.target.value)}/>
-                    <ManagerInventoryFilterSelect containerClassName="w-full sm:w-[176px]" aria-label="Filter payment method" value={paymentMethodFilter} onChange={e=>setPaymentMethodFilter(e.target.value as "all"|"cash"|"credit")}>
-                        <option value="all">All Payments</option>
-                        <option value="cash">Cash</option>
-                        <option value="credit">Credit (Utang)</option>
-                    </ManagerInventoryFilterSelect>
-                </div>
-                {notice && <p role="status" className="rounded-lg bg-green-50 p-2 text-sm text-green-700">{notice}</p>}
-                {error && <p role="alert" className="rounded-lg bg-red-50 p-2 text-xs text-red-600">{error}</p>}
-                {loading?<p className="text-sm">Loading supplier purchases...</p>:filtered.length===0?
-                    <p className="text-sm">{rows.length===0?"No transaction-ledger purchases found.":"No purchases match this search."}</p>:
-                    <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[17%]"/><col className="w-[15%]"/><col className="w-[14%]"/><col className="w-[10%]"/><col className="w-[9%]"/><col className="w-[8.5%]"/><col className="w-[10%]"/><col className="w-[8%]"/><col className="w-[8.5%]"/></colgroup>
-                        <thead className="sticky top-0 z-10 bg-white"><tr className="border-b border-[#E3D8EA] text-[#806A8C]">
-                            <th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Purchase No.</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Purchase Date / Time</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Supplier</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Method</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Total</th>
-                            <th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Paid</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Outstanding</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Status</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Action</th></tr></thead>
-                        <tbody>{filtered.map(row=><tr key={row.purchaseId} className="border-b border-[#F0EAF4]">
-                            <td className="min-w-0 break-words py-1.5 px-4 text-left"><button type="button" className="font-semibold text-[#5734B3] underline underline-offset-2" onClick={()=>void openPurchase(row)}>{row.purchaseNumber}</button></td>
-                            <td className="p-1.5">{formatSupplierPurchaseDate(row.purchaseDate)}<div className="mt-1 text-[10px] text-[#806A8C]">{formatPurchaseRecordedTime(row.recordedAt)}</div></td>
-                            <td className="min-w-0 break-words p-1.5">{row.supplier}</td><td className="min-w-0 break-words p-1.5 text-center">{row.paymentMethod === "cash" ? "Cash" : "Credit (Utang)"}</td>
-                            <td className="min-w-0 break-words p-1.5 text-center tabular-nums">{money(row.purchaseTotal)}</td><td className="min-w-0 break-words p-1.5 text-center tabular-nums">{money(row.amountPaid)}</td>
-                            <td className="min-w-0 break-words p-1.5 text-center tabular-nums">{money(row.outstandingBalance)}</td><td className={`min-w-0 break-words p-1.5 text-center font-semibold ${row.paymentStatus === "Paid" ? "text-[#23834A]" : row.paymentStatus === "Unpaid" ? "text-[#D92C3F]" : "text-[#A66A00]"}`}>{row.paymentStatus}</td>
-                            <td className="min-w-0 break-words p-1.5 text-center"><button type="button" disabled={saving} aria-label={`Edit purchase ${row.purchaseNumber}`}
-                                                                                          onClick={event=>{editTriggerRef.current=event.currentTarget;setEditPurchase(row);setError("");setNotice("");}}
-                                                                                          className="inline-flex items-center justify-center gap-1 rounded-lg bg-[#F1EBFF] px-2.5 py-1.5 text-[11px] font-semibold text-[#5330B6] transition hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5330B6] disabled:opacity-50">
-                                <Pencil size={13}/> Edit</button></td>
-                        </tr>)}</tbody></table></div>}
-                {viewPurchase && <section className="space-y-2 rounded-xl border border-[#E3D8EA] bg-[#FCF9FF] p-3">
-                    <div className="flex items-center justify-between"><h3 className="text-sm font-bold text-[#2B174C]">{viewPurchase.purchaseNumber} — Linked Products</h3>
-                        <button className="text-xs text-[#806A8C]" onClick={()=>setViewPurchase(null)} type="button">Close details</button></div>
-                    <p className="text-xs text-[#806A8C]">Only products and variants recorded in this purchase are shown. Current stock may differ from purchased quantity.</p>
-                    {itemsLoading?<p className="text-xs">Loading purchased items...</p>:purchaseItems.length===0?<p className="text-xs">No purchase line items found.</p>:
-                        <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                            <colgroup><col className="w-[42%]"/><col className="w-[18%]"/><col className="w-[20%]"/><col className="w-[20%]"/></colgroup><thead className="sticky top-0 z-10 bg-[#FCF9FF]"><tr className="border-b text-[#806A8C]">
-                            <th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Product / Variant</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Quantity Purchased</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Unit Cost</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Line Total</th></tr></thead>
-                            <tbody>{purchaseItems.map((item,index)=><tr key={`${item.productId}-${item.variantId??"regular"}-${index}`} className="border-b">
-                                <td className="py-2 px-4 text-left"><strong>{item.productName}</strong> {item.productNumber?`(${item.productNumber})`:""}
-                                    {item.variantId!=null && <div className="text-[#806A8C]">{typeof item.variantValues === "string" ? item.variantValues : Object.entries(item.variantValues || {}).map(([key,val])=>`${key}: ${val}`).join(" / ")} {item.variantNumber?`· ${item.variantNumber}`:""}</div>}</td>
-                                <td className="p-2 text-center">{item.quantity}</td><td className="p-2 text-center">{money(item.unitCost)}</td><td className="p-2 text-center">{money(item.lineTotal)}</td>
-                            </tr>)}</tbody></table></div>}
-                </section>}
-                <form onSubmit={preparePayment} className="space-y-3 border-t border-[#E3D8EA] pt-4">
-                    <h3 className="text-sm font-bold text-[#2B174C]">Record Payment for a Specific Purchase</h3>
-                    <select className={fieldClass} value={selectedId} onChange={e=>{setSelectedId(e.target.value);setPaymentAmount("");paymentRequestKey.current=crypto.randomUUID();}}>
-                        <option value="">Select an unpaid purchase</option>
-                        {rows.filter(row=>row.outstandingBalance>0).map(row=><option key={row.purchaseId} value={row.purchaseId}>
-                            {row.purchaseNumber} — {row.supplier} — {money(row.outstandingBalance)} outstanding</option>)}
-                    </select>
-                    <div className="grid gap-3 sm:grid-cols-2"><div className="space-y-1"><label className={labelClass}>Amount Paid (₱)</label>
-                        <input className={fieldClass} type="number" min="0.01" step="0.01" required value={paymentAmount}
-                               onChange={e=>setPaymentAmount(e.target.value)}/></div>
-                        <div className="space-y-1"><label className={labelClass}>Payment Date</label>
-                            <input className={fieldClass} type="date" required value={paymentDate} onChange={e=>setPaymentDate(e.target.value)}/></div></div>
-                    <div className="flex justify-end"><button type="submit" disabled={saving || !selected}
-                                                              className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
-                        {saving?"Recording...":"Record Payment"}</button></div>
-                </form>
-            </div>
-        </div>
-        {editPurchase && <SupplierPurchaseEditDialog key={editPurchase.purchaseId} purchase={editPurchase}
-                                                     onClose={closePurchaseEditor} onSave={savePurchaseDetails}/>}
-        {confirmPayment && <div className="fixed inset-0 z-[155] flex items-center justify-center bg-black/50 p-4">
-            <div role="alertdialog" aria-modal="true" className="w-full max-w-sm space-y-3 rounded-2xl bg-white p-5 shadow-xl">
-                <h3 className="font-bold text-[#2B174C]">Confirm Supplier Payment</h3>
-                <p className="text-sm">Record {money(confirmPayment.amount)} for {confirmPayment.number} on {confirmPayment.date}? This will update the purchase balance in MySQL but will not change stock.</p>
-                <div className="flex justify-end gap-2"><button type="button" disabled={saving} onClick={()=>setConfirmPayment(null)} className="rounded-lg border px-4 py-2 text-sm">Cancel</button>
-                    <button type="button" disabled={saving} onClick={()=>void pay()} className="rounded-lg bg-[#2B174C] px-4 py-2 text-sm text-white disabled:opacity-60">{saving?"Saving...":"Confirm Payment"}</button></div>
-            </div></div>}
-    </div>;
 }
 
 function ManagerInventoryTable({
@@ -5366,18 +4267,6 @@ function SuccessToast({
 }
 
 
-type CompleteImportPurchase = {
-    purchaseRef: string;
-    supplier: string;
-    purchaseDate: string;
-    paymentMethod: "cash" | "credit";
-    amountPaid: number;
-    purchaseTotal: number;
-    paymentDueDate: string | null;
-    outstandingBalance: number;
-    supplierInvoiceNumber?: string | null;
-};
-
 function getImportProductInitialCost(product: {hasVariants: boolean; variants?: Array<{stock:number;originalPrice:number}>;
     stock:number;originalPrice:number}) {
     return product.hasVariants
@@ -5394,15 +4283,6 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
         action: ProductSuccessAction;
         name: string;
     } | null>(null);
-    const [purchaseEditConfirmation, setPurchaseEditConfirmation] = React.useState<{
-        data: ProductSaveData;
-        productName: string;
-        paymentChanged: boolean;
-        sharedCount: number;
-        hasVariants: boolean;
-    } | null>(null);
-    const [purchaseCorrectionSaving, setPurchaseCorrectionSaving] = React.useState(false);
-    const [purchaseCorrectionError, setPurchaseCorrectionError] = React.useState("");
     const [pendingRemovalResult, setPendingRemovalResult] = React.useState<{
         name: string;
         mode: Exclude<ProductRemovalMode, "blocked">;
@@ -5422,11 +4302,6 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
     const [variantExpirationDates, setVariantExpirationDates] =
         React.useState<string[]>([]);
 
-    const [purchaseDraft, setPurchaseDraft] = React.useState<PurchaseDraft>(EMPTY_PURCHASE);
-    const [originalPurchaseDraft, setOriginalPurchaseDraft] = React.useState<PurchaseDraft | null>(null);
-    const [storedPurchaseTotal, setStoredPurchaseTotal] = React.useState<number | null>(null);
-    const [hasSavedPurchase, setHasSavedPurchase] = React.useState(false);
-    const [purchaseSharedCount, setPurchaseSharedCount] = React.useState(1);
     const [purchaseLoading, setPurchaseLoading] = React.useState(false);
     const [purchaseError, setPurchaseError] = React.useState("");
     const [pricingMethod, setPricingMethod] = React.useState<InventoryPricingMethod>("manual");
@@ -5471,7 +4346,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
         inv.showForm,
     ]);
 
-    // Keep the latest controller actions without refetching purchase data on every
+    // Keep the latest controller actions without refetching editor data on every
     // controller re-render (which would reset the user's unsaved form fields).
     const editorControllerRef = React.useRef(inv);
     React.useEffect(() => {
@@ -5481,17 +4356,12 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
     const editorMode = inv.formMode;
     const editorProductId = inv.editingId;
 
-    // Add and Edit display identical purchase/pricing fields. Edit reads the
+    // Add and Edit display identical pricing fields. Edit reads the
     // persisted values before changes can be submitted, including manager cost
     // fields deliberately hidden from the overview inventory table.
     React.useEffect(() => {
         if (!editorIsOpen || editorMode !== "product") return;
         const productId = Number(editorProductId || 0);
-        setPurchaseDraft(EMPTY_PURCHASE);
-        setOriginalPurchaseDraft(null);
-        setStoredPurchaseTotal(null);
-        setHasSavedPurchase(false);
-        setPurchaseSharedCount(1);
         setPricingMethod("manual");
         setMarkupPercentage("");
         setVariantPricingMethods([]);
@@ -5521,15 +4391,12 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                 }
                 if (cancelled) return;
                 const saved = data.product as Product;
-                const savedPurchase = data.purchase as (InitialPurchaseInput & {
-                    purchaseTotal: number; outstandingBalance: number; productCount?: number;
-                }) | null;
                 setPricingMethod(saved.pricingMethod === "markup" ? "markup" : "manual");
                 setMarkupPercentage(saved.markupPercentage == null ? "" : String(saved.markupPercentage));
                 setVariantPricingMethods((saved.variants || []).map((v) => v.pricingMethod === "markup" ? "markup" : "manual"));
                 setVariantMarkupPercentages((saved.variants || []).map((v) => v.markupPercentage == null ? "" : String(v.markupPercentage)));
                 // Use authoritative editing values rather than overview values
-                // (overview hides supplier costs from non-owner roles).
+                // (overview hides cost prices from non-owner roles).
                 if (!saved.hasVariants) {
                     editorControllerRef.current.setOriginalPrice(String(saved.originalPrice));
                     editorControllerRef.current.setSalesPrice(String(saved.salesPrice));
@@ -5539,24 +4406,9 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                         (editorControllerRef.current as VariantEditorController).updateVariantField(index, "salesPrice", String(v.salesPrice));
                     });
                 }
-                if (savedPurchase) {
-                    setHasSavedPurchase(true);
-                    setPurchaseSharedCount(Math.max(1, Number(savedPurchase.productCount || 1)));
-                    setStoredPurchaseTotal(Number(savedPurchase.purchaseTotal));
-                    const loadedPurchaseDraft: PurchaseDraft = {
-                        supplier: savedPurchase.supplier || "",
-                        supplierInvoiceNumber: savedPurchase.supplierInvoiceNumber || "",
-                        purchaseDate: savedPurchase.purchaseDate || "",
-                        paymentMethod: savedPurchase.paymentMethod === "credit" ? "credit" : "cash",
-                        amountPaid: String(savedPurchase.amountPaid ?? ""),
-                        paymentDueDate: savedPurchase.paymentDueDate || "",
-                    };
-                    setPurchaseDraft(loadedPurchaseDraft);
-                    setOriginalPurchaseDraft(loadedPurchaseDraft);
-                }
             } catch (error) {
                 if (cancelled || abort.signal.aborted) return;
-                setPurchaseError(error instanceof Error ? error.message : "Unable to load saved purchase data.");
+                setPurchaseError(error instanceof Error ? error.message : "Unable to load the saved product details.");
             } finally {
                 if (!cancelled) setPurchaseLoading(false);
             }
@@ -5660,15 +4512,10 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                     cellDates: true,
                 });
 
-                // The complete import template has its own two data sheets.
-                // Preserve the workbook (including PURCHASE DETAILS) for the
-                // updated controller; the legacy "Format" path below is untouched.
-                if (workbook.SheetNames.includes("PRODUCTS AND VARIANTS") ||
-                    workbook.SheetNames.includes("PURCHASE DETAILS")) {
-                    if (!workbook.SheetNames.includes("PRODUCTS AND VARIANTS") ||
-                        !workbook.SheetNames.includes("PURCHASE DETAILS")) {
-                        throw new Error('Both "PRODUCTS AND VARIANTS" and "PURCHASE DETAILS" sheets are required.');
-                    }
+                // The complete import template has its own data sheet.
+                // Preserve the workbook for the updated controller; the
+                // legacy "Format" path below is untouched.
+                if (workbook.SheetNames.includes("PRODUCTS AND VARIANTS")) {
                     inv.setSelectedImportFile(file);
                     return;
                 }
@@ -6087,7 +4934,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
             };
 
         // Keep the existing controller-confirmation flow; attach only the new
-        // pricing and initial-purchase fields to the same save request.
+        // pricing fields to the same save request.
         saveData.pricingMethod = pricingMethod;
         saveData.markupPercentage = pricingMethod === "markup"
             ? (markupPercentage.trim() ? Number(markupPercentage) : null)
@@ -6103,46 +4950,6 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
             }));
         }
         if (purchaseLoading || purchaseError) return;
-        const initialStock = saveData.hasVariants
-            ? (saveData.variants || []).reduce((sum, v) => sum + Number(v.stock || 0), 0)
-            : Number(saveData.stock || 0);
-        const purchaseDetailsChanged = Boolean(originalPurchaseDraft &&
-            (Object.keys(originalPurchaseDraft) as (keyof PurchaseDraft)[]).some(
-                key => String(purchaseDraft[key] ?? "").trim() !== String(originalPurchaseDraft[key] ?? "").trim()
-            ));
-        if ((pendingSave.mode === "add" &&
-                (isPurchaseDraftUsed(purchaseDraft) || initialStock > 0)) ||
-            (pendingSave.mode === "edit" && ((hasSavedPurchase && purchaseDetailsChanged) ||
-                (!hasSavedPurchase && isPurchaseDraftUsed(purchaseDraft))))) {
-            saveData.initialPurchase = {
-                supplier: purchaseDraft.supplier.trim(),
-                supplierInvoiceNumber: purchaseDraft.supplierInvoiceNumber.trim() || null,
-                purchaseDate: purchaseDraft.purchaseDate,
-                paymentMethod: purchaseDraft.paymentMethod,
-                amountPaid: purchaseDraft.paymentMethod === "cash"
-                    ? (storedPurchaseTotal ?? (saveData.hasVariants
-                        ? (saveData.variants || []).reduce((sum, v) => sum +
-                            Number(v.stock || 0) * Number(v.originalPrice || 0), 0)
-                        : Number(saveData.stock || 0) * Number(saveData.originalPrice || 0)))
-                    : Number(purchaseDraft.amountPaid || 0),
-                paymentDueDate: purchaseDraft.paymentMethod === "credit"
-                    ? (purchaseDraft.paymentDueDate || null) : null,
-                ...(pendingSave.mode === "edit" && originalPurchaseDraft ? {
-                    expectedAmountPaid: Number(originalPurchaseDraft.amountPaid || 0),
-                } : {}),
-            };
-        }
-
-        const paymentFieldsChanged = pendingSave.mode === "edit" && originalPurchaseDraft &&
-            (purchaseDraft.paymentMethod !== originalPurchaseDraft.paymentMethod ||
-                Number(purchaseDraft.amountPaid || 0) !== Number(originalPurchaseDraft.amountPaid || 0));
-        if (pendingSave.mode === "edit" && purchaseDetailsChanged && (paymentFieldsChanged || purchaseSharedCount > 1 || saveData.hasVariants)) {
-            setPurchaseCorrectionError("");
-            setPurchaseEditConfirmation({ data: saveData, productName: saveData.name.trim(),
-                paymentChanged: Boolean(paymentFieldsChanged), sharedCount: purchaseSharedCount,
-                hasVariants: Boolean(saveData.hasVariants) });
-            return;
-        }
         const productName = saveData.name.trim();
 
         setPendingProductSuccess({
@@ -6156,8 +4963,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
         productExpirationDate,
         variantExpirationDates,
         pricingMethod, markupPercentage, variantPricingMethods,
-        variantMarkupPercentages, purchaseDraft, originalPurchaseDraft, storedPurchaseTotal,
-        hasSavedPurchase, purchaseSharedCount, purchaseLoading, purchaseError,
+        variantMarkupPercentages, purchaseLoading, purchaseError,
     ]);
 
     const requestEditingProductDelete = React.useCallback(() => {
@@ -6332,43 +5138,6 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
     return (
         <>
             <SuccessToast toast={productToast} onClose={closeProductToast} />
-            {purchaseEditConfirmation && (
-                <div className="fixed inset-0 z-[190] flex items-center justify-center bg-black/60 p-4" role="presentation">
-                    <div role="alertdialog" aria-modal="true" aria-labelledby="purchase-correction-title"
-                         className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl space-y-4">
-                        <h2 id="purchase-correction-title" className="text-lg font-bold text-[#2B174C]">Confirm Purchase Correction</h2>
-                        <p className="text-sm text-[#5F4E75]">You are correcting previously saved supplier purchase details for
-                            <strong> {purchaseEditConfirmation.productName}</strong>. This is not a new stock receipt or payment.</p>
-                        {purchaseEditConfirmation.paymentChanged &&
-                            <p className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800">Changing Cash/Credit or Amount Paid will update the saved payment ledger and the Supplier Payables balance. For a new payment use Supplier Payables instead.</p>}
-                        {purchaseEditConfirmation.hasVariants &&
-                            <p className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800">This product has variants. Changes to its supplier and purchase payment details apply to the entire purchase, including all variants{purchaseEditConfirmation.sharedCount > 1 ? ` and the other linked products (${purchaseEditConfirmation.sharedCount} products total)` : ""}.</p>}
-                        {purchaseCorrectionError && <p role="alert" className="text-xs text-red-600">{purchaseCorrectionError}</p>}
-                        <div className="flex justify-end gap-2">
-                            <button type="button" disabled={purchaseCorrectionSaving} onClick={() => setPurchaseEditConfirmation(null)} className="rounded-xl border px-4 py-2 text-sm">Cancel</button>
-                            <button type="button" disabled={purchaseCorrectionSaving} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                                    onClick={async () => {
-                                        if (!purchaseEditConfirmation || purchaseCorrectionSaving) return;
-                                        setPurchaseCorrectionSaving(true); setPurchaseCorrectionError("");
-                                        try {
-                                            // Keep the original controller request, including stale-payment validation.
-                                            const saved = await inv.confirmSaveProduct(purchaseEditConfirmation.data);
-                                            if (!saved) {
-                                                setPurchaseCorrectionError("Product and purchase correction was not saved. Review the error and try again.");
-                                                return;
-                                            }
-                                            setPendingProductSuccess({action:"update",name:purchaseEditConfirmation.productName});
-                                            setPurchaseEditConfirmation(null);
-                                            window.dispatchEvent(new Event("stocknbook:purchase-updated"));
-                                        } catch (error) {
-                                            setPurchaseCorrectionError(error instanceof Error ? error.message : "Purchase update failed.");
-                                        } finally { setPurchaseCorrectionSaving(false); }
-                                    }}>{purchaseCorrectionSaving ? "Saving..." : "Confirm Changes"}</button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
             {inv.showForm && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
                     <div
@@ -6408,7 +5177,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                             }
                         >
                             {inv.formMode === "product" && purchaseLoading && (
-                                <p className="rounded-xl bg-[#F7F1FF] p-3 text-sm text-[#4E2C66]">Loading saved pricing and supplier purchase details...</p>
+                                <p className="rounded-xl bg-[#F7F1FF] p-3 text-sm text-[#4E2C66]">Loading saved pricing details...</p>
                             )}
                             {inv.formMode === "product" && purchaseError && (
                                 <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{purchaseError}. Close and reopen Edit Product to retry.</p>
@@ -6426,11 +5195,6 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                                     setVariantPricingMethods={setVariantPricingMethods}
                                     variantMarkupPercentages={variantMarkupPercentages}
                                     setVariantMarkupPercentages={setVariantMarkupPercentages}
-                                    purchaseDraft={purchaseDraft}
-                                    setPurchaseDraft={setPurchaseDraft}
-                                    savedPurchaseTotal={storedPurchaseTotal}
-                                    hasSavedPurchase={hasSavedPurchase}
-                                    purchaseSharedCount={purchaseSharedCount}
                                     productExpirationDate={
                                         productExpirationDate
                                     }
@@ -6585,7 +5349,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                         <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#E6DDF0] px-5 py-4 sm:px-6">
                             <div>
                                 <h3 className="text-[19px] font-bold text-[#1A1220]">Confirm Imported Products</h3>
-                                <p className="mt-1 text-sm text-[#6A5D6F]">Review all products and variants under one supplier purchase before importing.</p>
+                                <p className="mt-1 text-sm text-[#6A5D6F]">Review all products and variants before importing.</p>
                                 <p className="mt-1 text-xs font-semibold text-[#5A476A]">
                                     {inv.importPreviewProducts.length} product(s) • {inv.importPreviewProducts.reduce((total, p) => total + (p.hasVariants ? (p.variants || []).length : 1), 0)} inventory line(s)
                                 </p>
@@ -6667,31 +5431,6 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                                     </section>
                                 );
                             })}
-                            {(() => {
-                                // Every product in this import belongs to the same supplier purchase.
-                                const purchase = inv.importPreviewProducts.find((product) => Boolean(product.purchase))
-                                    ?.purchase as CompleteImportPurchase | null | undefined;
-                                return (
-                                    <section className="overflow-hidden rounded-xl border border-[#E3D8EA] bg-white">
-                                        <div className="p-4">
-                                            <h4 className="text-sm font-bold text-[#21132E]">Supplier &amp; Purchase Details</h4>
-                                            <p className="mt-1 text-xs text-[#675875]">
-                                                StockNBook Purchase No.: Generated automatically after import
-                                            </p>
-                                            <div className="mt-3 grid gap-x-8 gap-y-4 text-xs text-[#5A476A] sm:grid-cols-2">
-                                                <div>Supplier<div className="font-semibold text-[#21132E]">{purchase?.supplier || "Not recorded (Opening Balance)"}</div></div>
-                                                <div>Supplier Invoice Number (Optional)<div className="font-semibold text-[#21132E]">{purchase?.supplierInvoiceNumber || "—"}</div></div>
-                                                <div>Purchase Date<div className="font-semibold text-[#21132E]">{purchase ? formatImportExpirationDate(purchase.purchaseDate) : "—"}</div></div>
-                                                <div>Payment Method<div className="font-semibold text-[#21132E]">{purchase ? (purchase.paymentMethod === "cash" ? "Cash" : "Credit (Utang)") : "—"}</div></div>
-                                                <div>Combined Purchase Total (Entire Purchase)<div className="font-semibold text-[#21132E]">{purchase ? money(purchase.purchaseTotal) : "—"}</div></div>
-                                                <div>Amount Paid (Entire Purchase)<div className="font-semibold text-[#21132E]">{purchase ? money(purchase.amountPaid) : "—"}</div></div>
-                                                <div>Payment Due Date<div className="font-semibold text-[#21132E]">{purchase ? formatImportExpirationDate(purchase.paymentDueDate) : "—"}</div></div>
-                                                <div>Outstanding Balance (Entire Purchase)<div className="font-bold text-[#2B174C]">{purchase ? money(purchase.outstandingBalance) : "—"}</div></div>
-                                            </div>
-                                        </div>
-                                    </section>
-                                );
-                            })()}
                         </div>
                         <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-[#E6DDF0] bg-white px-5 py-4 sm:px-6">
                             <button type="button" onClick={() => { inv.setShowImportConfirmDialog(false); inv.setShowImportDialog(true); }}
@@ -7315,7 +6054,6 @@ function ProductForm({
                          pricingMethod, setPricingMethod, markupPercentage, setMarkupPercentage,
                          variantPricingMethods, setVariantPricingMethods,
                          variantMarkupPercentages, setVariantMarkupPercentages,
-                         purchaseDraft, setPurchaseDraft, savedPurchaseTotal, hasSavedPurchase, purchaseSharedCount,
                      }: {
     inv: InventoryController;
     productExpirationDate: string;
@@ -7333,24 +6071,7 @@ function ProductForm({
     setVariantPricingMethods: React.Dispatch<React.SetStateAction<InventoryPricingMethod[]>>;
     variantMarkupPercentages: string[];
     setVariantMarkupPercentages: React.Dispatch<React.SetStateAction<string[]>>;
-    purchaseDraft: PurchaseDraft;
-    setPurchaseDraft: React.Dispatch<React.SetStateAction<PurchaseDraft>>;
-    savedPurchaseTotal: number | null;
-    hasSavedPurchase: boolean;
-    purchaseSharedCount: number;
 }) {
-    const variantsForPurchase = (inv as VariantEditorController).variants || [];
-    const calculatedInitialCost = inv.hasVariants
-        ? variantsForPurchase.reduce((sum, row) => sum + Number(row.stock || 0) * Number(row.originalPrice || 0), 0)
-        : Number(inv.stock || 0) * Number(inv.originalPrice || 0);
-    // On Edit, preserve the ORIGINAL purchase total despite later stock changes.
-    const purchaseTotal = savedPurchaseTotal ?? calculatedInitialCost;
-    const effectivePaid = purchaseDraft.paymentMethod === "cash"
-        ? purchaseTotal : Number(purchaseDraft.amountPaid || 0);
-    const outstandingBalance = Math.max(0, purchaseTotal - effectivePaid);
-    const updatePurchase = (patch: Partial<PurchaseDraft>) =>
-        setPurchaseDraft((draft) => ({ ...draft, ...patch }));
-
     return (
         <>
             {inv.isOwner && (
@@ -7483,73 +6204,6 @@ function ProductForm({
                 </>
             )}
 
-            {inv.editingId && <EditProductStockCorrection inv={inv} />}
-
-            {!inv.editingId && <section className="space-y-3 border-t border-[#E6DDF0] pt-5">
-                <h3 className="text-sm font-bold text-[#1A1220]">Initial Purchase Details</h3>
-                {inv.editingId && hasSavedPurchase && <p className="text-xs text-[#806A8C]">You may correct saved purchase details. The original purchase total and stock receiving history stay unchanged; corrections are recorded in the audit history.</p>}
-                {inv.editingId && inv.hasVariants && hasSavedPurchase && <p role="note" className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">This product has variants. Supplier and payment corrections apply to its entire purchase, including all variants{purchaseSharedCount > 1 ? ` and ${purchaseSharedCount - 1} other linked product(s)` : ""}.</p>}
-                <fieldset className="space-y-3">
-                    <p className="text-xs text-[#806A8C]">
-                        {hasSavedPurchase
-                            ? "Saved supplier purchase. Editing current stock does not change the original purchase total."
-                            : "Required when recording initial stock from a supplier; optional when starting with zero stock."}
-                    </p>
-                    <div className="space-y-1">
-                        <label className={labelClass}>Supplier</label>
-                        <input value={purchaseDraft.supplier} onChange={(e) => updatePurchase({supplier:e.target.value})}
-                               placeholder="Enter supplier name" className={fieldClass} />
-                    </div>
-                    <div className="space-y-1">
-                        <label className={labelClass}>Supplier Invoice Number (Optional)</label>
-                        <input value={purchaseDraft.supplierInvoiceNumber}
-                               maxLength={80}
-                               onChange={(e) => updatePurchase({supplierInvoiceNumber:e.target.value})}
-                               placeholder="Enter invoice or receipt number" className={fieldClass} />
-                    </div>
-                    <div className="space-y-1">
-                        <label className={labelClass}>Purchase Date</label>
-                        <input type="date" value={purchaseDraft.purchaseDate}
-                               onChange={(e) => updatePurchase({purchaseDate:e.target.value})} className={fieldClass} />
-                    </div>
-                    <div className="space-y-1">
-                        <label className={labelClass}>Payment Method</label>
-                        <div className="grid grid-cols-2 gap-2">
-                            {(["cash", "credit"] as const).map((method) => (
-                                <button key={method} type="button" onClick={() => updatePurchase({paymentMethod:method})}
-                                        className={`rounded-xl border px-3 py-2.5 text-sm font-semibold ${purchaseDraft.paymentMethod === method
-                                            ? "border-[#2B174C] bg-[#2B174C] text-white"
-                                            : "border-[#E6DDF0] bg-white text-[#2B174C]"}`}>
-                                    {method === "cash" ? "Cash" : "Credit (Utang)"}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                    {(hasSavedPurchase || isPurchaseDraftUsed(purchaseDraft)) && (
-                        <p className="text-xs text-[#806A8C]">Original Purchase Total: <strong>{money(purchaseTotal)}</strong></p>
-                    )}
-                    {purchaseDraft.paymentMethod === "credit" && (
-                        <div className="grid gap-3 sm:grid-cols-2">
-                            <div className="space-y-1">
-                                <label className={labelClass}>{inv.editingId ? "Total Amount Paid (₱)" : "Amount Paid (₱)"}</label>
-                                <PesoPriceInput value={purchaseDraft.amountPaid}
-                                                onChange={(v) => updatePurchase({amountPaid:v})} />
-                            </div>
-                            <div className="space-y-1">
-                                <label className={labelClass}>Payment Due Date</label>
-                                <input type="date" value={purchaseDraft.paymentDueDate}
-                                       onChange={(e) => updatePurchase({paymentDueDate:e.target.value})} className={fieldClass} />
-                            </div>
-                            <div className="rounded-xl bg-[#F7F1FF] px-4 py-3 sm:col-span-2">
-                                <p className="text-xs text-[#806A8C]">Outstanding Balance</p>
-                                <p className="text-lg font-bold text-[#2B174C]">{money(outstandingBalance)}</p>
-                                <p className="text-[11px] text-[#806A8C]">This balance is saved and recalculated by the server when you confirm.</p>
-                            </div>
-                        </div>
-                    )}
-                </fieldset>
-            </section>}
-
             {inv.editingId && onDeleteProduct ? (
                 <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-2">
                     <button
@@ -7624,8 +6278,6 @@ function SimpleProductFields({ inv, pricingMethod, setPricingMethod, markupPerce
                     <input
                         type="number"
                         value={inv.stock}
-                        readOnly={Boolean(inv.editingId)}
-                        title={inv.editingId ? "Use Correct Recorded Stock below to fix an incorrect count" : undefined}
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                             inv.setStock(e.target.value)
                         }
@@ -8013,8 +6665,6 @@ function VariantEditor({
                             <div className="space-y-1">
                                 <label className={labelClass}>Stock</label>
                                 <input type="number" min="0" className={compactVariantFieldClass} value={variant.stock}
-                                       readOnly={Boolean(inv.editingId)}
-                                       title={inv.editingId ? "Use Correct Recorded Stock below to fix an incorrect count" : undefined}
                                        onChange={(e) => inv.updateVariantField(index, "stock", e.target.value)} />
                             </div>
                             <div className="space-y-1">

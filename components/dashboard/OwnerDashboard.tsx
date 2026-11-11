@@ -14,11 +14,9 @@ import {
     Trophy,
     Wallet,
     PieChart,
-    FileText,
     Package,
     Gift,
     Armchair,
-    Users,
     Download,
 } from "lucide-react";
 import type { ExportContext, ExportTable } from "./_shared";
@@ -690,126 +688,9 @@ function getPackageCost(
  * These are never filled with screenshot sample values. A null collection means
  * the corresponding endpoint has not supplied a recognizable dataset.
  */
-type OwnerSupplierRow = {
-    id: string;
-    purchaseNumber: string;
-    supplier: string;
-    branch: string;
-    balance: number;
-    dueDate: string;
-    status: string;
-    items: { name: string; quantity: number }[] | null;
-    source?: "sales" | "rental";
-};
-type OwnerManagerRequest = {
-    id: string;
-    manager: string;
-    branch: string;
-    leaveType: string;
-    dateLabel: string;
-    status: string;
-    reason?: string;
-};
 type OwnerRentalRow = { key: string; name: string; units: number; revenue: number; date?: string; period?: PeriodOption };
 type OwnerRevenueAllocation = { consumable: number; rental: number; unallocated: number; partial: boolean; periodKey: string };
 
-function ownerArrayAt(value: unknown, keys: string[]): unknown[] | null {
-    const record = toRecord(value);
-    const nested = toRecord(record.data);
-    for (const key of keys) {
-        if (Array.isArray(record[key])) return record[key] as unknown[];
-        if (Array.isArray(nested[key])) return nested[key] as unknown[];
-    }
-    return null;
-}
-function ownerSupplierRows(value: unknown): OwnerSupplierRow[] | null {
-    const items = ownerArrayAt(value, ["payables", "supplierPayables", "supplier_payables", "purchases", "supplierPurchases"]);
-    if (!items) return null;
-    const balanceKeys = ["outstandingBalance", "outstanding_balance", "remainingBalance", "balance", "amountDue", "amount_due"];
-    // A purchase list without unpaid balances is NOT a payables summary.
-    if (items.some(item => firstDefined(toRecord(item), balanceKeys) === undefined)) return null;
-    return items.map((item, index) => {
-        const r = toRecord(item);
-        const balance = readNumber(r, balanceKeys);
-        return {
-            id: readText(r, ["purchaseId", "purchase_id", "id"], String(index)),
-            purchaseNumber: readText(r, ["purchaseNumber", "purchase_number", "purchaseNo", "purchase_no", "referenceNo", "reference_no"], "—"),
-            supplier: readText(r, ["supplierName", "supplier_name", "supplier"], "—"),
-            branch: readText(r, ["branchName", "branch_name", "branch"], "—"),
-            balance, dueDate: readText(r, ["paymentDueDate", "payment_due_date", "dueDate", "due_date"]),
-            status: (() => {
-                const existing = readText(r, ["status", "paymentStatus", "payment_status"], "Pending");
-                const due = readText(r, ["paymentDueDate", "payment_due_date", "dueDate", "due_date"]);
-                // The purchasing API calls an unpaid credit balance "Unpaid".
-                // Display it as Pending; past-due balances take priority even
-                // when a purchase has already been partially paid.
-                if (/^\d{4}-\d{2}-\d{2}/.test(due) && due.slice(0, 10) < formatDashboardIsoDate(new Date())) return "Overdue";
-                return existing.toLowerCase() === "unpaid" ? "Pending" : existing;
-            })(),
-            items: (() => {
-                const source = firstDefined(r, ["items", "purchaseItems", "purchase_items"]);
-                return Array.isArray(source) ? source.map(item => {
-                    const product = toRecord(item);
-                    return {name: readText(product, ["productName", "product_name", "name"], "Product"), quantity: readNumber(product, ["qty", "quantity"], 0)};
-                }) : null;
-            })(),
-        };
-    }).filter(r => r.balance > 0.005);
-}
-function ownerManagerRows(value: unknown): OwnerManagerRequest[] | null {
-    const items = ownerArrayAt(value, ["managerRequests", "manager_requests", "leaveRequests", "leave_requests", "requests"]);
-    if (!items) return null;
-
-    // The owner API returns one database row per requested day. Show one row
-    // per leave application, as the Branch Managers screen does. Only group
-    // rows when their shared identity, submission timestamp and request details
-    // establish that they belong to the same application.
-    const grouped = new Map<string, { request: OwnerManagerRequest; dates: string[] }>();
-    items.forEach((item, index) => {
-        const r = toRecord(item);
-        const id = readText(r, ["id", "requestId", "request_id"], String(index));
-        const managerId = readText(r, ["managerId", "manager_id", "employeeId", "employee_id"]);
-        const branchId = readText(r, ["branchId", "branch_id"]);
-        const createdAt = readText(r, ["createdAt", "created_at"]);
-        const leaveType = readText(r, ["leaveType", "leave_type", "type"], "Leave");
-        const reason = readText(r, ["reason", "leaveReason", "leave_reason"]);
-        const status = readText(r, ["approvalStatus", "approval_status", "status"], "Pending");
-        const date = readText(r, ["leaveDate", "leave_date", "startDate", "start_date", "date"]);
-        const explicitEnd = readText(r, ["leaveEndDate", "leave_end_date", "endDate", "end_date"]);
-        const key = managerId && branchId && createdAt
-            ? JSON.stringify([managerId, branchId, createdAt, leaveType, reason, status])
-            : `single:${id}:${index}`;
-        const found = grouped.get(key);
-        if (found) {
-            if (date) found.dates.push(date);
-            if (explicitEnd) found.dates.push(explicitEnd);
-        } else {
-            grouped.set(key, {
-                request: {
-                    id,
-                    manager: readText(r, ["managerName", "manager_name", "employeeName", "employee_name", "name"], "—"),
-                    branch: readText(r, ["branchName", "branch_name", "branch"], "—"),
-                    leaveType,
-                    dateLabel: "—",
-                    status,
-                    reason,
-                },
-                dates: [date, explicitEnd].filter(Boolean),
-            });
-        }
-    });
-    return Array.from(grouped.values()).map(({request, dates}) => {
-        const sorted = [...new Set(dates)].sort();
-        const start = sorted[0] || "";
-        const end = sorted[sorted.length - 1] || "";
-        return {
-            ...request,
-            dateLabel: start && end && end !== start
-                ? `${ownerDisplayShortDate(start)} – ${ownerDisplayShortDate(end)}`
-                : ownerDisplayShortDate(start),
-        };
-    });
-}
 function ownerRentalRows(value: unknown): OwnerRentalRow[] | null {
     const raw = toRecord(value);
     const nested = toRecord(raw.data);
@@ -900,12 +781,6 @@ function ownerVerifiedAllocation(payload: unknown, total: number, expectedMonth:
         return {consumable, rental, unallocated: 0, partial: false, periodKey: expectedMonth};
     }
     return null;
-}
-
-function ownerDisplayShortDate(value: string): string {
-    if (!value) return "—";
-    const dt = new Date(value.length === 10 ? value + "T12:00:00" : value);
-    return Number.isNaN(dt.getTime()) ? value : dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
 /* ----------------------------------------------------------------------- */
@@ -1518,16 +1393,11 @@ export default function OwnerDashboard() {
     const [posSummary, setPosSummary] = useState<OwnerPosSummary>(EMPTY_OWNER_POS_SUMMARY);
     const [inventoryProducts, setInventoryProducts] = useState<InventoryProduct[]>([]);
     const [packages, setPackages] = useState<PackageRecord[]>([]);
-    const [supplierPayables, setSupplierPayables] = useState<OwnerSupplierRow[] | null>(null);
-    const [rentalSupplierPayables, setRentalSupplierPayables] = useState<OwnerSupplierRow[] | null>(null);
-    const [managerRequests, setManagerRequests] = useState<OwnerManagerRequest[] | null>(null);
     const [topRentalProducts, setTopRentalProducts] = useState<OwnerRentalRow[] | null>(null);
     const [topBookingSummary, setTopBookingSummary] = useState<OwnerRentalRow[] | null>(null);
     const [consumablePeriod, setConsumablePeriod] = useState<PeriodOption>("month");
     const [packagePeriod, setPackagePeriod] = useState<PeriodOption>("month");
     const [rentalPeriod, setRentalPeriod] = useState<PeriodOption>("month");
-    const [selectedPurchase, setSelectedPurchase] = useState<OwnerSupplierRow | null>(null);
-    const [selectedManagerRequest, setSelectedManagerRequest] = useState<OwnerManagerRequest | null>(null);
     const [selectedKpi, setSelectedKpi] = useState<OwnerKpiKey | null>(null);
     const [allocationData, setAllocationData] = useState<unknown>(null);
 
@@ -1590,7 +1460,7 @@ export default function OwnerDashboard() {
             );
             const ordersDateTo = formatDashboardIsoDate(currentDateTime);
 
-            const [branchesResult, bookingsResult, bookingCostsResult, posSummaryResult, productsResult, packagesResult, supplierResult, managerRequestsResult, rentalsResult, rentalSuppliersResult] =
+            const [branchesResult, bookingsResult, bookingCostsResult, posSummaryResult, productsResult, packagesResult, rentalsResult] =
                 await Promise.allSettled([
                     fetch("/api/branches", {
                         method: "GET",
@@ -1665,30 +1535,14 @@ export default function OwnerDashboard() {
                         }),
                         cache: "no-store",
                     }),
-                    // Optional sources: use existing owner supplier and leave endpoints.
                     // Rental dashboard analytics still require an action in lambda-rental-inventory.
                     // Never replace unsupported financial data with example amounts.
-                    fetch("/api/products", {
-                        method: "POST", cache: "no-store",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_supplier_payables", store_id: storeId ? Number(storeId) : undefined }),
-                    }),
-                    fetch("/api/branch-managers?view=manager_requests", {
-                        method: "GET", cache: "no-store",
-                        headers: { Authorization: `Bearer ${token}` },
-                    }),
                     // Read-only owner booking financial summary. Returns authoritative
                     // package and rental rankings plus a verified product-type allocation.
                     fetch("/api/bookings", {
                         method: "POST", cache: "no-store",
                         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
                         body: JSON.stringify({ action: "get_owner_dashboard_financial_summary" }),
-                    }),
-                    // Read-only rental purchase balances across every branch.
-                    fetch("/api/rental-inventory", {
-                        method: "POST", cache: "no-store",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_owner_supplier_payables" }),
                     }),
                 ]);
 
@@ -1851,30 +1705,6 @@ export default function OwnerDashboard() {
                 errors.push("Unable to load package cost data.");
             }
 
-            // Keep last known good optional data if a single endpoint is offline.
-            // In particular, never treat an HTTP error as an empty/zero balance.
-            if (supplierResult.status === "fulfilled") {
-                const response = supplierResult.value;
-                const payload = await response.json().catch(() => ({}));
-                if (response.ok) {
-                    const rows = ownerSupplierRows(payload);
-                    if (rows !== null) setSupplierPayables(rows.map(row => ({ ...row, source: "sales" as const })));
-                    else console.warn("Owner supplier API did not return a usable payables array.");
-                } else {
-                    console.warn("Owner supplier payables request failed:", response.status, toRecord(payload).error);
-                }
-            }
-            if (managerRequestsResult.status === "fulfilled") {
-                const response = managerRequestsResult.value;
-                const payload = await response.json().catch(() => ({}));
-                if (response.ok) {
-                    const rows = ownerManagerRows(payload);
-                    if (rows !== null) setManagerRequests(rows);
-                    else console.warn("Owner manager-request API did not return a requests array.");
-                } else {
-                    console.warn("Owner manager leave requests failed:", response.status, toRecord(payload).error);
-                }
-            }
             if (rentalsResult.status === "fulfilled") {
                 const response = rentalsResult.value;
                 const payload = await response.json().catch(() => ({}));
@@ -1891,25 +1721,6 @@ export default function OwnerDashboard() {
             } else {
                 console.warn("Owner booking financial summary request failed:", rentalsResult.reason);
                 errors.push("Unable to load booking financial summary.");
-            }
-
-            if (rentalSuppliersResult.status === "fulfilled") {
-                const response = rentalSuppliersResult.value;
-                const payload = await response.json().catch(() => ({}));
-                if (response.ok) {
-                    const rows = ownerSupplierRows(payload);
-                    if (rows !== null) {
-                        setRentalSupplierPayables(rows.map(row => ({
-                            ...row, id: `rental:${row.id}`, source: "rental" as const,
-                        })));
-                    } else {
-                        console.warn("Rental supplier payables response was not recognized.");
-                    }
-                } else {
-                    console.warn("Rental supplier payables request failed:", response.status, toRecord(payload).error);
-                }
-            } else {
-                console.warn("Rental supplier payables fetch failed:", rentalSuppliersResult.reason);
             }
 
             // React 18 batches these updates, so the UI changes from the old
@@ -2140,14 +1951,6 @@ export default function OwnerDashboard() {
             } than ${forecastBaselineLabel}.`;
 
     // Financial KPIs and chart continue to use the original authoritative sales calculations.
-    const combinedPayables = supplierPayables === null && rentalSupplierPayables === null
-        ? null : [...(supplierPayables || []), ...(rentalSupplierPayables || [])];
-    const supplierBalance = combinedPayables === null ? null : combinedPayables.reduce((total, item) => total + item.balance, 0);
-    const supplierTotalsComplete = supplierPayables !== null && rentalSupplierPayables !== null;
-    // Show every outstanding sales-inventory and rental-inventory purchase, not only the first five.
-    const displayedPayables = (combinedPayables || []).filter(item => item.balance > 0.005).slice().sort((a,b) => (a.dueDate || "9999").localeCompare(b.dueDate || "9999"));
-    const rentalPayableAmount = rentalSupplierPayables?.reduce((sum, row) => sum + row.balance, 0) ?? null;
-    const salesPayableAmount = supplierPayables?.reduce((sum, row) => sum + row.balance, 0) ?? null;
     const estimatedBookingCost = Math.max(0, current.cost - current.posCost - current.bookingCost);
     const kpiDetails: Record<OwnerKpiKey, OwnerKpiDetail> = {
         revenue: {
@@ -2172,16 +1975,7 @@ export default function OwnerDashboard() {
                 ? "Money left after subtracting sales costs. Some older booking costs are estimates. Rent, wages, and other expenses are not yet deducted."
                 : "Money left after subtracting sales costs. Rent, wages, and other business expenses are not yet deducted.",
         },
-        payables: {
-            title: "Supplier Payables", amount: supplierBalance, period: `As of ${formatCurrentDashboardDateTime(currentDateTime)}`,
-            formula: "Supplier Payables = Purchase Cost − Payments Already Made",
-            items: [["Unpaid consumable supply purchases", salesPayableAmount], ["Unpaid rental supply purchases", rentalPayableAmount]],
-            description: supplierTotalsComplete
-                ? "The amount still owed to suppliers for consumable goods and rental equipment. Payments already made are deducted. Fully paid purchases are not included."
-                : "Some supplier records could not be loaded, so this total may not include every unpaid purchase.",
-        },
     };
-    const pendingManagerRequests = managerRequests === null ? null : managerRequests.filter(item => item.status.toLowerCase() === "pending");
     const currentMonthKey = monthKey(currentDateTime);
     const verifiedAllocation = ownerVerifiedAllocation(allocationData, current.sales, currentMonthKey, current.posSales);
     const allocationReason = readText(toRecord(toRecord(allocationData).bookingRevenueAllocation), ["reason"]);
@@ -2235,11 +2029,10 @@ export default function OwnerDashboard() {
                 {!hasLoadedDashboard ? <OwnerDashboardSkeleton/> : (
                     <div className="mx-auto max-w-none space-y-4">
                         {loadError && <div role="alert" className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs text-[#B42318]">{loadError}</div>}
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                             <OwnerFinancialCard title="Total Revenue" value={peso(current.sales)} delta={deltaSales} note="Sales of products and completed bookings" icon={<BarChart3 size={24}/>} iconTone="purple" onClick={() => setSelectedKpi("revenue")}/>
                             <OwnerFinancialCard title="Cost of Sales" value={peso(current.cost)} delta={deltaCost} inverseDelta note="Products and completed bookings cost" icon={<Wallet size={24}/>} iconTone="orange" onClick={() => setSelectedKpi("cost")}/>
                             <OwnerFinancialCard title="Gross Profit" value={peso(current.profit ?? 0)} delta={deltaProfit} note="Sales minus cost of sales" icon={<TrendingUp size={24}/>} iconTone="green" onClick={() => setSelectedKpi("profit")}/>
-                            <OwnerFinancialCard title="Supplier Payables" value={supplierBalance === null ? "—" : peso(supplierBalance)} note={supplierBalance === null ? "Connect supplier payment data" : supplierTotalsComplete ? "Supplier bills still unpaid" : "Some supplier bills could not be loaded"} icon={<FileText size={24}/>} iconTone="red" onClick={() => setSelectedKpi("payables")}/>
                         </div>
                         <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
                             <div className="min-w-0 rounded-2xl border border-[#E7DFEC] bg-white p-4 shadow-sm xl:col-span-2">
@@ -2256,10 +2049,8 @@ export default function OwnerDashboard() {
                             </div>
                             <BranchPerformancePanel rows={branchRows} period={branchPeriod} onPeriodChange={setBranchPeriod} periodLabel={formatPeriodLabel(branchPeriod,currentDateTime)} onExport={(format) => downloadOwnerReport(format, "owner_branch_performance_"+branchPeriod+".csv", ["Branch","Revenue PHP","Period"], branchRows.slice(0,6).map(row => [row.name,row.amount,formatPeriodLabel(branchPeriod,currentDateTime)]))}/>
                         </div>
-                        <div className="grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2 xl:h-[440px] xl:grid-cols-[minmax(0,25fr)_minmax(0,40fr)_minmax(0,35fr)]">
+                        <div className="grid grid-cols-1 items-stretch gap-3">
                             <OwnerRevenueBreakdown allocation={verifiedAllocation} period={currentMonthLabel} unavailableReason={allocationReason} onExport={(format) => {if (!verifiedAllocation) return; const total = verifiedAllocation.consumable + verifiedAllocation.rental + verifiedAllocation.unallocated; downloadOwnerReport(format, "owner_revenue_breakdown.csv", ["Product Type","Revenue PHP","Percent","Period"], [["Consumable Goods",verifiedAllocation.consumable,total>0?(100*verifiedAllocation.consumable/total).toFixed(1):0,currentMonthLabel],["Rental Goods",verifiedAllocation.rental,total>0?(100*verifiedAllocation.rental/total).toFixed(1):0,currentMonthLabel],...(verifiedAllocation.partial ? [["Unallocated bookings",verifiedAllocation.unallocated,total>0?(100*verifiedAllocation.unallocated/total).toFixed(1):0,currentMonthLabel]] : [])])}}/>
-                            <OwnerSupplierPanel rows={displayedPayables} connected={combinedPayables !== null} onViewPurchase={setSelectedPurchase} onExport={(format) => downloadOwnerReport(format, "owner_supplier_payables.csv", ["Purchase ID","Product Type","Amount Due PHP","Due Date","Status"], displayedPayables.map(row => [row.purchaseNumber,row.source === "rental" ? "Rental goods" : "Consumable goods",row.balance,row.dueDate,row.status]))}/>
-                            <OwnerManagerRequestsPanel rows={pendingManagerRequests?.slice(0,5) ?? []} connected={pendingManagerRequests !== null} onReview={setSelectedManagerRequest} onExport={(format) => downloadOwnerReport(format, "owner_pending_manager_leave_requests.csv", ["Manager Name","Branch","Leave Type","Date / Date Range","Status"], (pendingManagerRequests ?? []).map(row => [row.manager,row.branch,row.leaveType,row.dateLabel,row.status]))}/>
                         </div>
                         <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
                             <OwnerRankingPanel title="Top Consumable Products" subtitle="Best-selling POS products" icon={<Package size={19}/>} onExport={(format) => downloadOwnerReport(format, "owner_top_consumable_products_"+consumablePeriod+".csv", ["Rank","Product","Units Sold","Revenue PHP"], (posProductsForPeriod ?? []).map((row,index) => [index+1,row.name,row.count,row.revenue]))} rows={posProductsForPeriod} countLabel="Units Sold" period={consumablePeriod} onPeriodChange={setConsumablePeriod} onViewAll={() => router.push("/reports")}/>
@@ -2270,9 +2061,6 @@ export default function OwnerDashboard() {
                 )}
             </section>
             {selectedKpi && <OwnerKpiDetailModal detail={kpiDetails[selectedKpi]} onClose={() => setSelectedKpi(null)}/>}
-            <OwnerRequestModal purchase={selectedPurchase} request={selectedManagerRequest} onClose={() => {setSelectedPurchase(null);setSelectedManagerRequest(null);}}
-                               onPurchaseAtModule={() => {setSelectedPurchase(null);router.push("/inventory");}}
-                               onReviewAtModule={() => {setSelectedManagerRequest(null);router.push("/branch-managers");}} />
         </>
     );
 }
@@ -2781,7 +2569,7 @@ function DemandForecastPanel({
 /* ----------------------------------------------------------------------- */
 type OwnerCsvCell = string | number | null | undefined;
 type OwnerExportFormat = "pdf" | "xlsx";
-type OwnerKpiKey = "revenue" | "cost" | "profit" | "payables";
+type OwnerKpiKey = "revenue" | "cost" | "profit";
 type OwnerKpiDetail = {
     title: string;
     amount: number | null;
@@ -2923,75 +2711,8 @@ function OwnerRevenueBreakdown({allocation,period,unavailableReason,onExport}:{a
     </div>;
 }
 
-function OwnerTableStatus({status}:{status:string}) {
-    const normalized=status.toLowerCase();
-    const cls=normalized.includes("overdue")||normalized.includes("reject")?"bg-[#FFE7EA] text-[#C52E3B]":normalized === "approved" || normalized === "paid" || normalized === "completed" ? "bg-[#E6F7EE] text-[#13884E]":"bg-[#FFF3D8] text-[#AF6E08]";
-    return <span className={`inline-flex max-w-full rounded-lg px-2 py-1 text-[10px] font-semibold ${cls}`}>{status}</span>;
-}
 function OwnerTableEmpty({connected,empty}:{connected:boolean;empty:string}) {
     return <div className="flex min-h-[150px] items-center justify-center px-4 text-center text-[11px] text-[#86778F]">{connected?empty:"Data source not connected. Link this panel to the corresponding Owner module API."}</div>;
-}
-function OwnerSupplierPanel({rows,connected,onExport,onViewPurchase}:{rows:OwnerSupplierRow[];connected:boolean;onExport:(format:OwnerExportFormat)=>void;onViewPurchase:(row:OwnerSupplierRow)=>void}) {
-    return <div className="flex h-[340px] min-h-0 min-w-0 flex-col overflow-visible rounded-2xl border border-[#E7DFEC] bg-white shadow-sm xl:h-full">
-        <div className="px-4 pt-4"><OwnerPanelTitle title="Supplier Payables" subtitle="Upcoming and overdue supplier payments" icon={<FileText size={19}/>} action={<OwnerExportButton label="Supplier Payables" onExport={onExport} disabled={!connected || rows.length===0}/>}/></div>
-        <div className="mt-3 min-h-0 flex-1 overflow-auto overscroll-contain">
-            {!connected || rows.length===0 ? <OwnerTableEmpty connected={connected} empty="No outstanding supplier payments."/> :
-                <table className="w-full min-w-[365px] text-left text-[10px]">
-                    <thead className="sticky top-0 z-10 bg-[#FFFCF7] uppercase text-[9px] text-[#806A8C]"><tr>
-                        {["Purchase ID","Amount Due","Due Date","Status"].map(v=><th key={v} className="whitespace-nowrap px-2.5 py-2.5 font-semibold">{v}</th>)}
-                    </tr></thead>
-                    <tbody>{rows.map(row => <tr key={row.id} className="border-t border-[#F1ECF4] text-[#392648]">
-                        <td className="whitespace-nowrap px-2.5 py-2"><button type="button" title="View purchase details" onClick={() => onViewPurchase(row)} className="font-semibold text-[#6D35D4] hover:underline focus-visible:underline">{row.purchaseNumber}</button><span className="mt-0.5 block text-[9px] text-[#8A7D92]">{row.branch || "Branch not recorded"}</span></td>
-                        <td className="whitespace-nowrap px-2.5 py-2 font-semibold">{peso(row.balance)}</td>
-                        <td className="whitespace-nowrap px-2.5 py-2">{ownerDisplayShortDate(row.dueDate)}</td>
-                        <td className="px-2.5 py-2"><OwnerTableStatus status={row.status}/></td>
-                    </tr>)}</tbody>
-                </table>}
-        </div>
-    </div>;
-}
-function OwnerManagerRequestsPanel({rows,connected,onExport,onReview}:{rows:OwnerManagerRequest[];connected:boolean;onExport:(format:OwnerExportFormat)=>void;onReview:(row:OwnerManagerRequest)=>void}) {
-    return <div className="flex h-[340px] min-h-0 min-w-0 flex-col overflow-visible rounded-2xl border border-[#E7DFEC] bg-white shadow-sm xl:h-full">
-        <div className="px-4 pt-4"><OwnerPanelTitle title="Manager Leave Requests" subtitle="Pending branch manager requests" icon={<Users size={19}/>} action={<OwnerExportButton label="Manager Leave Requests" onExport={onExport} disabled={!connected || rows.length===0}/>}/></div>
-        <div className="mt-3 min-h-0 flex-1 overflow-auto overscroll-contain">
-            {!connected || rows.length===0 ? <OwnerTableEmpty connected={connected} empty="No pending manager leave requests."/> :
-                <table className="w-full min-w-[280px] text-left text-[10px]">
-                    <thead className="sticky top-0 z-10 bg-[#FFFCF7] uppercase text-[9px] text-[#806A8C]"><tr>
-                        {["Manager Name","Branch","Action"].map(v=><th key={v} className="whitespace-nowrap px-2.5 py-2.5 font-semibold">{v}</th>)}
-                    </tr></thead>
-                    <tbody>{rows.map(row => <tr key={row.id} className="border-t border-[#F1ECF4] text-[#392648]">
-                        <td className="whitespace-nowrap px-2.5 py-2 font-semibold">{row.manager}</td>
-                        <td className="px-2.5 py-2">{row.branch}</td>
-                        <td className="px-2.5 py-2"><button type="button" onClick={() => onReview(row)} className="rounded-lg border border-[#DECEF2] bg-[#F5F0FF] px-2.5 py-1.5 text-[10px] font-semibold text-[#6D35D4] transition hover:bg-[#EEE5FF]">View</button></td>
-                    </tr>)}</tbody>
-                </table>}
-        </div>
-    </div>;
-}
-function OwnerRequestModal({purchase,request,onClose,onReviewAtModule,onPurchaseAtModule}:{purchase:OwnerSupplierRow|null;request:OwnerManagerRequest|null;onClose:()=>void;onReviewAtModule:()=>void;onPurchaseAtModule:()=>void}) {
-    if (!purchase && !request) return null;
-    return <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#170B29]/55 p-4" role="presentation" onMouseDown={event => {if (event.target===event.currentTarget) onClose();}}>
-        <div role="dialog" aria-modal="true" aria-label={purchase ? "Supplier purchase details" : "Manager leave request details"} className="w-full max-w-[560px] overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-[#EEE7F5] px-5 py-4">
-                <div><h3 className="text-[17px] font-bold text-[#1A1220]">{purchase ? "Purchase Details" : "Review Manager Leave"}</h3><p className="mt-0.5 text-[11px] text-[#86778F]">{purchase ? purchase.purchaseNumber : "Review using the Owner approval workflow"}</p></div>
-                <button type="button" onClick={onClose} aria-label="Close details" className="rounded-lg px-2 py-1 text-xl text-[#766484] hover:bg-[#F6F0FC]">×</button>
-            </div>
-            <div className="space-y-4 px-5 py-4">
-                {purchase ? <>
-                    <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#FAF7FC] p-4 text-[12px]">
-                        {[["Purchase ID",purchase.purchaseNumber],["Supplier",purchase.supplier],["Branch",purchase.branch],["Amount Due",peso(purchase.balance)],["Due Date",ownerDisplayShortDate(purchase.dueDate)],["Status",purchase.status]].map(([label,value])=><div key={label} className="min-w-0"><p className="text-[10px] text-[#86778F]">{label}</p><p className="mt-1 break-words font-semibold text-[#342140]">{value}</p></div>)}
-                    </div>
-                    {purchase.items ? <div><p className="mb-2 text-[12px] font-bold text-[#342140]">Purchased Items</p><div className="max-h-44 overflow-auto rounded-lg border border-[#F1ECF4]">{purchase.items.map((item,index)=><div key={`${item.name}-${index}`} className="flex justify-between gap-3 border-b border-[#F1ECF4] px-3 py-2 text-[11px]"><span>{item.name}</span><span className="shrink-0">{item.quantity} pcs</span></div>)}</div></div> : <p className="text-[11px] text-[#86778F]">Item-level purchase details were not included in the dashboard response.</p>}
-                </> : request ? <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#FAF7FC] p-4 text-[12px]">
-                    {[["Manager",request.manager],["Branch",request.branch],["Leave Type",request.leaveType],["Leave Date / Range",request.dateLabel],["Status",request.status],["Reason",request.reason || "Not provided"]].map(([label,value])=><div key={label} className="min-w-0"><p className="text-[10px] text-[#86778F]">{label}</p><p className="mt-1 break-words font-semibold text-[#342140]">{value}</p></div>)}
-                </div> : null}
-            </div>
-            <div className="flex flex-wrap justify-end gap-2 border-t border-[#EEE7F5] px-5 py-3">
-                <button type="button" onClick={onClose} className="rounded-lg border border-[#E6DDF0] px-3 py-2 text-[12px] font-semibold text-[#2B174C]">Close</button>
-                <button type="button" onClick={purchase ? onPurchaseAtModule : onReviewAtModule} className="rounded-lg bg-[#2B174C] px-3 py-2 text-[12px] font-semibold text-white hover:bg-[#1B0D31]">{purchase ? "Open Inventory Module" : "Review in Branch Managers"}</button>
-            </div>
-        </div>
-    </div>;
 }
 type OwnerRankRow = {key:string;name:string;secondary:string;count:number;revenue:number};
 function OwnerRankingPanel({title,subtitle,icon,rows,countLabel,period,onPeriodChange,onViewAll,onExport}:{title:string;subtitle:string;icon:React.ReactNode;rows:OwnerRankRow[]|null;countLabel:string;period:PeriodOption;onPeriodChange:(v:PeriodOption)=>void;onViewAll:()=>void;onExport:(format:OwnerExportFormat)=>void}) {

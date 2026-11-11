@@ -423,7 +423,8 @@ const dbPool = mysql.createPool({
  * Physical stock exists only in branch_inventory, and a product belongs to the
  * branch that holds the branch_inventory row of its default variant.
  *
- * Rental equipment follows the same rule with equipment / equipment_variants.
+ * Rental equipment has no variants: its branch_inventory row points at the
+ * equipment row directly (branch_inventory.equipment_id).
  *
  * The read models below expose the column names this Lambda already returns,
  * so API responses and the UI stay exactly the same.
@@ -1556,208 +1557,19 @@ async function findExistingProductByName(
 
 
 /* -------------------------------------------------------------------------- */
-/*         INITIAL PURCHASE: SUPPLIER AND CASH / CREDIT RECORD ONLY           */
+/*                            MONEY HELPERS                                   */
 /* -------------------------------------------------------------------------- */
 
 function roundMoney(value) {
     return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 }
 
-function normalizedPurchaseDate(value) {
-    // Reuses the project's existing strict YYYY-MM-DD validation.
-    return normalizeOptionalDate(value);
-}
-
-function getInitialPurchaseInput(body, stock, originalPrice, variants, storedTotal = null) {
-    const source = body.initialPurchase ?? body.initial_purchase;
-    if (source === undefined || source === null) return null; // existing clients continue working
-    if (!source || typeof source !== "object" || Array.isArray(source)) {
-        throw new Error("Invalid initial purchase information.");
-    }
-    if (storedTotal === null && Number(stock) <= 0) {
-        throw new Error("Initial purchase details require stock greater than zero.");
-    }
-    const supplier = toSafeString(source.supplier, 150);
-    const supplierInvoiceNumber = toSafeString(source.supplierInvoiceNumber ?? source.supplier_invoice_number, 80) || null;
-    const purchaseDate = normalizedPurchaseDate(source.purchaseDate ?? source.purchase_date);
-    const paymentMethod = String(source.paymentMethod ?? source.payment_method ?? "").trim().toLowerCase();
-    if (!supplier || !purchaseDate) {
-        throw new Error("Supplier and purchase date are required for initial stock.");
-    }
-    if (!["cash", "credit"].includes(paymentMethod)) {
-        throw new Error("Payment method must be cash or credit.");
-    }
-
-    const rawCost = Array.isArray(variants) && variants.length > 0
-        ? variants.reduce((sum, variant) =>
-            sum + Number(variant.stock || 0) * Number(variant.originalPrice || 0), 0)
-        : Number(stock) * Number(originalPrice);
-    if (!Number.isFinite(rawCost) || rawCost < 0) {
-        throw new Error("Invalid initial inventory purchase cost.");
-    }
-    // Edit never rewrites the original supplier purchase total just because
-    // product stock or replacement costs changed in a later period.
-    const purchaseTotal = storedTotal === null ? roundMoney(rawCost) : roundMoney(storedTotal);
-    const paidCandidate = toNumber(source.amountPaid ?? source.amount_paid ?? 0);
-    if (paidCandidate === null || paidCandidate < 0) {
-        throw new Error("Amount paid must be a valid nonnegative number.");
-    }
-    if (paymentMethod === "credit" && roundMoney(paidCandidate) > purchaseTotal) {
-        throw new Error("Amount paid cannot exceed the initial purchase cost.");
-    }
-    const amountPaid = paymentMethod === "cash" ? purchaseTotal : roundMoney(paidCandidate);
-    const outstandingBalance = roundMoney(Math.max(0, purchaseTotal - amountPaid));
-    const paymentDueDate = paymentMethod === "credit"
-        ? normalizedPurchaseDate(source.paymentDueDate ?? source.payment_due_date)
-        : null;
-    if (outstandingBalance > 0 && !paymentDueDate) {
-        throw new Error("Payment due date is required for an outstanding credit purchase.");
-    }
-    if (paymentDueDate && paymentDueDate < purchaseDate) {
-        throw new Error("Payment due date cannot be before the purchase date.");
-    }
-    return { supplier, supplierInvoiceNumber, purchaseDate, paymentMethod, purchaseTotal,
-        amountPaid, outstandingBalance, paymentDueDate };
-}
-
-async function recordInitialPurchase() {
-    return null;
-}
-
-async function findInitialPurchase() {
-    return null;
-}
-
-async function updateInitialPurchase() {
-    return null;
-}
-
-/* STOCKNBOOK PURCHASE LEDGER: canonical financial transactions, distinct from stock. */
 function exactMoney(value, label) {
     const raw = Number(value);
     if (!Number.isFinite(raw) || raw < 0 || Math.abs(raw * 100 - Math.round(raw * 100)) > 0.00001) {
         throw new Error(`${label} must be a nonnegative amount with at most 2 decimal places.`);
     }
     return Math.round(raw * 100);
-}
-// Correct one selected purchase without updating products, stock, or receipt history.
-async function updateSupplierPurchaseDetails() {
-    const error = new Error("Supplier purchases are no longer recorded in StockNBook.");
-    error.purchaseEditStatus = 410;
-    throw error;
-}
-
-
-function validatePurchaseHeader(input, lines) {
-    const supplier = toSafeString(input.supplier, 150);
-    const purchaseDate = normalizeOptionalDate(input.purchaseDate ?? input.receivedDate);
-    const supplierInvoiceNumber = toSafeString(input.supplierInvoiceNumber ?? input.supplier_invoice_number, 80) || null;
-    const paymentMethod = String(input.paymentMethod || "").toLowerCase();
-    if (!supplier || !purchaseDate || !["cash", "credit"].includes(paymentMethod)) {
-        throw new Error("Supplier, purchase date, and Cash/Credit are required.");
-    }
-    if (!lines.length || lines.some(l => !Number.isSafeInteger(l.quantity) || l.quantity <= 0 ||
-        !Number.isInteger(l.productId) || l.productId <= 0 ||
-        (l.variantId !== null && (!Number.isInteger(l.variantId) || l.variantId <= 0)))) {
-        throw new Error("A purchase needs one or more positive product or variant lines.");
-    }
-    const totalCents = lines.reduce((total, line) => total + line.quantity * exactMoney(line.unitPurchaseCost, "Unit purchase cost"), 0);
-    if (!Number.isSafeInteger(totalCents)) throw new Error("Purchase amount is too large.");
-    const amountPaidCents = paymentMethod === "cash" ? totalCents : exactMoney(input.amountPaid ?? 0, "Amount paid");
-    if (amountPaidCents > totalCents) throw new Error("Amount paid cannot exceed purchase total.");
-    const dueDate = paymentMethod === "credit" ? normalizeOptionalDate(input.paymentDueDate) : null;
-    if (totalCents > amountPaidCents && !dueDate) throw new Error("Due date is required for unpaid credit.");
-    if (dueDate && dueDate < purchaseDate) throw new Error("Due date cannot precede purchase date.");
-    return {supplier, purchaseDate, supplierInvoiceNumber, paymentMethod, dueDate,
-        totalCents, amountPaidCents, outstandingCents: totalCents - amountPaidCents};
-}
-async function createStockReceipt() {
-    return null;
-}
-// CREATE purchase once; record its financial payment once even if the purchase has many variants/products.
-async function createPurchaseLedger(connection, {input, lines}) {
-    const p = validatePurchaseHeader(input, lines);
-    return {purchaseId: null, receiptId: null, purchaseTotal: p.totalCents/100,
-        amountPaid: p.amountPaidCents/100, outstandingBalance: p.outstandingCents/100};
-}
-async function findCanonicalInitialPurchase() {
-    return null;
-}
-
-async function getRestockReceivedBy(
-    connection,
-    decoded,
-    tokenRole,
-    storeId
-) {
-    try {
-        if (tokenRole === "manager" && decoded?.manager_id) {
-            const [rows] = await connection.execute(
-                `SELECT full_name AS manager_name
-                 FROM users
-                 WHERE id = ?
-                   AND store_id = ?
-                   AND role = 'manager'
-                     LIMIT 1`,
-                [Number(decoded.manager_id), storeId]
-            );
-
-            if (rows.length > 0) {
-                return (
-                    toSafeString(rows[0].manager_name, 255) ||
-                    toSafeString(decoded.email, 255) ||
-                    "Manager"
-                );
-            }
-        }
-
-        if (tokenRole === "staff" && decoded?.staff_id) {
-            const [rows] = await connection.execute(
-                `SELECT full_name AS staff_name
-                 FROM users
-                 WHERE id = ?
-                   AND store_id = ?
-                   AND role = 'staff'
-                     LIMIT 1`,
-                [Number(decoded.staff_id), storeId]
-            );
-
-            if (rows.length > 0) {
-                return (
-                    toSafeString(rows[0].staff_name, 255) ||
-                    toSafeString(decoded.email, 255) ||
-                    "Staff"
-                );
-            }
-        }
-
-        if (tokenRole === "owner") {
-            const [rows] = await connection.execute(
-                `SELECT full_name AS owner_name
-                 FROM users
-                 WHERE store_id = ?
-                   AND role = 'owner'
-                     LIMIT 1`,
-                [storeId]
-            );
-
-            if (rows.length > 0) {
-                return (
-                    toSafeString(rows[0].owner_name, 255) ||
-                    toSafeString(decoded?.email, 255) ||
-                    "Owner"
-                );
-            }
-        }
-    } catch (error) {
-        console.error("Unable to resolve restock receiver:", error);
-    }
-
-    return (
-        toSafeString(decoded?.email, 255) ||
-        toSafeString(tokenRole, 80) ||
-        "User"
-    );
 }
 
 async function recordRestockHistory() {
@@ -2007,9 +1819,8 @@ const V2_SCHEMA_COLUMNS = {
     categories: ["id", "store_id", "category_name", "category_type", "status", "created_at", "updated_at"],
     products: ["id", "store_id", "category_id", "product_number", "product_name", "description", "has_variants", "next_variant_sequence", "status", "created_at", "updated_at", "deleted_at"],
     product_variants: ["id", "store_id", "product_id", "variant_number", "variant_name", "attributes", "unit_of_measure", "is_default", "selling_price", "cost_price", "pricing_method", "markup_percentage", "status", "created_at", "updated_at", "deleted_at"],
-    equipment: ["id", "store_id", "category_id", "equipment_number", "equipment_name", "description", "has_variants", "next_variant_sequence", "status", "created_at", "updated_at", "deleted_at"],
-    equipment_variants: ["id", "store_id", "equipment_id", "variant_number", "variant_name", "attributes", "is_default", "rental_rate_per_day", "cost_price", "status", "created_at", "updated_at", "deleted_at"],
-    branch_inventory: ["id", "store_id", "branch_id", "variant_id", "equipment_variant_id", "on_hand_quantity", "reserved_quantity", "unavailable_quantity", "reorder_level", "expiration_date", "status", "last_counted_at", "created_at", "updated_at"],
+    equipment: ["id", "store_id", "category_id", "equipment_number", "equipment_name", "description", "rental_rate_per_day", "cost_price", "status", "created_at", "updated_at", "deleted_at"],
+    branch_inventory: ["id", "store_id", "branch_id", "variant_id", "equipment_id", "on_hand_quantity", "reserved_quantity", "unavailable_quantity", "reorder_level", "expiration_date", "status", "last_counted_at", "created_at", "updated_at"],
     inventory_movements: ["id", "store_id", "branch_id", "branch_inventory_id", "movement_type", "quantity_bucket", "quantity_change", "quantity_before", "quantity_after", "unit_cost", "reference_type", "reference_id", "reason", "performed_by", "created_at"],
     inventory_batches: ["id", "store_id", "branch_id", "branch_inventory_id", "batch_code", "received_quantity", "remaining_quantity", "unit_cost", "received_at", "expiration_date", "status"],
     stock_issues: ["id", "store_id", "branch_id", "branch_inventory_id", "booking_id", "issue_type", "quantity", "quantity_resolved", "reason", "status", "estimated_completion_date", "reported_by", "approved_by", "approved_at", "resolved_by", "resolved_at", "resolution_notes", "created_at", "updated_at"],
@@ -2528,24 +2339,22 @@ async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}
     // released to bookings, and units recorded as unavailable (damaged/repair).
     const recentlyRented = new Set();
     const rentalHistory = true;
-    const [moves] = await connection.execute(`SELECT DISTINCT ev.equipment_id AS equipmentId
+    const [moves] = await connection.execute(`SELECT DISTINCT bki.equipment_id AS equipmentId
                                               FROM booking_items bki
                                                        JOIN bookings b ON b.id=bki.booking_id
-                                                       JOIN equipment_variants ev ON ev.id=bki.equipment_variant_id
                                               WHERE b.store_id=? ${branchId ? 'AND b.branch_id=?' : ''}
                                                 AND bki.item_type='rental' AND bki.released_at>=?`, [...args,slowStart]);
     moves.forEach(row=>recentlyRented.add(Number(row.equipmentId)));
     const [rentals] = await connection.execute(`SELECT e.id,bi.branch_id AS branchId,bi.on_hand_quantity AS totalUnits,
                                                        COALESCE((SELECT SUM(bki.quantity-bki.returned_quantity) FROM booking_items bki
-                                                                 JOIN bookings b ON b.id=bki.booking_id
-                                                                 WHERE bki.equipment_variant_id=ev.id AND b.branch_id=bi.branch_id
+                                                                                                                         JOIN bookings b ON b.id=bki.booking_id
+                                                                 WHERE bki.equipment_id=e.id AND b.branch_id=bi.branch_id
                                                                    AND bki.item_type='rental' AND bki.item_status='released'),0) AS rentedOut,
                                                        bi.unavailable_quantity AS maintenanceUnits,
                                                        0 AS missingUnits,bi.reorder_level AS alertLevel,
                                                        DATE_FORMAT(e.created_at,'%Y-%m-%d') AS createdDate
                                                 FROM equipment e
-                                                         JOIN equipment_variants ev ON ev.equipment_id=e.id AND ev.is_default=1
-                                                         JOIN branch_inventory bi ON bi.equipment_variant_id=ev.id
+                                                         JOIN branch_inventory bi ON bi.equipment_id = e.id
                                                 WHERE e.store_id=? ${branchId ? 'AND bi.branch_id=?' : ''}
                                                   AND e.deleted_at IS NULL`, args);
     for(const row of rentals) {
@@ -2567,14 +2376,13 @@ async function loadOwnerStockCondition(connection, {storeId, branchId, asOfDate}
  */
 async function loadOwnerRecordedRentalRevenue(connection,{storeId,branchId,dateFrom,dateTo}) {
     const args = [storeId,...(branchId?[branchId]:[]),dateFrom,dateTo];
-    const [rows] = await connection.execute(`SELECT b.branch_id AS branchId,ev.equipment_id AS equipmentId,
+    const [rows] = await connection.execute(`SELECT b.branch_id AS branchId,bki.equipment_id AS equipmentId,
                                                     COALESCE(e.equipment_name,bki.item_name_snapshot,'Archived rental equipment') AS equipmentName,
                                                     DATE_FORMAT(DATE(COALESCE(bki.returned_at,b.rental_end_date,b.event_date)),'%Y-%m-%d') AS revenueDate,
                                                     bki.line_total AS revenueAmount
                                              FROM booking_items bki
                                                       JOIN bookings b ON b.id=bki.booking_id AND b.store_id=bki.store_id
-                                                      JOIN equipment_variants ev ON ev.id=bki.equipment_variant_id
-                                                      LEFT JOIN equipment e ON e.id=ev.equipment_id
+                                                      LEFT JOIN equipment e ON e.id=bki.equipment_id
                                              WHERE b.store_id=? ${branchId ? 'AND b.branch_id=?' : ''}
                                                AND bki.item_type='rental' AND bki.item_status IN ('returned','cleaning','damaged','cleared')
                                                AND DATE(COALESCE(bki.returned_at,b.rental_end_date,b.event_date))>=?
@@ -2921,20 +2729,17 @@ exports.handler = async (event) => {
         // Recheck current employee status, branch and Inventory permission on
         // EVERY request. Session-storage permissions are UI hints, not security.
         const inventoryReadActions = new Set([
-            "get_products", "get_recent_purchased_stock_in", "get_last_stock_in",
-            "get_stock_suppliers", "get_supplier_payables", "get_supplier_purchase_items",
-            "get_product_editor_details", "get_product_initial_purchase",
+            "get_products", "get_last_stock_in",
+            "get_product_editor_details",
             "get_product_removal_impact", "get_variant_removal_impact",
             "get_staff_receiving_permissions", "get_staff_inventory_workspace", "get_staff_inventory_activity",
         ]);
         const ownerFinancialActions = new Set([
             "get_owner_stock_condition", "get_owner_inventory_performance", "get_products",
-            "get_supplier_payables", "get_supplier_purchase_items", "get_stock_suppliers",
-            "get_recent_purchased_stock_in", "get_last_stock_in", "get_product_initial_purchase",
-            "pay_supplier_purchase",
+            "get_last_stock_in",
         ]);
         if (tokenRole === "owner" && !ownerFinancialActions.has(action)) {
-            return jsonResponse(403, headers, {error: "Owner Inventory access is limited to financial oversight and supplier payments."});
+            return jsonResponse(403, headers, {error: "Owner Inventory access is limited to financial oversight."});
         }
         if (tokenRole === "manager") {
             const managerId = Number(decoded.manager_id);
@@ -3388,37 +3193,6 @@ exports.handler = async (event) => {
             return jsonResponse(200, headers, { products: visibleProducts });
         }
 
-        // Read-only purchase references for the existing Recent Stock Activity rows.
-        // The manager's branch is derived from the token; IDs are never fabricated.
-        if (action === "get_recent_purchased_stock_in") {
-            if (!["owner", "manager"].includes(tokenRole)) {
-                return unauthorized(headers, "Only owners and managers may view purchase references.");
-            }
-            if (!activeBranchId) return badRequest(headers, "A branch is required.");
-            // Stock-in movements of the last 30 days (no supplier purchase records in stocknbook_v2).
-            const [rows] = await connection.execute(
-                `SELECT bi.product_id AS productId,
-                        COALESCE(p.name, 'Archived Product') AS productName,
-                        pv.variant_name AS variantName,
-                        m.quantity_delta AS quantity,
-                        m.created_at AS recordedAt,
-                        NULL AS purchaseNumber,
-                        CASE WHEN m.movement_type='OPENING_STOCK' THEN 'add' ELSE 'receive' END AS purchaseSource
-                 FROM ${V2_INVENTORY_MOVEMENTS} m
-                          JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id = m.branch_inventory_id
-                          LEFT JOIN ${V2_PRODUCTS} p ON p.id = bi.product_id
-                          LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id = bi.variant_id
-                 WHERE m.store_id = ? AND m.branch_id = ?
-                   AND m.quantity_delta > 0
-                   AND m.movement_type IN ('OPENING_STOCK','MANAGER_RECEIPT','STAFF_RECEIPT')
-                   AND m.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-                 ORDER BY m.created_at DESC, m.id DESC
-                     LIMIT 500`,
-                [storeId, activeBranchId]
-            );
-            return jsonResponse(200, headers, { success: true, stockInMovements: rows });
-        }
-
         // Read-only, branch-scoped date lookup for Manager Inventory's
         // "Last Stock In" column. Only positive stock increases qualify.
         if (action === "get_last_stock_in") {
@@ -3454,38 +3228,24 @@ exports.handler = async (event) => {
         }
 
 
-        if (action === "get_stock_suppliers") {
-            if (!["owner", "manager"].includes(tokenRole)) {
-                return unauthorized(headers, "Supplier purchasing information is restricted to Managers and Owners.");
-            }
-            if (!activeBranchId) return badRequest(headers, "A branch is required.");
-            // Supplier records are not part of stocknbook_v2.
-            return jsonResponse(200, headers, { success: true, suppliers: [] });
-        }
-
         /* Dedicated stock receipt: updates quantities and moving-average unit costs,
            applying the manager's chosen selling price within the same transaction.
-           Earlier supplier purchase amounts and variant definitions are untouched. */
+           Variant definitions are untouched. */
         if (action === "receive_stock") {
-            // This action creates supplier purchases, changes costs and can reprice stock.
+            // This action changes costs and can reprice stock.
             // Staff may only complete a Manager-authorized physical receipt through
-            // complete_staff_stock_receipt; never permit the general purchasing path.
+            // complete_staff_stock_receipt; never permit the general receiving path.
             if (!["owner", "manager"].includes(tokenRole)) {
-                return unauthorized(headers, "Only a Manager or Owner may record supplier purchases and change pricing. Staff must use an authorized receiving task.");
+                return unauthorized(headers, "Only a Manager or Owner may receive stock and change pricing. Staff must use an authorized receiving task.");
             }
             const productId = Number(body.product_id ?? body.productId);
             if (!activeBranchId || !Number.isInteger(productId) || productId <= 0) {
                 return badRequest(headers, "A valid product and branch are required.");
             }
-            const supplier = toSafeString(body.supplier, 150);
-            const invoiceNumber = toSafeString(body.supplierInvoiceNumber ?? body.supplier_invoice_number, 80) || null;
             let receivedDate;
-            let dueDate;
             try {
                 receivedDate = normalizeOptionalDate(body.receivedDate);
-                dueDate = normalizeOptionalDate(body.paymentDueDate);
             } catch (error) { return badRequest(headers, error.message); }
-            const paymentMethod = String(body.paymentMethod || "").trim().toLowerCase();
             const todayParts = new Intl.DateTimeFormat("en-GB", {
                 timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit",
             }).formatToParts(new Date());
@@ -3494,8 +3254,8 @@ exports.handler = async (event) => {
             if (receivedDate && receivedDate > todayInPhilippines) {
                 return badRequest(headers, "Date Received cannot be in the future.");
             }
-            if (!supplier || !receivedDate || !["cash", "credit"].includes(paymentMethod)) {
-                return badRequest(headers, "Supplier, Date Received and Cash/Credit are required.");
+            if (!receivedDate) {
+                return badRequest(headers, "Date Received is required.");
             }
             const rawLines = body.lines;
             if (!Array.isArray(rawLines) || rawLines.length === 0 || rawLines.length > 200) {
@@ -3506,15 +3266,19 @@ exports.handler = async (event) => {
             for (const raw of rawLines) {
                 const variantId = raw.variantId == null ? null : Number(raw.variantId);
                 const quantity = Number(raw.quantity);
-                const unitPurchaseCost = Number(raw.unitPurchaseCost);
+                // Restock only adds quantity. A unit cost is optional; without one the
+                // line keeps the product's current average unit cost.
+                const unitCostProvided = raw.unitPurchaseCost !== undefined && raw.unitPurchaseCost !== null &&
+                    String(raw.unitPurchaseCost).trim() !== "";
+                const unitPurchaseCost = unitCostProvided ? Number(raw.unitPurchaseCost) : null;
                 let expirationDate;
                 try { expirationDate = normalizeOptionalDate(raw.expirationDate); }
                 catch (error) { return badRequest(headers, error.message); }
                 if ((variantId !== null && (!Number.isInteger(variantId) || variantId <= 0)) ||
                     !Number.isSafeInteger(quantity) || quantity <= 0 || quantity > 1000000 ||
-                    !Number.isFinite(unitPurchaseCost) || unitPurchaseCost < 0 || unitPurchaseCost > 100000000 ||
-                    Math.round(unitPurchaseCost * 100) !== unitPurchaseCost * 100 &&
-                    Math.abs(Math.round(unitPurchaseCost * 100) - unitPurchaseCost * 100) > 0.00001) {
+                    (unitCostProvided && (!Number.isFinite(unitPurchaseCost) || unitPurchaseCost < 0 || unitPurchaseCost > 100000000 ||
+                        Math.round(unitPurchaseCost * 100) !== unitPurchaseCost * 100 &&
+                        Math.abs(Math.round(unitPurchaseCost * 100) - unitPurchaseCost * 100) > 0.00001))) {
                     return badRequest(headers, "Each line requires a positive whole quantity and a valid unit purchase cost (2 decimal places max).");
                 }
                 if (expirationDate && expirationDate < receivedDate) {
@@ -3527,7 +3291,7 @@ exports.handler = async (event) => {
                 if (seen.has(key)) return badRequest(headers, "Duplicate receiving variant line.");
                 seen.add(key);
                 if (raw.orderedQuantity !== undefined && Number(raw.orderedQuantity) !== quantity) {
-                    return badRequest(headers, "Receive Stock accepts only quantities received now. Create another purchase for a separate delivery.");
+                    return badRequest(headers, "Receive Stock accepts only quantities received now. Record a separate delivery separately.");
                 }
                 // Pricing choice is optional for older clients; default to keeping
                 // the existing retail price. The server always calculates average cost.
@@ -3562,22 +3326,8 @@ exports.handler = async (event) => {
                     expectedPricing:raw.expectedPricing ?? null });
             }
             const costCents = cleanLines.reduce((sum, line) =>
-                sum + line.quantity * Math.round(line.unitPurchaseCost * 100), 0);
+                sum + line.quantity * Math.round((line.unitPurchaseCost ?? 0) * 100), 0);
             if (!Number.isSafeInteger(costCents)) return badRequest(headers, "Purchase cost is too large.");
-            const purchaseTotal = costCents / 100;
-            const inputPaid = Number(body.amountPaid ?? 0);
-            if (!Number.isFinite(inputPaid) || inputPaid < 0 || inputPaid > purchaseTotal ||
-                Math.abs(Math.round(inputPaid * 100) - inputPaid * 100) > 0.00001) {
-                return badRequest(headers, "Amount Paid must be between zero and the total purchase cost.");
-            }
-            const amountPaid = paymentMethod === "cash" ? purchaseTotal : Math.round(inputPaid * 100) / 100;
-            const outstandingBalance = (costCents - Math.round(amountPaid * 100)) / 100;
-            if (body.purchaseId != null && String(body.purchaseId).trim() !== "") {
-                return badRequest(headers, "Each Receive Stock submission creates one new supplier purchase. Existing-purchase deliveries are not supported.");
-            }
-            if (outstandingBalance > 0 && (!dueDate || dueDate < receivedDate)) {
-                return badRequest(headers, "A valid Payment Due Date is required for unpaid credit.");
-            }
             const requestKey = toSafeString(body.requestKey, 80);
             if (!requestKey) return badRequest(headers, "Receiving request key is required to prevent duplicate stock receipts.");
             await connection.beginTransaction();
@@ -3594,7 +3344,7 @@ exports.handler = async (event) => {
             if (previous.length) {
                 await connection.commit();
                 return jsonResponse(200, headers, {success:true, alreadyProcessed:true,
-                    receiptId:previous[0].id, purchaseId:null});
+                    receiptId:previous[0].id});
             }
             const current = lockedProduct;
             const isVariantProduct = Number(current.has_variants) === 1;
@@ -3647,7 +3397,7 @@ exports.handler = async (event) => {
                 }
                 // Use the branch balance for weighted-average receiving cost.
                 // A legacy catalog-only discrepancy is not physical stock and
-                // must not inflate the cost weighting of a new supplier receipt.
+                // must not inflate the cost weighting of a new stock receipt.
                 const valuationInventory = await v2LockInventory(connection,
                     {storeId,branchId:activeBranchId,productId,variantId:line.variantId});
                 const valuationRows = valuationInventory ? [valuationInventory] : [];
@@ -3661,8 +3411,9 @@ exports.handler = async (event) => {
                     return jsonResponse(409,headers,{error:'Invalid branch inventory balance. Reconcile before receiving stock.'});
                 }
                 // Original receipt unit costs remain recorded separately for audit.
+                const incomingUnitCost = line.unitPurchaseCost ?? oldAverageCost;
                 const averageCost = roundMoney((valuationStock * oldAverageCost +
-                    line.quantity * line.unitPurchaseCost) / (valuationStock + line.quantity));
+                    line.quantity * incomingUnitCost) / (valuationStock + line.quantity));
                 const impliedMarkup = oldAverageCost > 0
                     ? Math.max(0, (oldSellingPrice / oldAverageCost - 1) * 100) : 0;
                 const targetMarkup = line.pricingMarkupPercentage !== null
@@ -3703,15 +3454,7 @@ exports.handler = async (event) => {
                 receiptLines.push({ ...line, variantName, stockBefore: currentStock,
                     averageCost, selectedPrice, selectedMethod, selectedMarkup });
             }
-            const receivedBy = await getRestockReceivedBy(connection, decoded, tokenRole, storeId);
-            // Every Receive Stock submission is a single fully received supplier purchase.
-            const ledger = await createPurchaseLedger(connection, {
-                storeId, branchId:activeBranchId, input:{supplier, supplierInvoiceNumber:invoiceNumber,
-                    purchaseDate:receivedDate, paymentMethod, amountPaid, paymentDueDate:dueDate},
-                lines:receiptLines.map(line=>({...line, productId})),
-                source:"receive", requestKey, receivedBy, receivedDate});
-            let receiptId = ledger.receiptId;
-            const purchaseId = ledger.purchaseId;
+            let receiptId = null;
             const totalQuantity = cleanLines.reduce((sum, line) => sum + line.quantity, 0);
             // Credit the NEW verified delivery into branch and batch records.
             // An older positive catalog-only discrepancy is retained for a
@@ -3786,45 +3529,16 @@ exports.handler = async (event) => {
                 storeId, branchId: activeBranchId, employee: actingEmployee,
                 module: "Inventory", referenceNumber: current.product_number || String(productId),
                 action: "Restocked inventory", referenceId: String(productId),
-                details: `Received ${totalQuantity} unit(s) of ${current.name} from ${supplier} (Receipt #${receiptId})`+
+                details: `Received ${totalQuantity} unit(s) of ${current.name} (Receipt #${receiptId})`+
                     (reconciliationWarnings.length ? `; pre-existing catalog discrepancies preserved: ${JSON.stringify(reconciliationWarnings)}` : ''),
             });
             await connection.commit();
             return jsonResponse(200, headers, {
-                success: true, receiptId, purchaseId, receivingNumber:`RCV-${String(receiptId).padStart(6,"0")}`,
-                totalQuantity, purchaseTotal: ledger.purchaseTotal,
-                amountPaid: ledger.amountPaid,
-                outstandingBalance: ledger.outstandingBalance,
+                success: true, receiptId, receivingNumber:`RCV-${String(receiptId).padStart(6,"0")}`,
+                totalQuantity,
                 reconciliationRequired:reconciliationWarnings.length>0,
                 reconciliationWarnings,
             });
-        }
-
-        if (action === "get_supplier_payables") {
-            if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers, "Not permitted.");
-            // Supplier payables are not part of stocknbook_v2.
-            return jsonResponse(200,headers,{success:true,payables:[]});
-        }
-        if (action === "update_supplier_purchase") {
-            if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers,"Not permitted.");
-            try {
-                const result = await updateSupplierPurchaseDetails(connection, {
-                    purchaseId:Number(body.purchaseId),storeId,activeBranchId,
-                    details:body.details,expected:body.expected,decoded,tokenRole,
-                });
-                return jsonResponse(200,headers,result);
-            } catch (error) {
-                if (error.purchaseEditStatus) return jsonResponse(error.purchaseEditStatus,headers,{error:error.message});
-                throw error;
-            }
-        }
-        if (action === "get_supplier_purchase_items") {
-            if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers,"Not permitted.");
-            return notFound(headers,"Purchase not found in this store/branch.");
-        }
-        if (action === "pay_supplier_purchase") {
-            if (!["owner", "manager"].includes(tokenRole)) return unauthorized(headers,"Not permitted.");
-            return jsonResponse(410,headers,{error:"Supplier payments are no longer recorded in StockNBook."});
         }
 
         // Expired goods are excluded from availability automatically. The physical
@@ -3943,66 +3657,6 @@ exports.handler = async (event) => {
                 remainingBranchStock:before-quantity});
         }
 
-        if (action === "adjust_stock") {
-            if (!["owner","manager"].includes(tokenRole) || !activeBranchId) return unauthorized(headers,"Not permitted.");
-            const productId=Number(body.productId), variantId=body.variantId==null?null:Number(body.variantId);
-            const expected=Number(body.expectedStock), target=Number(body.newStock);
-            const reason=toSafeString(body.reason,500),requestKey=toSafeString(body.requestKey,80);
-            if(!Number.isInteger(productId)||productId<=0 || (variantId!==null && (!Number.isInteger(variantId)||variantId<=0)) ||
-                !Number.isInteger(expected)||expected<0||!Number.isInteger(target)||target<0 || target>2147483647 ||
-                reason.length<8 || !requestKey) return badRequest(headers,"Provide valid current/corrected stock, a reason of at least 8 characters, and a request reference.");
-            await connection.beginTransaction();
-            const p=await lockProductForUpdate(connection,storeId,activeBranchId,productId);
-            if(!p){await safeRollback(connection);return notFound(headers,"Product not found in this branch.");}
-            // A repeated request (same request reference) is answered from the stock movement.
-            const [duplicates] = await connection.execute(
-                `SELECT m.quantity_after AS newStock FROM inventory_movements m
-                 WHERE m.store_id=? AND m.branch_id=? AND m.reference_type='STOCK_ADJUSTMENT' AND m.reason LIKE ? LIMIT 1`,
-                [storeId,activeBranchId,`Ref ${requestKey.replace(/: /g," ")}: %`]);
-            if (duplicates.length) {await connection.commit();return jsonResponse(200,headers,{success:true,alreadyProcessed:true,newStock:Number(duplicates[0].newStock)});}
-            let current, aggregateStock=target;
-            if(Boolean(Number(p.has_variants))) {
-                if(variantId===null){await safeRollback(connection);return badRequest(headers,"Select a specific variant to adjust.");}
-                const variants=await lockVariantsForUpdate(connection,productId);
-                const selected=variants.find(row=>Number(row.id)===variantId);
-                if(!selected){await safeRollback(connection);return badRequest(headers,"Variant not found.");}
-                current=Number(selected.stock);
-                aggregateStock=variants.reduce((sum,row)=>sum+Number(Number(row.id)===variantId?target:row.stock),0);
-            }else{
-                if(variantId!==null){await safeRollback(connection);return badRequest(headers,"This product has no variants.");}
-                current=Number(p.stock);
-            }
-            if(current!==expected){await safeRollback(connection);return badRequest(headers,`Stock changed since opening this dialog (now ${current}). Reopen and retry.`);}
-            if(target===current){await safeRollback(connection);return badRequest(headers,"Corrected quantity must differ from current stock.");}
-            if(aggregateStock>2147483647){await safeRollback(connection);return badRequest(headers,"Total stock would exceed the supported limit.");}
-            const employee=await getActingEmployee(connection,decoded,tokenRole,storeId);
-            const [priceInfo]=await connection.execute(
-                `SELECT cost_price AS cost FROM product_variants WHERE id=? AND product_id=? AND deleted_at IS NULL`,
-                [await v2CatalogVariantId(connection,productId,variantId),productId]);
-            if(!priceInfo.length){await safeRollback(connection);return notFound(headers,"Product/variant pricing unavailable.");}
-            let correctionExpiry;
-            try {correctionExpiry=normalizeOptionalDate(body.expirationDate);}
-            catch(error){await safeRollback(connection);return badRequest(headers,error.message);}
-            const correctionDateParts=new Intl.DateTimeFormat('en-GB',{
-                timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit',
-            }).formatToParts(new Date());
-            const correctionDayPart=kind=>correctionDateParts.find(piece=>piece.type===kind)?.value||'';
-            const correctionToday=`${correctionDayPart('year')}-${correctionDayPart('month')}-${correctionDayPart('day')}`;
-            if(correctionExpiry && correctionExpiry<correctionToday && target>current){
-                await safeRollback(connection);return badRequest(headers,"Do not increase sellable stock with an expired date.");
-            }
-            // The correction and its audited movement are written together.
-            await adjustSynchronizedStock(connection,{storeId,branchId:activeBranchId,productId,variantId,
-                before:current,target,requestKey,costPrice:Number(priceInfo[0].cost),
-                expirationDate:correctionExpiry||null,employee,reason});
-            await assertInventoryLineSynchronized(connection,{
-                storeId,branchId:activeBranchId,productId,variantId,expected:target});
-            await logEmployeeAction(connection,{storeId,branchId:activeBranchId,employee,
-                module:"Inventory",referenceNumber:p.product_number||String(productId),action:"Corrected stock level",referenceId:String(productId),
-                details:`Corrected ${variantId?`variant ${variantId}`:"regular product"} stock ${current} -> ${target} (${target-current>=0?"+":""}${target-current}); reason: ${reason}`});
-            await connection.commit();
-            return jsonResponse(200,headers,{success:true,productId,variantId,previousStock:current,newStock:target,totalStock:aggregateStock});
-        }
         if (action === "get_product_editor_details") {
             // Cost and pricing editor details are financial management data;
             // Staff Inventory uses get_products with costs redacted.
@@ -4015,55 +3669,20 @@ exports.handler = async (event) => {
             }
             const product = await getProductById(connection, storeId, activeBranchId, productId);
             if (!product) return notFound(headers, "Product not found");
-            const canonical = await findCanonicalInitialPurchase(connection, storeId, Number(product.branchId), productId);
-            const raw = canonical || await findInitialPurchase(connection, storeId, Number(product.branchId), productId);
-            const purchase = raw ? {
-                supplier: raw.supplier,
-                supplierInvoiceNumber: raw.supplierInvoiceNumber || null,
-                purchaseDate: raw.purchaseDate,
-                paymentMethod: raw.paymentMethod,
-                purchaseTotal: Number(raw.purchaseTotal),
-                amountPaid: Number(raw.amountPaid),
-                outstandingBalance: Number(raw.outstandingBalance),
-                paymentDueDate: raw.paymentDueDate,
-                productCount: Number(raw.productCount || 1),
-            } : null;
-            return jsonResponse(200, headers, { product, purchase });
+            return jsonResponse(200, headers, { product });
         }
 
-        if (action === "get_product_initial_purchase") {
-            if (tokenRole !== "owner" && tokenRole !== "manager") {
-                return unauthorized(headers, "Insufficient permission to view supplier purchases.");
-            }
-            const productId = Number(body.id);
-            if (!Number.isInteger(productId) || productId <= 0) {
-                return badRequest(headers, "Invalid product id");
-            }
-            const product = await getProductById(connection, storeId, activeBranchId, productId);
-            if (!product) return notFound(headers, "Product not found");
-            // Supplier purchases are not part of stocknbook_v2.
-            return jsonResponse(200, headers, { purchase: null });
-        }
-
-        /* ATOMIC IMPORT FOR THE THREE-SHEET STOCKNBOOK TEMPLATE.
+        /* ATOMIC IMPORT FOR THE STOCKNBOOK EXCEL TEMPLATE.
          * Existing create/update/delete actions and their handlers stay unchanged.
-         * A shared Purchase Ref is allocated across its products without
-         * duplicating an invoice payment across every variant/product.
          */
         if (action === "import_products_bulk") {
             if (tokenRole !== "owner" && tokenRole !== "manager") {
-                return unauthorized(headers, "Only owners and managers can import supplier purchase records.");
+                return unauthorized(headers, "Only owners and managers can import products.");
             }
             if (!activeBranchId) return badRequest(headers, "branch_id is required");
             const incoming = body.products;
-            const singlePurchaseMode = body.importMode === "single_purchase";
-            // New Excel flow: one server-controlled purchase grouping for all
-            // products. Older API clients still use the existing purchases array.
-            const rawPurchases = singlePurchaseMode ? [body.purchase] : (body.purchases || []);
-            if (!Array.isArray(incoming) || !incoming.length || incoming.length > 500 ||
-                !Array.isArray(rawPurchases) || (singlePurchaseMode &&
-                    (!body.purchase || typeof body.purchase !== "object" || Array.isArray(body.purchase)))) {
-                return badRequest(headers, "Provide 1–500 import products and a purchase list.");
+            if (!Array.isArray(incoming) || !incoming.length || incoming.length > 500) {
+                return badRequest(headers, "Provide 1–500 import products.");
             }
             try {
                 // Validate data BEFORE writing any rows, then repeat duplicate
@@ -4101,54 +3720,15 @@ exports.handler = async (event) => {
                     if (variants.some(variant => !isPriceConsistent(variant, readPricingSelection(variant)))) {
                         throw new Error(`A variant has an incorrect markup price in "${name}".`);
                     }
-                    const purchaseRef = singlePurchaseMode ? "SINGLE_FILE_PURCHASE" : toSafeString(raw.purchaseRef ?? raw.purchase_ref, 80);
-                    const itemCost = roundMoney(hasVariants
-                        ? variants.reduce((sum, v) => sum + v.stock * v.originalPrice, 0)
-                        : stock * cost);
                     clean.push({ name, category, variants, hasVariants, stock, alertLevel,
-                        cost, price, pricing, itemCost, purchaseRef,
+                        cost, price, pricing,
                         expirationDate: hasVariants ? null : normalizeOptionalDate(raw.expirationDate ?? raw.expiration_date) });
-                }
-                if (singlePurchaseMode && rawPurchases.length !== 1) {
-                    throw new Error("One Excel file must contain exactly one supplier purchase.");
-                }
-                const purchases = new Map();
-                for (const raw of rawPurchases) {
-                    const ref = singlePurchaseMode ? "SINGLE_FILE_PURCHASE" : toSafeString(raw.purchaseRef ?? raw.purchase_ref, 80);
-                    const refKey = ref.toLowerCase();
-                    if (!ref || purchases.has(refKey)) throw new Error(`Duplicate or empty purchase reference: ${ref}.`);
-                    const supplier = toSafeString(raw.supplier, 150);
-                    const purchaseDate = normalizeOptionalDate(raw.purchaseDate);
-                    const method = String(raw.paymentMethod || "").trim().toLowerCase();
-                    const due = normalizeOptionalDate(raw.paymentDueDate);
-                    const amountPaid = Number(raw.amountPaid);
-                    const supplierInvoiceNumber = toSafeString(raw.supplierInvoiceNumber ?? raw.supplier_invoice_number,80) || null;
-                    if (!supplier || !purchaseDate || !["cash", "credit"].includes(method) ||
-                        !Number.isFinite(amountPaid) || amountPaid < 0) throw new Error(`Invalid supplier/payment data for ${ref}.`);
-                    const lines = clean.filter(product => product.purchaseRef.toLowerCase() === refKey);
-                    if (!lines.length) throw new Error(`Unused purchase reference ${ref}.`);
-                    const total = roundMoney(lines.reduce((sum, item) => sum + item.itemCost, 0));
-                    if (lines.some(item => item.stock <= 0)) throw new Error(`Purchase ${ref} contains a product with no initial stock.`);
-                    const paid = method === "cash" ? total : roundMoney(amountPaid);
-                    if (method === "credit" && paid > total) throw new Error(`Amount Paid exceeds invoice total for ${ref}.`);
-                    if (method === "cash" && amountPaid !== 0 && roundMoney(amountPaid) !== total) throw new Error(`Cash payment must equal invoice total for ${ref}.`);
-                    if (method === "credit" && paid < total && !due) throw new Error(`Due date required for unpaid purchase ${ref}.`);
-                    if (due && due < purchaseDate) throw new Error(`Due date cannot precede purchase date for ${ref}.`);
-                    purchases.set(refKey, {ref, supplier, supplierInvoiceNumber, purchaseDate, method,
-                        due: method === "credit" ? due : null, paid, total,
-                        lineCosts: lines.map(item => item.itemCost) });
-                }
-                for (const item of clean) {
-                    if (item.purchaseRef && !purchases.has(item.purchaseRef.toLowerCase())) {
-                        throw new Error(`No PURCHASE DETAILS entry for ${item.purchaseRef}.`);
-                    }
                 }
                 await connection.beginTransaction();
                 await connection.execute("SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE", [activeBranchId, storeId]);
                 const {storeCode, branchCode} = await getProductCodeContext(connection, storeId, activeBranchId);
                 const actingEmployee = await getActingEmployee(connection, decoded, tokenRole, storeId);
                 const created = [];
-                const pendingInvoices = new Map();
                 for (const item of clean) {
                     if (await findExistingProductByName(connection, storeId, activeBranchId, item.name)) {
                         throw new Error(`Product "${item.name}" already exists in this branch.`);
@@ -4166,38 +3746,15 @@ exports.handler = async (event) => {
                     });
                     const productId = insert.insertId;
                     await commitProductSequence(connection, storeId, activeBranchId, sequence);
-                    const variantKeys = item.hasVariants ? await insertProductVariants(connection, productId, item.variants) : [];
-                    if (item.purchaseRef) {
-                        const refKey=item.purchaseRef.toLowerCase();
-                        const purchaseLines=pendingInvoices.get(refKey) || [];
-                        if (item.hasVariants) item.variants.forEach((variant,i)=>{
-                            if (variant.stock>0) purchaseLines.push({productId,variantId:variantKeys[i].id,quantity:variant.stock,
-                                unitPurchaseCost:variant.originalPrice,expirationDate:variant.expirationDate});
-                        });
-                        else if (item.stock>0) purchaseLines.push({productId,variantId:null,quantity:item.stock,
-                            unitPurchaseCost:item.cost,expirationDate:item.expirationDate});
-                        pendingInvoices.set(refKey,purchaseLines);
-                    }
+                    if (item.hasVariants) await insertProductVariants(connection, productId, item.variants);
                     await logEmployeeAction(connection, {storeId, branchId: activeBranchId,
                         employee: actingEmployee, module:"Inventory", referenceNumber:productNumber,
                         action:"Added product", referenceId:String(productId),
                         details:`Added ${item.name}${item.hasVariants?` with ${item.variants.length} variant(s)`:""} to inventory`});
                     created.push({id:productId, productNumber, name:item.name});
                 }
-                for (const [refKey, invoice] of purchases) {
-                    const purchaseLines=pendingInvoices.get(refKey) || [];
-                    if (!purchaseLines.length) throw new Error(`Purchase ${invoice.ref} has no received units.`);
-                    const ledger=await createPurchaseLedger(connection,{
-                        storeId,branchId:activeBranchId, source:"import",
-                        purchaseRef:singlePurchaseMode ? null : invoice.ref,
-                        input:{supplier:invoice.supplier,supplierInvoiceNumber:invoice.supplierInvoiceNumber,
-                            purchaseDate:invoice.purchaseDate,paymentMethod:invoice.method,
-                            amountPaid:invoice.paid,paymentDueDate:invoice.due},
-                        lines:purchaseLines,receivedBy:actingEmployee.name,
-                    });
-                }
                 // Seed V2 for every imported product and its stocked variants.
-                // This runs atomically with the existing invoice creation.
+                // This runs atomically with the product creation above.
                 await requireSynchronizedInventoryTables(connection);
                 for (const saved of created) {
                     const sourceItem=clean.find(item=>item.name===saved.name);
@@ -4286,19 +3843,6 @@ exports.handler = async (event) => {
             try {validateProductInventoryInputs(body,stock,alertLevel,originalPrice,salesPrice,incomingVariants);}
             catch(error){return badRequest(headers,error.message);}
 
-            let initialPurchase;
-            try {
-                initialPurchase = getInitialPurchaseInput(body, stock, originalPrice, incomingVariants);
-            } catch (purchaseError) {
-                return badRequest(headers, purchaseError.message);
-            }
-            if (stock>0 && !initialPurchase && !parseBooleanFlag(body.openingStock ?? body.opening_stock)) {
-                return badRequest(headers,"Initial stock requires supplier purchase details or explicit Opening Stock.");
-            }
-            if (initialPurchase && tokenRole !== "owner" && tokenRole !== "manager") {
-                return unauthorized(headers, "Only owners and managers may record supplier purchases.");
-            }
-
             const expirationDate = hasVariants
                 ? null
                 : normalizeOptionalDate(
@@ -4377,19 +3921,6 @@ exports.handler = async (event) => {
 
             if (hasVariants) {
                 await insertProductVariants(connection, productId, incomingVariants);
-            }
-
-            // One normalized supplier transaction for every initial supplier purchase;
-            // zero-stock/opening balances never create a payable.
-            if (initialPurchase) {
-                const savedVariants=hasVariants ? (await getProductById(connection,storeId,activeBranchId,productId)).variants : [];
-                const lines=hasVariants ? incomingVariants.map((variant,i)=>({
-                    productId,variantId:savedVariants[i].id,quantity:variant.stock,
-                    unitPurchaseCost:variant.originalPrice, expirationDate:variant.expirationDate,
-                })).filter(line=>line.quantity>0) : [{productId,variantId:null,quantity:stock,
-                    unitPurchaseCost:originalPrice,expirationDate}];
-                await createPurchaseLedger(connection,{storeId,branchId:activeBranchId,source:"add",
-                    input:initialPurchase,lines,receivedBy:decoded?.email || "System"});
             }
 
             const actingEmployee = await getActingEmployee(
@@ -4525,16 +4056,15 @@ exports.handler = async (event) => {
                     )
                 );
 
-            // Changes to an existing supplier purchase are validated and audited below.
-            const editPurchaseDetails = body.initialPurchase ?? body.initial_purchase;
-            if (editPurchaseDetails != null && !["owner","manager"].includes(tokenRole)) {
-                return unauthorized(headers,"Only owners and managers may correct purchase details.");
-            }
             const existingVariants=Array.isArray(existing.variants)?existing.variants:[];
             if (Boolean(existing.hasVariants) !== hasVariants) {
                 return badRequest(headers,"Changing a product between regular and variant types requires a separate migration.");
             }
             const existingById=new Map(existingVariants.map(v=>[Number(v.id),v]));
+            // Stock is edited directly in Edit Product. Each changed line is applied
+            // below as an audited stock adjustment inside the same transaction.
+            const stockEdits=[];
+            const validEditedStock=value=>Number.isSafeInteger(Number(value))&&Number(value)>=0&&Number(value)<=2147483647;
             if (hasVariants) {
                 const submittedIds=incomingVariants.filter(v=>v.id).map(v=>Number(v.id));
                 if (new Set(submittedIds).size!==submittedIds.length || submittedIds.some(id=>!existingById.has(id)) ||
@@ -4542,15 +4072,18 @@ exports.handler = async (event) => {
                     return badRequest(headers,"Editing must preserve existing Variant IDs; archiving variants requires a separate action.");
                 }
                 for (const v of incomingVariants) {
-                    if (v.id && Number(v.stock)!==Number(existingById.get(Number(v.id)).stock)) {
-                        return badRequest(headers,"Use Receive Stock or Stock Adjustment to change variant quantity.");
+                    if (!validEditedStock(v.stock)) return badRequest(headers,"Stock must be a whole number of zero or more.");
+                    if (v.id) {
+                        const before=Number(existingById.get(Number(v.id)).stock);
+                        if (Number(v.stock)!==before) stockEdits.push({variantId:Number(v.id),before,target:Number(v.stock)});
                     }
-                    if (!v.id && Number(v.stock)!==0) return badRequest(headers,"New variants must start at 0 stock.");
                 }
-            } else if (stock !== Number(existing.stock)) {
-                return badRequest(headers,"Use Receive Stock or Stock Adjustment to change quantity.");
+            } else {
+                if (!validEditedStock(stock)) return badRequest(headers,"Stock must be a whole number of zero or more.");
+                if (stock !== Number(existing.stock)) stockEdits.push({variantId:null,before:Number(existing.stock),target:Number(stock)});
             }
             const stableStock=Number(existing.stock);
+            const newVariantStock=[];
             await connection.beginTransaction();
             // Serialize edits and receives to avoid overwriting changes to inventory quantities.
             const lockedProduct=await lockProductForUpdate(connection,storeId,Number(existing.branchId),id);
@@ -4567,13 +4100,6 @@ exports.handler = async (event) => {
                     await safeRollback(connection);
                     return badRequest(headers,"Stock changed while you were editing. Reload and try again.");
                 }
-            }
-
-            let purchaseChangeLog = "";
-            if (editPurchaseDetails != null) {
-                // Supplier purchases are not part of stocknbook_v2; the submitted
-                // purchase details are accepted but there is no record to correct.
-                purchaseChangeLog = "";
             }
 
             // packageId / packageName are not stored on products in stocknbook_v2.
@@ -4600,7 +4126,7 @@ exports.handler = async (event) => {
             }
 
             // Never DELETE+INSERT existing variants. Their IDs/variant numbers anchor POS,
-            // purchases, receipts, bookings, and audit references.
+            // receipts, bookings, and audit references.
             if (hasVariants) {
                 for (const v of incomingVariants) {
                     if (v.id) {
@@ -4609,22 +4135,53 @@ exports.handler = async (event) => {
                 }
                 const added=incomingVariants.filter(v=>!v.id);
                 if (added.length) {
-                    // New variants start at zero stock; their branch rows are created with them.
-                    await insertProductVariants(connection,id,added);
+                    // New variants get their branch rows here; stock entered for them
+                    // is recorded as opening stock, exactly as in Add Product.
+                    const createdVariants=await insertProductVariants(connection,id,added);
+                    for (const [index,variant] of added.entries()) {
+                        if (Number(variant.stock)>0) newVariantStock.push({variantId:Number(createdVariants[index].id),variant});
+                    }
                 }
+            }
+            const actingEmployee = await getActingEmployee(
+                connection,
+                decoded,
+                tokenRole,
+                storeId
+            );
+            const stockEditNotes=[];
+            for (const edit of stockEdits) {
+                const inventory=await v2LockInventory(connection,{storeId,branchId:activeBranchId,productId:id,variantId:edit.variantId});
+                const held=inventory ? Number(inventory.reserved_quantity||0)+Number(inventory.unavailable_quantity||0) : 0;
+                if (edit.target<held) {
+                    await safeRollback(connection);
+                    return badRequest(headers,`Stock cannot be lower than ${held} unit(s) reserved for bookings or held as unavailable.`);
+                }
+                const line=edit.variantId===null ? null : incomingVariants.find(v=>Number(v.id)===edit.variantId);
+                await adjustSynchronizedStock(connection,{storeId,branchId:activeBranchId,productId:id,variantId:edit.variantId,
+                    before:edit.before,target:edit.target,
+                    requestKey:`EDIT-${id}-${edit.variantId ?? "BASE"}-${Date.now()}`,
+                    costPrice:Number(line ? line.originalPrice : originalPrice) || 0,
+                    expirationDate:null,employee:actingEmployee,reason:"Stock edited in Edit Product"});
+                await assertInventoryLineSynchronized(connection,{
+                    storeId,branchId:activeBranchId,productId:id,variantId:edit.variantId,expected:edit.target});
+                stockEditNotes.push(`${edit.variantId ? `variant ${edit.variantId}` : "stock"} ${edit.before} -> ${edit.target}`);
+            }
+            for (const opening of newVariantStock) {
+                const variant=opening.variant;
+                await creditBranchInventoryBatch(connection,{
+                    storeId,branchId:activeBranchId,productId:id,variantId:opening.variantId,
+                    quantity:Number(variant.stock),expectedBefore:0,
+                    reorderLevel:Number(variant.alertLevel)||0,costPrice:Number(variant.originalPrice)||0,
+                    salesPrice:Number(variant.salesPrice)||0,expirationDate:variant.expirationDate||null,
+                    reference:`OPEN-${id}-${opening.variantId}`,actorName:actingEmployee.name,isOpening:true});
+                stockEditNotes.push(`new variant ${opening.variantId} opening stock ${Number(variant.stock)}`);
             }
             const product = await getProductById(
                 connection,
                 storeId,
                 activeBranchId,
                 id
-            );
-
-            const actingEmployee = await getActingEmployee(
-                connection,
-                decoded,
-                tokenRole,
-                storeId
             );
 
             await logEmployeeAction(connection, {
@@ -4635,7 +4192,7 @@ exports.handler = async (event) => {
                 referenceNumber: existing.productNumber || existing.product_number || String(id),
                 action: "Updated product",
                 referenceId: String(id),
-                details: `Updated details for ${name}${purchaseChangeLog ? "; "+purchaseChangeLog : ""}`,
+                details: `Updated details for ${name}${stockEditNotes.length ? `; stock edited: ${stockEditNotes.join(", ")}` : ""}`,
             });
 
             await connection.commit();

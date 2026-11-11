@@ -14,8 +14,6 @@ import {
 import { useRouter } from "next/navigation";
 import {
     Building2,
-    Bell,
-    CalendarDays,
     Clock3,
     Download,
     CheckCircle2,
@@ -45,129 +43,6 @@ type BranchManager = {
     branch: string;
     status: ManagerStatus;
 };
-
-type ManagerLeaveRow = {
-    id: number;
-    managerId: number;
-    employeeCode?: string | null;
-    managerName: string;
-    branchName: string;
-    branchId: number;
-    leaveDate: string;
-    leaveType: string;
-    reason: string;
-    approvalStatus: string;
-    decisionReason: string | null;
-    createdAt: string;
-};
-type ManagerLeaveGroup = {
-    key: string;
-    ids: number[];
-    managerId: number;
-    employeeCode: string;
-    managerName: string;
-    branchName: string;
-    leaveType: string;
-    reason: string;
-    status: string;
-    decisionReason: string | null;
-    createdAt: string;
-    start: string;
-    end: string;
-};
-function dayAfter(value: string) {
-    const day = new Date(value + "T00:00:00Z");
-    day.setUTCDate(day.getUTCDate() + 1);
-    return day.toISOString().slice(0, 10);
-}
-function groupManagerLeaves(rows: ManagerLeaveRow[]): ManagerLeaveGroup[] {
-    const groups: ManagerLeaveGroup[] = [];
-    for (const row of [...rows].sort((a, b) => a.managerId - b.managerId ||
-        a.createdAt.localeCompare(b.createdAt) || a.leaveDate.localeCompare(b.leaveDate))) {
-        const last = groups[groups.length - 1];
-        if (last && last.managerId === row.managerId && last.branchName === row.branchName &&
-            last.createdAt === row.createdAt && last.leaveType === row.leaveType &&
-            last.reason === row.reason && last.status === row.approvalStatus &&
-            dayAfter(last.end) === row.leaveDate) {
-            last.ids.push(row.id);
-            last.end = row.leaveDate;
-        } else groups.push({ key: String(row.id), ids: [row.id], managerId: row.managerId,
-            employeeCode: String(row.employeeCode || ""),
-            managerName: row.managerName, branchName: row.branchName,
-            leaveType: row.leaveType, reason: row.reason, status: row.approvalStatus,
-            decisionReason: row.decisionReason, createdAt: row.createdAt,
-            start: row.leaveDate, end: row.leaveDate });
-    }
-    return groups.sort((a, b) => Number(b.status === "Pending") - Number(a.status === "Pending") ||
-        b.createdAt.localeCompare(a.createdAt));
-}
-function managerDateLabel(value: string) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-    return new Date(value + "T12:00:00Z").toLocaleDateString("en-US",
-        { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
-}
-function managerRangeLabel(group: ManagerLeaveGroup) {
-    return group.start === group.end ? managerDateLabel(group.start) :
-        `${managerDateLabel(group.start)} – ${managerDateLabel(group.end)}`;
-}
-
-// Manager attendance recorded from manager dashboards (stocknbook_staff_attendance,
-// employee_role='manager'). hoursWorked is calculated by the server with the same
-// SQL as the manager's own Attendance Log.
-type ManagerAttendanceRow = {
-    id: number;
-    managerId: number;
-    employeeCode?: string | null;
-    managerName: string;
-    branchId: number;
-    branchName: string;
-    date: string;
-    timeIn: string | null;
-    timeOut: string | null;
-    hoursWorked: number | string | null;
-    status: string;
-};
-function manilaDay(date: Date) {
-    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Manila",
-        year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
-    const part = (name: string) => parts.find(item => item.type === name)?.value || "";
-    return `${part("year")}-${part("month")}-${part("day")}`;
-}
-function attendanceInPeriod(day: string, period: string, today: string) {
-    if (!today) return false;
-    if (period === "all") return true;
-    if (period === "today") return day === today;
-    if (period === "month") return day.slice(0, 7) === today.slice(0, 7);
-    if (period === "previous") {
-        const [year, month] = today.slice(0, 7).split("-").map(Number);
-        return day.slice(0, 7) === new Date(Date.UTC(year, month - 2, 1)).toISOString().slice(0, 7);
-    }
-    return false;
-}
-function attendanceClockTime(value?: string | null) {
-    const match = value?.match(/T(\d{2}):(\d{2})/);
-    if (!match) return "—";
-    const hour = Number(match[1]);
-    return `${hour % 12 || 12}:${match[2]} ${hour < 12 ? "AM" : "PM"}`;
-}
-function attendanceHours(value?: number | string | null) {
-    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return "—";
-    const minutes = Math.max(0, Math.round(Number(value) * 60));
-    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-function AttendanceBadge({ status }: { status: string }) {
-    const label = String(status || "Not Recorded");
-    const classes = label === "On Duty" || label === "Completed" || label === "Present"
-        ? "text-[#16834A]"
-        : label === "On Leave" ? "text-[#A56607]"
-            : label === "Absent" ? "text-[#D52B2B]" : "text-[#806A8C]";
-    return <span className={`inline-flex whitespace-nowrap text-[11px] font-semibold ${classes}`}>{label}</span>;
-}
-function AttendanceCount({ label, value, tone }: { label: string; value: number; tone: "green" | "gold" | "red" | "gray" }) {
-    const classes = { green: "bg-[#E6F7EE] text-[#16834A]", gold: "bg-[#FFF3D8] text-[#A56607]",
-        red: "bg-[#FFF0F0] text-[#D52B2B]", gray: "bg-[#F2EFF5] text-[#806A8C]" }[tone];
-    return <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-semibold ${classes}`}>{label}<span className="font-bold">{value}</span></span>;
-}
 
 type ManagerPermissions = {
     dashboard: boolean;
@@ -401,23 +276,10 @@ export default function BranchManagersPage() {
     const [loading, setLoading] = useState(true);
     const [updatingManagerId, setUpdatingManagerId] = useState<number | null>(null);
     const [confirmAccessChange, setConfirmAccessChange] = useState<BranchManager | null>(null);
-    const [managerRequests, setManagerRequests] = useState<ManagerLeaveRow[]>([]);
-    const [requestsLoading, setRequestsLoading] = useState(false);
-    const [requestsError, setRequestsError] = useState("");
-    const [requestsStatusFilter, setRequestsStatusFilter] = useState("all");
-    const [requestsTypeFilter, setRequestsTypeFilter] = useState("all");
-    const [requestsBranchFilter, setRequestsBranchFilter] = useState("all");
-    const [managerAttendance, setManagerAttendance] = useState<ManagerAttendanceRow[]>([]);
-    const [attendanceLoading, setAttendanceLoading] = useState(false);
-    const [attendanceError, setAttendanceError] = useState("");
-    const [attendancePeriod, setAttendancePeriod] = useState("today");
-    const [attendanceBranchFilter, setAttendanceBranchFilter] = useState("all");
-    const [attendanceStatusFilter, setAttendanceStatusFilter] = useState("all");
-    const [reviewingManagerRequest, setReviewingManagerRequest] = useState<ManagerLeaveGroup | null>(null);
-    const [activeTeamDetail, setActiveTeamDetail] = useState<"attendance" | "requests" | "invites" | null>(null);
+    const [activeTeamDetail, setActiveTeamDetail] = useState<"invites" | null>(null);
     const teamDetailTriggerRef = useRef<HTMLButtonElement | null>(null);
     const teamDetailCloseRef = useRef<HTMLButtonElement | null>(null);
-    const openTeamDetail = (detail: "attendance" | "requests" | "invites", trigger: HTMLButtonElement) => {
+    const openTeamDetail = (detail: "invites", trigger: HTMLButtonElement) => {
         teamDetailTriggerRef.current = trigger;
         setActiveTeamDetail(detail);
     };
@@ -433,9 +295,6 @@ export default function BranchManagersPage() {
         return () => { document.body.style.overflow = originalOverflow; };
     }, [activeTeamDetail]);
 
-    const [reviewReason, setReviewReason] = useState("");
-    const [reviewError, setReviewError] = useState("");
-    const [reviewSaving, setReviewSaving] = useState(false);
     const [notice, setNotice] = useState<{ title: string; message: string; kind: "success" | "error" } | null>(null);
     const [search, setSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState<
@@ -587,50 +446,6 @@ export default function BranchManagersPage() {
         }
     }, [router]);
 
-    const loadManagerRequests = useCallback(async () => {
-        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
-        if (!token) return;
-        setRequestsLoading(true);
-        try {
-            const res = await fetch("/api/branch-managers?view=manager_requests", {
-                method: "GET", cache: "no-store",
-                headers: { Authorization: `Bearer ${token}` },
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok || data.success !== true) throw new Error(data.error || "Could not load manager requests.");
-            setManagerRequests(Array.isArray(data.requests) ? data.requests : []);
-            setRequestsError("");
-        } catch (error) {
-            setRequestsError(error instanceof Error ? error.message : "Could not load manager requests.");
-        } finally { setRequestsLoading(false); }
-    }, []);
-
-    useEffect(() => {
-        void loadManagerRequests();
-    }, [loadManagerRequests]);
-
-    const loadManagerAttendance = useCallback(async () => {
-        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
-        if (!token) return;
-        setAttendanceLoading(true);
-        try {
-            const res = await fetch("/api/branch-managers?view=manager_attendance", {
-                method: "GET", cache: "no-store",
-                headers: { Authorization: `Bearer ${token}` },
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok || data.success !== true) throw new Error(data.error || "Could not load manager attendance.");
-            setManagerAttendance(Array.isArray(data.attendance) ? data.attendance : []);
-            setAttendanceError("");
-        } catch (error) {
-            setAttendanceError(error instanceof Error ? error.message : "Could not load manager attendance.");
-        } finally { setAttendanceLoading(false); }
-    }, []);
-
-    useEffect(() => {
-        void loadManagerAttendance();
-    }, [loadManagerAttendance]);
-
     useEffect(() => {
         setSubscriptionPlan(getStoredSubscriptionPlan());
         void loadSubscriptionPlan();
@@ -697,69 +512,6 @@ export default function BranchManagersPage() {
     const pendingInvites = managers.filter(manager => manager.status === "pending" &&
         (statusFilter === "all" || statusFilter === "pending") &&
         (!search.trim() || `${manager.name} ${manager.email} ${manager.branch}`.toLowerCase().includes(search.trim().toLowerCase())));
-    const groupedManagerRequests = useMemo(() => groupManagerLeaves(managerRequests), [managerRequests]);
-    const pendingManagerRequests = groupedManagerRequests.filter(item => item.status === "Pending").length;
-    const managerLeaveTypes = [...new Set(groupedManagerRequests.map(item => item.leaveType))].sort();
-    const managerRequestBranches = [...new Set(groupedManagerRequests.map(item => item.branchName))].sort();
-    const filteredManagerRequests = groupedManagerRequests.filter(item =>
-        (requestsStatusFilter === "all" || item.status.toLowerCase() === requestsStatusFilter) &&
-        (requestsTypeFilter === "all" || item.leaveType === requestsTypeFilter) &&
-        (requestsBranchFilter === "all" || item.branchName === requestsBranchFilter));
-
-    // Recorded manager attendance plus approved manager leave days (from the already
-    // loaded Manager Requests). Absence is never invented for missing records.
-    const attendanceToday = currentDateTime ? manilaDay(currentDateTime) : "";
-    const managerAttendanceRows = useMemo(() => {
-        const rows: ManagerAttendanceRow[] = [...managerAttendance];
-        if (!attendanceToday) return rows;
-        const recorded = new Set(rows.map(row => `${row.managerId}:${row.date}`));
-        const earliest = new Date(attendanceToday + "T00:00:00Z");
-        earliest.setUTCDate(earliest.getUTCDate() - 90);
-        const earliestDay = earliest.toISOString().slice(0, 10);
-        for (const leave of managerRequests) {
-            const day = leave.leaveDate;
-            if (leave.approvalStatus !== "Approved" || day < earliestDay || day > attendanceToday) continue;
-            const key = `${leave.managerId}:${day}`;
-            if (recorded.has(key)) continue;
-            rows.push({ id: -leave.id, managerId: leave.managerId, employeeCode: leave.employeeCode || null,
-                managerName: leave.managerName,
-                branchId: leave.branchId, branchName: leave.branchName, date: day,
-                timeIn: null, timeOut: null, hoursWorked: null, status: "On Leave" });
-            recorded.add(key);
-        }
-        return rows.sort((a, b) => b.date.localeCompare(a.date) ||
-            a.branchName.localeCompare(b.branchName) || a.managerName.localeCompare(b.managerName));
-    }, [managerAttendance, managerRequests, attendanceToday]);
-    const attendanceBranches = [...new Set([
-        ...managerAttendanceRows.map(row => row.branchName),
-        ...managers.filter(manager => manager.status !== "pending").map(manager => manager.branch),
-    ].filter(Boolean))].sort();
-    const visibleManagerAttendance = managerAttendanceRows.filter(row =>
-        attendanceInPeriod(row.date, attendancePeriod, attendanceToday) &&
-        (attendanceBranchFilter === "all" || row.branchName === attendanceBranchFilter) &&
-        (attendanceStatusFilter === "all" || row.status === attendanceStatusFilter));
-    // Today's roll call for active managers, with the same precedence the manager
-    // dashboard uses for staff: Present, then On Leave, then Absent, else Not Recorded.
-    const managerAttendanceToday = useMemo(() => {
-        const activeIds = managers.filter(manager => manager.status === "active").map(manager => manager.id);
-        const todayRows = managerAttendanceRows.filter(row => row.date === attendanceToday);
-        const idsWith = (statuses: string[]) => new Set(todayRows
-            .filter(row => statuses.includes(row.status)).map(row => Number(row.managerId)));
-        const present = idsWith(["On Duty", "Completed", "Present"]);
-        const onLeave = idsWith(["On Leave"]);
-        const absent = idsWith(["Absent"]);
-        const counts = {
-            total: activeIds.length,
-            present: activeIds.filter(id => present.has(id)).length,
-            onLeave: activeIds.filter(id => !present.has(id) && onLeave.has(id)).length,
-            absent: activeIds.filter(id => !present.has(id) && !onLeave.has(id) && absent.has(id)).length,
-            notRecorded: 0,
-        };
-        counts.notRecorded = Math.max(0, counts.total - counts.present - counts.onLeave - counts.absent);
-        return counts;
-    }, [managers, managerAttendanceRows, attendanceToday]);
-    const attendancePeriodLabel = { today: "Today", month: "This Month", previous: "Last Month", all: "Last 90 Days" }[attendancePeriod] || "Today";
-
     const exportManagerList = () => {
         void import("@/components/dashboard/_shared")
             .then(module => module.exportTableAsPdf({
@@ -782,57 +534,6 @@ export default function BranchManagersPage() {
             }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
                 branch: "All branches", dateRange: "Pending invitations" }, "owner_manager_invites"))
             .catch(() => setNotice({ title: "Export unavailable", message: "Could not export pending manager invitations.", kind: "error" }));
-    };
-
-    const exportManagerAttendance = () => {
-        void import("@/components/dashboard/_shared")
-            .then(module => module.exportTableAsPdf({
-                title: "Manager Attendance",
-                headers: ["Employee ID", "Manager Name", "Branch", "Date", "Time In", "Time Out", "Hours Worked", "Status"],
-                rows: visibleManagerAttendance.map(row => [row.employeeCode || "—", row.managerName, row.branchName,
-                    managerDateLabel(row.date), attendanceClockTime(row.timeIn), attendanceClockTime(row.timeOut),
-                    attendanceHours(row.hoursWorked), row.status]),
-            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
-                branch: attendanceBranchFilter === "all" ? "All branches" : attendanceBranchFilter,
-                dateRange: attendancePeriodLabel }, "owner_manager_attendance"))
-            .catch(() => setNotice({ title: "Export unavailable", message: "Could not export manager attendance.", kind: "error" }));
-    };
-
-    const reviewManagerLeave = async (decision: "Approved" | "Rejected") => {
-        if (!reviewingManagerRequest || reviewSaving) return;
-        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
-        if (!token) return router.push("/");
-        setReviewSaving(true);
-        setReviewError("");
-        try {
-            const res = await fetch("/api/branch-managers", {
-                method: "POST", headers: {
-                    "Content-Type": "application/json", Authorization: `Bearer ${token}`,
-                }, body: JSON.stringify({ action: "review_manager_leave", decision,
-                    requestIds: reviewingManagerRequest.ids, decisionReason: reviewReason.trim() }),
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok || data.success !== true) throw new Error(data.error || "Could not review manager request.");
-            setReviewingManagerRequest(null);
-            setReviewReason("");
-            setNotice({ title: `Manager request ${decision.toLowerCase()}`,
-                message: "The decision has been saved.", kind: "success" });
-            await loadManagerRequests();
-        } catch (error) {
-            setReviewError(error instanceof Error ? error.message : "Review failed.");
-        } finally { setReviewSaving(false); }
-    };
-
-    const exportManagerRequests = () => {
-        void import("@/components/dashboard/_shared")
-            .then(module => module.exportTableAsPdf({
-                title: "Manager Leave Requests",
-                headers: ["Manager", "Employee ID", "Branch", "Leave Type", "Date / Range", "Status", "Reason"],
-                rows: filteredManagerRequests.map(item => [item.managerName, item.employeeCode || "—", item.branchName,
-                    item.leaveType, managerRangeLabel(item), item.status, item.reason]),
-            }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
-                branch: "All branches", dateRange: "All requests" }, "owner_manager_requests"))
-            .catch(() => setNotice({ title: "Export unavailable", message: "Could not export manager requests.", kind: "error" }));
     };
 
     const resetAddManagerForm = useCallback(() => {
@@ -1227,8 +928,6 @@ export default function BranchManagersPage() {
                                     onClick={() => {
                                         void loadSubscriptionPlan();
                                         void loadManagers();
-                                        void loadManagerRequests();
-                                        void loadManagerAttendance();
                                     }}
                                     disabled={loading}
                                     aria-label="Refresh branch managers"
@@ -1560,19 +1259,7 @@ export default function BranchManagersPage() {
                         </section>
 
                         {/* Compact navigation preserves the detailed records in their original tables. */}
-                        <section aria-label="Team records" className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-                            <button type="button" onClick={(event) => openTeamDetail("attendance", event.currentTarget)}
-                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
-                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Manager Attendance</span><span className="block text-xs text-[#7A6A84]">Time In, Time Out, and hours worked</span></span></span>
-                                <span className="text-xs font-semibold text-[#5F4E75]">{`Present ${managerAttendanceToday.present} · Not recorded ${managerAttendanceToday.notRecorded}`}</span>
-                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Attendance <ArrowUpRight size={15}/></span>
-                            </button>
-                            <button type="button" onClick={(event) => openTeamDetail("requests", event.currentTarget)}
-                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
-                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Manager Requests</span><span className="block text-xs text-[#7A6A84]">Review branch manager leave requests</span></span></span>
-                                <span className="text-xs font-semibold text-[#A56607]">{pendingManagerRequests} pending</span>
-                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Requests <ArrowUpRight size={15}/></span>
-                            </button>
+                        <section aria-label="Team records" className="grid grid-cols-1 gap-3">
                             <button type="button" onClick={(event) => openTeamDetail("invites", event.currentTarget)}
                                     className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
                                 <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Pending Invites</span><span className="block text-xs text-[#7A6A84]">Managers awaiting account activation</span></span></span>
@@ -1583,109 +1270,16 @@ export default function BranchManagersPage() {
 
                         {activeTeamDetail && (
                             <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-3 backdrop-blur-[2px] sm:p-5"
-                                 onMouseDown={(event) => { if (event.target === event.currentTarget && !reviewingManagerRequest && !reviewSaving) closeTeamDetail(); }}
-                                 onKeyDown={(event) => { if (event.key === "Escape" && !reviewingManagerRequest && !reviewSaving) { event.stopPropagation(); closeTeamDetail(); } }}>
+                                 onMouseDown={(event) => { if (event.target === event.currentTarget) closeTeamDetail(); }}
+                                 onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeTeamDetail(); } }}>
                                 <div role="dialog" aria-modal="true" aria-labelledby="manager-team-detail-title"
                                      className="flex max-h-[90vh] w-full max-w-[1120px] flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-[#FFFDF8] shadow-2xl">
                                     <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#E6DDF0] bg-white px-5 py-4">
-                                        <h2 id="manager-team-detail-title" className="text-[18px] font-bold text-[#1A1220]">{activeTeamDetail === "attendance" ? "Manager Attendance" : activeTeamDetail === "requests" ? "Manager Requests" : "Pending Invites"}</h2>
+                                        <h2 id="manager-team-detail-title" className="text-[18px] font-bold text-[#1A1220]">Pending Invites</h2>
                                         <button ref={teamDetailCloseRef} type="button" aria-label="Close details" onClick={closeTeamDetail}
                                                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] hover:bg-[#F7F1FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#6D35D4]"><X size={19}/></button>
                                     </div>
                                     <div className="min-h-0 overflow-y-auto p-3 sm:p-5">
-                                        {activeTeamDetail === "attendance" && (
-                                            <section id="manager-attendance" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                                    <div className="flex items-center gap-3">
-                                                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><CalendarDays size={20}/></span>
-                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Manager Attendance</h2>
-                                                            <p className="mt-0.5 text-xs text-[#7A6A84]">Time In and Time Out recorded by branch managers from their dashboards.</p></div>
-                                                    </div>
-                                                    <div className="flex flex-wrap items-center gap-2">
-                                                        <select aria-label="Filter manager attendance by period" value={attendancePeriod} onChange={e => setAttendancePeriod(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                                            <option value="today">Today</option><option value="month">This Month</option><option value="previous">Last Month</option><option value="all">Last 90 Days</option>
-                                                        </select>
-                                                        <select aria-label="Filter manager attendance by branch" value={attendanceBranchFilter} onChange={e => setAttendanceBranchFilter(e.target.value)} className="h-9 max-w-40 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                                            <option value="all">All Branches</option>{attendanceBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
-                                                        </select>
-                                                        <select aria-label="Filter manager attendance by status" value={attendanceStatusFilter} onChange={e => setAttendanceStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                                            <option value="all">All Statuses</option><option value="On Duty">On Duty</option><option value="Completed">Completed</option><option value="On Leave">On Leave</option><option value="Absent">Absent</option>
-                                                        </select>
-                                                        <button type="button" onClick={exportManagerAttendance} title="Export manager attendance to PDF" aria-label="Export manager attendance" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
-                                                    </div>
-                                                </div>
-                                                {attendanceToday && !(loading && managers.length === 0) && <div className="flex flex-wrap items-center gap-2 border-b border-[#EEE7F2] bg-[#FFFCF7] px-5 py-2.5 text-xs">
-                                                    <span className="mr-1 font-semibold text-[#5F4E75]">Today · {managerAttendanceToday.total} active {managerAttendanceToday.total === 1 ? "manager" : "managers"}</span>
-                                                    <AttendanceCount label="Present" value={managerAttendanceToday.present} tone="green"/>
-                                                    <AttendanceCount label="On Leave" value={managerAttendanceToday.onLeave} tone="gold"/>
-                                                    <AttendanceCount label="Absent" value={managerAttendanceToday.absent} tone="red"/>
-                                                    <AttendanceCount label="Not Recorded" value={managerAttendanceToday.notRecorded} tone="gray"/>
-                                                </div>}
-                                                {attendanceError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{attendanceError}</p>}
-                                                <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain">
-                                                    <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
-                                                        <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr>{["Employee ID", "Manager Name", "Branch", "Date", "Time In", "Time Out", "Hours Worked", "Status"].map(label => <th className="px-2.5 py-2.5 text-center" key={label}>{label}</th>)}</tr></thead>
-                                                        <tbody>
-                                                        {visibleManagerAttendance.map(row => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={`${row.managerId}-${row.id}-${row.date}`}>
-                                                            <td className="whitespace-nowrap px-2.5 py-2.5 font-semibold text-[#4E2C66]">{row.employeeCode || "—"}</td>
-                                                            <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{row.managerName}</td>
-                                                            <td className="px-2.5 py-2.5">{row.branchName}</td>
-                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{managerDateLabel(row.date)}</td>
-                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{attendanceClockTime(row.timeIn)}</td>
-                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{attendanceClockTime(row.timeOut)}</td>
-                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{attendanceHours(row.hoursWorked)}</td>
-                                                            <td className="px-2.5 py-2.5"><AttendanceBadge status={row.status}/></td>
-                                                        </tr>)}
-                                                        {visibleManagerAttendance.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-[#8A7D92]">{attendanceLoading && managerAttendance.length === 0 ? "Loading manager attendance..." : attendanceError ? "Manager attendance unavailable." : attendanceStatusFilter !== "all" || attendanceBranchFilter !== "all" ? "No attendance records match the selected filters." : attendancePeriod === "today" ? "No manager attendance recorded today yet. Time In records from manager dashboards will appear here." : "No manager attendance or approved leave for this period."}</td></tr>}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                                <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {visibleManagerAttendance.length} {visibleManagerAttendance.length === 1 ? "record" : "records"} · Hours are shown after Time Out</div>
-                                            </section>
-                                        )}
-                                        {activeTeamDetail === "requests" && (
-                                            <section id="manager-requests" className="scroll-mt-28 overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                                    <div className="flex items-center gap-3">
-                                                        <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><Bell size={20}/></span>
-                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Manager Requests</h2>
-                                                            <p className="mt-0.5 text-xs text-[#7A6A84]">Review branch manager leave requests across all branches.</p></div>
-                                                        <span className="rounded-full bg-[#FFF3D8] px-2.5 py-1 text-[10px] font-bold text-[#A56607]">{pendingManagerRequests} pending</span>
-                                                    </div>
-                                                    <div className="flex flex-wrap items-center gap-2">
-                                                        <select aria-label="Filter manager requests by status" value={requestsStatusFilter} onChange={e => setRequestsStatusFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                                            <option value="all">All Statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option>
-                                                        </select>
-                                                        <select aria-label="Filter manager requests by branch" value={requestsBranchFilter} onChange={e => setRequestsBranchFilter(e.target.value)} className="h-9 max-w-40 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                                            <option value="all">All Branches</option>{managerRequestBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
-                                                        </select>
-                                                        <select aria-label="Filter manager requests by leave type" value={requestsTypeFilter} onChange={e => setRequestsTypeFilter(e.target.value)} className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-2 text-xs text-[#2B174C]">
-                                                            <option value="all">All Leave Types</option>{managerLeaveTypes.map(type => <option key={type} value={type}>{type}</option>)}
-                                                        </select>
-                                                        <button type="button" onClick={exportManagerRequests} title="Export manager requests to PDF" aria-label="Export manager requests" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><Download size={17}/></button>
-                                                    </div>
-                                                </div>
-                                                {requestsError && <p role="alert" className="m-4 rounded-lg bg-red-50 p-3 text-xs text-red-700">{requestsError}</p>}
-                                                <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain">
-                                                    <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
-                                                        <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr>{["Manager", "Branch", "Employee ID", "Leave Type", "Date / Range", "Status", "Action"].map(label => <th className="px-2.5 py-2.5 text-center" key={label}>{label}</th>)}</tr></thead>
-                                                        <tbody>
-                                                        {filteredManagerRequests.map(item => <tr className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]" key={item.key}>
-                                                            <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{item.managerName}</td>
-                                                            <td className="px-2.5 py-2.5">{item.branchName}</td>
-                                                            <td className="whitespace-nowrap px-2.5 py-2.5">{item.employeeCode || "—"}</td>
-                                                            <td className="px-2.5 py-2.5">{item.leaveType}</td>
-                                                            <td className="px-2.5 py-2.5">{managerRangeLabel(item)}</td>
-                                                            <td className="px-2.5 py-2.5"><span className={`text-[11px] font-semibold ${item.status === "Approved" ? "text-green-700" : item.status === "Rejected" ? "text-red-700" : "text-amber-700"}`}>{item.status}</span></td>
-                                                            <td className="px-2.5 py-2.5"><button type="button" onClick={() => { setReviewingManagerRequest(item); setReviewReason(""); setReviewError(""); }} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF]">Review</button></td>
-                                                        </tr>)}
-                                                        {filteredManagerRequests.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-[#8A7D92]">{requestsLoading ? "Loading manager requests..." : requestsError ? "Requests unavailable." : "No manager requests found."}</td></tr>}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                                <div className="border-t border-[#EEE7F2] px-4 py-2 text-right text-xs text-[#806A8C]">Showing {filteredManagerRequests.length} of {groupedManagerRequests.length} requests</div>
-                                            </section>
-                                        )}
                                         {activeTeamDetail === "invites" && (
                                             <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
                                                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
@@ -1719,22 +1313,6 @@ export default function BranchManagersPage() {
                         )}
 
                     </section>
-
-                    {reviewingManagerRequest && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !reviewSaving) setReviewingManagerRequest(null); }}>
-                        <div role="dialog" aria-modal="true" aria-labelledby="manager-leave-review-title" className="flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white shadow-2xl">
-                            <div className="flex items-start justify-between border-b border-[#E6DDF0] p-5"><div><h2 id="manager-leave-review-title" className="text-lg font-bold text-[#1A1220]">Review Manager Request</h2><p className="text-xs text-[#7A6A84]">Review the request before making a decision.</p></div><button type="button" disabled={reviewSaving} onClick={() => setReviewingManagerRequest(null)} className="text-[#7A6A84]" aria-label="Close review"><X size={20}/></button></div>
-                            <div className="space-y-4 overflow-y-auto p-5 text-sm">
-                                <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#FBF8FE] p-4"><div><span className="text-xs text-[#7A6A84]">Manager</span><p className="font-semibold">{reviewingManagerRequest.managerName}</p></div><div><span className="text-xs text-[#7A6A84]">Branch</span><p className="font-semibold">{reviewingManagerRequest.branchName}</p></div><div><span className="text-xs text-[#7A6A84]">Leave Type</span><p className="font-semibold">{reviewingManagerRequest.leaveType}</p></div><div><span className="text-xs text-[#7A6A84]">Status</span><p className="font-semibold">{reviewingManagerRequest.status}</p></div><div className="col-span-2"><span className="text-xs text-[#7A6A84]">Date / Range</span><p className="font-semibold">{managerRangeLabel(reviewingManagerRequest)}</p></div></div>
-                                <div><h3 className="text-xs font-bold text-[#5F4E75]">Manager&apos;s Reason</h3><p className="mt-1 whitespace-pre-wrap rounded-xl border border-[#E6DDF0] p-3">{reviewingManagerRequest.reason}</p></div>
-                                {reviewingManagerRequest.status !== "Pending" && reviewingManagerRequest.decisionReason && <div><h3 className="text-xs font-bold">Decision Reason</h3><p className="mt-1 rounded-xl bg-[#FBF8FE] p-3">{reviewingManagerRequest.decisionReason}</p></div>}
-                                {reviewingManagerRequest.status === "Pending" && <div><label htmlFor="manager-review-note" className="mb-1 block text-xs font-bold text-[#5F4E75]">Decision note (required when disapproving)</label><textarea id="manager-review-note" value={reviewReason} onChange={e => setReviewReason(e.target.value)} rows={3} maxLength={500} className="w-full rounded-xl border border-[#E6DDF0] p-3 outline-none focus:border-[#8058BA]" placeholder="Explain the decision" /></div>}
-                                {reviewError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{reviewError}</p>}
-                            </div>
-                            <div className="flex justify-end gap-2 border-t border-[#E6DDF0] p-4"><button type="button" onClick={() => setReviewingManagerRequest(null)} disabled={reviewSaving} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-xs font-semibold">Close</button>
-                                {reviewingManagerRequest.status === "Pending" && <><button type="button" disabled={reviewSaving || reviewReason.trim().length < 3} onClick={() => void reviewManagerLeave("Rejected")} className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-red-700 disabled:opacity-50">Disapprove</button><button type="button" disabled={reviewSaving} onClick={() => void reviewManagerLeave("Approved")} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">{reviewSaving ? "Saving..." : "Approve"}</button></>}
-                            </div>
-                        </div>
-                    </div>}
 
                     {confirmAccessChange && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !updatingManagerId) setConfirmAccessChange(null); }}>
                         <div role="dialog" aria-modal="true" aria-labelledby="manager-status-dialog-title" className="w-full max-w-md rounded-[20px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">

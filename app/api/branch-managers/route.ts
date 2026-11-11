@@ -46,7 +46,7 @@ async function callLocalAuth(
     });
 }
 
-// Owner-only manager leave requests and account access status. Existing invitation
+// Owner-only manager account access status. Existing invitation
 // and manager-list operations continue through lambda-auth unchanged.
 let ownerPool: Pool | undefined;
 function ownerDatabase(): Pool {
@@ -85,7 +85,7 @@ async function verifyOwner(req: NextRequest, db: Pool): Promise<number> {
         claims = decoded as Record<string, unknown>;
     } catch { throw new ManagerAccessError(401, "Your session expired. Please sign in again."); }
     if (String(claims.role || "").toLowerCase() !== "owner") {
-        throw new ManagerAccessError(403, "Only the store owner can review manager requests.");
+        throw new ManagerAccessError(403, "Only the store owner can change manager access.");
     }
     const storeId = validId(claims.store_id);
     const email = String(claims.email || "").trim();
@@ -104,42 +104,9 @@ function handleOwnerError(error: unknown) {
     console.error("Owner branch-manager request error:", error);
     return NextResponse.json({ success: false, error:
                 error instanceof Error && error.message.startsWith("DB_PASSWORD is not configured")
-                    ? "Configure DB_PASSWORD in .env.local for Manager Requests, then restart Next.js."
-                    : "Unable to process manager requests. Check the server log and database configuration." },
+                    ? "Configure DB_PASSWORD in .env.local for manager access changes, then restart Next.js."
+                    : "Unable to update manager access. Check the server log and database configuration." },
         { status: 503 });
-}
-
-async function listManagerRequests(req: NextRequest) {
-    try {
-        const db = ownerDatabase();
-        await verifyOwner(req, db);
-        // Employee attendance and leave requests are not part of stocknbook_v2.
-        return NextResponse.json({ success: true, requests: [] },
-            { headers: { "Cache-Control": "private, no-store" } });
-    } catch (error) { return handleOwnerError(error); }
-}
-
-// Owner-only manager attendance view (attendance is not part of stocknbook_v2).
-async function listManagerAttendance(req: NextRequest) {
-    try {
-        const db = ownerDatabase();
-        await verifyOwner(req, db);
-        // Employee attendance (time in / time out) is not part of stocknbook_v2.
-        return NextResponse.json({ success: true, attendance: [] },
-            { headers: { "Cache-Control": "private, no-store" } });
-    } catch (error) { return handleOwnerError(error); }
-}
-
-async function reviewManagerRequest(req: NextRequest, body: Record<string, unknown>) {
-    try {
-        const db = ownerDatabase();
-        await verifyOwner(req, db);
-        void body;
-        // Leave requests are not part of stocknbook_v2.
-        throw new ManagerAccessError(410, "Manager leave requests are no longer available.");
-    } catch (error) {
-        return handleOwnerError(error);
-    }
 }
 
 async function setManagerAccess(req: NextRequest, body: Record<string, unknown>, action: string) {
@@ -161,12 +128,6 @@ async function setManagerAccess(req: NextRequest, body: Record<string, unknown>,
 }
 
 export async function GET(req: NextRequest) {
-    if (req.nextUrl.searchParams.get("view") === "manager_requests") {
-        return listManagerRequests(req);
-    }
-    if (req.nextUrl.searchParams.get("view") === "manager_attendance") {
-        return listManagerAttendance(req);
-    }
     try {
         return await callLocalAuth(req, "get_branch_managers");
     } catch (error) {
@@ -196,7 +157,6 @@ export async function POST(req: NextRequest) {
             "resend_manager_invite",
             "deactivate_manager",
             "reactivate_manager",
-            "review_manager_leave",
         ]);
 
         if (!allowedActions.has(action)) {
@@ -206,7 +166,6 @@ export async function POST(req: NextRequest) {
             );
         }
 
-        if (action === "review_manager_leave") return reviewManagerRequest(req, body);
         if (action === "deactivate_manager" || action === "reactivate_manager") {
             return setManagerAccess(req, body, action);
         }

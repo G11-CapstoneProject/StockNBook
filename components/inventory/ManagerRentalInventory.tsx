@@ -6,14 +6,14 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
     Boxes, CalendarClock, CheckCircle2,
     PackagePlus, Pencil, Plus, Search, Settings2, Wrench, X, Trash2,
-    Download, Upload, ChevronDown, Wallet, ArrowRight,
+    Download, Upload, ChevronDown,
 } from "lucide-react";
 import {
     useRentalInventory, availableNow, hasRentalStockDiscrepancy,
     type RentalEquipment, type RentalActivity, type RentalMaintenanceRecord,
     type RentalMaintenanceHistory, type RentalPendingInspection, type RentalMissingReport,
     type RentalMutation, type RentalSummary, type RentalImportRow, type RentalPurchaseDetails,
-    type RentalBulkPurchase, type RentalPricingMethod,
+    type RentalPricingMethod,
     calculateCostBasedRentalRate,
 } from "@/hooks/useRentalInventory";
 import { SuccessToast } from "./_shared";
@@ -73,13 +73,13 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     } | null>(null);
     const [retireItem,setRetireItem] = React.useState<RentalEquipment|null>(null);
     const [notice, setNotice] = React.useState("");
+    const [noticeTitle, setNoticeTitle] = React.useState("Rental inventory updated");
     const [exportError, setExportError] = React.useState("");
     const closeInventoryToast = React.useCallback(() => { setNotice(""); setExportError(""); }, []);
     const [importOpen, setImportOpen] = React.useState(false);
-    const [conditionTab,setConditionTab] = React.useState<"active"|"history">("active");
+    const [conditionStatusFilter,setConditionStatusFilter] = React.useState("all");
     const [conditionDetail,setConditionDetail] = React.useState<ManagerConditionIssue|RentalMaintenanceHistory|null>(null);
     const [categoriesOpen, setCategoriesOpen] = React.useState(false);
-    const [supplierPaymentsOpen, setSupplierPaymentsOpen] = React.useState(false);
     const [exportOpen, setExportOpen] = React.useState(false);
     const [dateFiltersOpen, setDateFiltersOpen] = React.useState(false);
     const [fromDate, setFromDate] = React.useState("");
@@ -113,7 +113,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         // Retired equipment stays in history but not the default active catalog.
         if(!item.active && status!=="Archived")return false;
         const query = search.trim().toLowerCase();
-        const found = !query || [item.name, item.category, item.equipmentNumber, item.lastSupplier || "", ...item.unitNumbers]
+        const found = !query || [item.name, item.category, item.equipmentNumber, ...item.unitNumbers]
             .some(value => value.toLowerCase().includes(query));
         const availability = appliedDates ? datesAvailability?.get(item.id) : item.bookableToday;
         return found && (category === "All Categories" || item.category === category) &&
@@ -123,6 +123,10 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const managerConditionIssues=React.useMemo(()=>buildManagerConditionIssues(
             rental.maintenanceRecords,rental.missingReports,rental.pendingInspections),
         [rental.maintenanceRecords,rental.missingReports,rental.pendingInspections]);
+    // One list for open issues and completed work, filtered by status.
+    const conditionRows=React.useMemo(()=>buildManagerConditionRows(managerConditionIssues,rental.maintenanceHistory),
+        [managerConditionIssues,rental.maintenanceHistory]);
+    const visibleConditionRows=conditionStatusFilter==="all"?conditionRows:conditionRows.filter(row=>row.status===conditionStatusFilter);
 
     const resetDates = () => {
         setAppliedDates(null); setDatesAvailability(null);
@@ -166,7 +170,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         return ()=>{active=false;window.removeEventListener("focus",onFocus);window.clearInterval(timer);};
     }, [appliedDates, rental.checkAvailability]);
     const onSaved = async (mutation:RentalMutation) => {
-        if(!canManage)throw new Error("Full Inventory access is required to change equipment or purchase records.");
+        if(!canManage)throw new Error("Full Inventory access is required to change equipment records.");
         const reference = await rental.mutate(mutation);
         if (appliedDates) {
             // Keep the selected booking period after a stock operation; the
@@ -180,6 +184,14 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                 setDatesError(error instanceof Error ? error.message : "Unable to refresh rental availability.");
             }
         } else resetDates();
+        if (mutation.action === "receive_equipment") {
+            // Same confirmation as Consumable Inventory's Receive Stock.
+            const restocked = rental.equipment.find(item => item.id === mutation.equipmentId) || dialog?.item;
+            setNoticeTitle("Stock restocked successfully");
+            setNotice(`“${restocked?.name || "Rental equipment"}” received +${mutation.quantity.toLocaleString("en-PH")} units in inventory.`);
+            return;
+        }
+        setNoticeTitle("Rental inventory updated");
         setNotice(mutation.action === "resolve_missing_equipment"
             ? mutation.resolution === "found"
                 ? "Missing equipment recovered. Staff must inspect and complete the recovery-care task before units become ready."
@@ -190,7 +202,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     ? "Repair authorized. Equipment stays on hold until Staff completes repairs and the Manager approves stock release."
                     : mutation.action === "approve_repair_completion"
                         ? "Repaired units released to ready stock after Manager approval."
-                        : ["receive_equipment","import_equipment"].includes(mutation.action) || (mutation.action==="create_equipment" && Boolean(mutation.initialPurchase))
+                        : mutation.action === "import_equipment" || (mutation.action==="create_equipment" && Boolean(mutation.initialPurchase))
                             ? `Rental units received and recorded${reference ? ` · ${reference}` : ""}. Availability and today’s stock activity have been updated.`
                             : `Rental inventory saved${reference ? ` · ${reference}` : ""}.`);
     };
@@ -248,21 +260,15 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                 <p className="text-[11px] leading-4 text-[#86778F]">Monitor unresolved equipment issues and verified Staff work.</p>
                             </div>
                         </div>
-                        <div className="ml-auto flex shrink-0 items-center gap-2" role="tablist" aria-label="Equipment condition views">
-                            <button type="button" role="tab" aria-selected={conditionTab==='active'} onClick={()=>setConditionTab('active')}
-                                    className={`inline-flex h-9 items-center justify-center whitespace-nowrap rounded-xl border px-3 text-[11px] font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] ${conditionTab==='active'?'border-[#D8CBE7] bg-[#F4EFFD] text-[#5B32C5]':'border-[#E6DDF0] bg-white text-[#2B174C] hover:bg-[#F7F1FF]'}`}>
-                                Active Issues
-                            </button>
-                            <button type="button" role="tab" aria-selected={conditionTab==='history'} onClick={()=>setConditionTab('history')}
-                                    className={`inline-flex h-9 items-center justify-center whitespace-nowrap rounded-xl border px-3 text-[11px] font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] ${conditionTab==='history'?'border-[#D8CBE7] bg-[#F4EFFD] text-[#5B32C5]':'border-[#E6DDF0] bg-white text-[#2B174C] hover:bg-[#F7F1FF]'}`}>
-                                Maintenance History
-                            </button>
+                        <div className="ml-auto flex shrink-0 items-center gap-2">
+                            <RentalInventoryFilterSelect containerClassName="w-[160px]" value={conditionStatusFilter} aria-label="Filter equipment condition by status"
+                                                         onChange={e => setConditionStatusFilter(e.target.value)}>
+                                <option value="all">All Status</option>
+                                {MANAGER_CONDITION_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
+                            </RentalInventoryFilterSelect>
                             <button type="button" title="Download displayed equipment condition report (PDF)" aria-label="Download equipment condition report"
-                                    onClick={() => conditionTab === "active" ? downloadPanel("Equipment Condition Active Issues",
-                                            ["Equipment", "Work Item", "Reference", "Units", "Status"],
-                                            managerConditionIssues.map(issue => [issue.equipmentName, issue.title, issue.reference, String(issue.units), issue.status])) :
-                                        downloadPanel("Equipment Maintenance History", ["Equipment", "Activity", "Units", "Recorded By"],
-                                            rental.maintenanceHistory.map(record => [record.equipmentName, record.type, String(record.quantity), record.actorName || "Not recorded"]))}
+                                    onClick={() => downloadPanel("Equipment Condition & Monitoring", ["Equipment", "Units", "Issue", "Status", "Recorded By"],
+                                        visibleConditionRows.map(row => [row.equipmentName, String(row.units), row.issue, row.status, row.recordedBy || "Not recorded"]))}
                                     className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]"><Download size={16}/></button>
                         </div>
                     </div>
@@ -270,13 +276,9 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                         <EmptyPanel label="Connect rental inventory to view equipment condition."/> :
                         !rental.monitoringDataReady ?
                             <EmptyPanel label="Update the rental inventory Lambda and hook to display maintenance monitoring history."/> :
-                            conditionTab==='active' ? (
-                                managerConditionIssues.length===0 ? <EmptyPanel label="No active equipment issues. Staff repairs and recoveries appear in Maintenance History."/> :
-                                    <ManagerConditionIssueTable issues={managerConditionIssues} onView={setConditionDetail}/>
-                            ) : (
-                                rental.maintenanceHistory.length===0 ? <EmptyPanel label="No completed repair or recovery activity recorded yet."/> :
-                                    <ManagerConditionHistoryTable records={rental.maintenanceHistory} onView={setConditionDetail}/>
-                            )}
+                            visibleConditionRows.length===0 ?
+                                <EmptyPanel label={conditionStatusFilter==="all" ? "No equipment issues or repair activity recorded yet." : `No equipment with status “${conditionStatusFilter}”.`}/> :
+                                <ManagerConditionTable rows={visibleConditionRows} onView={setConditionDetail}/>}
                 </section>
 
                 <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
@@ -328,25 +330,6 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
 
 
             {conditionDetail&&<ManagerConditionDetails entry={conditionDetail} onClose={()=>setConditionDetail(null)}/>}
-
-            {/* Rental supplier payments are separate from equipment stock actions. */}
-            <section aria-label="Rental supplier payments" className="rounded-2xl border border-[#E7DFEC] bg-white px-4 py-3.5 shadow-sm">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex items-start gap-3">
-                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
-                            <Wallet size={18}/>
-                        </span>
-                        <div>
-                            <h2 className="text-[15px] font-bold text-[#21132E]">Supplier Payments</h2>
-                            <p className="mt-0.5 text-[11px] text-[#86778F]">Track and settle outstanding balances for rental equipment purchases.</p>
-                        </div>
-                    </div>
-                    <button type="button" onClick={()=>setSupplierPaymentsOpen(true)}
-                            className="inline-flex h-[42px] shrink-0 items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]">
-                        Supplier Payables <ArrowRight size={16}/>
-                    </button>
-                </div>
-            </section>
 
             <section className="overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
                 <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3.5">
@@ -472,21 +455,24 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             <SuccessToast
                 toast={exportError ? {title:"Rental inventory export failed",message:exportError,tone:"error"} :
                     notice && !notice.startsWith("Missing equipment") && !notice.startsWith("Permanent loss")
-                        ? {title:"Rental inventory updated",message:notice} : null}
+                        ? {title:noticeTitle,message:notice} : null}
                 onClose={closeInventoryToast}
             />
-            {dialog && <EquipmentDialog key={`${dialog.mode}-${dialog.item?.id ?? "new"}`} mode={dialog.mode} item={dialog.item} saving={rental.saving}
-                                        close={() => setDialog(null)}
-                                        onNavigate={(mode) => setDialog({mode, item:dialog.item})}
-                                        categories={categories}
-                                        onSave={async (mutation) => { await onSaved(mutation); setDialog(null); }}/>
+            {dialog?.mode === "receive" && dialog.item && <RentalReceiveStockDialog key={`receive-${dialog.item.id}`}
+                                                                                    item={dialog.item} saving={rental.saving}
+                                                                                    close={() => setDialog(null)}
+                                                                                    onSave={async (mutation) => { await onSaved(mutation); setDialog(null); }}/>}
+            {dialog && dialog.mode !== "receive" && <EquipmentDialog key={`${dialog.mode}-${dialog.item?.id ?? "new"}`} mode={dialog.mode} item={dialog.item} saving={rental.saving}
+                                                                     close={() => setDialog(null)}
+                                                                     onNavigate={(mode) => setDialog({mode, item:dialog.item})}
+                                                                     categories={categories}
+                                                                     onSave={async (mutation) => { await onSaved(mutation); setDialog(null); }}/>
             }
             {retireItem&&<RetireEquipmentDialog item={retireItem} saving={rental.saving}
                                                 close={()=>setRetireItem(null)} onSave={async (mutation)=>{await onSaved(mutation);setRetireItem(null);}}/>}
-            {importOpen && <RentalImportDialog close={()=>setImportOpen(false)} onSave={async (rows,purchase)=>{
-                await onSaved({action:"import_equipment",importMode:"single_purchase",rows,purchase}); setImportOpen(false);
+            {importOpen && <RentalImportDialog close={()=>setImportOpen(false)} onSave={async (rows)=>{
+                await onSaved({action:"import_equipment",rows}); setImportOpen(false);
             }} saving={rental.saving} existingEquipment={rental.equipment}/>}
-            {supplierPaymentsOpen && <RentalSupplierPayablesDialog branchId={branchId} canManage={canManage} onClose={()=>setSupplierPaymentsOpen(false)}/>}
             {categoriesOpen && <RentalCategoriesDialog categories={categories} equipment={rental.equipment}
                                                        saving={rental.saving} close={()=>setCategoriesOpen(false)}
                                                        onSave={async mutation => {await onSaved(mutation); setNotice("");}}/>}
@@ -560,7 +546,7 @@ function IssueBadge({issue}:{issue:string}) {
 // actual repairs/recoveries; customer liability is settled in Bookings.
 type ManagerConditionIssue = {
     kind:"maintenance"|"missing"|"inspection"; key:string; equipmentName:string;
-    units:number; title:string; status:string; notes:string; reportedAt:string;
+    units:number; title:string; issue:string; status:string; recordedBy:string; notes:string; reportedAt:string;
     reference:string; bookingReference:string|null;
 };
 function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:RentalMissingReport[],
@@ -569,7 +555,7 @@ function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:
     for(const record of records){
         active.push({kind:"maintenance",key:`maintenance-${record.id}`,equipmentName:record.equipmentName,
             units:record.units,title:record.status==='Routine'?'Routine care':record.status==='For Inspection'?'Safety inspection':'Repair / safety check',
-            status:record.status==='Routine'?'Routine Care':'Damaged',
+            issue:record.status==='Routine'?'Routine Care':'Damage',status:'Under Repair',recordedBy:record.reportedBy||'',
             notes:record.reason,reportedAt:record.dateReported,reference:`MNT-${String(record.id).padStart(6,'0')}`,
             bookingReference:record.bookingReference||null});
     }
@@ -577,7 +563,7 @@ function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:
         const units=Number(report.remainingUnits??report.quantity);
         if(!Number.isSafeInteger(units)||units<=0)continue;
         active.push({kind:"missing",key:`missing-${report.id}`,equipmentName:report.equipmentName,
-            units,title:"Missing equipment",status:"Missing",notes:report.reason,
+            units,title:"Missing equipment",issue:"Missing",status:"Unresolved",recordedBy:report.reportedBy||'',notes:report.reason,
             reportedAt:report.reportedAt,reference:`MISS-${String(report.id).padStart(6,'0')}`,
             bookingReference:report.bookingReference||null});
     }
@@ -585,7 +571,8 @@ function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:
         active.push({kind:"inspection",key:`inspection-${inspection.allocationId}`,
             equipmentName:inspection.equipmentName,units:inspection.units,
             title:inspection.observedDamageUnits>0?`Return inspection (${inspection.observedDamageUnits} suspected damaged)`:'Previous return inspection',
-            status:inspection.observedDamageUnits>0?"Damaged":"Pending Inspection",notes:inspection.notes||'Awaiting Staff condition verification.',
+            issue:inspection.observedDamageUnits>0?"Damage":"Return Inspection",status:"Pending Inspection",
+            recordedBy:inspection.receivedBy||'',notes:inspection.notes||'Awaiting Staff condition verification.',
             reportedAt:inspection.reportedAt,reference:`Allocation #${inspection.allocationId}`,
             bookingReference:inspection.bookingReference||null});
     }
@@ -597,41 +584,43 @@ function ManagerConditionDate({value}:{value:string|null|undefined}) {
     const parsed=/^\d{4}-\d{2}-\d{2}$/.test(value)?new Date(`${value}T12:00:00+08:00`):new Date(value);
     return <>{Number.isNaN(parsed.getTime())?'—':parsed.toLocaleDateString('en-PH',{timeZone:'Asia/Manila',month:'short',day:'numeric',year:'numeric'})}</>;
 }
-function ManagerConditionIssueTable({issues,onView}:{issues:ManagerConditionIssue[];onView:(value:ManagerConditionIssue)=>void}){
-    return <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Active equipment issues" tabIndex={0}>
-        <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-            <colgroup><col className="w-[24%]"/><col className="w-[31%]"/><col className="w-[9%]"/><col className="w-[17%]"/><col className="w-[19%]"/></colgroup>
-            <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr className="border-b border-[#E9E1EE]">
-                {['Equipment','Work Item / Reference','Units','Status','Action'].map(label=><th key={label} className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">{label}</th>)}
-            </tr></thead>
-            <tbody>{issues.map(issue=><tr key={issue.key} className="border-b border-[#EFE8F2] align-top last:border-0 text-[#2B174C]">
-                <td className="py-2 font-medium px-4 text-left">{issue.equipmentName}</td>
-                <td className="px-2 py-2"><p className="font-medium">{issue.title}</p>
-                    <p className="mt-1 break-all text-[10px] text-[#86778F]">{issue.reference}</p>
-                    {issue.notes&&<p className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]" title={issue.notes}>{issue.notes}</p>}</td>
-                <td className="px-2 py-2 text-center font-semibold tabular-nums">{issue.units}</td>
-                <td className={`px-2 py-2 text-center text-[10px] font-semibold ${issue.status==='Missing'||issue.status==='Damaged'?'text-[#A43D48]':'text-[#C27416]'}`}>{issue.status}</td>
-                <td className="px-2 py-2 text-center"><button type="button" onClick={()=>onView(issue)}
-                                                              className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3]">View Details</button></td>
-            </tr>)}</tbody>
-        </table>
-    </div>;
+const MANAGER_CONDITION_STATUSES=["Under Repair","Pending Inspection","Unresolved","Repair Completed","Replaced","Recovered"];
+type ManagerConditionRow = {
+    key:string; equipmentName:string; units:number; issue:string; status:string; recordedBy:string;
+    date:string; entry:ManagerConditionIssue|RentalMaintenanceHistory;
+};
+// Open issues first (most urgent first), then completed repairs, replacements and recoveries.
+function buildManagerConditionRows(issues:ManagerConditionIssue[], history:RentalMaintenanceHistory[]):ManagerConditionRow[] {
+    const rows:ManagerConditionRow[]=issues.map(issue=>({key:issue.key,equipmentName:issue.equipmentName,units:issue.units,
+        issue:issue.issue,status:issue.status,recordedBy:issue.recordedBy,date:issue.reportedAt,entry:issue}));
+    for(const record of history){
+        rows.push({key:`history-${record.id}`,equipmentName:record.equipmentName,units:record.quantity,
+            issue:record.type==='maintenance_completed'?(record.conditionStatus==='Routine'?'Routine Care':'Damage'):'Missing',
+            status:record.type==='maintenance_completed'?'Repair Completed':record.type==='missing_replaced'?'Replaced':'Recovered',
+            recordedBy:record.actorName||'',date:record.occurredAt,entry:record});
+    }
+    return rows;
 }
-function ManagerConditionHistoryTable({records,onView}:{records:RentalMaintenanceHistory[];onView:(value:RentalMaintenanceHistory)=>void}){
-    return <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Completed repair and recovery history" tabIndex={0}>
+function managerConditionStatusClass(status:string){
+    if(status==='Unresolved')return 'text-[#A43D48]';
+    if(status==='Under Repair'||status==='Pending Inspection')return 'text-[#C27416]';
+    return 'text-[#23834A]';
+}
+function ManagerConditionTable({rows,onView}:{rows:ManagerConditionRow[];onView:(value:ManagerConditionIssue|RentalMaintenanceHistory)=>void}){
+    return <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Equipment condition records" tabIndex={0}>
         <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-            <colgroup><col className="w-[26%]"/><col className="w-[32%]"/><col className="w-[23%]"/><col className="w-[19%]"/></colgroup>
+            <colgroup><col className="w-[23%]"/><col className="w-[9%]"/><col className="w-[15%]"/><col className="w-[19%]"/><col className="w-[17%]"/><col className="w-[17%]"/></colgroup>
             <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]"><tr className="border-b border-[#E9E1EE]">
-                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment</th><th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Completed Activity</th>
-                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Recorded By</th><th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Action</th>
+                {['Equipment','Units','Issue','Status','Recorded By','Action'].map(label=><th key={label} className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">{label}</th>)}
             </tr></thead>
-            <tbody>{records.map(record=><tr key={`history-${record.id}`} className="border-b border-[#EFE8F2] align-top last:border-0">
-                <td className="py-2 px-4 text-left"><p className="font-semibold text-[#2B174C]">{record.equipmentName}</p>
-                    <p className="mt-1 text-[#86778F]">{record.quantity} {record.quantity===1?'unit':'units'}</p></td>
-                <td className="px-2 py-2 text-center"><p className="font-medium text-[#23834A]">{record.type==='maintenance_completed'?'Repair Completed':record.type==='missing_replaced'?'Replacement Recorded':'Recovery Recorded'}</p>
-                    <p className="mt-1 text-[10px] text-[#86778F]"><ManagerConditionDate value={record.occurredAt}/></p></td>
-                <td className="px-2 py-2 text-center text-[#5F4E75]">{record.actorName||'Not recorded'}</td>
-                <td className="px-2 py-2 text-center"><button type="button" onClick={()=>onView(record)}
+            <tbody>{rows.map(row=><tr key={row.key} className="border-b border-[#EFE8F2] align-top last:border-0 text-[#2B174C]">
+                <td className="py-2 px-4 text-left font-semibold">{row.equipmentName}</td>
+                <td className="px-2 py-2 text-center font-semibold tabular-nums">{row.units}</td>
+                <td className="px-2 py-2 text-center">{row.issue}</td>
+                <td className="px-2 py-2 text-center"><p className={`font-semibold ${managerConditionStatusClass(row.status)}`}>{row.status}</p>
+                    <p className="mt-1 text-[10px] text-[#86778F]"><ManagerConditionDate value={row.date}/></p></td>
+                <td className="px-2 py-2 text-center text-[#5F4E75]">{row.recordedBy||'Not recorded'}</td>
+                <td className="px-2 py-2 text-center"><button type="button" onClick={()=>onView(row.entry)}
                                                               className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3]">View Details</button></td>
             </tr>)}</tbody>
         </table>
@@ -694,7 +683,7 @@ function RetireEquipmentDialog({item,saving,close,onSave}:{
               className="w-full max-w-lg space-y-4 rounded-2xl border border-[#E6DDF0] bg-white p-6 shadow-xl">
             <h3 className="text-lg font-bold text-[#21132E]">Delete Rental Equipment</h3>
             <p className="text-sm text-[#5A476A]">Delete <strong>{item.name}</strong> from the active rental equipment list.
-                To protect existing bookings and accounting records, the system keeps historical supplier payments, purchases, bookings, and audit entries.</p>
+                To protect existing bookings and accounting records, the system keeps historical bookings and audit entries.</p>
             {item.totalUnits>0&&<p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900">
                 {item.totalUnits} remaining units will be removed from available inventory with an audited stock adjustment.
                 Only proceed if the equipment has actually been taken out of service.</p>}
@@ -784,7 +773,7 @@ function ActivityRow({item}:{item:RentalActivity}) {
 
 type EditorMode = "add"|"edit"|"receive"|"maintenance"|"review"|"correct";
 /* Add/Edit follows Sales Inventory's sections, spacing, category dropdown,
- * pricing and supplier confirmation. Rentals have no variants or reorder point. */
+ * pricing and confirmation. Rentals have no variants or reorder point. */
 const rentalFieldClass = "w-full rounded-xl border border-[#E3D8EA] bg-white p-3 text-sm text-[#1A1220] placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:outline-none focus:ring-1 focus:ring-[#2B174C]";
 const rentalLabelClass = "text-xs font-semibold text-[#5A476A]";
 function validRentalMoney(value:string) {
@@ -805,14 +794,8 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
     const [category,setCategory]=React.useState(item?.category||"");
     const [quantity,setQuantity]=React.useState(mode==="add"?"0":mode==="correct"?String(item?.totalUnits??0):"");
     const [physicalCountVerified,setPhysicalCountVerified]=React.useState(false);
-    const [supplier,setSupplier]=React.useState("");
-    const [invoice,setInvoice]=React.useState("");
-    const [date,setDate]=React.useState(rentalToday);
     const [unitCost,setUnitCost]=React.useState("");
     const [rentalRate,setRentalRate]=React.useState(item?.rentalRatePerDay==null?"":String(item.rentalRatePerDay));
-    const [paymentMethod,setPaymentMethod]=React.useState<"cash"|"credit">("cash");
-    const [amountPaid,setAmountPaid]=React.useState("0");
-    const [dueDate,setDueDate]=React.useState("");
     const [reason,setReason]=React.useState("");
     const [maintenanceMode,setMaintenanceMode]=React.useState<"start"|"complete">("start");
     const [conditionStatus,setConditionStatus]=React.useState<"In Repair"|"For Inspection">("In Repair");
@@ -823,31 +806,18 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
     const submittingRef=React.useRef(false);
     const qty=Number(quantity);
     const limited=maintenanceMode==="start"?(item?availableNow(item):0):(item?.maintenanceUnits??0);
-    const purchaseVisible=mode==="receive"||(mode==="add"&&qty>0);
     const purchaseTotal=qty*Number(unitCost||0);
-    const purchasePaid=paymentMethod==="cash"?purchaseTotal:Number(amountPaid||0);
-    const balance=Math.round((purchaseTotal-purchasePaid)*100)/100;
     const title=mode==="add"?"Add Rental Equipment":mode==="edit"?"Edit Rental Equipment":
-        mode==="receive"?"Restock Rental Equipment":mode==="correct"?"Correct Equipment Stock":mode==="maintenance"?"Manage Maintenance":"Equipment Stock Review";
+        mode==="correct"?"Correct Equipment Stock":mode==="maintenance"?"Manage Maintenance":"Equipment Stock Review";
 
     const purchaseDetails=():RentalPurchaseDetails|null=>{
-        if(!Number.isSafeInteger(qty)||qty<1||qty>2147483647||!supplier.trim()||
-            supplier.trim().length>150||!validRentalDate(date)||date>rentalToday()||!validRentalMoney(unitCost)){
-            setError("Enter a valid received quantity, supplier, date (not future), and unit cost.");return null;
-        }
-        if(paymentMethod==="credit"&&(!validRentalMoney(amountPaid)||purchasePaid>purchaseTotal)){
-            setError("Amount Paid must be between zero and the total purchase cost.");return null;
+        if(!Number.isSafeInteger(qty)||qty<1||qty>2147483647||!validRentalMoney(unitCost)){
+            setError("Enter a valid received quantity and unit cost.");return null;
         }
         if(!Number.isSafeInteger(Math.round(purchaseTotal*100))||purchaseTotal>100000000000){
             setError("The purchase total is too large.");return null;
         }
-        if(paymentMethod==="credit"&&balance>0&&(!validRentalDate(dueDate)||dueDate<date)){
-            setError("An outstanding credit purchase needs a due date on or after the purchase date.");return null;
-        }
-        return {quantity:qty,unitCost:Number(unitCost),supplier:supplier.trim(),
-            supplierInvoiceNumber:invoice.trim()||undefined,purchaseDate:date,
-            paymentMethod,amountPaid:Math.round(purchasePaid*100)/100,
-            paymentDueDate:paymentMethod==="credit"&&balance>0?dueDate:null};
+        return {quantity:qty,unitCost:Number(unitCost)};
     };
     const prepare=(event:React.FormEvent)=>{
         event.preventDefault();setError("");if(saving||submitting||pending)return;
@@ -881,9 +851,6 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
             }
             mutation={action:"correct_equipment_stock",equipmentId:item.id,totalUnits:qty,
                 reason:reason.trim(),physicalCountVerified:true};
-        }else if(mode==="receive"&&item){
-            const purchase=purchaseDetails();if(!purchase)return;
-            mutation={action:"receive_equipment",equipmentId:item.id,...purchase};
         }else if(mode==="maintenance"&&item){
             if(!Number.isSafeInteger(qty)||qty<1||qty>limited||reason.trim().length<5){
                 setError(`Enter 1–${limited} units and a reason of at least 5 characters.`);return;
@@ -921,7 +888,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                         {[["Total Units",item.totalUnits],["Available Now",availableNow(item)],
                             ["Rented Out",item.rentedOutUnits],["Under Maintenance",item.maintenanceUnits],
                             ["Missing Units",item.missingUnits],["Rental Rate / Day",peso(item.rentalRatePerDay)],
-                            ["Average Unit Cost",peso(item.averageUnitCost)],["Last Supplier",item.lastSupplier||"—"]].map(([label,value])=><div key={label}>
+                            ["Average Unit Cost",peso(item.averageUnitCost)]].map(([label,value])=><div key={label}>
                             <p className="text-xs text-[#86778F]">{label}</p><strong className="text-sm text-[#2B174C]">{value}</strong></div>)}
                     </div>
                     <p className="mb-3 text-xs text-[#86778F]">Pricing: {item.pricingMethod==="cost_based"?"Suggested Cost-Based Rate":"Manual Rental Rate"}. Daily rates are reviewed by the manager; equipment age does not automatically reduce customer charges.</p>
@@ -966,12 +933,12 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                             <p className="text-xs text-[#9B8AAA]">Charge for ONE item for ONE day. For example, 10 tables × this daily price × 2 days. Set your business's daily rental price; confirmed past bookings aren't repriced.</p>
                         </div>
                     </div>
-                    {mode==="edit"&&<p className="text-xs text-[#86778F]">Supplier purchasing history is not edited here. Use Restock for newly received units; do not count deliveries that have not arrived.</p>}
+                    {mode==="edit"&&<p className="text-xs text-[#86778F]">Use Restock for newly received units; do not count deliveries that have not arrived.</p>}
                     {mode==="add"&&qty===0&&<p className="rounded-xl bg-[#FFFCF7] p-3 text-xs text-[#86778F]">Zero opening stock: you can create a catalog item without a purchase cost and receive equipment later.</p>}
                 </>}
                 {mode==="correct"&&item&&<section className="space-y-4 rounded-xl border border-[#E6DDF0] bg-[#FFFCF8] p-4">
                     <h3 className="text-sm font-bold text-[#21132E]">Physical Count Correction</h3>
-                    <p className="text-xs text-[#806A8C]">Use only after a verified physical recount. This is NOT a supplier restock or rental return and creates no payment. Existing confirmed reservations, rented-out units and held equipment remain protected.</p>
+                    <p className="text-xs text-[#806A8C]">Use only after a verified physical recount. This is NOT a restock or rental return. Existing confirmed reservations, rented-out units and held equipment remain protected.</p>
                     <p className="text-xs text-[#5A476A]">Current total units: <strong>{item.totalUnits}</strong> · Physically ready: <strong>{availableNow(item)}</strong> · Available today: <strong>{item.bookableToday}</strong></p>
                     <label className="block space-y-1"><span className={rentalLabelClass}>Corrected Total Units</span>
                         <input required type="number" min="0" max="2147483647" step="1" className={rentalFieldClass} value={quantity} onChange={e=>setQuantity(e.target.value)}/>
@@ -981,7 +948,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                     </label>
                     <label className="flex items-center gap-2 text-xs font-medium text-[#5A476A]">
                         <input type="checkbox" checked={physicalCountVerified} onChange={e=>setPhysicalCountVerified(e.target.checked)}/>
-                        I physically verified these units; this is not a new supplier delivery.
+                        I physically verified these units; this is not a new delivery.
                     </label>
                 </section>}
                 {mode==="maintenance"&&item&&<>
@@ -1006,48 +973,111 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                         </div>
                     </div>}
                 </>}
-                {purchaseVisible&&<section className="space-y-3 border-t border-[#E6DDF0] pt-5">
-                    <h3 className="text-sm font-bold text-[#1A1220]">{mode==="receive"?"Supplier & Purchase Details":"Initial Purchase Details"}</h3>
-                    <p className="text-xs text-[#806A8C]">Enter only quantities actually received and counted. Confirming this purchase immediately adds the units to rental stock and records the receipt and activity; editing equipment will not rewrite past purchases.</p>
-                    {mode==="receive"&&<div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-1"><label className={rentalLabelClass}>Units Physically Received</label><input required type="number" min="1" step="1" className={rentalFieldClass} value={quantity} onChange={e=>setQuantity(e.target.value)}/></div>
-                        <div className="space-y-1"><label className={rentalLabelClass}>Unit Purchase Cost (₱)</label><input required type="number" min="0" step="0.01" className={rentalFieldClass} value={unitCost} onChange={e=>setUnitCost(e.target.value)}/></div>
-                    </div>}
-                    <div className="space-y-1"><label className={rentalLabelClass}>Supplier</label><input required maxLength={150} value={supplier} onChange={e=>setSupplier(e.target.value)} className={rentalFieldClass} placeholder="Enter supplier name"/></div>
-                    <div className="space-y-1"><label className={rentalLabelClass}>Supplier Invoice Number (Optional)</label><input maxLength={80} value={invoice} onChange={e=>setInvoice(e.target.value)} className={rentalFieldClass} placeholder="Enter supplier invoice or receipt number"/></div>
-                    <div className="space-y-1"><label className={rentalLabelClass}>Purchase Date</label><input type="date" max={rentalToday()} required className={rentalFieldClass} value={date} onChange={e=>setDate(e.target.value)}/></div>
-                    <div className="space-y-1"><label className={rentalLabelClass}>Payment Method</label>
-                        <div className="grid grid-cols-2 gap-2">{(["cash","credit"] as const).map(method=><button type="button" key={method} onClick={()=>setPaymentMethod(method)}
-                                                                                                                  className={`rounded-xl border px-4 py-3 text-sm font-semibold ${paymentMethod===method?"border-[#2B174C] bg-[#F1EBFF] text-[#2B174C]":"border-[#E3D8EA] bg-white text-[#86778F]"}`}>{method==="cash"?"Cash (Paid in Full)":"Credit (Unpaid / Partial)"}</button>)}</div>
-                    </div>
-                    <div className="grid gap-3 rounded-xl bg-[#F7F1FF] p-4 sm:grid-cols-3">
-                        <div><p className="text-xs text-[#806A8C]">Purchase Total</p><strong className="text-lg text-[#2B174C]">{Number.isFinite(purchaseTotal)?peso(purchaseTotal):"—"}</strong></div>
-                        <div><p className="text-xs text-[#806A8C]">Amount Paid</p><strong className="text-lg text-[#2B174C]">{Number.isFinite(purchasePaid)?peso(purchasePaid):"—"}</strong></div>
-                        <div><p className="text-xs text-[#806A8C]">Outstanding Balance</p><strong className="text-lg text-[#2B174C]">{Number.isFinite(balance)?peso(balance):"—"}</strong></div>
-                    </div>
-                    {paymentMethod==="credit"&&<div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-1"><label className={rentalLabelClass}>Amount Paid (₱)</label><input required type="number" min="0" step="0.01" className={rentalFieldClass} value={amountPaid} onChange={e=>setAmountPaid(e.target.value)}/></div>
-                        <div className="space-y-1"><label className={rentalLabelClass}>Payment Due Date</label><input type="date" min={date||undefined} required={balance>0} className={rentalFieldClass} value={dueDate} onChange={e=>setDueDate(e.target.value)}/></div>
-                    </div>}
-                </section>}
                 {error&&<p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">{error}</p>}
                 <div className="flex justify-end gap-2 border-t border-[#E6DDF0] pt-4">
                     <button type="button" disabled={submitting} onClick={close} className="rounded-xl border border-[#E6DDF0] px-5 py-3 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]">{mode==="review"?"Close":"Cancel"}</button>
                     {mode!=="review"&&<button type="submit" disabled={saving||submitting||(mode==="maintenance"&&limited===0)} className={btn}>
-                        {mode==="add"?"Save Equipment":mode==="edit"?"Update Equipment":mode==="receive"?"Confirm Stock In":mode==="correct"?"Save Correction":"Save Maintenance"}</button>}
+                        {mode==="add"?"Save Equipment":mode==="edit"?"Update Equipment":mode==="correct"?"Save Correction":"Save Maintenance"}</button>}
                 </div>
             </form>
         </div>
         {pending&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4" role="presentation">
             <div role="alertdialog" aria-modal="true" aria-label="Confirm rental inventory changes" className="w-full max-w-md space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
-                <h3 className="text-lg font-bold text-[#1A1220]">{mode==="add"?"Confirm Add Equipment":mode==="edit"?"Confirm Update":mode==="receive"?"Confirm Received Stock":mode==="correct"?"Confirm Stock Correction":"Confirm Maintenance"}</h3>
-                <p className="text-sm text-[#6A5D6F]">{mode==="add"?`Add ${name.trim()} to rental inventory${qty>0 ? ` with ${qty} physically received units` : ""}?`:mode==="edit"?`Save the changes to ${name.trim()}?`:mode==="receive"?`Confirm ${qty} unit(s) of ${item?.name} have been physically received? This immediately updates rental availability and today’s stock activity.`:mode==="correct"?`Change the verified physical total of ${item?.name} from ${item?.totalUnits} to ${qty} units? Confirmed reservations and held units are protected.`:`Record this maintenance action for ${item?.name}?`}</p>
-                <p className="text-xs text-[#806A8C]">Physical stock and supplier transactions will be confirmed by the Rental backend, not generated by the interface.</p>
+                <h3 className="text-lg font-bold text-[#1A1220]">{mode==="add"?"Confirm Add Equipment":mode==="edit"?"Confirm Update":mode==="correct"?"Confirm Stock Correction":"Confirm Maintenance"}</h3>
+                <p className="text-sm text-[#6A5D6F]">{mode==="add"?`Add ${name.trim()} to rental inventory${qty>0 ? ` with ${qty} physically received units` : ""}?`:mode==="edit"?`Save the changes to ${name.trim()}?`:mode==="correct"?`Change the verified physical total of ${item?.name} from ${item?.totalUnits} to ${qty} units? Confirmed reservations and held units are protected.`:`Record this maintenance action for ${item?.name}?`}</p>
+                <p className="text-xs text-[#806A8C]">Physical stock changes will be confirmed by the Rental backend, not generated by the interface.</p>
                 <div className="flex justify-end gap-2"><button type="button" disabled={submitting} onClick={()=>setPending(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm">Back</button>
                     <button type="button" disabled={saving||submitting} onClick={()=>void confirm()} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{submitting?"Saving...":"Confirm"}</button></div>
             </div>
         </div>}
     </div>;
+}
+
+/* Restock mirrors Consumable Inventory's Receive Stock: it only adds quantity.
+ * Rental equipment has no variants, so there is always exactly one line, and
+ * equipment does not expire, so there is no expiration date. */
+function RentalReceiveStockDialog({item,saving,close,onSave}:{
+    item:RentalEquipment;saving:boolean;close:()=>void;onSave:(mutation:RentalMutation)=>Promise<void>;
+}) {
+    const [quantity,setQuantity]=React.useState("");
+    const [error,setError]=React.useState("");
+    const [submitting,setSubmitting]=React.useState(false);
+    const submittingRef=React.useRef(false);
+    const busy=saving||submitting;
+    const qty=Number(quantity)||0;
+    const availableBefore=availableNow(item);
+    const needsReconciliation=hasRentalStockDiscrepancy(item);
+    const formatUnits=(value:number)=>value.toLocaleString("en-PH");
+    const save=async(event:React.FormEvent)=>{
+        event.preventDefault();
+        if(submittingRef.current||saving)return;
+        setError("");
+        if(quantity.trim()===""||!Number.isSafeInteger(Number(quantity))||Number(quantity)<=0||Number(quantity)>2147483647){
+            setError("Enter a positive whole quantity to add.");return;
+        }
+        submittingRef.current=true;setSubmitting(true);
+        try{await onSave({action:"receive_equipment",equipmentId:item.id,quantity:Number(quantity)});}
+        catch(cause){setError(cause instanceof Error?cause.message:"Unable to receive stock.");}
+        finally{submittingRef.current=false;setSubmitting(false);}
+    };
+    return (
+        <div role="dialog" aria-modal="true" aria-label="Receive Stock"
+             className="fixed inset-0 z-[130] flex items-center justify-center bg-black/50 px-3 py-5">
+            <div className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+                <div className="flex items-center justify-between border-b border-[#E9E1EE] px-6 py-4">
+                    <h2 className="text-xl font-bold text-[#21132E]">Receive Stock</h2>
+                    <button type="button" onClick={close} disabled={busy} aria-label="Close Receive Stock"
+                            className="text-2xl text-[#806A8C] hover:text-[#2B174C] disabled:opacity-50">×</button>
+                </div>
+                <form onSubmit={save} className="flex min-h-0 flex-col">
+                    <div className="space-y-5 overflow-y-auto px-6 py-5">
+                        <div>
+                            <h3 className="text-base font-bold text-[#21132E]">{item.name}</h3>
+                            <p className="mt-1 text-xs text-[#806A8C]">Product No. {item.equipmentNumber || "—"} · {item.category}</p>
+                            <div className="mt-3 grid grid-cols-2 gap-3 rounded-xl bg-[#F7F1FF] p-4">
+                                <div><div className="text-xs text-[#806A8C]">Available Now (Physically Ready)</div>
+                                    <div className="mt-1 text-xl font-bold text-[#2B174C]">{formatUnits(availableBefore)}</div></div>
+                                <div><div className="text-xs text-[#806A8C]">Available After Receiving</div>
+                                    <div className="mt-1 text-xl font-bold text-[#2B174C]">{needsReconciliation ? "—" : formatUnits(availableBefore + qty)}</div></div>
+                            </div>
+                            {needsReconciliation && <p role="alert" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                                Assigned units exceed physical stock. Review booking, repair and missing records before receiving more stock; no new availability is projected until the records agree.
+                            </p>}
+                        </div>
+                        <section className="space-y-3">
+                            <h3 className="text-sm font-bold text-[#21132E]">Stock to Receive</h3>
+                            <p className="text-xs text-[#806A8C]">Enter the quantity to add.</p>
+                            <div className="space-y-3 rounded-xl border border-[#E3D8EA] p-4">
+                                <div className="flex justify-between gap-3">
+                                    <div><strong className="text-sm text-[#2B174C]">Regular</strong></div>
+                                    <span className="text-xs text-[#806A8C]">Available: {formatUnits(availableBefore)} pcs</span>
+                                </div>
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                    <div className="space-y-1"><label className={rentalLabelClass}>Quantity to Add</label>
+                                        <input type="number" min="0" step="1" value={quantity}
+                                               onChange={e => setQuantity(e.target.value)}
+                                               placeholder="0" className={rentalFieldClass}/></div>
+                                </div>
+                                <p className="text-xs text-[#806A8C]">Available after receiving: {needsReconciliation ? "Reconciliation required" : `${formatUnits(availableBefore + qty)} pcs`}</p>
+                            </div>
+                            <div className="flex justify-between border-t border-[#E3D8EA] pt-3 text-sm font-semibold text-[#2B174C]">
+                                <span>Total Stock to Add</span><span>+{formatUnits(qty)} pcs</span>
+                            </div>
+                        </section>
+                        {error && <p role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+                    </div>
+                    <div className="flex justify-end gap-2 border-t border-[#E3D8EA] bg-white px-6 py-4">
+                        <button type="button" onClick={close} disabled={busy}
+                                className="rounded-xl border border-[#E3D8EA] px-5 py-2.5 text-sm font-semibold text-[#2B174C]">Cancel</button>
+                        <button type="submit" disabled={busy || qty <= 0}
+                                className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
+                            {busy ? "Saving..." : "Confirm Stock In"}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1062,11 +1092,11 @@ type RentalExportFilters = {
     category:string;status:string;appliedDates:{from:string;to:string}|null;
 };
 function rentalReportRows(items:RentalEquipment[],filters:RentalExportFilters,availability:Map<number,number>|null) {
-    const headings = ["Product No.","Rental Product","Category","Last Supplier","Avg. Unit Cost (PHP)",
+    const headings = ["Product No.","Rental Product","Category","Avg. Unit Cost (PHP)",
         "Rental Rate / Day (PHP)","Total Units","Available Now",
         ...(filters.appliedDates?["Available in Selected Dates"]:[]),
         "Rented Out","Maintenance","Missing","Availability","Condition / Alert"];
-    const rows = items.map(item => [item.equipmentNumber||"—",item.name,item.category,item.lastSupplier||"—",
+    const rows = items.map(item => [item.equipmentNumber||"—",item.name,item.category,
         item.averageUnitCost??"—",item.rentalRatePerDay??"—",item.totalUnits,availableNow(item),
         ...(filters.appliedDates?[availability?.get(item.id)??"—"]:[]),
         item.rentedOutUnits,item.maintenanceUnits,item.missingUnits,
@@ -1090,7 +1120,7 @@ function exportRentalExcel(items:RentalEquipment[],filters:RentalExportFilters,a
         ["Matching Equipment",items.length],[],headings,...rows,
     ];
     const sheet=XLSX.utils.aoa_to_sheet(meta);
-    sheet["!cols"]=headings.map((_,i)=>({wch:[21,34,24,28,23,24,16,18,22,16,16,15,23,24][i]||18}));
+    sheet["!cols"]=headings.map((_,i)=>({wch:[21,34,24,23,24,16,18,22,16,16,15,23,24][i]||18}));
     const book=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book,sheet,"Rental Inventory");
     XLSX.writeFile(book,rentalFilename("xlsx"),{bookType:"xlsx"});
@@ -1199,8 +1229,8 @@ function exportRentalPdf(items:RentalEquipment[],filters:RentalExportFilters,ava
     document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
 }
 
-/* SAME SALES WORKFLOW: select XLSX → preview → confirm. One purchase per
- * workbook, not one purchase per equipment row. No variants / reorder point. */
+/* SAME SALES WORKFLOW: select XLSX → preview → confirm.
+ * No variants / reorder point. */
 const RENTAL_EQUIPMENT_HEADERS = ["Equipment Name","Category","Stock","Unit Purchase Cost (₱)","Rental Rate Per Day (₱)"];
 // The no-Product-No. template mirrors Add Rental Equipment. The backend
 // assigns a unique Product No. to every created rental product during import.
@@ -1209,8 +1239,7 @@ const RENTAL_FORM_REQUIRED = ["Rental Product","Category","Total Units","Cost Pr
 const RENTAL_IMPORT_REQUIRED = ["Rental Product","Category","Total Units","Unit Purchase Cost (₱)","Rental Rate Per Day (₱)"];
 const RENTAL_PRICING_HEADERS = ["Pricing Method","Target Paid Rental Days to Recover Cost","Residual Value (₱)","Operating Cost / Paid Day (₱)","Target Margin (%)"];
 const LEGACY_PRICING_HEADERS = ["Pricing Method","Useful Life (Years)","Paid Rental Days / Year","Residual Value (₱)","Operating Cost / Paid Day (₱)","Target Margin (%)"];
-const RENTAL_PURCHASE_HEADERS = ["Supplier","Supplier Invoice Number (Optional)","Purchase Date","Payment Method","Amount Paid (₱)","Payment Due Date"];
-type ParsedRentalImport = {rows:RentalImportRow[];purchase:RentalBulkPurchase;purchaseTotal:number;outstandingBalance:number};
+type ParsedRentalImport = {rows:RentalImportRow[]};
 function downloadRentalTemplate() {
     // Keep the formatted in-app download identical to the accepted XLSX upload.
     const link=document.createElement("a");
@@ -1219,14 +1248,6 @@ function downloadRentalTemplate() {
     document.body.appendChild(link);
     link.click();
     link.remove();
-}
-function rentalWorkbookDate(value:unknown):string {
-    if(value instanceof Date&&!Number.isNaN(value.getTime()))return [value.getFullYear(),String(value.getMonth()+1).padStart(2,"0"),String(value.getDate()).padStart(2,"0")].join("-");
-    if(typeof value==="number"&&Number.isFinite(value)){
-        const date=XLSX.SSF.parse_date_code(value);
-        if(date)return `${date.y}-${String(date.m).padStart(2,"0")}-${String(date.d).padStart(2,"0")}`;
-    }
-    return String(value??"").trim();
 }
 function rentalWorkbookMoney(raw:unknown,label:string,location:string){
     const value=String(raw??"").replace(/[₱,\s]/g,"").trim();
@@ -1245,8 +1266,7 @@ function rentalWorkbookTable(sheet:XLSX.WorkSheet,sheetName:string,headers:strin
 function parseRentalImport(buffer:ArrayBuffer,existingEquipment:RentalEquipment[]):ParsedRentalImport {
     const workbook=XLSX.read(buffer,{type:"array",cellDates:true});
     const equipSheet=workbook.Sheets["RENTAL EQUIPMENT"];
-    const purchaseSheet=workbook.Sheets["PURCHASE DETAILS"];
-    if(!equipSheet||!purchaseSheet)throw new Error('The XLSX file must include "RENTAL EQUIPMENT" and "PURCHASE DETAILS" sheets (one supplier purchase per file).');
+    if(!equipSheet)throw new Error('The XLSX file must include a "RENTAL EQUIPMENT" sheet.');
     const rawEquip=XLSX.utils.sheet_to_json<unknown[]>(equipSheet,{header:1,raw:true,defval:""});
     const headerKey=(v:unknown)=>String(v??"").toLowerCase().replace(/[^a-z0-9]/g,"");
     const hasFormHeaders=rawEquip.some(row=>RENTAL_FORM_REQUIRED.every(h=>row.some(v=>headerKey(v)===headerKey(h))));
@@ -1316,35 +1336,12 @@ function parseRentalImport(buffer:ArrayBuffer,existingEquipment:RentalEquipment[
             pricingMethod:"cost_based",pricingRecoveryDays:recoveryDays,
             pricingResidualValue:residual,pricingOperatingCostPerDay:operating,pricingMarginPercent:Number(target)};
     });
-    const purchaseCells=rentalWorkbookTable(purchaseSheet,"PURCHASE DETAILS",RENTAL_PURCHASE_HEADERS);
-    if(purchaseCells.length!==1)throw new Error(`PURCHASE DETAILS: Enter exactly ONE supplier purchase row, not ${purchaseCells.length}.`);
-    const values=purchaseCells[0].values;
-    const supplier=String(values[0]??"").trim();
-    const supplierInvoiceNumber=String(values[1]??"").trim();
-    const purchaseDate=rentalWorkbookDate(values[2]);
-    const method=String(values[3]??"").trim().toLowerCase();
-    const paidText=String(values[4]??"").trim();
-    const dueDate=rentalWorkbookDate(values[5]);
-    if(!supplier||supplier.length>150||supplierInvoiceNumber.length>80)throw new Error("PURCHASE DETAILS: supplier is required; the invoice number must be at most 80 characters.");
-    if(!validRentalDate(purchaseDate)||purchaseDate>rentalToday())throw new Error("PURCHASE DETAILS: Purchase Date must be a valid date (YYYY-MM-DD) and cannot be in the future.");
-    if(method!=="cash"&&method!=="credit")throw new Error("PURCHASE DETAILS: Payment Method must be Cash or Credit.");
     const totalCents=rows.reduce((sum,row)=>sum+row.openingUnits*Math.round(row.unitCost*100),0);
     if(!Number.isSafeInteger(totalCents))throw new Error("Total purchase cost is too large.");
-    const purchaseTotal=totalCents/100;
-    const paid=paidText?rentalWorkbookMoney(paidText,"Amount Paid","PURCHASE DETAILS"):0;
-    const paidCents=method==="cash"?totalCents:Math.round(paid*100);
-    if(method==="cash"&&paidText&&Math.round(paid*100)!==totalCents)throw new Error("PURCHASE DETAILS: Cash must be paid in full. Leave Amount Paid blank or enter the entire purchase total.");
-    if(paidCents>totalCents)throw new Error("PURCHASE DETAILS: Amount Paid cannot exceed the combined purchase cost.");
-    const outstandingBalance=(totalCents-paidCents)/100;
-    if(method==="credit"&&outstandingBalance>0&&(!validRentalDate(dueDate)||dueDate<purchaseDate))throw new Error("PURCHASE DETAILS: Unpaid or partial Credit requires a due date on or after the purchase date.");
-    if(dueDate&&(!validRentalDate(dueDate)||dueDate<purchaseDate))throw new Error("PURCHASE DETAILS: Payment Due Date is invalid.");
-    const purchase:RentalBulkPurchase={supplier,supplierInvoiceNumber:supplierInvoiceNumber||undefined,purchaseDate,
-        paymentMethod:method,amountPaid:paidCents/100,
-        paymentDueDate:method==="credit"&&outstandingBalance>0?dueDate:null};
-    return {rows,purchase,purchaseTotal,outstandingBalance};
+    return {rows};
 }
 function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>void;
-    onSave:(rows:RentalImportRow[],purchase:RentalBulkPurchase)=>Promise<void>;
+    onSave:(rows:RentalImportRow[])=>Promise<void>;
     saving:boolean;existingEquipment:RentalEquipment[]}) {
     const [file,setFile]=React.useState<File|null>(null);
     const [preview,setPreview]=React.useState<ParsedRentalImport|null>(null);
@@ -1357,7 +1354,7 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
         if(!file||reading)return;
         setError("");setReading(true);
         try{
-            if(!/\.xlsx$/i.test(file.name))throw new Error("Use an .xlsx file because a supplier purchase needs a separate PURCHASE DETAILS sheet.");
+            if(!/\.xlsx$/i.test(file.name))throw new Error("Use the StockNBook .xlsx rental format.");
             if(file.size>5*1024*1024)throw new Error("Choose a file smaller than 5 MB.");
             const data=parseRentalImport(await file.arrayBuffer(),existingEquipment);
             setPreview(data);setStep("confirm");
@@ -1367,7 +1364,7 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
     const confirm=async()=>{
         if(!preview||submitting||saving||running.current)return;
         running.current=true;setSubmitting(true);setError("");
-        try{await onSave(preview.rows,preview.purchase);}
+        try{await onSave(preview.rows);}
         catch(cause){setError(cause instanceof Error?cause.message:"Import failed. No products should be saved unless the server confirms success.");}
         finally{running.current=false;setSubmitting(false);}
     };
@@ -1394,8 +1391,8 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
             </>:<>
                 <div className="flex shrink-0 justify-between gap-4 border-b border-[#E6DDF0] px-5 py-4 sm:px-6">
                     <div><h2 className="text-[19px] font-bold text-[#1A1220]">Confirm Imported Rental Products</h2>
-                        <p className="mt-1 text-sm text-[#6A5D6F]">Import only quantities already physically received and counted. Confirming the import posts stock receipts and activity under one supplier purchase.</p>
-                        <p className="mt-1 text-xs font-semibold text-[#5A476A]">{preview?.rows.length??0} equipment product(s) • One supplier purchase</p>
+                        <p className="mt-1 text-sm text-[#6A5D6F]">Import only quantities already physically received and counted. Confirming the import posts stock receipts and activity.</p>
+                        <p className="mt-1 text-xs font-semibold text-[#5A476A]">{preview?.rows.length??0} equipment product(s)</p>
                     </div><button type="button" disabled={submitting} onClick={close} aria-label="Close preview" className="text-[#9B8AAA]"><X size={18}/></button>
                 </div>
                 <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5 sm:px-6">
@@ -1412,17 +1409,6 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
                                 <td className="px-2 py-2 text-center font-semibold text-[#23834A]">Valid</td>
                             </tr>)}</tbody></table></div>
                     </section>
-                    {preview&&<section className="rounded-xl border border-[#E3D8EA] bg-white p-4">
-                        <h3 className="text-sm font-bold text-[#21132E]">Supplier &amp; Purchase Details</h3>
-                        <p className="mt-1 text-xs text-[#675875]">StockNBook Rental Purchase No.: Generated by the backend when imported</p>
-                        <div className="mt-4 grid gap-4 text-xs text-[#5A476A] sm:grid-cols-2">
-                            {[["Supplier",preview.purchase.supplier],["Supplier Invoice Number",preview.purchase.supplierInvoiceNumber||"—"],
-                                ["Purchase Date",preview.purchase.purchaseDate],["Payment Method",preview.purchase.paymentMethod==="cash"?"Cash":"Credit"],
-                                ["Combined Purchase Total",peso(preview.purchaseTotal)],["Amount Paid",peso(preview.purchase.amountPaid)],
-                                ["Payment Due Date",preview.purchase.paymentDueDate||"—"],["Outstanding Balance",peso(preview.outstandingBalance)]].map(([label,value])=><div key={label}>
-                                {label}<div className="mt-0.5 font-bold text-[#21132E]">{value}</div></div>)}
-                        </div>
-                    </section>}
                 </div>
                 <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-[#E6DDF0] px-5 py-4 sm:px-6">
                     <button type="button" disabled={submitting} onClick={()=>{setStep("select");setError("");}} className={secondary}>Back</button>
@@ -1538,373 +1524,5 @@ function RentalCategoriesDialog({categories,equipment,close,onSave,saving}:{
                 </div>
             </div>}
         </div>
-    </div>;
-}
-
-
-/* -------------------------------------------------------------------------- */
-/*  RENTAL SUPPLIER PAYABLES — INLINE (matches Sales Inventory payment flow)    */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Supplier payments for RENTAL equipment only.
- * Uses the dedicated /api/rental-inventory endpoint and rental_* ledgers.
- * Does not call /api/products or edit equipment quantities.
- */
-type RentalSupplierPayable = {
-    purchaseId: number;
-    purchaseNumber: string;
-    supplier: string;
-    supplierInvoiceNumber: string | null;
-    purchaseDate: string;
-    recordedAt?: string | null;
-    paymentDueDate: string | null;
-    paymentMethod: "cash" | "credit";
-    purchaseTotal: number;
-    amountPaid: number;
-    outstandingBalance: number;
-    paymentStatus: "Paid" | "Partially Paid" | "Unpaid";
-};
-
-type RentalPurchaseItem = {
-    equipmentId: number;
-    equipmentNumber: string;
-    name: string;
-    quantity: number;
-    unitCost: number;
-    lineTotal: number;
-};
-
-type RentalApiResponse = {
-    success?: boolean;
-    error?: string;
-    payables?: unknown;
-    items?: unknown;
-    alreadyProcessed?: boolean;
-};
-
-function cents(value: string): number | null {
-    if (!/^\d+(?:\.\d{1,2})?$/.test(value.trim())) return null;
-    const number = Number(value);
-    return Number.isSafeInteger(Math.round(number * 100)) && number > 0 ? Math.round(number * 100) : null;
-}
-function formatSupplierPurchaseDate(value?: string | null) {
-    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value || "");
-    if (!match) return "—";
-    const year = Number(match[1]);
-    const month = Number(match[2]);
-    const day = Number(match[3]);
-    const date = new Date(Date.UTC(year, month - 1, day));
-    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== `${match[1]}-${match[2]}-${match[3]}`) return "—";
-    const months = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "Jun.", "Jul.", "Aug.", "Sep.", "Oct.", "Nov.", "Dec."];
-    return `${months[month - 1]} ${day}, ${year}`;
-}
-function formatPurchaseRecordedTime(value?: string | null) {
-    // created_at records when StockNBook saved the purchase, not the supplier's transaction time.
-    // The API returns database-local clock text; avoid converting an unknown timezone.
-    const match = /^\d{4}-\d{2}-\d{2}[ T](\d{2}):(\d{2})/.exec(value || "");
-    if (!match || Number(match[1]) > 23) return "—";
-    const hour = Number(match[1]);
-    return `${hour % 12 || 12}:${match[2]} ${hour >= 12 ? "PM" : "AM"}`;
-}
-
-function readPayable(value: unknown): RentalSupplierPayable | null {
-    if (!value || typeof value !== "object") return null;
-    const item = value as Record<string, unknown>;
-    const purchaseId = Number(item.purchaseId);
-    const purchaseTotal = Number(item.purchaseTotal);
-    const amountPaid = Number(item.amountPaid);
-    if (!Number.isSafeInteger(purchaseId) || purchaseId < 1 ||
-        !Number.isFinite(purchaseTotal) || purchaseTotal < 0 ||
-        !Number.isFinite(amountPaid) || amountPaid < 0 || amountPaid > purchaseTotal + 0.011 ||
-        !String(item.purchaseNumber || "").trim()) return null;
-    const outstandingBalance = Math.max(0, Math.round((purchaseTotal - amountPaid) * 100) / 100);
-    const paymentMethod = item.paymentMethod === "cash" ? "cash" : item.paymentMethod === "credit" ? "credit" : null;
-    if (!paymentMethod) return null;
-    return {
-        purchaseId,
-        purchaseNumber: String(item.purchaseNumber),
-        supplier: String(item.supplier || ""),
-        supplierInvoiceNumber: item.supplierInvoiceNumber == null ? null : String(item.supplierInvoiceNumber),
-        purchaseDate: String(item.purchaseDate || ""),
-        recordedAt: item.recordedAt == null ? null : String(item.recordedAt),
-        paymentDueDate: item.paymentDueDate == null ? null : String(item.paymentDueDate),
-        paymentMethod, purchaseTotal, amountPaid, outstandingBalance,
-        paymentStatus: outstandingBalance === 0 ? "Paid" : amountPaid > 0 ? "Partially Paid" : "Unpaid",
-    };
-}
-function readItem(value: unknown): RentalPurchaseItem | null {
-    if (!value || typeof value !== "object") return null;
-    const item = value as Record<string, unknown>;
-    const quantity = Number(item.quantity), unitCost = Number(item.unitCost);
-    const equipmentId = Number(item.equipmentId);
-    if (!Number.isSafeInteger(equipmentId) || equipmentId <= 0 || !Number.isSafeInteger(quantity) || quantity <= 0 ||
-        !Number.isFinite(unitCost) || unitCost < 0) return null;
-    return {
-        equipmentId,
-        equipmentNumber: String(item.equipmentNumber || ""),
-        name: String(item.name || "Archived equipment"),
-        quantity,
-        unitCost,
-        lineTotal: Number.isFinite(Number(item.lineTotal)) ? Number(item.lineTotal) : Math.round(quantity * unitCost * 100) / 100,
-    };
-}
-
-const inputClass = "h-10 w-full min-w-0 rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#2B174C] outline-none focus:border-[#5A35A5]";
-const secondaryButton = "rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-3 py-2 text-xs font-semibold text-[#5330B6] hover:bg-[#ECE3FF] disabled:opacity-50";
-const primaryButton = "rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-50";
-
-function RentalSupplierPayablesDialog({
-                                          branchId, canManage, onClose,
-                                      }: { branchId?: number; canManage: boolean; onClose: () => void }) {
-    const [payables, setPayables] = React.useState<RentalSupplierPayable[]>([]);
-    const [loading, setLoading] = React.useState(true);
-    const [saving, setSaving] = React.useState(false);
-    const [error, setError] = React.useState("");
-    const [notice, setNotice] = React.useState("");
-    const closePaymentToast = React.useCallback(() => setNotice(""), []);
-    const [search, setSearch] = React.useState("");
-    const [methodFilter, setMethodFilter] = React.useState<"all" | "cash" | "credit">("all");
-    const [selectedPurchase, setSelectedPurchase] = React.useState<RentalSupplierPayable | null>(null);
-    const [purchaseItems, setPurchaseItems] = React.useState<RentalPurchaseItem[]>([]);
-    const [itemsLoading, setItemsLoading] = React.useState(false);
-    const [paymentPurchaseId, setPaymentPurchaseId] = React.useState("");
-    const [paymentAmount, setPaymentAmount] = React.useState("");
-    const [paymentDate, setPaymentDate] = React.useState(rentalToday);
-    const [confirmation, setConfirmation] = React.useState<{
-        purchaseId: number; purchaseNumber: string; amount: number; paymentDate: string;
-    } | null>(null);
-    const paymentKeyRef = React.useRef<string>("");
-    const pendingRef = React.useRef(false);
-    const loadedRef = React.useRef(false);
-    const lastRequestRef = React.useRef(0);
-    const lastItemRequestRef = React.useRef(0);
-
-    const request = React.useCallback(async (data: Record<string, unknown>): Promise<RentalApiResponse> => {
-        const token = sessionStorage.getItem("token");
-        if (!token) throw new Error("Your session has expired. Please sign in again.");
-        const response = await fetch("/api/rental-inventory", {
-            method: "POST", cache: "no-store",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ ...data, ...(branchId ? { branch_id: branchId } : {}) }),
-        });
-        const result = await response.json().catch(() => ({})) as RentalApiResponse;
-        if (!response.ok || result.success !== true) {
-            throw new Error(result.error || `Unable to load rental supplier payments (HTTP ${response.status}).`);
-        }
-        return result;
-    }, [branchId]);
-
-    const reload = React.useCallback(async () => {
-        const number = ++lastRequestRef.current;
-        if (!loadedRef.current) setLoading(true);
-        try {
-            const result = await request({ action: "get_rental_supplier_payables" });
-            if (!Array.isArray(result.payables)) throw new Error("Rental payables response is invalid.");
-            const normalized = result.payables.map(readPayable);
-            if (normalized.some(item => item === null)) throw new Error("A rental purchase returned invalid payment information.");
-            if (number !== lastRequestRef.current) return;
-            const nextRows = normalized as RentalSupplierPayable[];
-            setPayables(nextRows);
-            setSelectedPurchase(previous => previous
-                ? nextRows.find(item => item.purchaseId === previous.purchaseId) || null : null);
-            loadedRef.current = true;
-            setError("");
-        } catch (cause) {
-            if (number === lastRequestRef.current) {
-                setError(cause instanceof Error ? cause.message : "Could not load rental supplier payables.");
-            }
-        } finally {
-            if (number === lastRequestRef.current) { setLoading(false); }
-        }
-    }, [request]);
-
-    React.useEffect(() => {
-        void reload();
-        const onFocus = () => { if (document.visibilityState === "visible" && !pendingRef.current) void reload(); };
-        window.addEventListener("focus", onFocus);
-        const refreshEvery = window.setInterval(onFocus, 30000);
-        return () => {
-            lastRequestRef.current += 1;
-            lastItemRequestRef.current += 1;
-            window.removeEventListener("focus", onFocus);
-            window.clearInterval(refreshEvery);
-        };
-    }, [reload]);
-
-    const needToPay = payables.reduce((sum, item) => sum + Math.round(item.outstandingBalance * 100), 0) / 100;
-    const alreadyPaid = payables.reduce((sum, item) => sum + Math.round(item.amountPaid * 100), 0) / 100;
-    const filtered = payables.filter(item =>
-        (methodFilter === "all" || item.paymentMethod === methodFilter) &&
-        [item.purchaseNumber, item.supplier, item.supplierInvoiceNumber, item.paymentStatus, item.paymentMethod]
-            .some(value => String(value || "").toLowerCase().includes(search.trim().toLowerCase())));
-    const chosenPayment = payables.find(item => String(item.purchaseId) === paymentPurchaseId && item.outstandingBalance > 0);
-
-    const view = async (item: RentalSupplierPayable) => {
-        setSelectedPurchase(item);
-        setPurchaseItems([]);
-        setItemsLoading(true);
-        const count = ++lastItemRequestRef.current;
-        try {
-            const response = await request({ action: "get_rental_purchase_items", purchaseId: item.purchaseId });
-            if (!Array.isArray(response.items)) throw new Error("Purchased equipment data was not returned.");
-            const rows = response.items.map(readItem);
-            if (rows.some(row => row === null)) throw new Error("Purchased equipment information is invalid.");
-            if (lastItemRequestRef.current === count) setPurchaseItems(rows as RentalPurchaseItem[]);
-        } catch (cause) {
-            if (lastItemRequestRef.current === count) setError(cause instanceof Error ? cause.message : "Unable to view purchased equipment.");
-        } finally {
-            if (lastItemRequestRef.current === count) setItemsLoading(false);
-        }
-    };
-
-    const preparePayment = (event: React.FormEvent) => {
-        event.preventDefault();
-        if(!canManage){setError("Full Inventory access is required to record payments.");return;}
-        if (saving || !chosenPayment) return;
-        const amountCents = cents(paymentAmount);
-        if (amountCents === null || amountCents > Math.round(chosenPayment.outstandingBalance * 100)) {
-            setError("Enter a positive payment with up to two decimals, not exceeding the outstanding balance.");
-            return;
-        }
-        if (!validRentalDate(paymentDate) || paymentDate > rentalToday()) {
-            setError("Choose a valid payment date that is not in the future.");
-            return;
-        }
-        setError("");
-        if (!paymentKeyRef.current) paymentKeyRef.current = crypto.randomUUID();
-        setConfirmation({ purchaseId: chosenPayment.purchaseId, purchaseNumber: chosenPayment.purchaseNumber,
-            amount: amountCents / 100, paymentDate });
-    };
-
-    const confirmPayment = async () => {
-        if(!canManage){setError("Full Inventory access is required to record payments.");return;}
-        if (!confirmation || saving || pendingRef.current) return;
-        pendingRef.current = true;
-        setSaving(true);
-        setError("");
-        try {
-            const result = await request({ action: "pay_rental_supplier_purchase", purchaseId: confirmation.purchaseId,
-                amount: confirmation.amount, paymentDate: confirmation.paymentDate,
-                requestKey: paymentKeyRef.current });
-            const purchaseNumber = confirmation.purchaseNumber;
-            paymentKeyRef.current = ""; // A successful request uses a new key next time.
-            setConfirmation(null);
-            setPaymentPurchaseId("");
-            setPaymentAmount("");
-            setNotice(result.alreadyProcessed ? "This payment was already recorded." : `Payment recorded for ${purchaseNumber}.`);
-            await reload();
-        } catch (cause) {
-            // Keep the SAME requestKey after a failed/uncertain network reply, to prevent duplicate payment.
-            setError(cause instanceof Error ? cause.message : "Unable to record the supplier payment.");
-        } finally { pendingRef.current = false; setSaving(false); }
-    };
-
-    return <div role="presentation" className="fixed inset-0 z-[145] flex items-center justify-center bg-black/50 p-3 sm:p-4">
-        <div role="dialog" aria-modal="true" aria-label="Supplier Payables" className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-            <div className="flex items-center justify-between gap-3 border-b border-[#E3D8EA] px-5 py-4 sm:px-6">
-                <h2 className="text-lg font-bold text-[#2B174C]">Supplier Payables</h2>
-                <div className="flex items-center gap-3">
-                    <button type="button" title="Download filtered rental supplier payables PDF" aria-label="Download rental supplier payables"
-                            onClick={() => void exportRentalPanelPdf("Rental Supplier Payables",
-                                ["Purchase No.", "Purchase Date", "Supplier", "Method", "Total", "Paid", "Outstanding", "Status"],
-                                filtered.map(row => [row.purchaseNumber, row.purchaseDate, row.supplier,
-                                    row.paymentMethod, peso(row.purchaseTotal), peso(row.amountPaid), peso(row.outstandingBalance), row.paymentStatus]),
-                                methodFilter === "all" ? "All payments" : methodFilter)
-                                .catch(() => setError("Unable to download the supplier payables report."))}
-                            className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]"><Download size={16}/></button>
-                    <button type="button" aria-label="Close Rental Supplier Payables" disabled={saving} onClick={onClose} className="rounded-lg px-2 py-1 text-sm text-[#806A8C] hover:text-[#2B174C] disabled:opacity-50">Close</button>
-                </div>
-            </div>
-            <div className="space-y-4 overflow-y-auto px-5 py-5 sm:px-6">
-                <p className="text-xs text-[#806A8C]">Purchase balances belong to the supplier transaction, not to each equipment unit. Payments do not alter rental stock.</p>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-label="Rental supplier purchase balances">
-                    <div className="rounded-xl border border-[#E3D8EA] bg-[#FBF8FF] p-4">
-                        <p className="text-xs font-medium text-[#806A8C]">Need to Pay</p>
-                        {loading ? <div className="mt-2 h-7 w-32 animate-pulse rounded bg-[#EDE5F6]"/> : <p className="mt-1 text-xl font-bold text-[#2B174C]">{peso(needToPay)}</p>}
-                        <p className="mt-1 text-xs text-[#806A8C]">Outstanding across all rental purchases</p>
-                    </div>
-                    <div className="rounded-xl border border-[#E3D8EA] bg-[#FBF8FF] p-4">
-                        <p className="text-xs font-medium text-[#806A8C]">Paid</p>
-                        {loading ? <div className="mt-2 h-7 w-32 animate-pulse rounded bg-[#EDE5F6]"/> : <p className="mt-1 text-xl font-bold text-[#2B174C]">{peso(alreadyPaid)}</p>}
-                        <p className="mt-1 text-xs text-[#806A8C]">Payments already recorded for rental purchases</p>
-                    </div>
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                    <input aria-label="Search rental supplier purchases" placeholder="Search Purchase No., supplier, invoice, or status..." value={search} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setSearch(e.target.value)} className={`${inputClass} flex-1`}/>
-                    <RentalInventoryFilterSelect containerClassName="w-full sm:w-[176px]" aria-label="Filter rental supplier payment method" value={methodFilter} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setMethodFilter(e.target.value as typeof methodFilter)}>
-                        <option value="all">All Payments</option><option value="cash">Cash</option><option value="credit">Credit (Utang)</option>
-                    </RentalInventoryFilterSelect>
-                </div>
-                <SuccessToast toast={notice ? {title:"Supplier payment updated",message:notice} : null} onClose={closePaymentToast} />
-                {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
-                {loading ? <div className="space-y-2" aria-label="Loading rental supplier purchases">{[0,1,2].map(n=><div key={n} className="h-11 animate-pulse rounded-xl bg-[#F4F0F8]"/>)}</div> :
-                    filtered.length===0 ? <p className="rounded-lg bg-[#FCF9FF] p-4 text-sm text-[#806A8C]">{payables.length===0?"No rental supplier purchases recorded yet.":"No purchases match the selected filters."}</p> :
-                        <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                            <colgroup><col className="w-[19%]"/><col className="w-[15%]"/><col className="w-[16%]"/><col className="w-[10%]"/><col className="w-[9%]"/><col className="w-[9%]"/><col className="w-[12%]"/><col className="w-[10%]"/></colgroup>
-                            <thead className="sticky top-0 z-10 border-b border-[#E3D8EA] bg-white text-[#806A8C]"><tr>
-                                <th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Purchase No.</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Purchase Date / Time</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Supplier</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Method</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Total</th>
-                                <th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Paid</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Outstanding</th><th className="truncate min-w-0 break-words p-1.5 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Status</th>
-                            </tr></thead>
-                            <tbody>{filtered.map(item=><tr key={item.purchaseId} className="border-t border-[#EFE8F2] text-[#2B174C]">
-                                <td className="min-w-0 break-words py-2 px-4 text-left"><button type="button" onClick={()=>void view(item)} className="rounded-lg px-1 py-1 font-semibold text-[#5330B6] underline underline-offset-2 transition hover:bg-[#F1EBFF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5330B6]">{item.purchaseNumber}</button></td>
-                                <td className="min-w-0 px-2 py-2">{formatSupplierPurchaseDate(item.purchaseDate)}<div className="mt-1 text-[10px] text-[#806A8C]">{formatPurchaseRecordedTime(item.recordedAt)}</div></td>
-                                <td className="min-w-0 break-words px-2 py-2">{item.supplier}</td><td className="min-w-0 break-words px-2 py-2 text-center">{item.paymentMethod==="cash"?"Cash":"Credit (Utang)"}</td>
-                                <td className="min-w-0 break-words px-2 py-2 text-center tabular-nums">{peso(item.purchaseTotal)}</td><td className="min-w-0 break-words px-2 py-2 text-center tabular-nums">{peso(item.amountPaid)}</td>
-                                <td className="min-w-0 break-words px-2 py-2 text-center font-semibold tabular-nums">{peso(item.outstandingBalance)}</td>
-                                <td className="min-w-0 break-words px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${item.paymentStatus==="Paid"?"text-[#23834A]":item.paymentStatus==="Unpaid"?"text-[#D92C3F]":"text-[#C77A00]"}`}>{item.paymentStatus}</span></td>
-                            </tr>)}</tbody>
-                        </table></div>}
-
-                {selectedPurchase && <section className="space-y-3 rounded-xl border border-[#E3D8EA] bg-[#FCF9FF] p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-bold text-[#2B174C]">{selectedPurchase.purchaseNumber} — Purchased Equipment</h3>
-                        <button type="button" onClick={()=>{setSelectedPurchase(null);lastItemRequestRef.current+=1;}} className="text-xs font-semibold text-[#806A8C]">Close Details</button></div>
-                    <div className="grid gap-2 text-xs text-[#5A476A] sm:grid-cols-2 lg:grid-cols-4">
-                        <span>Supplier Invoice: <strong>{selectedPurchase.supplierInvoiceNumber||"—"}</strong></span>
-                        <span>Purchase Date: <strong>{formatSupplierPurchaseDate(selectedPurchase.purchaseDate)}</strong></span>
-                        <span>Due Date: <strong>{formatSupplierPurchaseDate(selectedPurchase.paymentDueDate)}</strong></span>
-                        <span>Payment Method: <strong>{selectedPurchase.paymentMethod==="cash"?"Cash":"Credit"}</strong></span>
-                    </div>
-                    {itemsLoading ? <p className="text-xs text-[#806A8C]">Loading purchased equipment...</p> : purchaseItems.length === 0 ?
-                        <p className="text-xs text-[#806A8C]">No purchase item details were returned.</p> :
-                        <div className="max-h-[320px] w-full overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                            <colgroup><col className="w-[42%]"/><col className="w-[18%]"/><col className="w-[20%]"/><col className="w-[20%]"/></colgroup>
-                            <thead className="sticky top-0 z-10 bg-[#FCF9FF] text-[#806A8C]"><tr><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Rental Equipment</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Quantity Purchased</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Unit Cost</th><th className="truncate p-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">Line Total</th></tr></thead>
-                            <tbody>{purchaseItems.map((item,index)=><tr key={`${item.equipmentId}-${index}`} className="border-t border-[#E9E1EE]">
-                                <td className="py-2 px-4 text-left"><strong>{item.name}</strong> <span className="text-[#806A8C]">{item.equipmentNumber||""}</span></td>
-                                <td className="p-2 text-center">{item.quantity}</td><td className="p-2 text-center">{peso(item.unitCost)}</td><td className="p-2 text-center">{peso(item.lineTotal)}</td>
-                            </tr>)}</tbody>
-                        </table></div>}
-                </section>}
-
-                {canManage&&<form onSubmit={preparePayment} className="space-y-3 border-t border-[#E3D8EA] pt-4">
-                    <h3 className="text-sm font-bold text-[#2B174C]">Record Payment for a Specific Purchase</h3>
-                    <select aria-label="Select rental purchase with an outstanding balance" value={paymentPurchaseId}
-                            onChange={(event: React.ChangeEvent<HTMLSelectElement>)=>{setPaymentPurchaseId(event.target.value);setPaymentAmount("");setError("");paymentKeyRef.current=crypto.randomUUID();}} className={inputClass}>
-                        <option value="">Select an unpaid or partially paid purchase</option>
-                        {payables.filter(item=>item.outstandingBalance>0).map(item=><option key={item.purchaseId} value={item.purchaseId}>
-                            {item.purchaseNumber} — {item.supplier} — {peso(item.outstandingBalance)} outstanding
-                        </option>)}
-                    </select>
-                    {chosenPayment && <p className="text-xs text-[#806A8C]">Remaining balance: <strong className="text-[#2B174C]">{peso(chosenPayment.outstandingBalance)}</strong></p>}
-                    <div className="grid gap-3 sm:grid-cols-2">
-                        <label className="space-y-1"><span className="text-xs font-semibold text-[#5A476A]">Amount Paid (₱)</span>
-                            <input type="number" min="0.01" step="0.01" required value={paymentAmount} onChange={(event: React.ChangeEvent<HTMLInputElement>)=>setPaymentAmount(event.target.value)} className={inputClass}/></label>
-                        <label className="space-y-1"><span className="text-xs font-semibold text-[#5A476A]">Payment Date</span>
-                            <input type="date" max={rentalToday()} required value={paymentDate} onChange={(event: React.ChangeEvent<HTMLInputElement>)=>setPaymentDate(event.target.value)} className={inputClass}/></label>
-                    </div>
-                    <div className="flex justify-end"><button type="submit" disabled={!chosenPayment||saving} className={primaryButton}>{saving?"Recording...":"Record Payment"}</button></div>
-                </form>}
-            </div>
-        </div>
-        {confirmation && <div role="presentation" className="fixed inset-0 z-[160] flex items-center justify-center bg-black/60 p-4">
-            <div role="alertdialog" aria-modal="true" aria-label="Confirm Rental Supplier Payment" className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5 shadow-xl">
-                <div className="flex items-center gap-2"><CheckCircle2 size={20} className="text-[#5A35A5]"/><h3 className="text-lg font-bold text-[#2B174C]">Confirm Supplier Payment</h3></div>
-                <p className="text-sm text-[#5A476A]">Record <strong>{peso(confirmation.amount)}</strong> for purchase <strong>{confirmation.purchaseNumber}</strong> on <strong>{confirmation.paymentDate}</strong>?</p>
-                <p className="rounded-lg bg-[#FCF9FF] p-3 text-xs text-[#806A8C]">This adds a financial payment to the Rental Supplier Ledger. It does not receive or adjust equipment stock.</p>
-                <div className="flex justify-end gap-2"><button type="button" disabled={saving} onClick={()=>setConfirmation(null)} className={secondaryButton}>Back</button>
-                    <button type="button" disabled={saving} onClick={()=>void confirmPayment()} className={primaryButton}>{saving?"Recording...":"Confirm Payment"}</button></div>
-            </div>
-        </div>}
     </div>;
 }

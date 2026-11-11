@@ -478,6 +478,10 @@ async function loadRestockHistory(
         SELECT
             rh.id,
             rh.branch_id,
+            p.id AS product_id,
+            p.product_number,
+            rh.movement_type,
+            CASE WHEN v.is_default = 1 AND p.has_variants = 1 THEN 1 ELSE 0 END AS is_parent_row,
             p.product_name,
             CASE WHEN v.is_default = 1 THEN NULL ELSE v.variant_name END AS variant_name,
             rh.quantity_before AS stock_before,
@@ -488,6 +492,7 @@ async function loadRestockHistory(
                      THEN SUBSTRING(rh.reason, LOCATE(': ', rh.reason) + 2)
                  ELSE rh.reason END AS notes,
             DATE_FORMAT(rh.created_at, '%Y-%m-%d') AS restock_date,
+            DATE_FORMAT(rh.created_at, '%H:%i:%s') AS restock_time,
             br.branch_name
         FROM inventory_movements rh
                  JOIN branch_inventory sbi ON sbi.id = rh.branch_inventory_id
@@ -529,6 +534,12 @@ async function loadRestockHistory(
             asText(row.branch_name) ||
             (row.branch_id ? `Branch ${row.branch_id}` : "Unassigned Branch"),
         quantityAdded: asNumber(row.quantity_added),
+        // Exact time and product identity for the Inventory stock activity list.
+        time: asText(row.restock_time) || undefined,
+        productId: asNumber(row.product_id),
+        productNumber: asText(row.product_number) || undefined,
+        movementType: asText(row.movement_type) || undefined,
+        isParentRow: Number(row.is_parent_row) === 1,
         currentStock: asNumber(row.current_stock),
         stockBefore: asNumber(row.stock_before),
         receivedBy: asText(row.received_by) || "Not recorded",

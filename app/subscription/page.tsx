@@ -415,24 +415,29 @@ export default function SubscriptionPage() {
         }
     }
 
-    async function uploadReceiptProof(file: File) {
-        const formData = new FormData();
-        formData.append("receipt", file);
-
-        const res = await fetch("/api/subscription-receipt", {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${token}`,
-            },
-            body: formData,
-        });
-
-        const body = await res.json();
-        if (!res.ok) {
-            throw new Error(body.error || "Unable to upload the GCash receipt.");
+    // Send the proof with the verified payment submission; never upload it to /public.
+    async function encodeReceiptProof(file: File): Promise<string> {
+        if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+            throw new Error("Upload a PNG, JPG, JPEG, or WEBP receipt image.");
+        }
+        if (file.size === 0 || file.size > 5 * 1024 * 1024) {
+            throw new Error("The receipt image must be between 1 byte and 5 MB.");
         }
 
-        return String(body.receipt_url || "");
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error("Unable to read the GCash receipt."));
+            reader.onload = () => {
+                const dataUrl = String(reader.result || "");
+                const prefix = `data:${file.type};base64,`;
+                if (!dataUrl.startsWith(prefix)) {
+                    reject(new Error("Invalid receipt image."));
+                    return;
+                }
+                resolve(dataUrl.slice(prefix.length));
+            };
+            reader.readAsDataURL(file);
+        });
     }
 
     async function submitPayment() {
@@ -465,7 +470,7 @@ export default function SubscriptionPage() {
         setMessage("");
 
         try {
-            const uploadedReceiptUrl = await uploadReceiptProof(receiptFile);
+            const receiptBase64 = await encodeReceiptProof(receiptFile);
 
             const res = await fetch("/api/subscription-client", {
                 method: "POST",
@@ -477,7 +482,8 @@ export default function SubscriptionPage() {
                     action: "submit_subscription_payment",
                     plan_id: selectedPlan.id,
                     reference_number: referenceNumber.trim(),
-                    receipt_url: uploadedReceiptUrl,
+                    receipt_base64: receiptBase64,
+                    receipt_mime_type: receiptFile.type,
                     otp: cleanOtp,
                 }),
             });

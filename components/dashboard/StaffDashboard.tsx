@@ -8,12 +8,8 @@ import {
     Activity,
     CalendarCheck,
     CalendarX2,
-    Download,
-    LogIn,
-    LogOut,
     Search,
     Package,
-    Loader2,
     AlertTriangle,
     BarChart3,
     CalendarClock,
@@ -215,7 +211,7 @@ type StockAlertItem = {
 
 /**
  * Retry a transient browser network failure ONCE for dashboard read requests.
- * Not used for any operation that changes data (attendance or stock receiving).
+ * Not used for any operation that changes data (stock receiving).
  * HTTP errors are passed through and remain visible for proper diagnosis.
  */
 async function fetchStaffDashboardRead(url: string, options: RequestInit): Promise<Response> {
@@ -2932,19 +2928,6 @@ export default function StaffDashboard() {
 
     // The dashboard uses the same cream / plum palette and compact card styling
     // as Manager Inventory. All operational actions retain their existing routes.
-    const storeDisplayName =
-        getUserValue(user, "store_name") ||
-        getUserValue(user, "storeName") ||
-        getSavedItem("store_name") ||
-        getSavedItem("stocknbook_store_name") ||
-        "Store not provided";
-    const staffEmployeeNumber =
-        getUserValue(user, "staff_number") ||
-        getUserValue(user, "staffNumber") ||
-        getUserValue(user, "employee_number") ||
-        getUserValue(user, "employeeNumber") ||
-        getSavedItem("staff_number") ||
-        "Not provided";
     const confirmedForAllocation = canManageBookings
         ? todayBookings.filter((booking) =>
             normalizeDashboardBookingStatus(booking.status).toLowerCase() === "confirmed",
@@ -2989,7 +2972,7 @@ export default function StaffDashboard() {
                             <SalesSummaryCard title="Rental Inspections" value="—" subtitle="Connect assigned return inspections" icon={<Search size={24}/>} tone="blue"/>
                             <SalesSummaryCard title="Bookings to Review" value={needsReview === null ? "—" : String(needsReview)} subtitle={needsReview === null ? "Booking access not granted" : "Pending booking requirements"} icon={<CalendarCheck size={24}/>} tone="green"/>
                         </div>
-                        <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+                        <div className="grid grid-cols-1 items-stretch gap-3">
                             <StaffWorkTable
                                 operations={todayWorkOperations}
                                 canAccessBookings={canAccessBookings}
@@ -3001,14 +2984,6 @@ export default function StaffDashboard() {
                                 onOpenInventory={() => router.push("/inventory")}
                                 onRestock={startStaffRestock}
                                 onReviewExpiry={openExpiryReview}
-                            />
-                            <StaffAttendancePanel
-                                storeName={storeDisplayName}
-                                branchName={dashboardBranchName}
-                                staffName={staffDisplayName || "Staff member"}
-                                employeeNumber={staffEmployeeNumber}
-                                currentDateTime={currentDateTime}
-                                onNotify={showStaffToast}
                             />
                         </div>
                     </div>
@@ -5671,7 +5646,7 @@ function StaffStockAlertsModal({
     );
 }
 /* -------------------------------------------------------------------------- */
-/* Staff dashboard: clean operational work and database-backed attendance      */
+/* Staff dashboard: clean operational work                                       */
 /* -------------------------------------------------------------------------- */
 
 function StaffWorkTable({
@@ -5859,8 +5834,8 @@ function StaffExpiredStockReviewDialog({ alert, product, onClose }: {
 }
 
 // Stock receipt is limited to the manager-authorized quantity, variant, and
-// delivery reference. There are no Staff purchasing or supplier payment edits.
-/** Staff-only operational restock. Manager Inventory and supplier purchasing are unaffected. */
+// delivery reference. There are no Staff purchasing edits.
+/** Staff-only operational restock. Manager Inventory is unaffected. */
 function StaffDirectRestockDialog({ product, variantId, onClose, onSaved }: {
     product: Product;
     variantId: number | null;
@@ -5957,7 +5932,7 @@ function StaffDirectRestockDialog({ product, variantId, onClose, onSaved }: {
                             <textarea maxLength={500} rows={2} value={notes} onChange={event => setNotes(event.target.value)}
                                       className="mt-1 w-full rounded-xl border border-[#E3D8EA] bg-white p-3 text-sm text-[#21132E]" placeholder="Any receiving observations" />
                         </label>
-                        <p className="rounded-xl bg-[#F8F3FF] px-4 py-3 text-xs leading-5 text-[#5A476A]">Your manager assigned you Inventory access. This operation adds received quantities only; it does not change purchase costs, supplier payments, or selling prices.</p>
+                        <p className="rounded-xl bg-[#F8F3FF] px-4 py-3 text-xs leading-5 text-[#5A476A]">Your manager assigned you Inventory access. This operation adds received quantities only; it does not change purchase costs or selling prices.</p>
                     </section>
                     {error && <p role="alert" className="rounded-xl bg-[#FFF0F0] px-4 py-3 text-xs text-[#B42318]">{error}</p>}
                 </div>
@@ -6027,11 +6002,11 @@ function StaffAuthorizedReceiptDialog({ product, task, onClose, onSaved }: {
                             </div>
                         </div>
                     </section>
-                    <section className="space-y-3 border-t border-[#EEE8F2] pt-4"><h3 className="text-sm font-bold text-[#21132E]">2. Supplier & Receiving Information</h3>
+                    <section className="space-y-3 border-t border-[#EEE8F2] pt-4"><h3 className="text-sm font-bold text-[#21132E]">2. Receiving Information</h3>
                         <label className="block text-xs font-semibold text-[#5A476A]">Delivery Reference<input readOnly value={task.deliveryReference || "—"} className="mt-1 w-full rounded-xl border border-[#E3D8EA] bg-[#FAF8FD] p-3 text-sm"/></label>
                         {task.notes && <p className="rounded-xl bg-[#F8F3FF] p-3 text-xs text-[#5A476A]">{task.notes}</p>}
                     </section>
-                    <p className="rounded-xl bg-[#F8F3FF] px-4 py-3 text-xs leading-5 text-[#5A476A]">Supplier payments, unit costs, and purchase approval remain under the Manager/Owner. This staff action only records the authorized delivery and inventory movement.</p>
+                    <p className="rounded-xl bg-[#F8F3FF] px-4 py-3 text-xs leading-5 text-[#5A476A]">Unit costs and approval remain under the Manager/Owner. This staff action only records the authorized delivery and inventory movement.</p>
                     {error && <p role="alert" className="rounded-xl bg-[#FFF0F0] px-4 py-3 text-xs text-[#B42318]">{error}</p>}
                 </div>
                 <footer className="flex shrink-0 justify-end gap-2 border-t border-[#E9E1EE] bg-white px-6 py-4">
@@ -6041,723 +6016,6 @@ function StaffAuthorizedReceiptDialog({ product, task, onClose, onSaved }: {
             </form>
         </section>
     </div>;
-}
-
-type StaffAttendanceRecord = {
-    id: string;
-    storeName: string;
-    branchName: string;
-    employeeName: string;
-    employeeNumber: string;
-    date: string;
-    endDate?: string;
-    requestCreatedAt?: string;
-    decisionReason?: string;
-    reviewedAt?: string;
-    timeIn: string | null;
-    timeOut: string | null;
-    hoursWorked: number | null;
-    status: string;
-    reason: string;
-    leaveType: string;
-    approvalStatus: string;
-};
-
-function formatAttendanceRecord(value: unknown): StaffAttendanceRecord {
-    const raw = toRecord(value);
-    const get = (fields: string[]) => readText(raw, fields);
-    const timeIn = get(["timeIn", "time_in", "clock_in"]);
-    const timeOut = get(["timeOut", "time_out", "clock_out"]);
-    const rawHours = firstDefined(raw, ["hoursWorked", "hours_worked"]);
-    const hours = rawHours === null || rawHours === undefined || rawHours === "" ? null : Number(rawHours);
-    return {
-        id: get(["id", "attendanceId", "attendance_id", "request_id"]),
-        storeName: get(["storeName", "store_name"]),
-        branchName: get(["branchName", "branch_name"]),
-        employeeName: get(["employeeName", "employee_name", "staff_name"]),
-        employeeNumber: get(["employeeNumber", "employee_number", "staff_number"]),
-        date: get(["date", "attendanceDate", "attendance_date", "leave_date"]),
-        endDate: get(["endDate", "end_date", "leave_end_date"]) || undefined,
-        requestCreatedAt: get(["requestCreatedAt", "createdAt", "created_at"]) || undefined,
-        decisionReason: get(["decisionReason", "decision_reason"]) || undefined,
-        reviewedAt: get(["reviewedAt", "reviewed_at"]) || undefined,
-        timeIn: timeIn || null, timeOut: timeOut || null,
-        hoursWorked: hours !== null && Number.isFinite(hours) ? hours : null,
-        status: get(["status", "attendance_status"]) || "Unknown",
-        reason: get(["reason", "leave_reason", "absence_reason"]),
-        leaveType: get(["leaveType", "leave_type"]),
-        approvalStatus: get(["approvalStatus", "approval_status"]),
-    };
-}
-
-
-// Older StockNBook versions saved one row per day for one leave application.
-// Collapse only contiguous daily rows from the same submission, matching the
-// manager's request grouping without deleting or editing historical SQL rows.
-function groupStaffLeaveHistory(records: StaffAttendanceRecord[]): StaffAttendanceRecord[] {
-    const attendance = records.filter((record) => !record.id.startsWith("L-"));
-    const leaves = records.filter((record) => record.id.startsWith("L-"))
-        .sort((a, b) =>
-            a.employeeNumber.localeCompare(b.employeeNumber) ||
-            String(a.requestCreatedAt || "").localeCompare(String(b.requestCreatedAt || "")) ||
-            a.date.localeCompare(b.date));
-    const groups: StaffAttendanceRecord[] = [];
-    for (const record of leaves) {
-        const last = groups[groups.length - 1];
-        const endOfLast = last?.endDate || last?.date || "";
-        const previous = new Date(`${endOfLast}T00:00:00.000Z`);
-        if (!Number.isNaN(previous.getTime())) previous.setUTCDate(previous.getUTCDate() + 1);
-        const consecutiveDay = !Number.isNaN(previous.getTime()) &&
-            previous.toISOString().slice(0, 10) === record.date;
-        const sameSubmission = last && Boolean(last.requestCreatedAt && record.requestCreatedAt) &&
-            last.requestCreatedAt === record.requestCreatedAt &&
-            last.employeeNumber === record.employeeNumber &&
-            last.leaveType === record.leaveType && last.reason === record.reason &&
-            last.approvalStatus === record.approvalStatus;
-        if (sameSubmission && consecutiveDay) {
-            last.endDate = record.endDate && record.endDate >= record.date
-                ? record.endDate : record.date;
-        } else {
-            groups.push({ ...record });
-        }
-    }
-    return [...attendance, ...groups].sort((a, b) =>
-        b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
-}
-
-function staffLeaveStatus(record: StaffAttendanceRecord): string {
-    return record.approvalStatus ||
-        (record.status.toLowerCase() === "absent" ? "Absent" : "—");
-}
-
-function staffLeaveStatusStyle(status: string): string {
-    switch (status.toLowerCase()) {
-        case "approved": return "bg-[#E7F7ED] text-[#147D43]";
-        case "pending": return "bg-[#FFF4DF] text-[#A86905]";
-        case "rejected": case "disapproved": case "absent":
-            return "bg-[#FFE8E9] text-[#C72D36]";
-        default: return "bg-[#F2EDF7] text-[#5A476A]";
-    }
-}
-
-function staffAttendanceDay(raw: string) {
-    const key = String(raw || "").slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return raw || "—";
-    return new Date(`${key}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-function staffAttendanceClock(raw: string | null) {
-    if (!raw) return "—";
-    const candidate = /^\d{4}-\d{2}-\d{2} /.test(raw) ? raw.replace(" ", "T") : raw;
-    const date = new Date(candidate);
-    return Number.isNaN(date.getTime()) ? raw : date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
-}
-
-function staffAttendanceDuration(hours: number | null) {
-    if (hours === null || !Number.isFinite(hours)) return "—";
-    const minutes = Math.max(0, Math.round(hours * 60));
-    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
-function staffAttendanceStatus(record: StaffAttendanceRecord) {
-    const status = record.status.toLowerCase().replace(/[\s_-]+/g, " ");
-    if (status === "on duty" || (record.timeIn && !record.timeOut && status !== "absent")) return "On Duty";
-    if (status === "absent") return "Absent";
-    if (status.includes("leave")) return "Leave";
-    if (status === "pending") return "Leave";
-    if (status === "rejected") return "Leave";
-    if (record.timeIn && record.timeOut) return "Completed";
-    return record.status;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Staff attendance PDF export is intentionally defined in StaffDashboard.tsx  */
-/* (no StaffAttendancePdf.ts import or additional PDF component is required).   */
-/* -------------------------------------------------------------------------- */
-
-/** Staff attendance PDF export: browser-only, no new npm dependencies.
- * A4 landscape multipage report. Only the signed-in staff member's API-scoped
- * records are supplied by StaffDashboard; never make up absent days.
- */
-type StaffAttendancePdfRecord = {
-    id: string;
-    storeName: string;
-    branchName: string;
-    employeeName: string;
-    employeeNumber: string;
-    date: string;
-    endDate?: string;
-    timeIn: string | null;
-    timeOut: string | null;
-    hoursWorked: number | null;
-    status: string;
-    reason: string;
-    leaveType: string;
-    approvalStatus: string;
-};
-
-type StaffAttendancePdfOptions = {
-    storeName: string;
-    branchName: string;
-    staffName: string;
-    employeeNumber: string;
-    startDate: string;
-    endDate: string;
-    generatedAt: Date;
-    records: StaffAttendancePdfRecord[];
-};
-
-type ReportSection = {
-    title: string;
-    headers: string[];
-    widths: number[];
-    rows: string[][];
-};
-type PrintRow = { cells: string[][]; height: number };
-type PrintPage = { section: ReportSection; rows: PrintRow[] };
-
-const PAGE_WIDTH = 841.89;
-const PAGE_HEIGHT = 595.28;
-const SCALE = 2;
-const TABLE_X = 31;
-const TABLE_Y = 167;
-const HEADING_HEIGHT = 27;
-const FOOTER_Y = 550;
-const LINE_HEIGHT = 11;
-
-function dateLabel(raw: string) {
-    const matched = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-    if (!matched) return raw || "—";
-    const d = new Date(Date.UTC(Number(matched[1]), Number(matched[2]) - 1, Number(matched[3]), 12));
-    return d.toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
-}
-function clockLabel(raw: string | null): string {
-    if (!raw) return "—";
-    // Stored server dates are already Manila-local DATETIME values.
-    const parsed = new Date(raw.replace(" ", "T"));
-    if (Number.isNaN(parsed.valueOf())) return raw;
-    return parsed.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", hour12: true });
-}
-function hoursLabel(raw: number | null) {
-    if (raw === null || !Number.isFinite(raw)) return "—";
-    const minutes = Math.round(raw * 60);
-    return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
-}
-function statusLabel(record: StaffAttendancePdfRecord) {
-    if (record.timeIn && record.timeOut) return "Completed";
-    if (record.timeIn) return "On Duty";
-    if (/leave/i.test(record.status)) return "Leave";
-    return record.status || "—";
-}
-function safeFilePart(text: string) {
-    return text.replace(/[^a-z0-9_-]+/gi, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "Employee";
-}
-
-function wrapCell(ctx: CanvasRenderingContext2D, value: string, width: number): string[] {
-    const normalized = (value || "—").replace(/\s+/g, " ").trim() || "—";
-    const lines: string[] = [];
-    let line = "";
-    for (const word of normalized.split(" ")) {
-        const combined = line ? `${line} ${word}` : word;
-        if (ctx.measureText(combined).width <= width) {
-            line = combined;
-            continue;
-        }
-        if (line) { lines.push(line); line = ""; }
-        for (const letter of word) {
-            if (line && ctx.measureText(line + letter).width > width) {
-                lines.push(line);
-                line = "";
-            }
-            line += letter;
-        }
-    }
-    if (line) lines.push(line);
-    return lines.length ? lines : ["—"];
-}
-
-function sectionsFor(options: StaffAttendancePdfOptions): ReportSection[] {
-    const attendance = options.records.filter(r => Boolean(r.timeIn) || Boolean(r.timeOut) || r.status.toLowerCase() === "absent");
-    const leaves = options.records.filter(r => /leave|pending|rejected/i.test(r.status));
-    const general = attendance.map(r => [
-        r.storeName || options.storeName,
-        r.branchName || options.branchName,
-        r.employeeName || options.staffName,
-        // Employee number ALWAYS uses staff.id, supplied in employeeNumber from API.
-        r.employeeNumber || options.employeeNumber,
-        dateLabel(r.date), clockLabel(r.timeIn), clockLabel(r.timeOut), hoursLabel(r.hoursWorked), statusLabel(r),
-    ]);
-    const leaveRows = leaves.map(r => [
-        r.storeName || options.storeName,
-        r.branchName || options.branchName,
-        r.employeeName || options.staffName,
-        r.employeeNumber || options.employeeNumber,
-        dateLabel(r.date) + (r.endDate && r.endDate !== r.date ? ` – ${dateLabel(r.endDate)}` : ""),
-        r.leaveType || "Leave", r.approvalStatus || "—", r.reason || "—",
-    ]);
-    return [
-        {
-            title: `Attendance and Absences (${general.length})`,
-            headers: ["Store", "Branch", "Employee", "Employee ID", "Date", "Time In", "Time Out", "Hours", "Status"],
-            widths: [116, 100, 103, 75, 75, 75, 75, 56, 75], rows: general,
-        },
-        {
-            title: `Leave Requests (${leaveRows.length})`,
-            headers: ["Store", "Branch", "Employee", "Employee ID", "Date", "Leave Type", "Approval", "Reason"],
-            widths: [105, 94, 93, 75, 75, 77, 76, 155], rows: leaveRows,
-        },
-    ];
-}
-
-function renderPages(ctx: CanvasRenderingContext2D, sections: ReportSection[]): PrintPage[] {
-    const pages: PrintPage[] = [];
-    for (const section of sections) {
-        let page: PrintPage = { section, rows: [] };
-        let usedHeight = TABLE_Y + HEADING_HEIGHT;
-        const input = section.rows.length ? section.rows : [
-            ["No records for the selected dates.", ...Array(section.headers.length - 1).fill("")],
-        ];
-        for (const data of input) {
-            ctx.font = "8px Arial, sans-serif";
-            const wrapped = data.map((value, index) => wrapCell(ctx, value, section.widths[index] - 10));
-            let offset = 0;
-            const maxLines = Math.max(...wrapped.map(value => value.length));
-            // Large leave reasons continue on subsequent rows/pages rather than being truncated.
-            while (offset < maxLines) {
-                const cells = wrapped.map(lines => lines.slice(offset, offset + 24));
-                const height = Math.max(24, Math.max(...cells.map(v => v.length)) * LINE_HEIGHT + 10);
-                if (usedHeight + height > FOOTER_Y && page.rows.length > 0) {
-                    pages.push(page);
-                    page = { section, rows: [] };
-                    usedHeight = TABLE_Y + HEADING_HEIGHT;
-                }
-                page.rows.push({ cells, height });
-                usedHeight += height;
-                offset += 24;
-            }
-        }
-        pages.push(page);
-    }
-    return pages;
-}
-
-function drawPage(ctx: CanvasRenderingContext2D, page: PrintPage, pageIndex: number, totalPages: number, info: StaffAttendancePdfOptions) {
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
-    ctx.fillStyle = "#2B174C";
-    ctx.font = "bold 17px Arial, sans-serif";
-    ctx.fillText("StockNBook  |  Staff Attendance Report", TABLE_X, 31);
-    ctx.font = "10px Arial, sans-serif";
-    ctx.fillText(`Store: ${info.storeName}`, TABLE_X, 54);
-    ctx.fillText(`Branch: ${info.branchName}`, TABLE_X, 70);
-    ctx.fillText(`Employee: ${info.staffName}  |  Employee ID: ${info.employeeNumber}`, TABLE_X, 86);
-    ctx.fillText(`Period: ${dateLabel(info.startDate)} - ${dateLabel(info.endDate)}`, TABLE_X, 102);
-    ctx.fillStyle = "#6E597C";
-    ctx.font = "9px Arial, sans-serif";
-    ctx.fillText(`Generated: ${info.generatedAt.toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" })}`, TABLE_X, 119);
-    ctx.strokeStyle = "#D9CDF0";
-    ctx.beginPath(); ctx.moveTo(TABLE_X, 128); ctx.lineTo(PAGE_WIDTH - TABLE_X, 128); ctx.stroke();
-    ctx.fillStyle = "#21132E";
-    ctx.font = "bold 12px Arial, sans-serif";
-    ctx.fillText(page.section.title, TABLE_X, 149);
-
-    let y = TABLE_Y;
-    const drawGridRow = (cells: string[][], height: number, heading: boolean, shaded: boolean) => {
-        const totalWidth = page.section.widths.reduce((sum, n) => sum + n, 0);
-        ctx.fillStyle = heading ? "#F1EBFF" : shaded ? "#FAF8FD" : "#FFFFFF";
-        ctx.fillRect(TABLE_X, y, totalWidth, height);
-        let x = TABLE_X;
-        cells.forEach((lines, i) => {
-            const width = page.section.widths[i];
-            ctx.strokeStyle = "#E3D8EA";
-            ctx.lineWidth = 0.5;
-            ctx.strokeRect(x, y, width, height);
-            ctx.font = heading ? "bold 7.5px Arial, sans-serif" : "8px Arial, sans-serif";
-            ctx.fillStyle = heading ? "#4E2C66" : "#21132E";
-            lines.forEach((line, index) => ctx.fillText(line, x + 5, y + 12 + index * LINE_HEIGHT));
-            x += width;
-        });
-        y += height;
-    };
-    ctx.font = "bold 7.5px Arial, sans-serif";
-    const wrappedHeaders = page.section.headers.map((header, index) => wrapCell(ctx, header, page.section.widths[index] - 10));
-    drawGridRow(wrappedHeaders, HEADING_HEIGHT, true, false);
-    page.rows.forEach((row, i) => drawGridRow(row.cells, row.height, false, i % 2 === 1));
-    ctx.fillStyle = "#806A8C";
-    ctx.font = "9px Arial, sans-serif";
-    ctx.fillText("StockNBook  |  Attendance records from the database", TABLE_X, PAGE_HEIGHT - 19);
-    ctx.textAlign = "right";
-    ctx.fillText(`Page ${pageIndex + 1} of ${totalPages}`, PAGE_WIDTH - TABLE_X, PAGE_HEIGHT - 19);
-    ctx.textAlign = "left";
-}
-
-function saveJpegPagesAsPdf(images: Uint8Array[], imageWidth: number, imageHeight: number, filename: string) {
-    const encoder = new TextEncoder();
-    const pieces: BlobPart[] = [];
-    let cursor = 0;
-    const put = (content: string | Uint8Array) => {
-        const bytes = typeof content === "string" ? encoder.encode(content) : content;
-        pieces.push(bytes as BlobPart);
-        cursor += bytes.byteLength;
-    };
-    const offsets: number[] = [];
-    const obj = (id: number, writeContents: () => void) => {
-        offsets[id] = cursor;
-        put(`${id} 0 obj\n`);
-        writeContents();
-        put("\nendobj\n");
-    };
-    put("%PDF-1.4\n%StockNBook\n");
-    obj(1, () => put("<< /Type /Catalog /Pages 2 0 R >>"));
-    obj(2, () => put(`<< /Type /Pages /Kids [${images.map((_, i) => `${3 + i * 3} 0 R`).join(" ")}] /Count ${images.length} >>`));
-    images.forEach((jpeg, i) => {
-        const base = 3 + i * 3;
-        obj(base, () => put(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}] /Resources << /XObject << /PgImg ${base + 1} 0 R >> >> /Contents ${base + 2} 0 R >>`));
-        obj(base + 1, () => {
-            put(`<< /Type /XObject /Subtype /Image /Width ${imageWidth} /Height ${imageHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`);
-            put(jpeg);
-            put("\nendstream");
-        });
-        const stream = `q\n${PAGE_WIDTH} 0 0 ${PAGE_HEIGHT} 0 0 cm\n/PgImg Do\nQ\n`;
-        obj(base + 2, () => put(`<< /Length ${encoder.encode(stream).byteLength} >>\nstream\n${stream}endstream`));
-    });
-    const xref = cursor;
-    const count = 2 + 3 * images.length;
-    put(`xref\n0 ${count + 1}\n0000000000 65535 f \n`);
-    for (let id = 1; id <= count; id++) put(`${String(offsets[id]).padStart(10, "0")} 00000 n \n`);
-    put(`trailer\n<< /Size ${count + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`);
-    const blob = new Blob(pieces, { type: "application/pdf" });
-    const url = URL.createObjectURL(blob);
-    const element = document.createElement("a");
-    element.href = url;
-    element.download = filename;
-    document.body.appendChild(element);
-    element.click();
-    element.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
-}
-
-async function exportStaffAttendancePdf(options: StaffAttendancePdfOptions): Promise<void> {
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(PAGE_WIDTH * SCALE);
-    canvas.height = Math.round(PAGE_HEIGHT * SCALE);
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("PDF export is not supported by your browser.");
-    context.setTransform(SCALE, 0, 0, SCALE, 0, 0);
-    const pages = renderPages(context, sectionsFor(options));
-    const images = pages.map((page, index) => {
-        drawPage(context, page, index, pages.length, options);
-        const raw = canvas.toDataURL("image/jpeg", 0.87).split(",")[1];
-        const binary = atob(raw);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < bytes.length; i += 1) bytes[i] = binary.charCodeAt(i);
-        return bytes;
-    });
-    const filename = `StockNBook_Attendance_${safeFilePart(options.staffName)}_${options.startDate}_to_${options.endDate}.pdf`;
-    saveJpegPagesAsPdf(images, canvas.width, canvas.height, filename);
-}
-
-function StaffAttendancePanel({ storeName, branchName, staffName, employeeNumber, currentDateTime, onNotify }: {
-    storeName: string;
-    branchName: string;
-    staffName: string;
-    employeeNumber: string;
-    currentDateTime: Date;
-    onNotify: (message: StaffActionToastMessage) => void;
-}) {
-    const [records, setRecords] = useState<StaffAttendanceRecord[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [actionPending, setActionPending] = useState(false);
-    const [exportPending, setExportPending] = useState(false);
-    const [error, setError] = useState("");
-    const [tab, setTab] = useState<"worked" | "exceptions">("worked");
-    const [range, setRange] = useState<"month" | "90" | "all" | "day" | "custom">("month");
-    const [leaveRange, setLeaveRange] = useState<"month" | "90" | "all" | "day" | "custom">("all");
-    const [filterDay, setFilterDay] = useState(() => formatLocalIsoDate(new Date()));
-    const [filterStart, setFilterStart] = useState(() => formatLocalIsoDate(new Date()));
-    const [filterEnd, setFilterEnd] = useState(() => formatLocalIsoDate(new Date()));
-    const [leaveFilterDay, setLeaveFilterDay] = useState(() => formatLocalIsoDate(new Date()));
-    const [leaveFilterStart, setLeaveFilterStart] = useState(() => formatLocalIsoDate(new Date()));
-    const [leaveFilterEnd, setLeaveFilterEnd] = useState(() => formatLocalIsoDate(new Date()));
-    const [todayAttendance, setTodayAttendance] = useState<StaffAttendanceRecord | null>(null);
-    const [leaveOpen, setLeaveOpen] = useState(false);
-    const [selectedLeaveRequest, setSelectedLeaveRequest] = useState<StaffAttendanceRecord | null>(null);
-    const [leaveMode, setLeaveMode] = useState<"single" | "range">("single");
-    const [leaveDate, setLeaveDate] = useState("");
-    const [leaveEndDate, setLeaveEndDate] = useState("");
-    const [leaveReason, setLeaveReason] = useState("");
-    const [leaveType, setLeaveType] = useState("Personal");
-    const [refreshKey, setRefreshKey] = useState(0);
-
-    const getDates = useCallback(() => {
-        const now = new Date();
-        const endDate = formatLocalIsoDate(now);
-        if (range === "all") return { endDate, startDate: "2000-01-01" };
-        if (range === "day") return { startDate: filterDay, endDate: filterDay };
-        if (range === "custom") return { startDate: filterStart, endDate: filterEnd };
-        const start = range === "month" ? new Date(now.getFullYear(), now.getMonth(), 1) : new Date(now.getFullYear(), now.getMonth(), now.getDate() - 89);
-        return { startDate: formatLocalIsoDate(start), endDate };
-    }, [range, filterDay, filterStart, filterEnd]);
-    const loadAttendance = useCallback(async () => {
-        const token = getSavedItem("token");
-        if (!token) { setLoading(false); setError("Please sign in to load attendance."); return; }
-        const { startDate, endDate } = getDates();
-        if (startDate > endDate) { setLoading(false); setError("Start date cannot be after end date."); return; }
-        setLoading(true);
-        try {
-            const response = await fetch(`/api/staff-attendance?${new URLSearchParams({startDate, endDate})}`, {
-                headers: { Authorization: `Bearer ${token}` }, cache: "no-store",
-            });
-            const data = await response.json().catch(() => ({}));
-            const list = data.records ?? data.data?.records;
-            if (!response.ok || data.success === false || !Array.isArray(list)) throw new Error(data.error || "Attendance service is unavailable.");
-            setRecords(groupStaffLeaveHistory(list.map(formatAttendanceRecord)));
-            setTodayAttendance(data.todayRecord ? formatAttendanceRecord(data.todayRecord) : null);
-            setError("");
-        } catch (caught) {
-            setError(caught instanceof Error ? caught.message : "Could not load attendance records.");
-            setRecords([]);
-            setTodayAttendance(null);
-        } finally { setLoading(false); }
-    }, [getDates]);
-    useEffect(() => { void loadAttendance(); }, [loadAttendance, refreshKey]);
-
-    const today = formatLocalIsoDate(currentDateTime);
-    const todayRecord = todayAttendance ?? records.find((record) => record.date.slice(0, 10) === today && Boolean(record.timeIn));
-    const onDuty = Boolean(todayRecord?.timeIn && !todayRecord?.timeOut);
-    const workedHours = todayRecord?.hoursWorked ?? (onDuty && todayRecord?.timeIn ? Math.max(0, (currentDateTime.getTime() - new Date(todayRecord.timeIn.replace(" ", "T")).getTime()) / 3_600_000) : null);
-    const worked = records.filter((record) => Boolean(record.timeIn) || Boolean(record.timeOut));
-    const exceptions = records.filter((record) => {
-        const status = record.status.toLowerCase();
-        return status.includes("absent") || status.includes("leave") || status === "pending" || status === "rejected";
-    });
-    // Match the Manager Dashboard: leave history uses the submission date when
-    // available, while attendance keeps its own independent date-range filter.
-    const filteredExceptions = exceptions.filter((record) => {
-        const requestedDay = String(record.requestCreatedAt || record.date || "").slice(0, 10);
-        if (leaveRange === "all") return true;
-        if (leaveRange === "month") return requestedDay.slice(0, 7) === today.slice(0, 7);
-        if (leaveRange === "90") {
-            const start = formatLocalIsoDate(new Date(
-                currentDateTime.getFullYear(), currentDateTime.getMonth(), currentDateTime.getDate() - 89,
-            ));
-            return requestedDay >= start && requestedDay <= today;
-        }
-        if (leaveRange === "day") return requestedDay === leaveFilterDay;
-        return Boolean(leaveFilterStart && leaveFilterEnd && leaveFilterStart <= leaveFilterEnd &&
-            requestedDay >= leaveFilterStart && requestedDay <= leaveFilterEnd);
-    });
-    const filtered = tab === "worked" ? worked : filteredExceptions;
-    const activeRange = tab === "worked" ? range : leaveRange;
-
-    const postAction = async (action: "time_in" | "time_out" | "request_leave") => {
-        const token = getSavedItem("token");
-        if (!token) { setError("Please sign in again."); onNotify({title:"Sign in required",message:"Please sign in again.",tone:"error"}); return; }
-        setActionPending(true); setError("");
-        try {
-            const response = await fetch("/api/staff-attendance", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                body: JSON.stringify(action === "request_leave"
-                    ? { action, start_date: leaveDate, end_date: leaveMode === "range" ? leaveEndDate : leaveDate,
-                        reason: leaveReason.trim(), leave_type: leaveType }
-                    : { action }),
-            });
-            const result = await response.json().catch(() => ({}));
-            if (!response.ok || result.success === false) throw new Error(result.error || "Could not record attendance action.");
-            if (action === "time_in") {
-                onNotify({ title: "Time in recorded successfully", message: "Your attendance time in has been saved for today." });
-            } else if (action === "time_out") {
-                onNotify({ title: "Time out recorded successfully", message: "Your attendance time out has been saved for today." });
-            } else {
-                const selectedDates = leaveMode === "range" ? `${staffAttendanceDay(leaveDate)} – ${staffAttendanceDay(leaveEndDate)}` : staffAttendanceDay(leaveDate);
-                onNotify({ title: "Leave request submitted", message: `Your ${leaveType.toLowerCase()} leave request for ${selectedDates} is pending approval.` });
-            }
-            setLeaveOpen(false); setLeaveReason(""); setLeaveDate(""); setLeaveEndDate("");
-            setRefreshKey((value) => value + 1);
-        } catch (caught) {
-            const message = caught instanceof Error ? caught.message : "Attendance request failed.";
-            setError(message);
-            onNotify({ title: "Action could not be completed", message, tone: "error" });
-        } finally { setActionPending(false); }
-    };
-
-    const exportAttendance = async () => {
-        const token = getSavedItem("token");
-        if (!token) { setError("Please sign in again."); onNotify({title:"Sign in required",message:"Please sign in again.",tone:"error"}); return; }
-        setExportPending(true); setError("");
-        try {
-            const { startDate, endDate } = getDates();
-            if (startDate > endDate) throw new Error("Select a valid report date or range.");
-            // Attendance is limited to the chosen period; leave requests include full history.
-            // Export the full server-scoped range, not only visible scroll rows.
-            const response = await fetch(`/api/staff-attendance?${new URLSearchParams({ startDate, endDate, export: "1" })}`, {
-                headers: { Authorization: `Bearer ${token}` }, cache: "no-store",
-            });
-            const payload = await response.json().catch(() => ({}));
-            const list = payload.records ?? payload.data?.records;
-            if (!response.ok || payload.success === false || !Array.isArray(list))
-                throw new Error(payload.error || "Unable to fetch the complete attendance report.");
-            const allRecords = groupStaffLeaveHistory(list.map(formatAttendanceRecord) as StaffAttendanceRecord[]);
-            await exportStaffAttendancePdf({
-                storeName, branchName, staffName, employeeNumber,
-                startDate, endDate, generatedAt: new Date(),
-                records: allRecords,
-            });
-            onNotify({ title: "Attendance PDF generated", message: `Prepared the attendance report for ${staffAttendanceDay(startDate)} – ${staffAttendanceDay(endDate)} (${allRecords.length} records).` });
-        } catch (caught) {
-            const message = caught instanceof Error ? caught.message : "Attendance PDF export failed.";
-            setError(message);
-            onNotify({ title: "PDF export failed", message, tone: "error" });
-        } finally { setExportPending(false); }
-    };
-
-    return <section className="flex h-[540px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
-            <div className="flex min-w-0 items-center gap-2.5">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><CalendarClock size={19}/></span>
-                <div><h2 className="text-[15px] font-bold text-[#21132E]">Attendance Log</h2><p className="mt-0.5 text-[11px] text-[#86778F]">Your attendance and leave history</p></div>
-            </div>
-            <button type="button" onClick={() => void exportAttendance()} disabled={exportPending || loading || Boolean(error)}
-                    className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[#D9CDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC] disabled:opacity-50">
-                {exportPending ? <Loader2 size={14} className="animate-spin"/> : <Download size={14}/>} Export
-            </button>
-        </div>
-        <div className="mx-4 mt-3 grid grid-cols-3 gap-2 rounded-xl border border-[#E2EDE6] bg-[#F5FBF6] px-3 py-3">
-            <div className="min-w-0"><p className="text-[10px] text-[#86778F]">Current Status</p><p className={`mt-1 text-xs font-bold ${onDuty ? "text-[#168449]" : "text-[#5A476A]"}`}>{loading ? "Loading..." : onDuty ? "● On Duty" : todayRecord?.timeOut ? "Completed" : "Not Clocked In"}</p></div>
-            <div className="min-w-0 border-l border-[#E0E7E0] pl-3"><p className="text-[10px] text-[#86778F]">Time In</p><p className="mt-1 text-xs font-bold text-[#21132E]">{staffAttendanceClock(todayRecord?.timeIn || null)}</p></div>
-            <div className="min-w-0 border-l border-[#E0E7E0] pl-3"><p className="text-[10px] text-[#86778F]">Hours Worked</p><p className="mt-1 text-xs font-bold text-[#21132E]">{staffAttendanceDuration(workedHours)}</p></div>
-        </div>
-        <div className="grid grid-cols-3 gap-2 px-4 py-3">
-            <button type="button" onClick={() => void postAction("time_in")} disabled={actionPending || loading || onDuty || Boolean(todayRecord) || Boolean(error)}
-                    className="inline-flex h-9 items-center justify-center gap-1 rounded-xl bg-[#E6F7EE] px-1 text-[11px] font-semibold text-[#148447] hover:bg-[#D7F0E1] disabled:opacity-50"><LogIn size={15}/>Time In</button>
-            <button type="button" onClick={() => void postAction("time_out")} disabled={actionPending || loading || !onDuty || Boolean(error)}
-                    className="inline-flex h-9 items-center justify-center gap-1 rounded-xl bg-[#FDECEC] px-1 text-[11px] font-semibold text-[#B42318] hover:bg-[#FBE0E0] disabled:opacity-50"><LogOut size={15}/>Time Out</button>
-            <button type="button" onClick={() => {setError(""); setLeaveOpen(true);}} disabled={actionPending}
-                    className="inline-flex h-9 items-center justify-center gap-1 rounded-xl border border-[#D9CDF0] bg-[#F9F6FC] px-1 text-[11px] font-semibold text-[#5A35A5] hover:bg-[#F1EBFF]"><CalendarDays size={15}/>Request Leave</button>
-        </div>
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#EEE8F2] px-4 py-2">
-            <div className="flex items-center gap-3 text-[11px]">
-                <button type="button" onClick={() => setTab("worked")} aria-pressed={tab === "worked"} className={`pb-1 font-semibold ${tab === "worked" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Attendance ({worked.length})</button>
-                <button type="button" onClick={() => setTab("exceptions")} aria-pressed={tab === "exceptions"} className={`pb-1 font-semibold ${tab === "exceptions" ? "border-b-2 border-[#2B174C] text-[#2B174C]" : "text-[#86778F]"}`}>Absent / Leave ({filteredExceptions.length})</button>
-            </div>
-            <select aria-label={tab === "exceptions" ? "Leave request date range" : "Attendance date range"}
-                    value={activeRange}
-                    onChange={(event) => {
-                        const selectedRange = event.target.value as "month" | "90" | "all" | "day" | "custom";
-                        if (tab === "exceptions") setLeaveRange(selectedRange);
-                        else setRange(selectedRange);
-                    }}
-                    className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[10px] font-semibold text-[#2B174C]">
-                <option value="month">This Month</option>
-                <option value="90">Last 90 Days</option>
-                <option value="all">{tab === "exceptions" ? "All Requests" : "All Records"}</option>
-                <option value="day">Specific Date</option>
-                <option value="custom">Date Range</option>
-            </select>
-        </div>
-        {(activeRange === "day" || activeRange === "custom") && <div className="flex flex-wrap gap-2 border-t border-[#EEE8F2] px-4 py-2 text-[11px] text-[#5A476A]">
-            <label className="flex items-center gap-2">{activeRange === "day" ? "Date" : "From"}
-                <input aria-label={tab === "exceptions" ? (activeRange === "day" ? "Specific leave request date" : "Leave request start date") : (activeRange === "day" ? "Specific attendance date" : "Attendance start date")}
-                       type="date"
-                       value={tab === "exceptions" ? (activeRange === "day" ? leaveFilterDay : leaveFilterStart) : (activeRange === "day" ? filterDay : filterStart)}
-                       onChange={(event) => {
-                           if (tab === "exceptions") {
-                               if (activeRange === "day") setLeaveFilterDay(event.target.value);
-                               else setLeaveFilterStart(event.target.value);
-                           } else if (activeRange === "day") setFilterDay(event.target.value);
-                           else setFilterStart(event.target.value);
-                       }}
-                       className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/>
-            </label>
-            {activeRange === "custom" && <label className="flex items-center gap-2">To
-                <input aria-label={tab === "exceptions" ? "Leave request end date" : "Attendance end date"}
-                       type="date" min={tab === "exceptions" ? leaveFilterStart : filterStart}
-                       value={tab === "exceptions" ? leaveFilterEnd : filterEnd}
-                       onChange={(event) => tab === "exceptions" ? setLeaveFilterEnd(event.target.value) : setFilterEnd(event.target.value)}
-                       className="h-8 rounded-lg border border-[#E3D8EA] bg-white px-2 text-[11px]"/>
-            </label>}
-        </div>}
-        {error && <div role="alert" className="mx-4 mb-2 rounded-lg bg-[#FFF0F0] px-3 py-2 text-[11px] text-[#B42318]">{error} <button type="button" className="ml-1 underline" onClick={() => void loadAttendance()}>Retry</button></div>}
-        <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
-            <table className={`w-full text-left text-[10px] ${tab === "worked" ? "min-w-[410px]" : "min-w-[300px]"}`}>
-                <thead className="sticky top-0 z-10 border-y border-[#EEE8F2] bg-[#FBF9FC] uppercase tracking-[0.04em] text-[#806A8C]">
-                {tab === "worked" ? <tr><th className="px-3 py-2 font-semibold">Date</th><th className="px-3 py-2 font-semibold">Time In</th><th className="px-3 py-2 font-semibold">Time Out</th><th className="px-3 py-2 font-semibold">Hours</th><th className="px-3 py-2 font-semibold">Status</th></tr>
-                    : <tr><th className="px-3 py-2 font-semibold">Date</th><th className="px-3 py-2 font-semibold">Status</th><th className="px-3 py-2 font-semibold">Action</th></tr>}
-                </thead>
-                <tbody>
-                {loading ? <tr><td colSpan={tab === "worked" ? 5 : 3} className="px-3 py-10 text-center text-[#86778F]">Loading attendance...</td></tr> : filtered.length === 0 ? <tr><td colSpan={tab === "worked" ? 5 : 3} className="px-3 py-10 text-center text-[#86778F]">{tab === "worked" ? "No attendance records for this period." : "No absences or leave requests recorded."}</td></tr>
-                    : filtered.map((record, index) => <tr key={`${record.id}-${record.date}-${index}`} className="border-b border-[#F1ECF4] last:border-0 hover:bg-[#FCFAFE]">
-                        {tab === "worked" ? <>
-                            <td className="whitespace-nowrap px-3 py-2 text-[#5A476A]">{staffAttendanceDay(record.date)}</td>
-                            <td className="whitespace-nowrap px-3 py-2">{staffAttendanceClock(record.timeIn)}</td>
-                            <td className="whitespace-nowrap px-3 py-2">{staffAttendanceClock(record.timeOut)}</td>
-                            <td className="px-3 py-2">{staffAttendanceDuration(record.hoursWorked)}</td>
-                            <td className="px-3 py-2"><span className={`rounded-lg px-2 py-1 font-semibold ${record.timeOut ? "bg-[#E7F7ED] text-[#147D43]" : "bg-[#FFF4DF] text-[#A86905]"}`}>{staffAttendanceStatus(record)}</span></td>
-                        </> : <>
-                            <td className="whitespace-nowrap px-3 py-2 text-[#5A476A]">{staffAttendanceDay(record.date)}{record.endDate && record.endDate !== record.date ? ` – ${staffAttendanceDay(record.endDate)}` : ""}</td>
-                            <td className="px-3 py-2"><span className={`inline-flex rounded-lg px-2 py-1 font-semibold ${staffLeaveStatusStyle(staffLeaveStatus(record))}`}>{staffLeaveStatus(record)}</span></td>
-                            <td className="px-3 py-2"><button type="button" onClick={() => setSelectedLeaveRequest(record)}
-                                                              className="rounded-lg border border-[#D9C9EA] bg-[#F7F1FF] px-2.5 py-1.5 font-semibold text-[#5D2DAB] hover:bg-[#ECE3F8]">View</button></td>
-                        </>}
-                    </tr>)}
-                </tbody>
-            </table>
-        </div>
-        {selectedLeaveRequest && <div role="presentation" className="fixed inset-0 z-[95] flex items-center justify-center bg-[#160C24]/50 p-4 font-sans"
-                                      onMouseDown={event => { if (event.target === event.currentTarget) setSelectedLeaveRequest(null); }}>
-            <section role="dialog" aria-modal="true" aria-label="Staff leave request details"
-                     className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl">
-                <div className="flex items-start justify-between border-b border-[#E9E1EE] px-5 py-4">
-                    <div><h2 className="text-[17px] font-bold text-[#21132E]">Absent / Leave Request Details</h2>
-                        <p className="mt-1 text-xs text-[#86778F]">Your request and the manager's decision</p></div>
-                    <button type="button" aria-label="Close leave request details" onClick={() => setSelectedLeaveRequest(null)}
-                            className="rounded-lg p-1.5 text-[#806A8C] hover:bg-[#F7F1FF]"><X size={20}/></button>
-                </div>
-                <div className="max-h-[65vh] space-y-4 overflow-y-auto px-5 py-5">
-                    <div className="grid grid-cols-2 gap-4 rounded-xl bg-[#F9F6FC] p-4 text-xs">
-                        <div><p className="text-[#86778F]">Date Requested</p>
-                            <p className="mt-1 font-semibold text-[#21132E]">{selectedLeaveRequest.requestCreatedAt ? staffAttendanceDay(selectedLeaveRequest.requestCreatedAt) : "Not available"}</p></div>
-                        <div><p className="text-[#86778F]">Leave Date / Range</p>
-                            <p className="mt-1 font-semibold text-[#21132E]">{staffAttendanceDay(selectedLeaveRequest.date)}{selectedLeaveRequest.endDate && selectedLeaveRequest.endDate !== selectedLeaveRequest.date ? ` – ${staffAttendanceDay(selectedLeaveRequest.endDate)}` : ""}</p></div>
-                        <div><p className="text-[#86778F]">Leave Type</p>
-                            <p className="mt-1 font-semibold text-[#21132E]">{selectedLeaveRequest.leaveType || (staffAttendanceStatus(selectedLeaveRequest) === "Absent" ? "Absent" : "Leave")}</p></div>
-                        <div><p className="text-[#86778F]">Status</p><div className="mt-1"><span className={`inline-flex rounded-lg px-2 py-1 font-semibold ${staffLeaveStatusStyle(staffLeaveStatus(selectedLeaveRequest))}`}>{staffLeaveStatus(selectedLeaveRequest)}</span></div></div>
-                    </div>
-                    <div><p className="text-xs font-bold text-[#5A476A]">Your Reason</p>
-                        <p className="mt-1 whitespace-pre-wrap break-words rounded-xl border border-[#E9E1EE] px-3 py-3 text-sm text-[#21132E]">{selectedLeaveRequest.reason || "No reason recorded."}</p></div>
-                    <div><p className="text-xs font-bold text-[#5A476A]">Manager's Response</p>
-                        <p className="mt-1 whitespace-pre-wrap break-words rounded-xl border border-[#E9E1EE] bg-[#F9F6FC] px-3 py-3 text-sm text-[#21132E]">{selectedLeaveRequest.decisionReason || (staffLeaveStatus(selectedLeaveRequest).toLowerCase() === "pending" ? "Awaiting the manager's decision." : "No manager response was recorded.")}</p>
-                        {selectedLeaveRequest.reviewedAt && <p className="mt-2 text-[11px] text-[#86778F]">Decision recorded: {staffAttendanceDay(selectedLeaveRequest.reviewedAt)}</p>}
-                    </div>
-                </div>
-                <div className="flex justify-end border-t border-[#E9E1EE] px-5 py-3">
-                    <button type="button" onClick={() => setSelectedLeaveRequest(null)}
-                            className="rounded-xl border border-[#E3D8EA] px-4 py-2 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">Close</button>
-                </div>
-            </section>
-        </div>}
-        {leaveOpen && <div role="presentation" className="fixed inset-0 z-[90] flex items-center justify-center bg-[#160C24]/50 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setLeaveOpen(false); }}>
-            <form onSubmit={(event) => { event.preventDefault(); if (leaveDate && (leaveMode === "single" || (leaveEndDate && leaveEndDate >= leaveDate)) && leaveReason.trim()) void postAction("request_leave"); }}
-                  className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5 shadow-xl">
-                <div><h3 className="text-base font-bold text-[#21132E]">Request Leave</h3><p className="mt-1 text-xs text-[#86778F]">Your request is submitted for approval, not automatically approved.</p></div>
-                <div className="flex gap-2 rounded-xl bg-[#F7F1FF] p-1 text-xs font-semibold">
-                    <button type="button" onClick={() => setLeaveMode("single")}
-                            className={`flex-1 rounded-lg px-3 py-2 ${leaveMode === "single" ? "bg-[#2B174C] text-white" : "text-[#5A476A]"}`}>Specific Date</button>
-                    <button type="button" onClick={() => setLeaveMode("range")}
-                            className={`flex-1 rounded-lg px-3 py-2 ${leaveMode === "range" ? "bg-[#2B174C] text-white" : "text-[#5A476A]"}`}>Date Range</button>
-                </div>
-                <div className={`grid gap-3 ${leaveMode === "range" ? "sm:grid-cols-2" : ""}`}>
-                    <label className="block text-xs font-semibold text-[#5A476A]">{leaveMode === "range" ? "From" : "Leave Date"}<input required type="date" min={today} value={leaveDate} onChange={(event) => setLeaveDate(event.target.value)} className="mt-1 h-10 w-full rounded-xl border border-[#E3D8EA] px-3 text-sm"/></label>
-                    {leaveMode === "range" && <label className="block text-xs font-semibold text-[#5A476A]">To<input required type="date" min={leaveDate || today} value={leaveEndDate} onChange={(event) => setLeaveEndDate(event.target.value)} className="mt-1 h-10 w-full rounded-xl border border-[#E3D8EA] px-3 text-sm"/></label>}
-                </div>
-                <p className="text-[11px] text-[#86778F]">{leaveMode === "range" ? "Every date in the selected range will be submitted for approval." : "One leave date will be submitted for approval."}</p>
-                <label className="block text-xs font-semibold text-[#5A476A]">Leave Type<select value={leaveType} onChange={(event) => setLeaveType(event.target.value)} className="mt-1 h-10 w-full rounded-xl border border-[#E3D8EA] px-3 text-sm"><option>Personal</option><option>Sick</option><option>Emergency</option><option>Vacation</option><option>Other</option></select></label>
-                <label className="block text-xs font-semibold text-[#5A476A]">Reason<textarea required maxLength={1000} rows={3} value={leaveReason} onChange={(event) => setLeaveReason(event.target.value)} placeholder="State the reason for your leave" className="mt-1 w-full rounded-xl border border-[#E3D8EA] p-3 text-sm"/></label>
-                <div className="flex justify-end gap-2"><button type="button" onClick={() => setLeaveOpen(false)} className="rounded-xl border border-[#E3D8EA] px-4 py-2 text-xs font-semibold text-[#2B174C]">Cancel</button><button type="submit" disabled={actionPending || !leaveDate || (leaveMode === "range" && (!leaveEndDate || leaveEndDate < leaveDate)) || leaveReason.trim().length < 3} className="rounded-xl bg-[#2B174C] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">{actionPending ? "Submitting..." : "Submit Request"}</button></div>
-            </form>
-        </div>}
-    </section>;
 }
 
 /* Staff-only receiving dialog mirrors the manager's validated receive_stock workflow.
@@ -6833,15 +6091,9 @@ function StaffReceiveStockDialog({ product, onClose, onSaved }: {
     const savingRef = React.useRef(false);
     const receivingRequestKey = React.useRef(crypto.randomUUID());
     const [error, setError] = React.useState("");
-    const [supplier, setSupplier] = React.useState("");
-    const [supplierOptions, setSupplierOptions] = React.useState<string[]>([]);
-    const [invoice, setInvoice] = React.useState("");
     const [receivedDate, setReceivedDate] = React.useState(() =>
         new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" })
     );
-    const [paymentMethod, setPaymentMethod] = React.useState<"cash" | "credit">("cash");
-    const [amountPaid, setAmountPaid] = React.useState("0");
-    const [dueDate, setDueDate] = React.useState("");
 
     React.useEffect(() => {
         const abort = new AbortController();
@@ -6895,20 +6147,6 @@ function StaffReceiveStockDialog({ product, onClose, onSaved }: {
                         unitPurchaseCost: String(current.originalPrice ?? 0), expirationDate: "",
                     }];
                 setLines(stockLines);
-                if (result.purchase?.supplier) setSupplier(String(result.purchase.supplier));
-                // Optional suggestions only: users may also enter a new supplier.
-                try {
-                    const supplierResponse = await fetch("/api/products", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_stock_suppliers", branch_id: current.branchId }),
-                        cache: "no-store", signal: abort.signal,
-                    });
-                    const supplierResult = await supplierResponse.json().catch(() => ({}));
-                    if (!abort.signal.aborted && supplierResponse.ok && Array.isArray(supplierResult.suppliers)) {
-                        setSupplierOptions(supplierResult.suppliers.filter((v: unknown): v is string => typeof v === "string"));
-                    }
-                } catch { /* Supplier suggestions are optional. */ }
             } catch (e) {
                 if (!abort.signal.aborted) setError(e instanceof Error ? e.message : "Unable to load product.");
             } finally {
@@ -6925,8 +6163,6 @@ function StaffReceiveStockDialog({ product, onClose, onSaved }: {
     const totalQuantity = lines.reduce((sum, line) => sum + (Number(line.quantity) || 0), 0);
     const totalCost = Math.round((lines.reduce((sum, line) => sum +
         (Number(line.quantity) || 0) * (Number(line.unitPurchaseCost) || 0), 0) + Number.EPSILON) * 100) / 100;
-    const paid = paymentMethod === "cash" ? totalCost : Number(amountPaid || 0);
-    const outstanding = Math.max(0, Math.round((totalCost - paid + Number.EPSILON) * 100) / 100);
     const stockBefore = details.hasVariants && (details.variants || []).length
         ? (details.variants || []).reduce((sum, v) => sum + Number(v.stock || 0), 0)
         : Number(details.stock || 0);
@@ -6955,16 +6191,7 @@ function StaffReceiveStockDialog({ product, onClose, onSaved }: {
                 getStaffReceiveStockPriceReview(line).suggestedPrice > 100000000))) {
             setError("Markup Percentage must be between 0 and 99999 (up to four decimal places) and produce a valid selling price."); return;
         }
-        if (!supplier.trim() || !receivedDate) { setError("Supplier and Date Received are required."); return; }
-        if (paymentMethod === "credit" && (!Number.isFinite(paid) || paid < 0 || paid > totalCost)) {
-            setError("Amount Paid must be between zero and the total purchase cost."); return;
-        }
-        if (paymentMethod === "credit" && outstanding > 0 && !dueDate) {
-            setError("Enter a Payment Due Date for the outstanding balance."); return;
-        }
-        if (dueDate && paymentMethod === "credit" && dueDate < receivedDate) {
-            setError("Payment Due Date cannot be earlier than Date Received."); return;
-        }
+        if (!receivedDate) { setError("Date Received is required."); return; }
         if (selected.some(line => line.expirationDate && line.expirationDate < receivedDate)) {
             setError("A received batch cannot already be expired on its receiving date."); return;
         }
@@ -6980,9 +6207,7 @@ function StaffReceiveStockDialog({ product, onClose, onSaved }: {
                     action: "receive_stock", requestKey: receivingRequestKey.current,
                     product_id: details.id,
                     branch_id: details.branchId,
-                    supplier: supplier.trim(), supplierInvoiceNumber: invoice.trim() || null,
-                    receivedDate, paymentMethod, amountPaid: paid,
-                    paymentDueDate: paymentMethod === "credit" && outstanding > 0 ? dueDate : null,
+                    receivedDate,
                     lines: selected.map(line => ({
                         variantId: line.variantId, quantity: Number(line.quantity),
                         unitPurchaseCost: Number(line.unitPurchaseCost),
@@ -7156,44 +6381,14 @@ function StaffReceiveStockDialog({ product, onClose, onSaved }: {
                                     </section>
                                 )}
                                 <section className="space-y-3 border-t border-[#E3D8EA] pt-5">
-                                    <h3 className="text-sm font-bold text-[#21132E]">2. Supplier &amp; Receiving Information</h3>
-                                    <div className="space-y-1"><label className={staffReceiveLabelClass}>Supplier</label>
-                                        <input list={`receive-stock-suppliers-${product.id}`} value={supplier} onChange={e => setSupplier(e.target.value)}
-                                               maxLength={150} required placeholder="Select or enter supplier" className={staffReceiveFieldClass}/>
-                                        <datalist id={`receive-stock-suppliers-${product.id}`}>
-                                            {supplierOptions.map(name => <option key={name} value={name}/>) }
-                                        </datalist></div>
+                                    <h3 className="text-sm font-bold text-[#21132E]">2. Receiving Information</h3>
                                     <div className="space-y-1"><label className={staffReceiveLabelClass}>Date Received</label>
                                         <input type="date" value={receivedDate} onChange={e => setReceivedDate(e.target.value)} required className={staffReceiveFieldClass}/></div>
-                                    <div className="space-y-1"><label className={staffReceiveLabelClass}>Supplier Invoice Number (Optional)</label>
-                                        <input value={invoice} onChange={e => setInvoice(e.target.value)} maxLength={80}
-                                               placeholder="Enter invoice or receipt number" className={staffReceiveFieldClass}/></div>
-                                </section>
-                                <section className="space-y-3 border-t border-[#E3D8EA] pt-5">
-                                    <h3 className="text-sm font-bold text-[#21132E]">3. Purchase Payment Details</h3>
-                                    <div className="space-y-1"><label className={staffReceiveLabelClass}>Payment Method</label>
-                                        <div className="flex gap-5 text-sm text-[#2B174C]">
-                                            <label className="flex items-center gap-2"><input type="radio" checked={paymentMethod === "cash"}
-                                                                                              onChange={() => setPaymentMethod("cash")}/>Cash</label>
-                                            <label className="flex items-center gap-2"><input type="radio" checked={paymentMethod === "credit"}
-                                                                                              onChange={() => setPaymentMethod("credit")}/>Credit (Utang)</label>
-                                        </div></div>
-                                    {paymentMethod === "credit" && (
-                                        <div className="grid gap-3 sm:grid-cols-2">
-                                            <div className="space-y-1"><label className={staffReceiveLabelClass}>Amount Paid (₱)</label>
-                                                <input type="number" value={amountPaid} min="0" step="0.01"
-                                                       onChange={e => setAmountPaid(e.target.value)} className={staffReceiveFieldClass}/></div>
-                                            <div className="space-y-1"><label className={staffReceiveLabelClass}>Payment Due Date</label>
-                                                <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} className={staffReceiveFieldClass}/></div>
-                                        </div>
-                                    )}
                                 </section>
                                 <section className="space-y-2 rounded-xl bg-[#F7F1FF] p-4 text-sm text-[#2B174C]">
                                     <h3 className="font-bold">Stock Receiving Summary</h3>
                                     <div className="flex justify-between"><span>Total Units Received</span><strong>{formatStaffNumber(totalQuantity)} pcs</strong></div>
                                     <div className="flex justify-between"><span>Total Purchase Cost</span><strong>{formatStaffMoney(totalCost)}</strong></div>
-                                    <div className="flex justify-between"><span>Amount Paid</span><strong>{formatStaffMoney(paid)}</strong></div>
-                                    <div className="flex justify-between border-t border-[#E3D8EA] pt-2"><strong>Outstanding Balance</strong><strong>{formatStaffMoney(outstanding)}</strong></div>
                                 </section>
                             </>
                         )}

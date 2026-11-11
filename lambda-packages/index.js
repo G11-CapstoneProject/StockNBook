@@ -30,7 +30,8 @@ const dbPool = mysql.createPool({
  * Physical stock exists only in branch_inventory, and a product belongs to the
  * branch that holds the branch_inventory row of its default variant.
  *
- * Rental equipment follows the same rule with equipment / equipment_variants.
+ * Rental equipment has no variants: its branch_inventory row points at the
+ * equipment row directly (branch_inventory.equipment_id).
  *
  * The read models below expose the column names this Lambda already returns,
  * so API responses and the UI stay exactly the same.
@@ -635,7 +636,7 @@ async function attachV2Inclusions(connection, rows) {
                 CASE WHEN v.is_default = 1 THEN NULL ELSE v.id END AS variantId,
                 p.product_name AS productName,
                 CASE WHEN v.is_default = 1 THEN '' ELSE v.variant_name END AS variantName,
-                ev.equipment_id AS equipmentId, e.equipment_name AS equipmentName,
+                pi.equipment_id AS equipmentId, e.equipment_name AS equipmentName,
                 CASE WHEN pi.item_type = 'rental'
                          THEN GREATEST(COALESCE(bi.on_hand_quantity, 0) - COALESCE(bi.unavailable_quantity, 0), 0)
                      ELSE GREATEST(COALESCE(bi.on_hand_quantity, 0) - COALESCE(bi.reserved_quantity, 0)
@@ -644,11 +645,10 @@ async function attachV2Inclusions(connection, rows) {
                   JOIN packages pk ON pk.id = pi.package_id
                   LEFT JOIN product_variants v ON v.id = pi.variant_id
                   LEFT JOIN products p ON p.id = v.product_id
-                  LEFT JOIN equipment_variants ev ON ev.id = pi.equipment_variant_id
-                  LEFT JOIN equipment e ON e.id = ev.equipment_id
+                  LEFT JOIN equipment e ON e.id = pi.equipment_id
                   LEFT JOIN branch_inventory bi ON bi.branch_id = pk.branch_id
              AND ((pi.variant_id IS NOT NULL AND bi.variant_id = pi.variant_id)
-                 OR (pi.equipment_variant_id IS NOT NULL AND bi.equipment_variant_id = pi.equipment_variant_id))
+                 OR (pi.equipment_id IS NOT NULL AND bi.equipment_id = pi.equipment_id))
          WHERE pi.package_id IN (${ids.map(() => "?").join(",")})
          ORDER BY pi.package_id, pi.sort_order, pi.id`,
         ids
@@ -759,11 +759,10 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
     const rentalLines = [];
     for (const inclusion of inclusions.filter(i => i.itemType === "rental")) {
         const [rows] = await connection.execute(
-            `SELECT e.id, e.equipment_name AS name, ev.id AS equipmentVariantId, ev.rental_rate_per_day,
+            `SELECT e.id, e.equipment_name AS name, e.rental_rate_per_day,
                     bi.on_hand_quantity AS total_units, bi.unavailable_quantity AS held_units
              FROM equipment e
-                      JOIN equipment_variants ev ON ev.equipment_id = e.id AND ev.is_default = 1
-                      JOIN branch_inventory bi ON bi.equipment_variant_id = ev.id
+                      JOIN branch_inventory bi ON bi.equipment_id = e.id
              WHERE e.id = ? AND e.store_id = ? AND bi.branch_id = ?
                AND e.deleted_at IS NULL LIMIT 1`, [inclusion.equipmentId, storeId, branchId]);
         if (!rows.length) throw new Error(`Rental equipment ${inclusion.equipmentId} is not available in this branch.`);
@@ -773,7 +772,7 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
         if (Number(equipment.rental_rate_per_day) <= 0 ||
             Math.abs(Number(equipment.rental_rate_per_day) - Number(inclusion.unitSalesPrice)) > 0.005)
             throw new Error(`${equipment.name}: rental rate has changed. Refresh the catalog before saving.`);
-        rentalLines.push({ ...inclusion, equipmentVariantId: Number(equipment.equipmentVariantId) });
+        rentalLines.push({ ...inclusion, equipmentId: Number(equipment.id) });
     }
     const consumableInclusions = inclusions.filter(i => i.itemType !== "rental");
     const consumableLines = [];
@@ -827,7 +826,7 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
         storeId,
         packageId,
         line.itemType === "rental" ? null : line.catalogVariantId,
-        line.itemType === "rental" ? line.equipmentVariantId : null,
+        line.itemType === "rental" ? line.equipmentId : null,
         line.itemType === "rental" ? "rental" : "consumable",
         Number(line.quantity || 1),
         Number(line.unitSalesPrice || line.unit_price || 0),
@@ -835,7 +834,7 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
     ]);
     await connection.execute(
         `INSERT INTO package_items
-         (store_id, package_id, variant_id, equipment_variant_id, item_type, quantity, unit_price_snapshot, sort_order)
+         (store_id, package_id, variant_id, equipment_id, item_type, quantity, unit_price_snapshot, sort_order)
          VALUES ${placeholders}`,
         params
     );

@@ -1086,7 +1086,7 @@ export default function StaffInventory() {
                         {staffExpirationRisk(details.expirationDate) && <span className={`ml-2 rounded-lg px-2 py-1 ${staffExpirationRisk(details.expirationDate)==="Expired" ? "bg-[#FFE7EA] text-[#BF2438]":"bg-[#FFF3D8] text-[#A56607]"}`}>{staffExpirationRisk(details.expirationDate)}</span>}</p>
                     {details.status!=="In Stock" ? <>
                         {reportsByKey.has(details.key) ? <p className="rounded-xl bg-[#F7F3FC] p-3 text-xs text-[#6A5D6F]">A shortage report for this item is already open with the Manager.</p> : <>
-                            <p className="rounded-xl bg-[#F7F3FC] p-3 text-xs leading-5 text-[#6A5D6F]">Verify the shelf or storage area and submit a shortage report. Staff cannot directly change inventory quantities or supplier payments.</p>
+                            <p className="rounded-xl bg-[#F7F3FC] p-3 text-xs leading-5 text-[#6A5D6F]">Verify the shelf or storage area and submit a shortage report. Staff cannot directly change inventory quantities.</p>
                             <label className="block text-xs font-semibold">Shortage Notes<textarea value={reportNotes} onChange={e=>setReportNotes(e.target.value)} maxLength={500} rows={3} placeholder="What did you verify? (5+ characters)" className="mt-1 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm"/></label>
                             <button type="button" disabled={saving || reportNotes.trim().length<5 || !!activityError} className={`${primary} disabled:opacity-40`} onClick={()=>void submitShortage(details)}>{saving ? "Reporting..." : "Report Shortage"}</button></>}
                     </> : <p className="rounded-xl bg-[#F7F3FC] p-3 text-xs text-[#6A5D6F]">This item is currently above its reorder point. Contact a Manager for corrections or catalog changes.</p>}
@@ -1109,7 +1109,7 @@ export default function StaffInventory() {
                         </>}
                     </div>
                 </div> : <div className="mt-4 space-y-3 text-sm">
-                    <p className="text-[#5F4E75]">Confirm only deliveries physically received and already authorized by the Manager. Stock, POS batches and audit movements are updated together. Supplier pricing and payments cannot be changed here.</p>
+                    <p className="text-[#5F4E75]">Confirm only deliveries physically received and already authorized by the Manager. Stock, POS batches and audit movements are updated together. Pricing cannot be changed here.</p>
                     {!canReceive ? <p role="alert">Your staff account is not authorized for stock receiving.</p> : receivingTasks.length===0 ?
                         <p className="rounded-xl bg-[#F7F3FC] p-3 text-xs">No Manager-authorized deliveries are waiting for receiving.</p> : <>
                             <label className="block text-xs font-semibold">Pending Delivery<select className="mt-1 w-full rounded-xl border border-[#E6DDF0] p-3 text-sm" value={activeReceipt?.id || ""} onChange={event=>chooseReceipt(receivingTasks.find(t=>String(t.id)===event.target.value)||null)}><option value="">Select authorized delivery</option>{receivingTasks.map(t=><option key={t.id} value={t.id}>{t.deliveryReference} — {t.productName} ({t.quantity} remaining)</option>)}</select></label>

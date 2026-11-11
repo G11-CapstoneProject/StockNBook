@@ -48,14 +48,6 @@ type ProductPricingMethod = "manual" | "markup";
 type ProductSaveWithPurchase = Omit<ProductSaveData, "variants"> & {
     pricingMethod?: ProductPricingMethod;
     markupPercentage?: number | null;
-    initialPurchase?: {
-        supplier: string;
-        supplierInvoiceNumber?: string | null;
-        purchaseDate: string;
-        paymentMethod: "cash" | "credit";
-        amountPaid: number;
-        paymentDueDate: string | null;
-    };
     variants?: Array<ProductVariantSave & {
         pricingMethod?: ProductPricingMethod;
         markupPercentage?: number | null;
@@ -74,24 +66,10 @@ export type ProductFormVariant = {
     expirationDate?: string | null;
 };
 
-export type ImportPurchaseSummary = {
-    purchaseRef: string;
-    supplierInvoiceNumber?: string | null;
-    supplier: string;
-    purchaseDate: string;
-    paymentMethod: "cash" | "credit";
-    amountPaid: number;
-    paymentDueDate: string | null;
-    purchaseTotal: number;
-    outstandingBalance: number;
-};
-
 export type ImportPreviewProduct = ProductSaveData & {
     tempId: string;
     pricingMethod?: "manual" | "markup";
     markupPercentage?: number | null;
-    purchaseRef?: string;
-    purchase?: ImportPurchaseSummary | null;
     importTemplateVersion?: "complete";
 };
 
@@ -417,12 +395,9 @@ async function parseCompleteImportFile(
     workbook: XLSX.WorkBook, storeId: string, branchId: string, branchName: string | null
 ): Promise<ImportPreviewProduct[]> {
     const productsSheet = workbook.Sheets["PRODUCTS AND VARIANTS"];
-    const purchasesSheet = workbook.Sheets["PURCHASE DETAILS"];
-    if (!productsSheet || !purchasesSheet) {
-        throw new Error('The workbook must have "PRODUCTS AND VARIANTS" and "PURCHASE DETAILS" sheets.');
+    if (!productsSheet) {
+        throw new Error('The workbook must have a "PRODUCTS AND VARIANTS" sheet.');
     }
-    // Product rows no longer require user-entered Purchase Ref values.
-    // Older three-sheet files with that column remain supported.
     const p = newImportSheetReader(productsSheet, "PRODUCTS AND VARIANTS", ["productname", "category", "hasvariants", "variantdetails", "stock", "reorderpoint", "costprice", "pricingmethod"]);
     const byName = new Map<string, ImportPreviewProduct>();
     const variantSignatures = new Map<string, Set<string>>();
@@ -442,7 +417,7 @@ async function parseCompleteImportFile(
         const hasVariants = hasVariantValue === "yes";
         const stock = requiredImportNumber(p.get(row, "Stock"), "Stock", rowNumber, true);
         if (stock <= 0) {
-            throw new Error(`PRODUCTS AND VARIANTS · E${rowNumber}: Stock must be greater than zero for a supplier-purchase import.`);
+            throw new Error(`PRODUCTS AND VARIANTS · E${rowNumber}: Stock must be greater than zero for an Excel import.`);
         }
         const alertLevel = requiredImportNumber(p.get(row, "Reorder Point"), "Reorder Point", rowNumber, true);
         const originalPrice = requiredImportNumber(p.get(row, "Cost Price (₱)"), "Cost Price", rowNumber);
@@ -453,19 +428,18 @@ async function parseCompleteImportFile(
             throw new Error(`PRODUCTS AND VARIANTS · L${rowNumber} (Expiration Date): Invalid date. Use YYYY-MM-DD, for example 2027-04-30.`);
         }
         const expirationDate = normalizedExpiration || null;
-        const purchaseRef = cleanImportCell(p.get(row, "Purchase Ref"));
         const key = name.toLowerCase().replace(/\s+/g, " ");
         let product = byName.get(key);
         if (product && (product.category.toLowerCase() !== category.toLowerCase() ||
-            product.hasVariants !== hasVariants || String(product.purchaseRef || "").toLowerCase() !== purchaseRef.toLowerCase())) {
-            throw new Error(`Row ${rowNumber}: All rows for "${name}" must have the same category, variant setting, and Purchase Ref.`);
+            product.hasVariants !== hasVariants)) {
+            throw new Error(`Row ${rowNumber}: All rows for "${name}" must have the same category and variant setting.`);
         }
         if (!product) {
             product = {
                 tempId: `import-complete-${rowNumber}`, storeId: Number(storeId), branchId: Number(branchId), branchName,
                 name, category, stock: 0, alertLevel: 0, originalPrice: 0, salesPrice: 0,
                 hasVariants, variants: [], expirationDate: null, pricingMethod: "manual",
-                markupPercentage: null, purchaseRef, purchase: null, importTemplateVersion: "complete",
+                markupPercentage: null, importTemplateVersion: "complete",
             };
             byName.set(key, product);
         }
@@ -493,82 +467,6 @@ async function parseCompleteImportFile(
     const products = [...byName.values()].map(recalculateImportProduct);
     if (!products.length) throw new Error("PRODUCTS AND VARIANTS contains no products.");
 
-    // One complete workbook represents ONE supplier purchase, with all products
-    // and variants included automatically. No purchase reference or product-name
-    // mapping is entered by the user.
-    const pr = newImportSheetReader(purchasesSheet, "PURCHASE DETAILS",
-        ["supplier", "purchasedate", "paymentmethod", "amountpaid"]);
-    const purchaseHeaders = new Set(pr.rows[pr.headerRowIndex].map(importColumnKey));
-    if (!purchaseHeaders.has("paymentduedate") && !purchaseHeaders.has("duedate")) {
-        throw new Error('PURCHASE DETAILS must include "Payment Due Date".');
-    }
-    const inputHeaders = ["Supplier", "Supplier Invoice Number (Optional)", "Purchase Date",
-        "Payment Method", "Amount Paid (₱)", "Payment Due Date", "Due Date",
-        "Products Included", "Purchase Ref"];
-    const filledRows = pr.rows.slice(pr.headerRowIndex + 1)
-        .map((row, index) => ({ row, rowNumber: pr.headerRowIndex + index + 2 }))
-        .filter(({row}) => inputHeaders.some(header => cleanImportCell(pr.get(row, header)) !== ""));
-    if (filledRows.length !== 1) {
-        const filledLocations = filledRows.map(item => item.rowNumber).join(', ') || 'none';
-        throw new Error(`PURCHASE DETAILS: Exactly ONE purchase row is allowed (row 7). Found ${filledRows.length} filled purchase rows: ${filledLocations}. Clear any other purchase cells below row 7; use another Excel file for another purchase.`);
-    }
-    const {row, rowNumber} = filledRows[0];
-    const supplier = cleanImportCell(pr.get(row, "Supplier"));
-    const supplierInvoiceNumber = cleanImportCell(pr.get(row, "Supplier Invoice Number (Optional)")) || null;
-    const purchaseDate = parseImportDate(pr.get(row, "Purchase Date"));
-    const paymentMethod = cleanImportCell(pr.get(row, "Payment Method")).toLowerCase();
-    const paymentDueDate = parseImportDate(pr.get(row,
-        purchaseHeaders.has("paymentduedate") ? "Payment Due Date" : "Due Date")) || null;
-    if (!supplier) throw new Error(`PURCHASE DETAILS · A${rowNumber}: Enter the Supplier name.`);
-    if (!purchaseDate) throw new Error(`PURCHASE DETAILS · C${rowNumber}: Enter a valid Purchase Date (YYYY-MM-DD, e.g. 2026-10-09).`);
-    if (!["cash", "credit"].includes(paymentMethod)) {
-        throw new Error(`PURCHASE DETAILS · D${rowNumber}: Payment Method must be Cash or Credit.`);
-    }
-    const paidInput = pr.get(row, "Amount Paid (₱)");
-    const amountPaid = paidInput === "" || paidInput === undefined || paidInput === null
-        ? 0 : requiredImportNumber(paidInput, "Amount Paid", rowNumber);
-    // Older templates can be imported only when all rows refer to one purchase;
-    // legacy multi-purchase workbooks are rejected rather than silently merged.
-    const productRefs = new Set(products.map(p => String(p.purchaseRef || "").trim().toLowerCase()).filter(Boolean));
-    if (productRefs.size > 1) {
-        throw new Error("This workbook contains multiple Purchase Refs. Import each supplier purchase in a separate Excel file.");
-    }
-    const oldSheetRef = cleanImportCell(pr.get(row, "Purchase Ref")).toLowerCase();
-    if (productRefs.size === 1 && oldSheetRef && !productRefs.has(oldSheetRef)) {
-        throw new Error("The old template's Purchase Ref does not match its product rows.");
-    }
-    const purchaseTotal = importMoney(products.reduce((sum, product) => sum + (
-        product.hasVariants
-            ? (product.variants || []).reduce((n, variant) => n + Number(variant.stock) * Number(variant.originalPrice), 0)
-            : Number(product.stock) * Number(product.originalPrice)
-    ), 0));
-    if (products.some(product => Number(product.stock) <= 0)) {
-        throw new Error("Each product in a supplier purchase must have initial stock greater than zero. Add zero-stock catalogue products through Add Product.");
-    }
-    let effectivePaid = importMoney(amountPaid);
-    if (paymentMethod === "cash") {
-        if (effectivePaid !== 0 && effectivePaid !== purchaseTotal) {
-            throw new Error("For Cash, Amount Paid must equal the combined purchase total (or be left blank for automatic full payment).");
-        }
-        effectivePaid = purchaseTotal;
-    } else {
-        if (effectivePaid > purchaseTotal) throw new Error("Amount Paid cannot exceed the combined purchase total.");
-        if (effectivePaid < purchaseTotal && !paymentDueDate) {
-            throw new Error(`PURCHASE DETAILS · F${rowNumber}: Payment Due Date is required for unpaid Credit. Use YYYY-MM-DD.`);
-        }
-        if (paymentDueDate && paymentDueDate < purchaseDate) {
-            throw new Error(`PURCHASE DETAILS · F${rowNumber}: Payment Due Date must be on or after Purchase Date.`);
-        }
-    }
-    // The marker is only used for the per-product confirmation preview. The
-    // server creates the actual PUR-###### purchase number after saving.
-    const purchase: ImportPurchaseSummary = {
-        purchaseRef: "SINGLE_FILE_PURCHASE", supplier, supplierInvoiceNumber,
-        purchaseDate, paymentMethod: paymentMethod as "cash" | "credit",
-        amountPaid: effectivePaid, paymentDueDate: paymentMethod === "cash" ? null : paymentDueDate,
-        purchaseTotal, outstandingBalance: importMoney(Math.max(0, purchaseTotal - effectivePaid)),
-    };
-    products.forEach(product => { product.purchaseRef = purchase.purchaseRef; product.purchase = purchase; });
     return products;
 }
 
@@ -588,8 +486,7 @@ async function parseImportFileToPreviewProducts({
         type: "array",
         cellDates: true,
     });
-    if (workbook.SheetNames.includes("PRODUCTS AND VARIANTS") ||
-        workbook.SheetNames.includes("PURCHASE DETAILS")) {
+    if (workbook.SheetNames.includes("PRODUCTS AND VARIANTS")) {
         return parseCompleteImportFile(workbook, storeId, branchId, branchName);
     }
 
@@ -1487,11 +1384,11 @@ export function useInventoryController() {
                 branchName: branchLabel,
             });
 
-            // Excel bulk purchase imports must include supplier/payment details.
+            // Excel imports must use the StockNBook template.
             // Leave the older CSV-only product import path unchanged.
             if (/\.(xlsx|xls)$/i.test(selectedImportFile.name) &&
                 previewProducts.some(product => product.importTemplateVersion !== "complete")) {
-                throw new Error("Use the new One Supplier / One Purchase Excel template with a PURCHASE DETAILS sheet. Each Excel file must contain exactly one supplier purchase.");
+                throw new Error("Use the StockNBook Excel template with a PRODUCTS AND VARIANTS sheet.");
             }
 
             if (previewProducts.length === 0) {
@@ -1549,27 +1446,17 @@ export function useInventoryController() {
             setIsImporting(true);
 
             if (importPreviewProducts.some(product => product.importTemplateVersion === "complete")) {
-                // Exactly one supplier purchase per file. The server saves all
-                // products/variants, the purchase, and its payment atomically.
-                const purchase = importPreviewProducts[0].purchase;
-                if (!purchase || importPreviewProducts.some(product => product.purchase !== purchase)) {
-                    alert("❌ Only one supplier purchase is allowed per Excel file.");
-                    return;
-                }
+                // The server saves all products/variants and their opening stock atomically.
                 const productsPayload = importPreviewProducts.map(product => {
                     const data = recalculateImportProduct(product);
-                    return { ...data, purchaseRef: undefined, purchase: undefined,
-                        importTemplateVersion: undefined };
+                    return { ...data, importTemplateVersion: undefined };
                 });
                 const response = await fetch("/api/products", {
                     method: "POST",
                     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                    body: JSON.stringify({ action: "import_products_bulk", importMode: "single_purchase",
+                    body: JSON.stringify({ action: "import_products_bulk",
                         branch_id: Number(importPreviewProducts[0].branchId),
-                        products: productsPayload,
-                        purchase: { supplier: purchase.supplier, supplierInvoiceNumber: purchase.supplierInvoiceNumber,
-                            purchaseDate: purchase.purchaseDate, paymentMethod: purchase.paymentMethod,
-                            amountPaid: purchase.amountPaid, paymentDueDate: purchase.paymentDueDate } }),
+                        products: productsPayload }),
                 });
                 const { data } = await safeParseResponse<ProductsApiResponse>(response);
                 if (!response.ok || data?.success === false) {
@@ -1634,7 +1521,6 @@ export function useInventoryController() {
                     },
                     body: JSON.stringify({
                         action: "create_product",
-                        openingStock:true, // Legacy single-sheet imports have no supplier purchase details.
                         store_id: productData.storeId,
                         storeId: productData.storeId,
                         branch_id: Number(productData.branchId),
@@ -1891,16 +1777,13 @@ export function useInventoryController() {
             original_price: productData.originalPrice,
             salesPrice: productData.salesPrice,
             sales_price: productData.salesPrice,
-            // Forward the pricing selections and supplier purchase details from
+            // Forward the pricing selections from
             // ManagerInventory's Add/Edit dialog to the existing product API.
             ...(productData.pricingMethod !== undefined
                 ? { pricingMethod: productData.pricingMethod }
                 : {}),
             ...(productData.markupPercentage !== undefined
                 ? { markupPercentage: productData.markupPercentage }
-                : {}),
-            ...(productData.initialPurchase !== undefined
-                ? { initialPurchase: productData.initialPurchase }
                 : {}),
             expirationDate: productData.hasVariants
                 ? null

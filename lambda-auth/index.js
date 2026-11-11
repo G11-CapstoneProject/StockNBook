@@ -1505,7 +1505,7 @@ async function sendGmailHtmlEmail(toEmail, rawMessage, logLabel) {
 
     if (
         !SMTP_PASS ||
-        SMTP_PASS === "PASTE_NEW_GOOGLE_APP_PASSWORD_HERE"
+        SMTP_PASS === "rrmk ivgo ojgg nkqw"
     ) {
         const configError = new Error(
             "Email sending is not configured. Replace PASTE_NEW_GOOGLE_APP_PASSWORD_HERE in index.js with a valid Google App Password."
@@ -2539,7 +2539,46 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
     const storeId = Number(decoded.store_id);
     const planId = Number(body.plan_id);
     const referenceNumber = String(body.reference_number || "").trim();
-    const receiptUrl = String(body.receipt_url || "").trim();
+    const receiptMimeType = String(body.receipt_mime_type || "").trim().toLowerCase();
+    const receiptBase64 = body.receipt_base64;
+    const maxReceiptBytes = 5 * 1024 * 1024;
+    const maxBase64Length = Math.ceil(maxReceiptBytes / 3) * 4;
+    const receiptTypes = ["image/png", "image/jpeg", "image/webp"];
+
+    if (!receiptTypes.includes(receiptMimeType) || typeof receiptBase64 !== "string" ||
+        !receiptBase64 || receiptBase64.length > maxBase64Length ||
+        receiptBase64.length % 4 !== 0) {
+        const error = new Error("Upload a valid PNG, JPG, JPEG, or WEBP receipt (maximum 5 MB).");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const receiptData = Buffer.from(receiptBase64, "base64");
+    // Round-trip validation rejects malformed / noncanonical base64 without a
+    // large, backtracking regular expression for multi-megabyte uploads.
+    if (receiptData.toString("base64") !== receiptBase64) {
+        const error = new Error("The receipt image data is invalid.");
+        error.statusCode = 400;
+        throw error;
+    }
+    if (!receiptData.length || receiptData.length > maxReceiptBytes) {
+        const error = new Error("The receipt image must be 5 MB or smaller.");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    // Content signature check: do not trust the browser's declared MIME type.
+    const validImage = receiptMimeType === "image/png"
+        ? receiptData.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+        : receiptMimeType === "image/jpeg"
+            ? receiptData.length >= 3 && receiptData[0] === 255 && receiptData[1] === 216 && receiptData[2] === 255
+            : receiptData.length >= 12 && receiptData.toString("ascii", 0, 4) === "RIFF" &&
+            receiptData.toString("ascii", 8, 12) === "WEBP";
+    if (!validImage) {
+        const error = new Error("The selected file is not a valid receipt image.");
+        error.statusCode = 400;
+        throw error;
+    }
 
     if (!Number.isInteger(planId) || planId <= 0) {
         const error = new Error("Select a valid plan.");
@@ -2691,10 +2730,9 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
         "pending",
     ];
 
-    if (columns.receipt && receiptUrl) {
-        insertColumns.push(columns.receipt);
-        insertValues.push(receiptUrl);
-    }
+    // Store the image with the payment record, not in a publicly accessible path.
+    insertColumns.push("receipt_data", "receipt_mime_type");
+    insertValues.push(receiptData, receiptMimeType);
 
     if (columns.createdAt) {
         insertColumns.push(columns.createdAt);

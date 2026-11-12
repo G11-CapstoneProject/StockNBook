@@ -1936,6 +1936,7 @@ export function useInventoryController() {
             }
 
             setProducts((prev) => prev.filter((p) => p.id !== productToDelete.id));
+            window.dispatchEvent(new Event("stocknbook:stock-activity-refresh"));
             setShowDeleteProductDialog(false);
             setProductToDelete(null);
         } catch {

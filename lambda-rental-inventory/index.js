@@ -1165,6 +1165,19 @@ async function mutate(db,scope,body) {
             }
             await db.execute(`UPDATE equipment SET deleted_at=NOW(),status='inactive' WHERE id=?`,[current.id]);
             await db.execute(`UPDATE branch_inventory SET status='inactive' WHERE id=?`,[current.inventory_id]);
+            // Keep the existing soft-delete and stock adjustment unchanged; record
+            // the manager's deletion for the Owner/Manager Audit Logs module.
+            if (Number.isSafeInteger(scope.actorId) && scope.actorId > 0) {
+                await db.execute(
+                    `INSERT INTO employee_actions
+                     (store_id, branch_id, user_id, user_name, user_role,
+                      module, reference_number, action, entity_id, details)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [scope.storeId, scope.branchId, scope.actorId, scope.actor, "Manager",
+                        "Inventory", current.equipment_number, "Deleted rental equipment", current.id,
+                        JSON.stringify(`Deleted ${current.name} from active rental inventory; ${units} unit(s) recorded as Stock Out; historical records preserved. Reason: ${reason}`)]
+                );
+            }
             return {referenceNumber:current.equipment_number,retiredUnits:units};
         }
         case "create_rental_category": {

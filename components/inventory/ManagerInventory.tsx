@@ -281,6 +281,15 @@ type ExpiredDisposalActivityRecord = {
     quantity: number;
 };
 
+type ProductDeletionActivityRecord = {
+    id: number;
+    recordedAt: string;
+    productName: string;
+    variantValues?: Record<string, unknown> | string | null;
+    quantity: number;
+    productNumber?: string | null;
+};
+
 type RecentStockMovement = {
     id: string;
     productId: string;
@@ -289,7 +298,7 @@ type RecentStockMovement = {
     date: Date | null;
     hasRecordedTime?: boolean;
     movement: "Stock In" | "Stock Out" | "Disposed";
-    source: "Added" | "Restock" | "POS Sale" | "Expired Disposal";
+    source: "Added" | "Restock" | "POS Sale" | "Expired Disposal" | "Product Deletion";
     referenceNumber?: string;
 };
 
@@ -733,18 +742,45 @@ function buildExpiredDisposalMovements(records: ExpiredDisposalActivityRecord[])
     }).filter((movement) => movement.quantity > 0 && Boolean(movement.productName));
 }
 
+function buildProductDeletionMovements(records: ProductDeletionActivityRecord[]): RecentStockMovement[] {
+    return records.map(record => {
+        let variantValues: Record<string, unknown> = {};
+        if (record.variantValues && typeof record.variantValues === "object" && !Array.isArray(record.variantValues)) {
+            variantValues = record.variantValues;
+        } else if (typeof record.variantValues === "string") {
+            try {
+                const parsed: unknown = JSON.parse(record.variantValues);
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) variantValues = parsed as Record<string, unknown>;
+            } catch { /* Keep the original product label. */ }
+        }
+        const variantName = Object.values(variantValues).map(value => String(value ?? "").trim()).filter(Boolean).join(", ");
+        return {
+            id: `product-deletion-${record.id}`,
+            productId: "",
+            productName: variantName ? `${record.productName} - ${variantName}` : record.productName,
+            quantity: Math.abs(Number(record.quantity)),
+            date: parseStockActivityDateTime(record.recordedAt),
+            movement: "Stock Out" as const,
+            source: "Product Deletion" as const,
+            referenceNumber: record.productNumber || "",
+        };
+    }).filter(record => record.quantity > 0 && Boolean(record.productName));
+}
+
 function buildRecentStockMovements({
                                        salesMovements,
                                        restockRecords,
                                        employeeActions,
                                        branchId,
                                        disposalRecords,
+                                       deletionRecords,
                                    }: {
     salesMovements: SalesMovement[];
     restockRecords: RestockHistoryRecord[];
     employeeActions: InventoryEmployeeAction[];
     branchId?: number;
     disposalRecords: ExpiredDisposalActivityRecord[];
+    deletionRecords: ProductDeletionActivityRecord[];
 }) {
     // Added and restocked stock both come from the recorded stock-in movements,
     // one row per product or variant, so each stock-in appears exactly once.
@@ -772,6 +808,7 @@ function buildRecentStockMovements({
         ...restockMovements,
         ...stockOutMovements,
         ...buildExpiredDisposalMovements(disposalRecords),
+        ...buildProductDeletionMovements(deletionRecords),
     ]
         .filter((movement) => Boolean(movement.productName))
         .sort((a, b) => {
@@ -1938,6 +1975,7 @@ export default function ManagerInventory() {
         RestockHistoryRecord[]
     >([]);
     const [expiredDisposalActivity, setExpiredDisposalActivity] = React.useState<ExpiredDisposalActivityRecord[]>([]);
+    const [productDeletionActivity, setProductDeletionActivity] = React.useState<ProductDeletionActivityRecord[]>([]);
     const [inventoryEmployeeActions, setInventoryEmployeeActions] =
         React.useState<InventoryEmployeeAction[]>([]);
     const [stockActivityLoading, setStockActivityLoading] =
@@ -2226,7 +2264,7 @@ export default function ManagerInventory() {
         const loadExpiredDisposals = async () => {
             const token = sessionStorage.getItem("token");
             if (!token || !Number.isSafeInteger(managerBranchId) || managerBranchId <= 0) {
-                if (!cancelled) setExpiredDisposalActivity([]);
+                if (!cancelled) { setExpiredDisposalActivity([]); setProductDeletionActivity([]); }
                 return;
             }
             try {
@@ -2240,7 +2278,10 @@ export default function ManagerInventory() {
                 if (!response.ok || result.success === false || !Array.isArray(result.disposals)) {
                     throw new Error(result.error || "Unable to load expired-stock disposal activity.");
                 }
-                if (!cancelled) setExpiredDisposalActivity(result.disposals);
+                if (!cancelled) {
+                    setExpiredDisposalActivity(result.disposals);
+                    setProductDeletionActivity(Array.isArray(result.deletionMovements) ? result.deletionMovements : []);
+                }
             } catch (error) {
                 console.warn("Manager expired-stock disposal activity loading failed:", error);
                 // Keep previously loaded rows when a background refresh fails.
@@ -2465,10 +2506,12 @@ export default function ManagerInventory() {
             employeeActions: inventoryEmployeeActions,
             branchId: managerBranchId,
             disposalRecords: expiredDisposalActivity,
+            deletionRecords: productDeletionActivity,
         });
     }, [
         inventoryEmployeeActions,
         expiredDisposalActivity,
+        productDeletionActivity,
         managerBranchId,
         recentSales.movements,
         restockHistory,
@@ -4182,6 +4225,7 @@ type ProductRemovalImpact = {
         activePackages?: number;
         restockRecords?: number;
         expiredInventory?: boolean;
+        remainingStock?: number;
     };
 };
 
@@ -5117,7 +5161,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
 
         setProductToast({
             title: wasArchived
-                ? "Product archived successfully"
+                ? "Product deleted successfully"
                 : "Product deleted permanently",
             message: wasArchived
                 ? `“${pendingRemovalResult.name}” was removed from future operations while its historical records were preserved.`
@@ -5453,7 +5497,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                         <div className="flex items-start justify-between gap-4">
                             <div>
                                 <h3 className="text-[18px] font-bold text-[#1A1220]">
-                                    Remove Product
+                                    Delete Product
                                 </h3>
                                 <p className="mt-1 text-sm text-[#6A5D6F]">
                                     StockNBook checks business usage before removing{" "}
@@ -5508,12 +5552,17 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                             ) : removalImpact?.mode === "archive" ? (
                                 <div className="rounded-xl border border-[#D8CBE9] bg-[#F8F3FF] px-4 py-3">
                                     <p className="text-sm font-semibold text-[#4E2C66]">
-                                        This product has business history and will be archived.
+                                        This product will be deleted from the active inventory list.
                                     </p>
                                     <p className="mt-1 text-xs leading-5 text-[#6A5D6F]">
                                         It will disappear from future POS, booking, reorder, and active inventory selections,
-                                        while historical sales, bookings, reports, and analytics remain preserved.
+                                        while historical sales, bookings, reports, and analytics remain preserved. Any remaining stock will be recorded as Stock Out.
                                     </p>
+                                    {Number(removalImpact.counts?.remainingStock || 0) > 0 && (
+                                        <p className="mt-2 text-xs font-semibold leading-5 text-[#69402A]">
+                                            {removalImpact.counts?.remainingStock} remaining unit(s) will be deducted as Stock Out. Confirm only if they are being removed from service.
+                                        </p>
+                                    )}
                                     {(removalImpact.history || []).length > 0 && (
                                         <p className="mt-2 text-xs font-medium text-[#5A476A]">
                                             History found: {(removalImpact.history || []).join(", ")}.
@@ -5561,7 +5610,7 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                                 {removalImpactLoading
                                     ? "Checking..."
                                     : removalImpact?.mode === "archive"
-                                        ? "Archive Product"
+                                        ? "Delete Product"
                                         : removalImpact?.mode === "permanent"
                                             ? "Delete Permanently"
                                             : removalImpact?.mode === "blocked"

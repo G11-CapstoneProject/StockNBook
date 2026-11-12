@@ -2011,6 +2011,23 @@ async function getProductRemovalImpact(
         history.push("stock movement history");
     }
 
+    // A product with remaining physical stock must not be hard-deleted.
+    // Existing reservations/holds must be resolved before removal.
+    const [stockRows] = await connection.execute(
+        `SELECT COALESCE(SUM(bi.on_hand_quantity),0) AS onHand,
+                COALESCE(SUM(bi.reserved_quantity),0) AS reserved,
+                COALESCE(SUM(bi.unavailable_quantity),0) AS unavailable
+         FROM branch_inventory bi
+         JOIN product_variants v ON v.id=bi.variant_id
+         WHERE v.product_id=? AND v.deleted_at IS NULL AND bi.store_id=? AND bi.branch_id=?`,
+        [productId, storeId, activeBranchId]
+    );
+    counts.remainingStock = Number(stockRows[0]?.onHand || 0);
+    if (counts.remainingStock > 0) history.push("remaining stock to remove");
+    if (Number(stockRows[0]?.reserved || 0) > 0 || Number(stockRows[0]?.unavailable || 0) > 0) {
+        blockers.push("This product still has reserved or unavailable stock. Resolve it before deleting the product.");
+    }
+
     // Expiration by itself is not a reason for permanent deletion. Preserve the
     // record by archiving it, matching StockNBook's inventory-history policy.
     const productExpired = isExpiredInventoryDate(product.expirationDate);
@@ -2219,6 +2236,49 @@ async function applyVariantRemoval(connection, storeId, activeBranchId, productI
     });
 
     return { mode, impact: { ...impact, mode } };
+}
+
+// Record the actual on-hand quantity as Stock Out before soft-deleting a product.
+// The same transaction protects the stock balance, ledger and employee audit log.
+async function recordProductDeletionStockOut(connection, storeId, branchId, productId, actorId, productNumber) {
+    const [rows] = await connection.execute(
+        `SELECT bi.id, bi.on_hand_quantity, bi.reserved_quantity, bi.unavailable_quantity,
+                v.variant_number, v.is_default
+         FROM branch_inventory bi
+         JOIN product_variants v ON v.id=bi.variant_id
+         WHERE v.product_id=? AND v.deleted_at IS NULL AND bi.store_id=? AND bi.branch_id=?
+         ORDER BY bi.id FOR UPDATE`,
+        [productId, storeId, branchId]
+    );
+    if (rows.some(row => Number(row.reserved_quantity) > 0 || Number(row.unavailable_quantity) > 0)) {
+        const error = new Error("This product has reserved or unavailable stock. Resolve it before deleting.");
+        error.statusCode = 409;
+        throw error;
+    }
+    let removedUnits = 0;
+    for (const row of rows) {
+        const before = Number(row.on_hand_quantity || 0);
+        if (before <= 0) continue;
+        const [result] = await connection.execute(
+            `UPDATE branch_inventory SET on_hand_quantity=0, last_counted_at=NOW()
+             WHERE id=? AND store_id=? AND branch_id=? AND on_hand_quantity=?`,
+            [row.id, storeId, branchId, before]
+        );
+        if (Number(result.affectedRows) !== 1) {
+            const error = new Error("Stock changed during deletion. Refresh inventory and try again.");
+            error.statusCode = 409;
+            throw error;
+        }
+        await v2RecordMovement(connection, {
+            storeId, branchId, inventoryId: Number(row.id),
+            movementType: "STOCK_ADJUSTMENT", delta: -before, before, after: 0,
+            referenceType: "PRODUCT_DELETION", referenceId: productId,
+            reference: (!Number(row.is_default) && row.variant_number) || productNumber || String(productId),
+            actorId, notes: "Product deleted from the active inventory catalog",
+        });
+        removedUnits += before;
+    }
+    return removedUnits;
 }
 
 async function archiveProduct(connection, storeId, activeBranchId, productId) {
@@ -3592,7 +3652,22 @@ exports.handler = async (event) => {
                  ORDER BY m.created_at DESC, m.id DESC LIMIT 100`,
                 [storeId, activeBranchId, dayStartEpoch, dayStartEpoch + 86400]
             );
-            return jsonResponse(200, headers, { success: true, disposals: rows });
+            const [deletionMovements] = await connection.execute(
+                `SELECT m.id, m.created_at AS recordedAt, p.name AS productName,
+                        pv.variant_values AS variantValues, m.quantity_delta AS quantity,
+                        COALESCE(NULLIF(pv.variant_number,''), p.product_number) AS productNumber
+                 FROM ${V2_INVENTORY_MOVEMENTS} m
+                      JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id
+                       AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
+                      JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
+                      LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id=bi.variant_id AND pv.product_id=p.id
+                 WHERE m.store_id=? AND m.branch_id=?
+                   AND m.reference_type='PRODUCT_DELETION' AND m.quantity_delta<0
+                   AND m.created_at >= FROM_UNIXTIME(?) AND m.created_at < FROM_UNIXTIME(?)
+                 ORDER BY m.created_at DESC, m.id DESC LIMIT 100`,
+                [storeId, activeBranchId, dayStartEpoch, dayStartEpoch + 86400]
+            );
+            return jsonResponse(200, headers, { success: true, disposals: rows, deletionMovements });
         }
         if (action === "dispose_expired_batch") {
             if (tokenRole !== "manager" || !activeBranchId) return unauthorized(headers,"Manager authorization is required to record disposal.");
@@ -4375,6 +4450,10 @@ exports.handler = async (event) => {
                     stale.statusCode=409;throw stale;
                 }
                 if (impact.mode === "archive") {
+                    const removedUnits = await recordProductDeletionStockOut(
+                        connection, storeId, activeBranchId, id, actingEmployee.id,
+                        existing.productNumber || existing.product_number
+                    );
                     const affectedRows = await archiveProduct(
                         connection,
                         storeId,
@@ -4392,9 +4471,9 @@ exports.handler = async (event) => {
                         employee: actingEmployee,
                         module: "Inventory",
                         referenceNumber: existing.productNumber || existing.product_number || String(id),
-                        action: "Archived product",
+                        action: "Deleted product",
                         referenceId: String(id),
-                        details: `Archived ${existing.name} to preserve historical business records`,
+                        details: `Deleted ${existing.name} from the active catalog; ${removedUnits} unit(s) recorded as Stock Out; historical records preserved`,
                     });
                 } else {
                     const affectedRows = await permanentlyDeleteProduct(
@@ -4440,6 +4519,10 @@ exports.handler = async (event) => {
                     const blocked=new Error(retryImpact.blockers[0]||"This product now has an active booking.");
                     blocked.statusCode=409;throw blocked;
                 }
+                const removedUnits = await recordProductDeletionStockOut(
+                    connection, storeId, activeBranchId, id, actingEmployee.id,
+                    existing.productNumber || existing.product_number
+                );
                 const archivedRows = await archiveProduct(
                     connection,
                     storeId,
@@ -4459,9 +4542,9 @@ exports.handler = async (event) => {
                     employee: actingEmployee,
                     module: "Inventory",
                     referenceNumber: existing.productNumber || existing.product_number || String(id),
-                    action: "Archived product",
+                    action: "Deleted product",
                     referenceId: String(id),
-                    details: `Archived ${existing.name} because a related system record prevented permanent deletion`,
+                    details: `Deleted ${existing.name} from the active catalog because a related record prevented physical deletion; ${removedUnits} unit(s) recorded as Stock Out; history preserved`,
                 });
 
                 await connection.commit();

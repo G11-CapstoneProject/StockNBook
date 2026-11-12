@@ -47,7 +47,8 @@ function rentalActivityDirection(record: RentalActivity): "in" | "out" | "other"
     if (["rented_out", "missing_reported", "maintenance_started"].includes(record.type)) return "out";
     if (record.type === "adjustment") {
         if (/^Physical stock correction \+/.test(record.description || "")) return "in";
-        if (/^Physical stock correction -/.test(record.description || "")) return "out";
+        if (/^Physical stock correction -/.test(record.description || "") ||
+            /^Equipment retired:/.test(record.description || "")) return "out";
     }
     return "other";
 }
@@ -763,7 +764,9 @@ function ActivityRow({item}:{item:RentalActivity}) {
             <div className="mt-0.5 text-[10px] text-[#8A7D90]">{when.toLocaleTimeString("en-PH",{timeZone:"Asia/Manila",hour:"numeric",minute:"2-digit"})}</div>
         </td>
         <td className="px-2 py-2 font-semibold text-[#2B174C]">{item.equipmentName}</td>
-        <td className={`px-2 py-2 text-center font-medium ${isPositive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>{activityNames[item.type]}</td>
+        <td className={`px-2 py-2 text-center font-medium ${isPositive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>
+            {item.type === "adjustment" && /^Equipment retired:/.test(item.description || "") ? "Stock Out" : activityNames[item.type]}
+        </td>
         <td className={`px-2 py-2 text-center font-semibold ${isPositive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>
             {isPositive ? "+" : "−"}{item.quantity}
         </td>

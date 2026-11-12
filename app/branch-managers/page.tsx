@@ -945,7 +945,7 @@ export default function BranchManagersPage() {
                     </header>
 
                     <section className="space-y-4 px-6 py-5">
-                        <div className="grid gap-4 md:grid-cols-3">
+                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                             <StatCard
                                 title="Total Managers"
                                 value={totals.total}
@@ -966,6 +966,13 @@ export default function BranchManagersPage() {
                                 subtitle="Currently inactive"
                                 icon={<UserX size={25} strokeWidth={2} />}
                                 tone="red"
+                            />
+                            <StatCard
+                                title="Pending Invitations"
+                                value={pendingInvites.length}
+                                subtitle="Awaiting account activation"
+                                icon={<Clock3 size={25} strokeWidth={2} />}
+                                tone="amber"
                             />
                         </div>
 
@@ -1154,9 +1161,9 @@ export default function BranchManagersPage() {
                             </div>
 
                             {loading && managers.length === 0 ? (
-                                <div className="min-h-[180px] xl:min-h-[210px] p-4"><ModuleSkeleton variant="team" /></div>
+                                <div className="p-4"><ModuleSkeleton variant="team" /></div>
                             ) : listedManagers.length === 0 ? (
-                                <div className="flex min-h-[180px] xl:min-h-[210px] flex-col items-center justify-center px-4 text-center">
+                                <div className="flex min-h-[136px] flex-col items-center justify-center px-4 text-center">
                                 <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={22} />
                                 </span>
@@ -1170,14 +1177,14 @@ export default function BranchManagersPage() {
                             ) : (
                                 <div>
                                     <div
-                                        className="min-h-[180px] xl:min-h-[210px] max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"
+                                        className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"
                                         role="region" aria-label="Manager list" tabIndex={0}
                                     >
-                                        <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                        <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-left [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
                                             <colgroup><col className="w-[17%]" /><col className="w-[29%]" /><col className="w-[19%]" /><col className="w-[13%]" /><col className="w-[22%]" /></colgroup>
                                             <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                                             <tr className="border-b border-[#E6DDF0]">
-                                                <TableHeader align="center">
+                                                <TableHeader align="left">
                                                     Employee ID
                                                 </TableHeader>
                                                 <TableHeader>
@@ -1261,10 +1268,10 @@ export default function BranchManagersPage() {
                         {/* Compact navigation preserves the detailed records in their original tables. */}
                         <section aria-label="Team records" className="grid grid-cols-1 gap-3">
                             <button type="button" onClick={(event) => openTeamDetail("invites", event.currentTarget)}
-                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
+                                    className="group flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
                                 <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Pending Invites</span><span className="block text-xs text-[#7A6A84]">Managers awaiting account activation</span></span></span>
                                 <span className="text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
-                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Invites <ArrowUpRight size={15}/></span>
+                                <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Invites <ArrowUpRight size={15}/></span>
                             </button>
                         </section>
 
@@ -1294,7 +1301,7 @@ export default function BranchManagersPage() {
                                                 <div className="p-4">
                                                     {loading && managers.length === 0 ? <div className="p-2"><ModuleSkeleton variant="team" /></div> : pendingInvites.length === 0 ?
                                                         <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFCF7] px-4 py-6 text-sm text-[#7A6A84]">No pending invites yet.</div> :
-                                                        <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                                        <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-left [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
                                                             <thead className="bg-[#FFFCF8] uppercase text-[#806A8C]"><tr>{["Manager", "Email", "Branch", "Status", "Action"].map(label => <th key={label} className="px-2.5 py-2.5">{label}</th>)}</tr></thead>
                                                             <tbody>{pendingInvites.map(manager => <tr key={manager.id} className="border-t border-[#EEE7F2]">
                                                                 <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{manager.name}</td>
@@ -1627,7 +1634,7 @@ function ManagerDialogInput({
     );
 }
 
-type StatTone = "violet" | "green" | "red";
+type StatTone = "violet" | "green" | "red" | "amber";
 
 const statToneStyles: Record<
     StatTone,
@@ -1652,6 +1659,11 @@ const statToneStyles: Record<
         iconColor: "text-[#C13333]",
         borderColor: "#F0D2D2",
     },
+    amber: {
+        iconBackground: "bg-[#FFF6DF]",
+        iconColor: "text-[#A56607]",
+        borderColor: "#F3E3C2",
+    },
 };
 
 function StatCard({
@@ -1671,7 +1683,7 @@ function StatCard({
 
     return (
         <div
-            className="flex min-h-[132px] items-center gap-4 rounded-[18px] bg-white px-5 py-5"
+            className="flex min-h-[132px] items-center gap-3 rounded-[18px] bg-white px-4 py-4"
             style={{
                 boxShadow: `inset 0 0 0 1px ${style.borderColor}, 0 2px 8px rgba(45, 27, 78, 0.06)`,
             }}

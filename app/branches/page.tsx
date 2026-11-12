@@ -7,7 +7,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
     Building2,
-    CalendarDays,
     CheckCircle2,
     MapPin,
     Pencil,
@@ -15,7 +14,6 @@ import {
     Plus,
     RefreshCw,
     Search,
-    ShoppingCart,
     Trash2,
     UserRoundCheck,
     UsersRound,
@@ -398,34 +396,6 @@ function calculateBranchBookingSales(
                 total + getBranchBookingTotal(booking),
             0
         );
-}
-
-function formatCurrency(value: number) {
-    const amount = Number(value || 0);
-
-    return `₱${(Number.isFinite(amount) ? amount : 0).toLocaleString(
-        "en-PH",
-        {
-            minimumFractionDigits: 0,
-            maximumFractionDigits: 0,
-        }
-    )}`;
-}
-
-function getFirstValidNumber(
-    ...values: Array<number | string | null | undefined>
-) {
-    for (const value of values) {
-        if (value === null || value === undefined || value === "") continue;
-
-        const numberValue = Number(value);
-
-        if (Number.isFinite(numberValue)) {
-            return numberValue;
-        }
-    }
-
-    return 0;
 }
 
 function formatCurrentDateTime(value: Date) {
@@ -1214,7 +1184,7 @@ export default function BranchesPage() {
                                         Branch Directory
                                     </h2>
                                     <p className="mt-1 text-[13px] leading-5 text-[#806A8C]">
-                                        View branch performance and assigned manager details.
+                                        View branch contact information, staff, and assigned managers.
                                     </p>
                                 </div>
 
@@ -1275,7 +1245,7 @@ export default function BranchesPage() {
                                         onAction={() => setSearch("")}
                                     />
                                 ) : (
-                                    <div className="grid gap-4 xl:grid-cols-2">
+                                    <div className="grid items-start gap-4 xl:grid-cols-2">
                                         {filteredBranches.map((branch) => (
                                             <BranchCard
                                                 key={branch.id}
@@ -1950,25 +1920,11 @@ function BranchCard({
 }) {
     const status = getBranchStatus(branch);
 
-    const totalPosSales = getFirstValidNumber(
-        branch.total_pos_sales,
-        branch.pos_sales,
-        branch.pos_revenue,
-        branch.totalPosSales
-    );
-
-    const totalBookingSales = getFirstValidNumber(
-        branch.total_booking_sales,
-        branch.booking_sales,
-        branch.booking_revenue,
-        branch.totalBookingSales
-    );
-
     const inactiveReason = getBranchInactiveReason(branch);
 
     return (
         <article
-            className="overflow-hidden rounded-[18px] border bg-white transition duration-200 hover:-translate-y-0.5"
+            className="overflow-hidden rounded-[18px] border bg-white transition-shadow duration-200 hover:shadow-md"
             style={{
                 borderColor: "#E7DFF0",
                 boxShadow:
@@ -2057,130 +2013,63 @@ function BranchCard({
                 </div>
             </div>
 
-            <div className="grid gap-3 px-4 pb-4 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 px-4 pb-4 sm:grid-cols-2 xl:grid-cols-3">
+                <div>
+                    <Metric
+                        value={branch.address || "No address provided"}
+                        label="Address"
+                        icon={<MapPin size={18} strokeWidth={2} aria-hidden="true" />}
+                        iconBackground="#F1E9FF"
+                        iconColor="#6D3CC7"
+                        wrapValue
+                    />
+                </div>
                 <Metric
-                    value={formatCurrency(totalPosSales)}
-                    label="Total POS Sales"
-                    icon={
-                        <ShoppingCart
-                            size={18}
-                            strokeWidth={2}
-                            aria-hidden="true"
-                        />
-                    }
-                    iconBackground="#F1E9FF"
-                    iconColor="#6D3CC7"
-                />
-
-                <Metric
-                    value={formatCurrency(totalBookingSales)}
-                    label="Total Booking Sales"
-                    icon={
-                        <CalendarDays
-                            size={18}
-                            strokeWidth={2}
-                            aria-hidden="true"
-                        />
-                    }
+                    value={branch.contact_number || "No phone number"}
+                    label="Phone Number"
+                    icon={<Phone size={18} strokeWidth={2} aria-hidden="true" />}
                     iconBackground="#EAF3FF"
                     iconColor="#2E78DA"
+                    wrapValue
                 />
-
                 <Metric
                     value={Number(branch.staff_count || 0)}
                     label="Total Staff"
-                    icon={
-                        <UsersRound
-                            size={18}
-                            strokeWidth={2}
-                            aria-hidden="true"
-                        />
-                    }
+                    icon={<UsersRound size={18} strokeWidth={2} aria-hidden="true" />}
                     iconBackground="#EAF8EF"
                     iconColor="#188348"
                 />
             </div>
 
-            <div
-                className="border-t px-4 py-3.5"
-                style={{ borderColor: "#EEE7F2" }}
-            >
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                    <div className="min-w-0 space-y-2">
-                        <p className="flex min-w-0 items-center gap-2 text-[13px] text-[#7A6A84]">
-                            <MapPin
-                                size={15}
-                                strokeWidth={2}
-                                className="shrink-0"
-                                style={{ color: "#7040C1" }}
-                                aria-hidden="true"
-                            />
+            <div className="flex items-center justify-end border-t border-[#EEE7F2] px-4 py-3">
+                <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                    <button
+                        type="button"
+                        onClick={onEdit}
+                        className="inline-flex h-[38px] items-center gap-1.5 rounded-xl border px-3.5 text-xs font-semibold shadow-sm transition"
+                        style={{
+                            borderColor: "#CDB8E4",
+                            backgroundColor: "#FFFFFF",
+                            color: "#5D2EA5",
+                        }}
+                    >
+                        <Pencil size={14} />
+                        Edit
+                    </button>
 
-                            <span className="shrink-0 font-semibold text-[#281246]">
-                                Address
-                            </span>
-
-                            <span
-                                className="truncate"
-                                title={
-                                    branch.address ||
-                                    "No address provided"
-                                }
-                            >
-                                {branch.address ||
-                                    "No address provided"}
-                            </span>
-                        </p>
-
-                        <p className="flex min-w-0 items-center gap-2 text-[13px] text-[#7A6A84]">
-                            <Phone
-                                size={15}
-                                strokeWidth={2}
-                                className="shrink-0"
-                                style={{ color: "#7040C1" }}
-                                aria-hidden="true"
-                            />
-
-                            <span className="shrink-0 font-semibold text-[#281246]">
-                                Contact
-                            </span>
-
-                            <span className="truncate">
-                                {branch.contact_number ||
-                                    "No contact number"}
-                            </span>
-                        </p>
-                    </div>
-
-                    <div className="flex shrink-0 justify-end gap-2">
-                        <button
-                            type="button"
-                            onClick={onEdit}
-                            className="inline-flex h-[38px] items-center gap-1.5 rounded-xl border px-3.5 text-xs font-semibold shadow-sm transition"
-                            style={{
-                                borderColor: "#CDB8E4",
-                                backgroundColor: "#FFFFFF",
-                                color: "#5D2EA5",
-                            }}
-                        >
-                            <Pencil size={14} />
-                            Edit
-                        </button>
-
-                        <button
-                            type="button"
-                            onClick={onDelete}
-                            className="inline-flex h-[38px] items-center gap-1.5 rounded-xl border px-3.5 text-xs font-semibold shadow-sm transition"
-                            style={{
-                                borderColor: "#D84B32",
-                                backgroundColor: "#D84B32",
-                                color: "#FFFFFF",
-                            }}
-                        >
-                            <Trash2 size={14} />
-                            Delete
-                        </button>
-                    </div>
+                    <button
+                        type="button"
+                        onClick={onDelete}
+                        className="inline-flex h-[38px] items-center gap-1.5 rounded-xl border px-3.5 text-xs font-semibold shadow-sm transition"
+                        style={{
+                            borderColor: "#D84B32",
+                            backgroundColor: "#D84B32",
+                            color: "#FFFFFF",
+                        }}
+                    >
+                        <Trash2 size={14} />
+                        Delete
+                    </button>
                 </div>
             </div>
         </article>
@@ -2193,16 +2082,18 @@ function Metric({
                     icon,
                     iconBackground,
                     iconColor,
+                    wrapValue = false,
                 }: {
     value: string | number;
     label: string;
     icon: React.ReactNode;
     iconBackground: string;
     iconColor: string;
+    wrapValue?: boolean;
 }) {
     return (
         <div
-            className="flex min-w-0 items-center gap-2.5 rounded-xl border bg-white px-3 py-3"
+            className="flex h-full min-w-0 items-center gap-2.5 rounded-xl border bg-white px-3 py-3"
             style={{
                 borderColor: "#EEE6F3",
                 boxShadow:
@@ -2221,13 +2112,13 @@ function Metric({
 
             <div className="min-w-0">
                 <p
-                    className="truncate text-[15px] font-bold leading-5 text-[#1A1220]"
+                    className={`${wrapValue ? "break-words text-[13px]" : "truncate text-[15px]"} font-bold leading-5 text-[#1A1220]`}
                     title={String(value)}
                 >
                     {value}
                 </p>
 
-                <p className="mt-0.5 truncate text-[10px] font-medium leading-4 text-[#7A6A84] sm:text-[11px]">
+                <p className="mt-0.5 text-[10px] font-medium leading-4 text-[#7A6A84] sm:text-[11px]">
                     {label}
                 </p>
             </div>

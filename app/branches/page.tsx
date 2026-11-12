@@ -2046,28 +2046,18 @@ function BranchCard({
                     <button
                         type="button"
                         onClick={onEdit}
-                        className="inline-flex h-[38px] items-center gap-1.5 rounded-xl border px-3.5 text-xs font-semibold shadow-sm transition"
-                        style={{
-                            borderColor: "#CDB8E4",
-                            backgroundColor: "#FFFFFF",
-                            color: "#5D2EA5",
-                        }}
+                        className="inline-flex h-[30px] items-center gap-1 rounded-lg bg-[#F1EBFF] px-3 text-[10px] font-semibold text-[#5734B3] transition hover:bg-[#E7DCFF]"
                     >
-                        <Pencil size={14} />
+                        <Pencil size={11} />
                         Edit
                     </button>
 
                     <button
                         type="button"
                         onClick={onDelete}
-                        className="inline-flex h-[38px] items-center gap-1.5 rounded-xl border px-3.5 text-xs font-semibold shadow-sm transition"
-                        style={{
-                            borderColor: "#D84B32",
-                            backgroundColor: "#D84B32",
-                            color: "#FFFFFF",
-                        }}
+                        className="inline-flex h-[30px] items-center gap-1 rounded-lg bg-[#FFF0F0] px-3 text-[10px] font-semibold text-[#D83A45] transition hover:bg-[#FFE2E2]"
                     >
-                        <Trash2 size={14} />
+                        <Trash2 size={11} />
                         Delete
                     </button>
                 </div>

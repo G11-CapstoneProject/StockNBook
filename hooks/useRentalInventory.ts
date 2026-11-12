@@ -319,7 +319,9 @@ export type RentalMutation =
     | { action: "create_equipment"; name: string; category: string; alertLevel: number;
     rentalRatePerDay: number; initialPurchase?: RentalPurchaseDetails } & RentalPricingSelection
     | { action: "update_equipment"; equipmentId: number; name: string; category: string; alertLevel: number;
-    rentalRatePerDay?: number } & RentalPricingSelection
+    rentalRatePerDay?: number;
+    // Optional verified stock count correction, saved atomically by the same Update Product request.
+    totalUnits?: number; expectedTotalUnits?: number; reason?: string; physicalCountVerified?: true } & RentalPricingSelection
     | { action: "correct_equipment_stock"; equipmentId:number; totalUnits:number;
     reason:string; physicalCountVerified:true }
     | { action: "receive_equipment"; equipmentId: number; quantity: number }
@@ -555,9 +557,12 @@ export type StaffRentalEquipmentCalendar = {
 export type StaffRentalMovement = {
     id: number; equipmentId: number; equipmentName: string;
     type: string; quantity: number; occurredAt: string; referenceNumber: string;
+    // Server-classified Stock In / Stock Out (absent on older Lambda deployments).
+    direction?: "in" | "out";
 };
 export type StaffRentalStockAction =
     | { action:"staff_receive_rental_purchase"; taskId:number; quantity:number }
+    | { action:"staff_restock_equipment"; equipmentId:number; quantity:number }
     | { action:"staff_report_equipment_issue"; equipmentId:number; quantity:number; reason:string; issueType:"routine"|"damage"|"missing" }
     | { action:"staff_submit_repair_completion"; maintenanceId:number; quantity:number; notes:string }
     | { action:"staff_complete_routine_maintenance"; maintenanceId:number; quantity:number; notes:string }
@@ -580,6 +585,7 @@ type ApiResult = {
     pendingReceipts?: StaffRentalPendingReceipt[]; maintenanceTasks?: StaffRentalMaintenanceTask[];
     missingReports?: StaffRentalMissingReport[];
     schedule?: StaffRentalEquipmentSchedule; calendar?: StaffRentalEquipmentCalendar;
+    availability?: unknown;
 };
 
 async function rentalRequest(body: Record<string, unknown>, signal?: AbortSignal): Promise<ApiResult> {
@@ -721,6 +727,18 @@ export function useStaffRentalInventory() {
             !Array.isArray(response.schedule.bookings))throw new Error("Invalid rental schedule response.");
         return response.schedule;
     },[]);
+    // Read-only booking availability for a date range: the same check_availability Lambda
+    // check used by the Manager Branch Rental Equipment List, scoped to the Staff's branch.
+    const checkAvailability=React.useCallback(async(startDate:string,endDate:string):Promise<RentalAvailability[]>=>{
+        if(!startDate||!endDate||endDate<startDate)throw new Error("Select a valid rental date range.");
+        const result=await rentalRequest({action:"check_availability",start_date:startDate,end_date:endDate});
+        if(!Array.isArray(result.availability))throw new Error("Availability data was not returned.");
+        return result.availability
+            .filter((v: unknown): v is {equipmentId: number; availableUnits: number} => Boolean(v && typeof v === "object"))
+            .map((v) => ({equipmentId: Number(v.equipmentId), availableUnits: nonnegativeInteger(v.availableUnits)}))
+            .filter(v => Number.isSafeInteger(v.equipmentId) && v.equipmentId > 0);
+    },[]);
     return { equipment, allocations, activity, pendingReceipts, maintenanceTasks, missingReports,
-        loading, refreshing, saving, error, connected, refresh, act, actBooking, actStock, getEquipmentSchedule, getEquipmentCalendar };
+        loading, refreshing, saving, error, connected, refresh, act, actBooking, actStock, getEquipmentSchedule, getEquipmentCalendar,
+        checkAvailability };
 }

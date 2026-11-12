@@ -266,13 +266,6 @@ type InventoryReportsResponse = {
     error?: string;
 };
 
-type LastStockInRecord = {
-    productId: number | string;
-    variantId?: number | string | null;
-    variantName?: string | null;
-    stockInDate: string;
-};
-
 type ExpiredDisposalActivityRecord = {
     id: number;
     recordedAt?: string | null;
@@ -330,12 +323,8 @@ type ActionCenterRow = {
         | "Do Not Restock";
 };
 
-type ActionCenterFilter =
-    | "All"
-    | "Low Stock Items"
-    | "Out of Stock Items"
-    | "Expiring / Expired"
-    | "Slow Moving";
+// "All" or one existing stock alert status (ActionCenterRow issue).
+type ActionCenterFilter = "All" | ActionCenterRow["issue"];
 
 // Inventory downloads reuse the same report format as StockNBook's management modules.
 async function downloadManagerInventoryReport(
@@ -974,86 +963,6 @@ function getProductExpiration(product: Product) {
     return dates[0] || null;
 }
 
-// A recorded positive restock wins over opening stock. The separate products
-// endpoint provides all-time restock dates, not only the last 30 days used by
-// Recent Stock Activity. Only this table and its matching export use this map.
-function readStockInCalendarDate(value: unknown): string {
-    const raw = String(value ?? "").trim();
-    if (!raw) return "";
-
-    // The API returns database calendar dates already normalized to YYYY-MM-DD.
-    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-        const parsed = new Date(`${raw}T00:00:00`);
-        return !Number.isNaN(parsed.getTime()) &&
-        parsed.getFullYear() === Number(raw.slice(0, 4)) &&
-        parsed.getMonth() + 1 === Number(raw.slice(5, 7)) &&
-        parsed.getDate() === Number(raw.slice(8, 10))
-            ? raw : "";
-    }
-
-    // createdAt arrives as an ISO timestamp from MySQL. Use the business's
-    // Philippine calendar day rather than taking the UTC date prefix.
-    const date = parseStockActivityDateTime(raw);
-    if (!date) return "";
-    const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit",
-    }).formatToParts(date);
-    const part = (name: string) => parts.find((p) => p.type === name)?.value || "";
-    return `${part("year")}-${part("month")}-${part("day")}`;
-}
-
-function buildLastStockInDates(
-    products: Product[],
-    records: LastStockInRecord[]
-) {
-    const productDates: Record<number, string> = {};
-    const variantDates: Record<string, string> = {};
-    const today = readStockInCalendarDate(new Date().toISOString());
-
-    const newer = (current: string, candidate: string) =>
-        candidate && candidate <= today && candidate > current ? candidate : current;
-
-    // For existing records with opening inventory, creation is the earliest
-    // available stock-in date. Do not label a zero-stock creation as Stock In.
-    products.forEach((product) => {
-        const openingDate = readStockInCalendarDate(product.createdAt);
-        const variants = product.hasVariants ? product.variants || [] : [];
-        if (variants.length > 0) {
-            variants.forEach((variant) => {
-                if (Number(variant.stock) <= 0) return;
-                const date = readStockInCalendarDate(variant.createdAt || product.createdAt);
-                const key = `${product.id}:${variant.id}`;
-                variantDates[key] = newer(variantDates[key] || "", date);
-                productDates[product.id] = newer(productDates[product.id] || "", date);
-            });
-        } else if (Number(product.stock) > 0) {
-            productDates[product.id] = newer(productDates[product.id] || "", openingDate);
-        }
-    });
-
-    records.forEach((record) => {
-        const productId = Number(record.productId);
-        if (!Number.isInteger(productId) || productId <= 0) return;
-        const product = products.find((item) => Number(item.id) === productId);
-        if (!product) return;
-        const date = readStockInCalendarDate(record.stockInDate);
-        if (!date || date > today) return;
-
-        productDates[productId] = newer(productDates[productId] || "", date);
-        const variantName = normalizeLookupText(record.variantName || "");
-        const variantId = Number(record.variantId || 0);
-        if (!variantName && !variantId) return;
-        (product.variants || []).forEach((variant) => {
-            if (variantId ? Number(variant.id)!==variantId
-                : normalizeLookupText(getVariantName(variant)) !== variantName) return;
-            const key = `${productId}:${variant.id}`;
-            variantDates[key] = newer(variantDates[key] || "", date);
-        });
-    });
-
-    return { productDates, variantDates };
-}
-
 function getNumericSalesValue(value: unknown) {
     if (value === null || value === undefined || value === "") return null;
     const numeric = Number(value);
@@ -1591,8 +1500,7 @@ function productMatchesInventorySearch(product: Product, rawSearch: string) {
 // Export the same filtered product rows and columns currently shown in the
 // Branch Inventory List. Keep the product/stock-in/status calculations unchanged.
 function getManagerInventoryExportRows(
-    products: Product[],
-    productStockInDates: Record<number, string>
+    products: Product[]
 ): Array<Array<string | number>> {
     return [
         [
@@ -1601,7 +1509,6 @@ function getManagerInventoryExportRows(
             "Category",
             "Available Stock",
             "Reorder Point",
-            "Last Stock In",
             "Expiration",
             "Status",
         ],
@@ -1611,7 +1518,6 @@ function getManagerInventoryExportRows(
             product.category,
             getProductTotalStock(product),
             getProductReorderLevel(product),
-            formatDate(productStockInDates[product.id]),
             getProductExpiration(product)
                 ? formatDate(getProductExpiration(product)!.toISOString())
                 : "—",
@@ -1650,7 +1556,6 @@ function getManagerInventoryReportDate(date: Date) {
 
 function exportManagerInventoryExcel(
     products: Product[],
-    productStockInDates: Record<number, string>,
     details: ManagerInventoryExportDetails
 ) {
     const reportRows: Array<Array<string | number>> = [
@@ -1662,16 +1567,16 @@ function exportManagerInventoryExcel(
         ["Status Filter", details.statusFilter],
         ["Total Products", products.length],
         [],
-        ...getManagerInventoryExportRows(products, productStockInDates),
+        ...getManagerInventoryExportRows(products),
     ];
     const sheet = XLSX.utils.aoa_to_sheet(reportRows);
     sheet["!cols"] = [
         { wch: 19 }, { wch: 42 }, { wch: 25 }, { wch: 18 },
-        { wch: 17 }, { wch: 20 }, { wch: 20 }, { wch: 18 },
+        { wch: 17 }, { wch: 20 }, { wch: 18 },
     ];
-    sheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 7 } }];
+    sheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 6 } }];
     // Row 9 contains the actual product headings, below the report information.
-    sheet["!autofilter"] = { ref: `A9:H${Math.max(9, 9 + products.length)}` };
+    sheet["!autofilter"] = { ref: `A9:G${Math.max(9, 9 + products.length)}` };
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, sheet, "Branch Inventory");
@@ -1685,14 +1590,13 @@ function exportManagerInventoryExcel(
 // available in Next.js; no new packages or unrelated backend changes are needed.
 function exportManagerInventoryPdf(
     products: Product[],
-    productStockInDates: Record<number, string>,
     details: ManagerInventoryExportDetails
 ) {
-    const [headers, ...rows] = getManagerInventoryExportRows(products, productStockInDates);
+    const [headers, ...rows] = getManagerInventoryExportRows(products);
     const pageWidth = 841.89; // A4 landscape, in PDF points
     const pageHeight = 595.28;
     const scale = 2; // keep text readable even with hundreds of products
-    const widths = [102, 175, 123, 71, 80, 81, 87, 62];
+    const widths = [102, 175, 123, 71, 80, 87, 62];
     const tableWidth = widths.reduce((sum, value) => sum + value, 0);
     const tableLeft = (pageWidth - tableWidth) / 2;
     const tableTop = 139;
@@ -1986,7 +1890,6 @@ export default function ManagerInventory() {
         Record<number, string>
     >({});
     const [variantNumbersById, setVariantNumbersById] = React.useState<Record<number,string>>({});
-    const [lastStockInRecords, setLastStockInRecords] = React.useState<LastStockInRecord[]>([]);
     const [receivingProduct, setReceivingProduct] = React.useState<Product | null>(null);
     const [disposalSelection, setDisposalSelection] = React.useState<{product: Product; variantId: number | null} | null>(null);
     const [restockToast, setRestockToast] = React.useState<SuccessToastMessage | null>(null);
@@ -2419,44 +2322,7 @@ export default function ManagerInventory() {
         };
     }, []);
 
-    // Fetch the full recorded stock-in history independently of the
-    // 30-day Recent Stock Activity feed. No stock/price/write operations.
-    React.useEffect(() => {
-        let cancelled = false;
-        const loadLastStockInDates = async () => {
-            const token = sessionStorage.getItem("token");
-            if (!token || !Number.isInteger(managerBranchId) || managerBranchId <= 0) {
-                if (!cancelled) setLastStockInRecords([]);
-                return;
-            }
-            try {
-                const response = await fetch("/api/products", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({ action: "get_last_stock_in", branch_id: managerBranchId }),
-                    cache: "no-store",
-                });
-                const result = await response.json().catch(() => ({}));
-                if (!response.ok || result.success === false || !Array.isArray(result.stockInRecords)) {
-                    throw new Error(result.error || "Unable to load stock-in dates.");
-                }
-                if (!cancelled) setLastStockInRecords(result.stockInRecords);
-            } catch (error) {
-                console.warn("Manager inventory stock-in date lookup failed:", error);
-                if (!cancelled) setLastStockInRecords([]);
-            }
-        };
-        void loadLastStockInDates();
-        return () => { cancelled = true; };
-    }, [managerBranchId, stockActivityRefreshKey]);
 
-    const lastStockInDates = React.useMemo(
-        () => buildLastStockInDates(managerProducts, lastStockInRecords),
-        [managerProducts, lastStockInRecords]
-    );
 
     // KPI cards and the Stock Action Center count the same sellable stock shown in
     // the Branch Inventory List ("Available Stock"). Each line keeps its original
@@ -2680,6 +2546,7 @@ export default function ManagerInventory() {
 
                         <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
                             <StockActionCenter
+                                search={inv.search}
                                 rows={actionRows}
                                 branchName={branchBadge}
                                 onEdit={inv.handleEditProduct}
@@ -2698,6 +2565,7 @@ export default function ManagerInventory() {
 
                             <RecentStockActivity
                                 movements={recentStockMovements}
+                                search={inv.search}
                                 branchName={branchBadge}
                                 loading={salesLoading || stockActivityLoading}
                             />
@@ -2708,7 +2576,6 @@ export default function ManagerInventory() {
                             products={tableProducts}
                             storeName={inv.storeName}
                             branchName={branchBadge}
-                            lastStockInDates={lastStockInDates}
                             categories={inv.categories}
                             selectedCategory={inv.selectedCategory}
                             onCategoryChange={inv.setSelectedCategory}
@@ -3187,6 +3054,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
 
 function StockActionCenter({
                                rows,
+                               search,
                                branchName,
                                onEdit,
                                onReceive,
@@ -3195,6 +3063,7 @@ function StockActionCenter({
                                onVariantRemoved,
                            }: {
     rows: ActionCenterRow[];
+    search: string;
     branchName: string;
     onEdit: (product: Product) => void;
     onReceive: (product: Product) => void;
@@ -3206,17 +3075,9 @@ function StockActionCenter({
     const [reviewRow, setReviewRow] = React.useState<ActionCenterRow | null>(null);
     const [exportError, setExportError] = React.useState("");
 
-    const visibleRows = React.useMemo(() => {
-        return rows.filter((row) => {
-            if (filter === "Low Stock Items") return row.issue === "Low Stock";
-            if (filter === "Out of Stock Items") return row.issue === "Out of Stock";
-            if (filter === "Expiring / Expired") {
-                return row.issue === "Expiring" || row.issue === "Expired";
-            }
-            if (filter === "Slow Moving") return row.issue === "Slow Moving";
-            return true;
-        });
-    }, [filter, rows]);
+    const visibleRows = React.useMemo(() => rows.filter((row) =>
+        (filter === "All" || row.issue === filter) && productMatchesInventorySearch(row.product, search)
+    ), [filter, rows, search]);
 
     return (
         <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
@@ -3241,19 +3102,20 @@ function StockActionCenter({
                                                   onChange={(event) =>
                                                       setFilter(event.target.value as ActionCenterFilter)
                                                   }
-                                                  aria-label="Filter stock action center"
+                                                  aria-label="Filter stock action center by status"
                     >
-                        <option value="All">All</option>
-                        <option value="Low Stock Items">Low Stock Items</option>
-                        <option value="Out of Stock Items">Out of Stock Items</option>
-                        <option value="Expiring / Expired">Expiring / Expired</option>
+                        <option value="All">All Status</option>
+                        <option value="Low Stock">Low Stock</option>
+                        <option value="Out of Stock">Out of Stock</option>
+                        <option value="Expiring">Expiring</option>
+                        <option value="Expired">Expired</option>
                         <option value="Slow Moving">Slow Moving</option>
                     </ManagerInventoryFilterSelect>
                     <button type="button" title="Download filtered stock action report (PDF)" aria-label="Download stock action report"
                             onClick={() => void downloadManagerInventoryReport("Stock Action Center",
                                 ["Product", "Current Stock", "Reorder Point", "Sales Velocity", "Status", "Action"],
                                 visibleRows.map(row => [row.productName, String(row.currentStock), String(row.reorderPoint), row.salesVelocity, row.issue, row.action]),
-                                branchName, filter, "stocknbook_stock_action_center")
+                                branchName, `${filter === "All" ? "All Status" : filter}${search.trim() ? ` · Search: “${search.trim()}”` : ""}`, "stocknbook_stock_action_center")
                                 .then(() => setExportError(""))
                                 .catch(() => setExportError("Unable to download stock action report."))}
                             className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]">
@@ -3595,32 +3457,42 @@ function RecentStockActivity({
                                  movements,
                                  branchName,
                                  loading,
+                                 search,
                              }: {
     movements: RecentStockMovement[];
     branchName: string;
     loading: boolean;
+    search: string;
 }) {
-    const [activityDateFilter, setActivityDateFilter] = React.useState<"today" | "all" | "date">("today");
-    const [selectedDate, setSelectedDate] = React.useState("");
+    const [activityDateFilter, setActivityDateFilter] = React.useState<"today" | "all" | "range">("today");
+    const [startDate, setStartDate] = React.useState("");
+    const [endDate, setEndDate] = React.useState("");
     const [movementFilter, setMovementFilter] = React.useState<"all" | "in" | "out">("all");
     const [exportError, setExportError] = React.useState("");
     const todayKey = manilaActivityDateKey(new Date());
+    // Inclusive YYYY-MM-DD range; Start Date must not be later than End Date.
+    const rangeValid = /^\d{4}-\d{2}-\d{2}$/.test(startDate) && /^\d{4}-\d{2}-\d{2}$/.test(endDate) && startDate <= endDate;
+    const rangeReversed = Boolean(startDate && endDate && startDate > endDate);
     const filteredMovements = React.useMemo(() => movements.filter(movement => {
         if (!movement.date) return false;
         const key = manilaActivityDateKey(movement.date);
         if (activityDateFilter === "today" && key !== todayKey) return false;
-        if (activityDateFilter === "date" && (!selectedDate || key !== selectedDate)) return false;
+        // Date Range includes both selected days; an incomplete or reversed range shows no records.
+        if (activityDateFilter === "range" && (!rangeValid || key < startDate || key > endDate)) return false;
         if (movementFilter === "in" && movement.movement !== "Stock In") return false;
         if (movementFilter === "out" && movement.movement === "Stock In") return false;
+        // The Branch Inventory List search also narrows this activity table and its export.
+        const query = search.trim().toLowerCase();
+        if (query && ![movement.productName, movement.referenceNumber].join(" ").toLowerCase().includes(query)) return false;
         return true;
-    }), [movements, activityDateFilter, selectedDate, movementFilter, todayKey]);
+    }), [movements, activityDateFilter, startDate, endDate, rangeValid, movementFilter, todayKey, search]);
     const downloadActivity = () => void downloadManagerInventoryReport(
-        "Consumable Stock Activity", ["Date", "Time", "Product", "Movement", "Qty", "Reference No."],
+        "Consumable Stock Activity", ["Date", "Time", "Product", "Activity", "Qty", "Reference No."],
         filteredMovements.map(m => [formatStockActivityDate(m.date),
             m.source === "POS Sale" && !m.hasRecordedTime ? "Not recorded" : formatStockActivityTime(m.date),
             m.productName, m.movement, String(m.movement === "Stock In" ? m.quantity : -m.quantity),
             m.referenceNumber || "—"]), branchName,
-        `${activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? "Today" : selectedDate || "Select a date"} · ${movementFilter === "all" ? "All activity" : movementFilter === "in" ? "Stock In" : "Stock Out"}`,
+        `${activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? "Today" : rangeValid ? `${startDate} to ${endDate}` : "Choose a date range"} · ${movementFilter === "all" ? "All activity" : movementFilter === "in" ? "Stock In" : "Stock Out"}${search.trim() ? ` · Search: “${search.trim()}”` : ""}`,
         "stocknbook_consumable_stock_activity")
         .then(() => setExportError(""))
         .catch(() => setExportError("Unable to download the activity report."));
@@ -3641,19 +3513,34 @@ function RecentStockActivity({
                     </div>
                 </div>
                 <div className="flex shrink-0 items-center justify-end gap-1.5">
-                    <ManagerInventoryFilterSelect containerClassName="w-[105px]" aria-label="Filter consumable activity date" value={activityDateFilter} onChange={e => setActivityDateFilter(e.target.value as "today" | "all" | "date")}>
-                        <option value="today">Today</option><option value="all">All loaded</option><option value="date">Choose date</option>
+                    <ManagerInventoryFilterSelect containerClassName="w-[105px]" aria-label="Filter consumable activity date" value={activityDateFilter} onChange={e => setActivityDateFilter(e.target.value as "today" | "all" | "range")}>
+                        <option value="today">Today</option><option value="all">All loaded</option><option value="range">Date range</option>
                     </ManagerInventoryFilterSelect>
-                    {activityDateFilter === "date" && <input type="date" aria-label="Choose consumable activity date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)}
-                                                             className="h-9 max-w-[135px] rounded-xl border border-[#E3D8EA] bg-white px-1 text-[11px] text-[#2B174C]" />}
-                    <ManagerInventoryFilterSelect containerClassName="w-[116px]" aria-label="Filter consumable activity direction" value={movementFilter} onChange={e => setMovementFilter(e.target.value as "all" | "in" | "out")}>
+                    <ManagerInventoryFilterSelect containerClassName="w-[116px]" aria-label="Filter consumable activity" value={movementFilter} onChange={e => setMovementFilter(e.target.value as "all" | "in" | "out")}>
                         <option value="all">All Activity</option><option value="in">Stock In</option><option value="out">Stock Out</option>
                     </ManagerInventoryFilterSelect>
                     <button type="button" title="Download filtered activity PDF" aria-label="Download filtered consumable activity" onClick={downloadActivity}
-                            disabled={loading || (activityDateFilter === "date" && !selectedDate)}
+                            disabled={loading || (activityDateFilter === "range" && !rangeValid)}
                             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF] disabled:opacity-40"><Download size={16}/></button>
                 </div>
             </div>
+            {activityDateFilter === "range" && (
+                <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-[11px]">
+                    <label className="flex items-center gap-1.5 font-semibold text-[#4E2C66]">Start Date
+                        <input type="date" aria-label="Consumable activity start date" value={startDate} max={endDate || undefined}
+                               onChange={e => setStartDate(e.target.value)}
+                               className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-2 text-[11px] font-normal text-[#2B174C]" />
+                    </label>
+                    <label className="flex items-center gap-1.5 font-semibold text-[#4E2C66]">End Date
+                        <input type="date" aria-label="Consumable activity end date" value={endDate} min={startDate || undefined}
+                               onChange={e => setEndDate(e.target.value)}
+                               className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-2 text-[11px] font-normal text-[#2B174C]" />
+                    </label>
+                    {rangeReversed
+                        ? <p role="alert" className="font-medium text-[#D92C3F]">Start Date cannot be later than End Date.</p>
+                        : (!startDate || !endDate) && <p className="text-[#86778F]">Choose a Start Date and End Date (both dates included).</p>}
+                </div>
+            )}
             {exportError && <p role="alert" className="px-4 text-xs text-red-600">{exportError}</p>}
 
             {loading ? (
@@ -3678,7 +3565,7 @@ function RecentStockActivity({
                         <tr className="border-b border-[#E9E1EE]">
                             <MiniHeader center>Date & Time</MiniHeader>
                             <MiniHeader center>Product</MiniHeader>
-                            <MiniHeader center>Movement</MiniHeader>
+                            <MiniHeader center>Activity</MiniHeader>
                             <MiniHeader center>Qty</MiniHeader>
                             <MiniHeader center>Reference No.</MiniHeader>
                         </tr>
@@ -3811,7 +3698,6 @@ function ManagerInventoryTable({
                                    products,
                                    storeName,
                                    branchName,
-                                   lastStockInDates,
                                    categories,
                                    selectedCategory,
                                    onCategoryChange,
@@ -3826,7 +3712,6 @@ function ManagerInventoryTable({
     products: Product[];
     storeName: string;
     branchName: string;
-    lastStockInDates: { productDates: Record<number, string>; variantDates: Record<string, string> };
     categories: string[];
     selectedCategory: string;
     onCategoryChange: (value: string) => void;
@@ -3852,8 +3737,8 @@ function ManagerInventoryTable({
             generatedAt: new Date(),
         };
         try {
-            if (format === "xlsx") exportManagerInventoryExcel(products, lastStockInDates.productDates, options);
-            else exportManagerInventoryPdf(products, lastStockInDates.productDates, options);
+            if (format === "xlsx") exportManagerInventoryExcel(products, options);
+            else exportManagerInventoryPdf(products, options);
             setExportToast({title: "Inventory export started", message: `${format === "xlsx" ? "Excel" : "PDF"} report prepared. Check your browser downloads.`});
         } catch (error) {
             setExportToast({title: "Unable to export inventory", message: error instanceof Error ? error.message : "Please try again.", tone: "error"});
@@ -3949,18 +3834,17 @@ function ManagerInventoryTable({
                     No products found for the current filters.
                 </div>
             ) : (
-                <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain" style={{ maxHeight: 360 }} role="region" aria-label="Branch inventory list" tabIndex={0}>
-                    <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain" style={{ maxHeight: 360 }} role="region" aria-label="Branch inventory list" tabIndex={0}>
+                    <table className="w-full min-w-0 table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                         <colgroup>
-                            <col className="w-[10%]" />
-                            <col className="w-[20%]" />
+                            <col className="w-[13%]" />
+                            <col className="w-[22%]" />
                             <col className="w-[11%]" />
                             <col className="w-[9%]" />
                             <col className="w-[8.5%]" />
+                            <col className="w-[9.5%]" />
                             <col className="w-[9%]" />
-                            <col className="w-[8.5%]" />
-                            <col className="w-[8%]" />
-                            <col className="w-[16%]" />
+                            <col className="w-[18%]" />
                         </colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                         <tr className="border-b border-[#E9E1EE]">
@@ -3969,7 +3853,6 @@ function ManagerInventoryTable({
                             <MiniHeader center>Category</MiniHeader>
                             <MiniHeader center>Available Stock</MiniHeader>
                             <MiniHeader center>Reorder Point</MiniHeader>
-                            <MiniHeader center>Last Stock In</MiniHeader>
                             <MiniHeader center>Expiration</MiniHeader>
                             <MiniHeader center>Status</MiniHeader>
                             <MiniHeader center>Action</MiniHeader>
@@ -4010,9 +3893,10 @@ function ManagerInventoryTable({
                                                 : undefined
                                         }
                                     >
-                                        <td className="break-all py-2 font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px] px-4 text-left">
+                                        {/* Same typography as the Product column. The complete number stays on one
+                                            line, with the variant expand/collapse arrow before it. */}
+                                        <td className="whitespace-nowrap py-2 px-4 text-left font-semibold text-[#2B174C]">
                                             <div className="flex items-center justify-start gap-1.5">
-                                                <span>{getProductNumber(product) || "—"}</span>
                                                 {expandable ? (
                                                     <ChevronDown
                                                         size={13}
@@ -4020,7 +3904,8 @@ function ManagerInventoryTable({
                                                             expanded ? "rotate-180" : ""
                                                         }`}
                                                     />
-                                                ) : null}
+                                                ) : <span className="inline-block w-[13px] shrink-0" aria-hidden="true" />}
+                                                <span>{getProductNumber(product) || "—"}</span>
                                             </div>
                                         </td>
                                         <td className="break-words px-2 py-2 font-semibold text-[#2B174C]">
@@ -4042,9 +3927,6 @@ function ManagerInventoryTable({
                                         </td>
                                         <td className="px-2 py-2 text-center text-[#5F4E75]">
                                             {formatNumber(getProductReorderLevel(product))}
-                                        </td>
-                                        <td className="px-2 py-2 text-center text-[#5F4E75]">
-                                            {formatDate(lastStockInDates.productDates[product.id])}
                                         </td>
                                         <td className="px-2 py-2 text-center text-[#5F4E75]">
                                             {expiration
@@ -4128,7 +4010,7 @@ function ManagerInventoryTable({
                                                     key={variant.id}
                                                     className="h-12 border-b border-[#EFE8F2] bg-[#FCF9FF]"
                                                 >
-                                                    <td className="break-all py-2 px-4 text-left font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">
+                                                    <td className="whitespace-nowrap py-2 pr-4 pl-[35px] text-left text-[10px] font-semibold text-[#5F3D82]" title="Variant Number">
                                                         {variant.variantNumber || "—"}
                                                     </td>
                                                     <td className="break-words px-2 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">
@@ -4142,9 +4024,6 @@ function ManagerInventoryTable({
                                                     </td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">
                                                         {formatNumber(variant.alertLevel)}
-                                                    </td>
-                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">
-                                                        {formatDate(lastStockInDates.variantDates[`${product.id}:${variant.id}`])}
                                                     </td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">
                                                         {formatDate(

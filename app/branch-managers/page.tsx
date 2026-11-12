@@ -8,29 +8,22 @@ import {
     useCallback,
     useEffect,
     useMemo,
-    useRef,
     useState,
 } from "react";
 import { useRouter } from "next/navigation";
 import {
-    Building2,
     Clock3,
     Download,
     CheckCircle2,
     Copy,
     Filter,
     Mail,
-    Plus,
     RefreshCw,
     Search,
-    ShieldCheck,
     UserCheck,
-    UserPlus,
     UsersRound,
     UserX,
     X,
-    LockKeyhole,
-    ArrowUpRight,
 } from "lucide-react";
 
 type ManagerStatus = "active" | "inactive" | "pending";
@@ -44,43 +37,11 @@ type BranchManager = {
     status: ManagerStatus;
 };
 
-type ManagerPermissions = {
-    dashboard: boolean;
-    bookings: boolean;
-    packages: boolean;
-    packages_manage: boolean;
-    inventory: boolean;
-    pos: boolean;
-    reports: boolean;
-    staff_management: boolean;
-    branch_settings: boolean;
-};
-
-type AvailableBranch = {
-    id: number;
-    branchName: string;
-    managerName: string;
-    managerEmail: string;
-    status: "active" | "inactive";
-};
-
 type ManagerInviteDelivery = {
     link: string;
     email: string;
     emailSent: boolean;
     emailError: string;
-};
-
-const defaultManagerPermissions: ManagerPermissions = {
-    dashboard: true,
-    bookings: true,
-    packages: true,
-    packages_manage: true,
-    inventory: true,
-    pos: true,
-    reports: true,
-    staff_management: true,
-    branch_settings: true,
 };
 
 type RawManager = Record<string, unknown>;
@@ -142,39 +103,6 @@ function normalizeManager(value: unknown): BranchManager {
     };
 }
 
-function normalizeAvailableBranch(value: unknown): AvailableBranch {
-    const branch =
-        value && typeof value === "object"
-            ? (value as RawManager)
-            : {};
-
-    const rawStatus = (
-        asText(branch.branch_status) ||
-        asText(branch.status) ||
-        "active"
-    ).toLowerCase();
-
-    return {
-        id: asNumber(
-            branch.id ??
-            branch.branch_id ??
-            branch.branchId
-        ),
-        branchName:
-            asText(branch.branch_name) ||
-            asText(branch.branchName) ||
-            asText(branch.name) ||
-            "Unnamed branch",
-        managerName:
-            asText(branch.manager_name) ||
-            asText(branch.managerName),
-        managerEmail:
-            asText(branch.manager_email) ||
-            asText(branch.managerEmail),
-        status: rawStatus === "inactive" ? "inactive" : "active",
-    };
-}
-
 function formatCurrentDateTime(value: Date) {
     const dateLabel = value.toLocaleDateString("en-US", {
         month: "long",
@@ -211,64 +139,6 @@ function getStatusClass(status: ManagerStatus) {
     return "text-[#A56607]";
 }
 
-type SubscriptionPlan = "starter" | "growth" | "scale";
-
-type SubscriptionResponse = {
-    subscription?: {
-        plan?: {
-            name?: string | null;
-        };
-    };
-};
-
-function normalizeSubscriptionPlan(value: unknown): SubscriptionPlan {
-    const plan = String(value || "").trim().toLowerCase();
-
-    if (plan.includes("scale")) return "scale";
-    if (plan.includes("growth")) return "growth";
-    return "starter";
-}
-
-function getStoredSubscriptionPlan(): SubscriptionPlan {
-    if (typeof window === "undefined") return "starter";
-
-    const keys = [
-        "subscription_plan",
-        "current_plan",
-        "plan",
-        "plan_name",
-        "planName",
-        "store_plan",
-    ];
-
-    for (const storage of [sessionStorage, localStorage]) {
-        for (const key of keys) {
-            const value = storage.getItem(key);
-            if (value) return normalizeSubscriptionPlan(value);
-        }
-
-        for (const key of ["subscription", "current_subscription", "active_subscription", "subscriptionData"]) {
-            const raw = storage.getItem(key);
-            if (!raw) continue;
-            try {
-                const parsed = JSON.parse(raw) as Record<string, unknown>;
-                const plan = parsed.plan ?? parsed.plan_name ?? parsed.planName ?? parsed.name;
-                if (plan) return normalizeSubscriptionPlan(plan);
-            } catch {
-                // Ignore non-JSON storage values.
-            }
-        }
-    }
-
-    return "starter";
-}
-
-function getManagerLimit(plan: SubscriptionPlan) {
-    if (plan === "scale") return Number.POSITIVE_INFINITY;
-    if (plan === "growth") return 3;
-    return 1;
-}
-
 export default function BranchManagersPage() {
     const router = useRouter();
 
@@ -276,24 +146,6 @@ export default function BranchManagersPage() {
     const [loading, setLoading] = useState(true);
     const [updatingManagerId, setUpdatingManagerId] = useState<number | null>(null);
     const [confirmAccessChange, setConfirmAccessChange] = useState<BranchManager | null>(null);
-    const [activeTeamDetail, setActiveTeamDetail] = useState<"invites" | null>(null);
-    const teamDetailTriggerRef = useRef<HTMLButtonElement | null>(null);
-    const teamDetailCloseRef = useRef<HTMLButtonElement | null>(null);
-    const openTeamDetail = (detail: "invites", trigger: HTMLButtonElement) => {
-        teamDetailTriggerRef.current = trigger;
-        setActiveTeamDetail(detail);
-    };
-    const closeTeamDetail = () => {
-        setActiveTeamDetail(null);
-        window.requestAnimationFrame(() => teamDetailTriggerRef.current?.focus());
-    };
-    useEffect(() => {
-        if (!activeTeamDetail) return;
-        teamDetailCloseRef.current?.focus();
-        const originalOverflow = document.body.style.overflow;
-        document.body.style.overflow = "hidden";
-        return () => { document.body.style.overflow = originalOverflow; };
-    }, [activeTeamDetail]);
 
     const [notice, setNotice] = useState<{ title: string; message: string; kind: "success" | "error" } | null>(null);
     const [search, setSearch] = useState("");
@@ -303,75 +155,10 @@ export default function BranchManagersPage() {
     const [error, setError] = useState("");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
 
-    const [showAddManagerModal, setShowAddManagerModal] =
-        useState(false);
-    const [availableBranches, setAvailableBranches] = useState<
-        AvailableBranch[]
-    >([]);
-    const [loadingBranches, setLoadingBranches] = useState(false);
-    const [addingManager, setAddingManager] = useState(false);
-    const [addManagerError, setAddManagerError] = useState("");
-    const [selectedBranchId, setSelectedBranchId] = useState("");
-    const [newManagerName, setNewManagerName] = useState("");
-    const [newManagerEmail, setNewManagerEmail] = useState("");
-    const [newManagerPermissions, setNewManagerPermissions] =
-        useState<ManagerPermissions>({
-            ...defaultManagerPermissions,
-        });
-    const [showPlanLimitDialog, setShowPlanLimitDialog] = useState(false);
-    const [subscriptionPlan, setSubscriptionPlan] = useState<SubscriptionPlan>("starter");
     const [latestManagerInvite, setLatestManagerInvite] =
         useState<ManagerInviteDelivery | null>(null);
     const [resendingManagerId, setResendingManagerId] =
         useState<number | null>(null);
-
-    const loadSubscriptionPlan = useCallback(async () => {
-        const token =
-            sessionStorage.getItem("token") || localStorage.getItem("token");
-
-        if (!token) {
-            setSubscriptionPlan(getStoredSubscriptionPlan());
-            return;
-        }
-
-        try {
-            const response = await fetch("/api/subscription-client", {
-                method: "GET",
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    Accept: "application/json",
-                },
-                cache: "no-store",
-            });
-
-            const rawText = await response.text();
-
-            let data: SubscriptionResponse = {};
-            try {
-                data = rawText ? (JSON.parse(rawText) as SubscriptionResponse) : {};
-            } catch {
-                data = {};
-            }
-
-            if (!response.ok) {
-                setSubscriptionPlan(getStoredSubscriptionPlan());
-                return;
-            }
-
-            const planName = data.subscription?.plan?.name;
-            if (planName) {
-                const normalized = normalizeSubscriptionPlan(planName);
-                setSubscriptionPlan(normalized);
-                sessionStorage.setItem("subscription_plan", normalized);
-                localStorage.setItem("subscription_plan", normalized);
-                return;
-            }
-
-            setSubscriptionPlan(getStoredSubscriptionPlan());
-        } catch {
-            setSubscriptionPlan(getStoredSubscriptionPlan());
-        }
-    }, []);
 
     const loadManagers = useCallback(async () => {
         const token =
@@ -447,11 +234,6 @@ export default function BranchManagersPage() {
     }, [router]);
 
     useEffect(() => {
-        setSubscriptionPlan(getStoredSubscriptionPlan());
-        void loadSubscriptionPlan();
-    }, [loadSubscriptionPlan]);
-
-    useEffect(() => {
         void loadManagers();
     }, [loadManagers]);
 
@@ -509,9 +291,7 @@ export default function BranchManagersPage() {
     }, [managers, search, statusFilter]);
 
     const listedManagers = filteredManagers.filter(manager => manager.status !== "pending");
-    const pendingInvites = managers.filter(manager => manager.status === "pending" &&
-        (statusFilter === "all" || statusFilter === "pending") &&
-        (!search.trim() || `${manager.name} ${manager.email} ${manager.branch}`.toLowerCase().includes(search.trim().toLowerCase())));
+    const pendingInvites = managers.filter(manager => manager.status === "pending");
     const exportManagerList = () => {
         void import("@/components/dashboard/_shared")
             .then(module => module.exportTableAsPdf({
@@ -534,274 +314,6 @@ export default function BranchManagersPage() {
             }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
                 branch: "All branches", dateRange: "Pending invitations" }, "owner_manager_invites"))
             .catch(() => setNotice({ title: "Export unavailable", message: "Could not export pending manager invitations.", kind: "error" }));
-    };
-
-    const resetAddManagerForm = useCallback(() => {
-        setSelectedBranchId("");
-        setNewManagerName("");
-        setNewManagerEmail("");
-        setNewManagerPermissions({
-            ...defaultManagerPermissions,
-        });
-        setAddManagerError("");
-    }, []);
-
-    const loadAvailableBranches = useCallback(async () => {
-        const token =
-            sessionStorage.getItem("token") ||
-            localStorage.getItem("token");
-
-        if (!token) {
-            router.push("/");
-            return;
-        }
-
-        setLoadingBranches(true);
-        setAddManagerError("");
-
-        try {
-            const response = await fetch("/api/branches", {
-                method: "GET",
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                },
-                cache: "no-store",
-            });
-
-            const rawText = await response.text();
-
-            let data: {
-                branches?: unknown[];
-                error?: string;
-                message?: string;
-            } = {};
-
-            try {
-                data = rawText ? JSON.parse(rawText) : {};
-            } catch {
-                data = {
-                    error:
-                        rawText ||
-                        "The Branches service returned an invalid response.",
-                };
-            }
-
-            if (!response.ok) {
-                setAvailableBranches([]);
-                setAddManagerError(
-                    data.error ||
-                    data.message ||
-                    `Unable to load branches (HTTP ${response.status}).`
-                );
-                return;
-            }
-
-            const normalizedBranches = Array.isArray(data.branches)
-                ? data.branches
-                    .map(normalizeAvailableBranch)
-                    .filter((branch) => branch.id > 0)
-                : [];
-
-            setAvailableBranches(
-                normalizedBranches.filter(
-                    (branch) =>
-                        !branch.managerName &&
-                        !branch.managerEmail
-                )
-            );
-        } catch (requestError: unknown) {
-            setAvailableBranches([]);
-            setAddManagerError(
-                requestError instanceof Error
-                    ? requestError.message
-                    : "Unable to load branches without managers."
-            );
-        } finally {
-            setLoadingBranches(false);
-        }
-    }, [router]);
-
-    const openAddManagerModal = () => {
-        const managerLimit = getManagerLimit(subscriptionPlan);
-
-        if (Number.isFinite(managerLimit) && managers.length >= managerLimit) {
-            setShowPlanLimitDialog(true);
-            return;
-        }
-
-        resetAddManagerForm();
-        setShowAddManagerModal(true);
-        void loadAvailableBranches();
-    };
-
-    const closeAddManagerModal = () => {
-        if (addingManager) return;
-
-        setShowAddManagerModal(false);
-        resetAddManagerForm();
-    };
-
-    const handleAddManager = async () => {
-        const managerLimit = getManagerLimit(subscriptionPlan);
-
-        if (Number.isFinite(managerLimit) && managers.length >= managerLimit) {
-            setShowAddManagerModal(false);
-            setShowPlanLimitDialog(true);
-            return;
-        }
-
-        const token =
-            sessionStorage.getItem("token") ||
-            localStorage.getItem("token");
-
-        if (!token) {
-            router.push("/");
-            return;
-        }
-
-        const branchId = Number(selectedBranchId);
-        const managerName = newManagerName.trim();
-        const managerEmail = newManagerEmail
-            .trim()
-            .toLowerCase();
-
-        if (!branchId) {
-            setAddManagerError(
-                "Select the branch where this manager will be assigned."
-            );
-            return;
-        }
-
-        if (!managerName) {
-            setAddManagerError("Enter the manager name.");
-            return;
-        }
-
-        if (
-            !managerEmail ||
-            !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(managerEmail)
-        ) {
-            setAddManagerError(
-                "Enter a valid manager email address."
-            );
-            return;
-        }
-
-        setAddingManager(true);
-        setAddManagerError("");
-
-        try {
-            const response = await fetch("/api/branch-managers", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    action: "add_manager_to_branch",
-                    branch_id: branchId,
-                    manager_name: managerName,
-                    manager_email: managerEmail,
-                    permissions: newManagerPermissions,
-                }),
-            });
-
-            const rawText = await response.text();
-
-            let data: {
-                manager?: unknown;
-                error?: string;
-                message?: string;
-                email_sent?: boolean;
-                email_status?: string;
-                email_error?: string;
-                invite_link?: string;
-            } = {};
-
-            try {
-                data = rawText ? JSON.parse(rawText) : {};
-            } catch {
-                data = {
-                    error:
-                        rawText ||
-                        "The Branch Managers service returned an invalid response.",
-                };
-            }
-
-            if (!response.ok) {
-                setAddManagerError(
-                    data.error ||
-                    data.message ||
-                    `Unable to add manager (HTTP ${response.status}).`
-                );
-                return;
-            }
-
-            if (data.manager) {
-                const newManager = normalizeManager(data.manager);
-
-                if (newManager.id > 0) {
-                    setManagers((currentManagers) => [
-                        ...currentManagers.filter(
-                            (manager) =>
-                                manager.id !== newManager.id
-                        ),
-                        newManager,
-                    ]);
-                } else {
-                    await loadManagers();
-                }
-            } else {
-                await loadManagers();
-            }
-
-            setAvailableBranches((currentBranches) =>
-                currentBranches.filter(
-                    (branch) => branch.id !== branchId
-                )
-            );
-
-            const emailWasSent =
-                data.email_sent === true ||
-                String(data.email_status || "")
-                    .trim()
-                    .toLowerCase() === "sent";
-
-            const generatedInviteLink = String(data.invite_link || "").trim();
-            if (generatedInviteLink) {
-                setLatestManagerInvite({
-                    link: generatedInviteLink,
-                    email: managerEmail,
-                    emailSent: emailWasSent,
-                    emailError: String(data.email_error || ""),
-                });
-            }
-
-            setShowAddManagerModal(false);
-            resetAddManagerForm();
-
-            const emailWasSentForAlert =
-                data.email_sent === true ||
-                String(data.email_status || "")
-                    .trim()
-                    .toLowerCase() === "sent";
-
-            setNotice({
-                title: emailWasSentForAlert ? "Manager invitation sent" : "Invitation created",
-                message: emailWasSentForAlert
-                    ? "The manager activation email was sent successfully."
-                    : `The invitation was created, but email delivery failed. ${data.email_error || "Copy the backup invitation link."}`,
-                kind: emailWasSentForAlert ? "success" : "error",
-            });
-        } catch (requestError: unknown) {
-            setAddManagerError(
-                requestError instanceof Error
-                    ? requestError.message
-                    : "Unable to add this manager."
-            );
-        } finally {
-            setAddingManager(false);
-        }
     };
 
     const resendManagerInvite = async (manager: BranchManager) => {
@@ -926,7 +438,6 @@ export default function BranchManagersPage() {
                                 <button
                                     type="button"
                                     onClick={() => {
-                                        void loadSubscriptionPlan();
                                         void loadManagers();
                                     }}
                                     disabled={loading}
@@ -1047,114 +558,52 @@ export default function BranchManagersPage() {
                         )}
 
                         <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-4">
+                            <div className="flex flex-col gap-4 px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
                                 <div className="flex min-w-0 items-center gap-3">
-                                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]">
-                                    <UsersRound size={21} strokeWidth={2} />
-                                </span>
-
+                                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]">
+                                        <UsersRound size={21} strokeWidth={2} />
+                                    </span>
                                     <div className="min-w-0">
-                                        <h2 className="text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">
-                                            Manager List
-                                        </h2>
-                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                            Managers assigned across all branches.
-                                        </p>
+                                        <h2 className="text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">Manager List</h2>
+                                        <p className="mt-0.5 text-xs text-[#7A6A84]">Managers assigned across all branches.</p>
                                     </div>
                                 </div>
-                                <button type="button" onClick={exportManagerList} title="Download manager list as PDF" aria-label="Download manager list as PDF" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]">
-                                    <Download size={17} />
-                                </button>
-                            </div>
-
-                            <div className="border-b border-[#E6DDF0] px-4 py-3 sm:px-5">
-                                <div className="flex flex-col gap-3 lg:flex-row">
-                                    <div className="relative min-w-0 flex-1">
-                                        <Search
-                                            size={18}
-                                            className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                                        />
-
+                                <div className="flex w-full min-w-0 flex-col gap-2.5 sm:flex-row sm:items-center xl:w-auto xl:flex-1 xl:justify-end">
+                                    <div className="relative min-w-0 flex-1 xl:max-w-[520px]">
+                                        <Search size={18} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
                                         <input
                                             value={search}
-                                            onChange={(event) =>
-                                                setSearch(event.target.value)
-                                            }
+                                            onChange={(event) => setSearch(event.target.value)}
                                             placeholder="Search manager name, email, branch, or status..."
+                                            aria-label="Search managers"
                                             className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                         />
-
                                         {search && (
-                                            <button
-                                                type="button"
-                                                onClick={() => setSearch("")}
-                                                aria-label="Clear manager search"
-                                                className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
-                                            >
+                                            <button type="button" onClick={() => setSearch("")} aria-label="Clear manager search"
+                                                    className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]">
                                                 <X size={15} />
                                             </button>
                                         )}
                                     </div>
-
-                                    <div className="flex flex-wrap items-center gap-2.5">
+                                    <div className="flex shrink-0 items-center gap-2.5">
                                         <div className="relative">
-                                            <Filter
-                                                size={16}
-                                                className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
-                                            />
-
+                                            <Filter size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]" />
                                             <select
                                                 value={statusFilter}
-                                                onChange={(event) =>
-                                                    setStatusFilter(
-                                                        event.target.value as
-                                                            | "all"
-                                                            | ManagerStatus
-                                                    )
-                                                }
+                                                onChange={(event) => setStatusFilter(event.target.value as "all" | ManagerStatus)}
                                                 aria-label="Filter managers by status"
                                                 className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                             >
-                                                <option value="all">
-                                                    All Status
-                                                </option>
-                                                <option value="active">
-                                                    Active
-                                                </option>
-                                                <option value="inactive">
-                                                    Inactive
-                                                </option>
-                                                <option value="pending">
-                                                    Pending
-                                                </option>
+                                                <option value="all">All Status</option>
+                                                <option value="active">Active</option>
+                                                <option value="inactive">Inactive</option>
+                                                <option value="pending">Pending</option>
                                             </select>
-
-                                            <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#806A8C]">
-                                                ▾
-                                            </span>
+                                            <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#806A8C]">▾</span>
                                         </div>
-
-                                        <button
-                                            type="button"
-                                            onClick={openAddManagerModal}
-                                            title="Add a manager to a branch without an assigned manager"
-                                            className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
-                                            style={{
-                                                backgroundColor: "#2B174C",
-                                                border: "1px solid #2B174C",
-                                                color: "#FFFFFF",
-                                                boxShadow:
-                                                    "0 4px 10px rgba(43, 23, 76, 0.22)",
-                                            }}
-                                        >
-                                            <Plus
-                                                size={18}
-                                                strokeWidth={2.2}
-                                                color="#FFFFFF"
-                                            />
-                                            <span style={{ color: "#FFFFFF" }}>
-                                                Add Manager
-                                            </span>
+                                        <button type="button" onClick={exportManagerList} title="Download manager list as PDF" aria-label="Download manager list as PDF"
+                                                className="inline-flex h-[48px] w-[48px] shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#6D35D4] shadow-sm transition hover:bg-[#F7F1FF]">
+                                            <Download size={17} />
                                         </button>
                                     </div>
                                 </div>
@@ -1209,7 +658,7 @@ export default function BranchManagersPage() {
                                                 return (
                                                     <tr
                                                         key={manager.id}
-                                                        className="border-b border-[#EEE7F2] bg-white last:border-b-0 transition hover:bg-[#FFFCF7]"
+                                                        className="bg-white transition hover:bg-[#FFFCF7]"
                                                     >
                                                         <td className="whitespace-nowrap px-3 py-2.5 text-sm font-semibold text-[#4E2C66]">
                                                             {manager.employeeCode || "—"}
@@ -1265,59 +714,40 @@ export default function BranchManagersPage() {
                             )}
                         </section>
 
-                        {/* Compact navigation preserves the detailed records in their original tables. */}
-                        <section aria-label="Team records" className="grid grid-cols-1 gap-3">
-                            <button type="button" onClick={(event) => openTeamDetail("invites", event.currentTarget)}
-                                    className="group flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
-                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Pending Invites</span><span className="block text-xs text-[#7A6A84]">Managers awaiting account activation</span></span></span>
-                                <span className="text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
-                                <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Invites <ArrowUpRight size={15}/></span>
-                            </button>
-                        </section>
-
-                        {activeTeamDetail && (
-                            <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-3 backdrop-blur-[2px] sm:p-5"
-                                 onMouseDown={(event) => { if (event.target === event.currentTarget) closeTeamDetail(); }}
-                                 onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeTeamDetail(); } }}>
-                                <div role="dialog" aria-modal="true" aria-labelledby="manager-team-detail-title"
-                                     className="flex max-h-[90vh] w-full max-w-[1120px] flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-[#FFFDF8] shadow-2xl">
-                                    <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#E6DDF0] bg-white px-5 py-4">
-                                        <h2 id="manager-team-detail-title" className="text-[18px] font-bold text-[#1A1220]">Pending Invites</h2>
-                                        <button ref={teamDetailCloseRef} type="button" aria-label="Close details" onClick={closeTeamDetail}
-                                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] hover:bg-[#F7F1FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#6D35D4]"><X size={19}/></button>
-                                    </div>
-                                    <div className="min-h-0 overflow-y-auto p-3 sm:p-5">
-                                        {activeTeamDetail === "invites" && (
-                                            <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                                    <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span>
-                                                        <div><h2 className="text-[18px] font-bold text-[#1A1220]">Pending Invites</h2><p className="mt-0.5 text-xs text-[#7A6A84]">Managers waiting to activate their accounts.</p></div>
-                                                    </div>
-                                                    <div className="flex items-center gap-2">
-                                                        <span className="rounded-full bg-[#FFF7E8] px-3 py-1.5 text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
-                                                        <button type="button" onClick={exportManagerInvites} title="Download pending manager invites as PDF" aria-label="Download pending manager invites as PDF" className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]"><Download size={17}/></button>
-                                                    </div>
-                                                </div>
-                                                <div className="p-4">
-                                                    {loading && managers.length === 0 ? <div className="p-2"><ModuleSkeleton variant="team" /></div> : pendingInvites.length === 0 ?
-                                                        <div className="rounded-xl border border-dashed border-[#E6DDF0] bg-[#FFFCF7] px-4 py-6 text-sm text-[#7A6A84]">No pending invites yet.</div> :
-                                                        <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-left [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
-                                                            <thead className="bg-[#FFFCF8] uppercase text-[#806A8C]"><tr>{["Manager", "Email", "Branch", "Status", "Action"].map(label => <th key={label} className="px-2.5 py-2.5">{label}</th>)}</tr></thead>
-                                                            <tbody>{pendingInvites.map(manager => <tr key={manager.id} className="border-t border-[#EEE7F2]">
-                                                                <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{manager.name}</td>
-                                                                <td className="px-2.5 py-2.5">{manager.email}</td>
-                                                                <td className="px-2.5 py-2.5">{manager.branch}</td>
-                                                                <td className="px-2.5 py-2.5"><span className="font-semibold text-[#A56607]">Pending</span></td>
-                                                                <td className="px-2.5 py-2.5"><button type="button" onClick={() => void resendManagerInvite(manager)} disabled={resendingManagerId === manager.id} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF] disabled:opacity-50">{resendingManagerId === manager.id ? "Resending..." : "Resend Invite"}</button></td>
-                                                            </tr>)}</tbody>
-                                                        </table></div>}
-                                                </div>
-                                            </section>
-                                        )}
+                        <section aria-label="Pending manager invitations" className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 p-4">
+                                <div className="flex min-w-0 items-center gap-3">
+                                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20} /></span>
+                                    <div className="min-w-0">
+                                        <h2 className="text-[16px] font-bold text-[#1A1220]">Pending Invites</h2>
+                                        <p className="text-xs text-[#7A6A84]">Managers awaiting account activation</p>
                                     </div>
                                 </div>
+                                <div className="flex items-center gap-2.5">
+                                    <span className="text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
+                                    {pendingInvites.length > 0 && (
+                                        <button type="button" onClick={exportManagerInvites} title="Download pending manager invites as PDF" aria-label="Download pending manager invites as PDF"
+                                                className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]"><Download size={17} /></button>
+                                    )}
+                                </div>
                             </div>
-                        )}
+                            {pendingInvites.length > 0 && (
+                                <div className="border-t border-[#E6DDF0] px-4 py-3">
+                                    <div className="max-h-[320px] overflow-auto">
+                                        <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-left [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                            <thead className="bg-[#FFFCF8] uppercase text-[#806A8C]"><tr>{["Manager", "Email", "Branch", "Status", "Action"].map(label => <th key={label} className="px-2.5 py-2.5">{label}</th>)}</tr></thead>
+                                            <tbody>{pendingInvites.map(manager => <tr key={manager.id} className="border-t border-[#EEE7F2]">
+                                                <td className="px-2.5 py-2.5 font-semibold text-[#2B174C]">{manager.name}</td>
+                                                <td className="px-2.5 py-2.5">{manager.email}</td>
+                                                <td className="px-2.5 py-2.5">{manager.branch}</td>
+                                                <td className="px-2.5 py-2.5"><span className="font-semibold text-[#A56607]">Pending</span></td>
+                                                <td className="px-2.5 py-2.5"><button type="button" onClick={() => void resendManagerInvite(manager)} disabled={resendingManagerId === manager.id} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF] disabled:opacity-50">{resendingManagerId === manager.id ? "Resending..." : "Resend Invite"}</button></td>
+                                            </tr>)}</tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </section>
 
                     </section>
 
@@ -1333,304 +763,9 @@ export default function BranchManagersPage() {
                         <div className="flex-1"><p className="text-sm font-bold text-[#1A1220]">{notice.title}</p><p className="mt-1 text-xs text-[#7A6A84]">{notice.message}</p></div><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification" className="text-[#7A6A84]"><X size={16}/></button>
                     </div>}
 
-                    {showPlanLimitDialog && (
-                        <PlanLimitDialog
-                            title="Staff account limit reached"
-                            plan={subscriptionPlan}
-                            currentCount={managers.length}
-                            limit={getManagerLimit(subscriptionPlan)}
-                            onClose={() => setShowPlanLimitDialog(false)}
-                            onViewPlans={() => router.push("/subscription")}
-                        />
-                    )}
-
-                    {showAddManagerModal && (
-                        <div
-                            className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm"
-                            onMouseDown={closeAddManagerModal}
-                        >
-                            <div
-                                role="dialog"
-                                aria-modal="true"
-                                aria-labelledby="add-manager-dialog-title"
-                                className="max-h-[78vh] w-full max-w-[1120px] overflow-y-auto rounded-[22px] border border-[#E6DDF0] bg-white shadow-2xl"
-                                onMouseDown={(event) =>
-                                    event.stopPropagation()
-                                }
-                            >
-                                <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-6 py-5">
-                                    <div>
-                                        <h2
-                                            id="add-manager-dialog-title"
-                                            className="text-[22px] font-bold tracking-[-0.02em] text-[#1A1220]"
-                                        >
-                                            Add Manager
-                                        </h2>
-                                        <p className="mt-1 text-sm text-[#7A6A84]">
-                                            Assign a manager to an existing branch
-                                            that currently has no manager.
-                                        </p>
-                                    </div>
-
-                                    <button
-                                        type="button"
-                                        onClick={closeAddManagerModal}
-                                        disabled={addingManager}
-                                        aria-label="Close Add Manager dialog"
-                                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                        <X size={18} />
-                                    </button>
-                                </div>
-
-                                <div className="space-y-5 px-6 py-5">
-                                    {addManagerError && (
-                                        <div className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-4 py-3 text-sm font-medium text-[#9B1C1C]">
-                                            {addManagerError}
-                                        </div>
-                                    )}
-
-                                    <div className="rounded-2xl border border-[#E8DFF0] bg-[#FFFEFC] p-5">
-                                        <div className="mb-4 flex items-center gap-3">
-                                        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#F1E9FF] text-[#6D35D4]">
-                                            <Building2
-                                                size={20}
-                                                strokeWidth={2}
-                                            />
-                                        </span>
-
-                                            <div>
-                                                <h3 className="font-bold text-[#1A1220]">
-                                                    Branch assignment
-                                                </h3>
-                                                <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                    Only branches without an
-                                                    assigned manager are shown.
-                                                </p>
-                                            </div>
-                                        </div>
-
-                                        <label
-                                            htmlFor="add-manager-branch"
-                                            className="mb-2 block text-sm font-semibold text-[#1A1220]"
-                                        >
-                                            Branch
-                                        </label>
-
-                                        <div className="relative">
-                                            <select
-                                                id="add-manager-branch"
-                                                value={selectedBranchId}
-                                                disabled={
-                                                    loadingBranches ||
-                                                    addingManager ||
-                                                    availableBranches.length === 0
-                                                }
-                                                onChange={(event) =>
-                                                    setSelectedBranchId(
-                                                        event.target.value
-                                                    )
-                                                }
-                                                className="h-[46px] w-full appearance-none rounded-xl border border-[#E6DDF0] bg-white px-3 pr-10 text-sm text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#9B8AAA]"
-                                            >
-                                                <option value="">
-                                                    {loadingBranches
-                                                        ? "Loading available branches..."
-                                                        : availableBranches.length ===
-                                                        0
-                                                            ? "No branches without a manager"
-                                                            : "Select a branch"}
-                                                </option>
-
-                                                {availableBranches.map(
-                                                    (branch) => (
-                                                        <option
-                                                            key={branch.id}
-                                                            value={branch.id}
-                                                        >
-                                                            {branch.branchName} —{" "}
-                                                            {branch.status ===
-                                                            "inactive"
-                                                                ? "Inactive"
-                                                                : "Active"}
-                                                        </option>
-                                                    )
-                                                )}
-                                            </select>
-
-                                            <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#806A8C]">
-                                            ▾
-                                        </span>
-                                        </div>
-
-                                        {!loadingBranches &&
-                                            availableBranches.length === 0 && (
-                                                <p className="mt-3 rounded-xl border border-[#E6D9BA] bg-[#FFFBF0] px-4 py-3 text-xs leading-5 text-[#6F6043]">
-                                                    Every branch already has a
-                                                    manager. Create another branch
-                                                    without a manager before adding
-                                                    a new manager here.
-                                                </p>
-                                            )}
-                                    </div>
-
-                                    <div className="rounded-2xl border border-[#E8DFF0] bg-white p-5">
-                                        <div className="mb-4 flex items-center gap-3">
-                                        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EEF4FF] text-[#3367D6]">
-                                            <UserPlus
-                                                size={20}
-                                                strokeWidth={2}
-                                            />
-                                        </span>
-
-                                            <div>
-                                                <h3 className="font-bold text-[#1A1220]">
-                                                    Manager details
-                                                </h3>
-                                                <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                    Enter the manager who will
-                                                    receive the account activation
-                                                    invitation.
-                                                </p>
-                                            </div>
-                                        </div>
-
-                                        <div className="grid gap-4 sm:grid-cols-2">
-                                            <ManagerDialogInput
-                                                label="Manager name"
-                                                value={newManagerName}
-                                                onChange={setNewManagerName}
-                                                placeholder="e.g. Ana Cruz"
-                                                disabled={addingManager}
-                                            />
-
-                                            <ManagerDialogInput
-                                                label="Manager email"
-                                                value={newManagerEmail}
-                                                onChange={setNewManagerEmail}
-                                                placeholder="manager@email.com"
-                                                type="email"
-                                                disabled={addingManager}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <div className="rounded-2xl border border-[#E8DFF0] bg-white p-5">
-                                        <div className="mb-4 flex items-center gap-3">
-                                        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EAF8EF] text-[#188348]">
-                                            <ShieldCheck
-                                                size={20}
-                                                strokeWidth={2}
-                                            />
-                                        </span>
-
-                                            <div>
-                                                <h3 className="font-bold text-[#1A1220]">
-                                                    Manager permissions
-                                                </h3>
-                                                <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                    Managers automatically get
-                                                    full access to all modules.
-                                                </p>
-                                            </div>
-                                        </div>
-
-                                        <div className="flex items-start gap-2 rounded-xl border border-[#E8DFF0] bg-[#FBF8FF] px-4 py-3 text-xs leading-5 text-[#5B4A73]">
-                                            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#188348]" />
-                                            <span>
-                                            Managers get full access to every
-                                            module for this branch —
-                                            Dashboard, Bookings, Packages,
-                                            Manage Packages, Inventory,
-                                            Sales/POS, Reports, Staff
-                                            Management, and Branch Settings.
-                                        </span>
-                                        </div>
-                                    </div>
-
-                                    <div className="rounded-xl border border-[#E6D9BA] bg-[#FFFBF0] px-4 py-3 text-xs leading-5 text-[#6F6043]">
-                                        The selected manager will be saved as
-                                        Pending, and an account activation email
-                                        will be sent automatically. The invitation
-                                        expires after 7 days.
-                                    </div>
-                                </div>
-
-                                <div className="sticky bottom-0 flex gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4">
-                                    <button
-                                        type="button"
-                                        onClick={closeAddManagerModal}
-                                        disabled={addingManager}
-                                        className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-5 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                        Cancel
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        onClick={() =>
-                                            void handleAddManager()
-                                        }
-                                        disabled={
-                                            addingManager ||
-                                            loadingBranches ||
-                                            availableBranches.length === 0
-                                        }
-                                        className="flex flex-1 items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                                        style={{
-                                            backgroundColor: "#2B174C",
-                                            border: "1px solid #2B174C",
-                                            boxShadow:
-                                                "0 4px 10px rgba(43, 23, 76, 0.18)",
-                                        }}
-                                    >
-                                        <UserPlus size={17} />
-                                        {addingManager
-                                            ? "Sending invitation..."
-                                            : "Add manager"}
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
                 </main>
             </div>
         </RequirePermission>
-    );
-}
-
-function ManagerDialogInput({
-                                label,
-                                value,
-                                onChange,
-                                placeholder = "",
-                                type = "text",
-                                disabled = false,
-                            }: {
-    label: string;
-    value: string;
-    onChange: (value: string) => void;
-    placeholder?: string;
-    type?: "text" | "email";
-    disabled?: boolean;
-}) {
-    return (
-        <label className="block">
-            <span className="mb-2 block text-sm font-semibold text-[#1A1220]">
-                {label}
-            </span>
-
-            <input
-                type={type}
-                value={value}
-                disabled={disabled}
-                placeholder={placeholder}
-                onChange={(event) =>
-                    onChange(event.target.value)
-                }
-                className="h-[46px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3 text-sm text-[#1A1220] outline-none placeholder:text-[#A796B1] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8]"
-            />
-        </label>
     );
 }
 
@@ -1725,76 +860,5 @@ function TableHeader({
         >
             {children}
         </th>
-    );
-}
-
-function PlanLimitDialog({
-                             title,
-                             plan,
-                             currentCount,
-                             limit,
-                             onClose,
-                             onViewPlans,
-                         }: {
-    title: string;
-    plan: SubscriptionPlan;
-    currentCount: number;
-    limit: number;
-    onClose: () => void;
-    onViewPlans: () => void;
-}) {
-    const planLabel = plan.charAt(0).toUpperCase() + plan.slice(1);
-
-    return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[#120A1F]/45 px-4 backdrop-blur-[2px]">
-            <div className="w-full max-w-[620px] rounded-[16px] border border-[#E6DDF0] bg-[#FFFCF7] p-8 text-center shadow-[0_24px_60px_rgba(20,10,35,0.22)] sm:p-10">
-                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-[#F1E9FA] text-[#5E32A7]">
-                    <LockKeyhole size={28} strokeWidth={1.9} />
-                </div>
-
-                <div className="mt-5">
-                    <span className="inline-flex items-center rounded-full border border-[#E9DDB8] bg-[#FFF7DF] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8B6B1B]">
-                        {planLabel} plan
-                    </span>
-
-                    <h2 className="mt-4 text-[24px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                        {title}
-                    </h2>
-
-                    <p className="mx-auto mt-3 max-w-[500px] text-sm leading-6 text-[#7A6A84]">
-                        Your current <span className="font-semibold text-[#4A315E]">{planLabel}</span> plan allows up to{" "}
-                        <span className="font-semibold text-[#4A315E]">{Number.isFinite(limit) ? limit : "unlimited"}</span>{" "}
-                        {Number.isFinite(limit) ? "staff account" : "staff accounts"}. You are currently using{" "}
-                        <span className="font-semibold text-[#4A315E]">{currentCount}</span>.
-                    </p>
-
-                    <div className="mx-auto mt-6 max-w-[500px] rounded-xl border border-[#E9E0EF] bg-[#FDFAF4] px-5 py-4 text-left">
-                        <p className="text-sm font-semibold text-[#2B174C]">Want to add more?</p>
-                        <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                            Upgrade your store plan to increase your staff account limit.
-                        </p>
-                    </div>
-
-                    <div className="mt-6 flex flex-col justify-center gap-2.5 sm:flex-row">
-                        <button
-                            type="button"
-                            onClick={onViewPlans}
-                            className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                        >
-                            View plans
-                            <ArrowUpRight size={15} />
-                        </button>
-
-                        <button
-                            type="button"
-                            onClick={onClose}
-                            className="inline-flex h-[42px] items-center justify-center rounded-xl border border-[#E6DDF0] bg-white px-5 text-sm font-semibold text-[#2B174C] shadow-sm transition hover:bg-[#FBF8FF]"
-                        >
-                            Close
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
     );
 }

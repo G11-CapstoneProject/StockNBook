@@ -1033,17 +1033,18 @@ export default function RoleSidebar() {
                         </SidebarSection>
                     )}
 
-                    {/* Every role can view the store's current plan and usage.
-                 * Only the owner can manage billing, submit payment proof, or upgrade. */}
+                    {/* Staff do not have a Subscription module; managers can only view plan usage. */}
                     <SidebarSection label="System">
-                        <NavItem
-                            pathname={pathname}
-                            item={{
-                                label: role === "owner" ? "Subscription" : "Plan & Usage",
-                                href: "/subscription",
-                                icon: CreditCard,
-                            }}
-                        />
+                        {role !== "staff" && (
+                            <NavItem
+                                pathname={pathname}
+                                item={{
+                                    label: role === "owner" ? "Subscription" : "Plan & Usage",
+                                    href: "/subscription",
+                                    icon: CreditCard,
+                                }}
+                            />
+                        )}
 
                         {canViewSettings && (
                             <NavItem

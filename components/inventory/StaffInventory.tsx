@@ -3,11 +3,12 @@
 import * as React from "react";
 import {
     AlertTriangle, ArrowLeftRight, CalendarDays, ChevronDown, ClipboardList,
-    Package, PackagePlus, RefreshCw, Search, ShoppingCart, X, CalendarClock, Truck,
+    Package, PackagePlus, RefreshCw, Search, ShoppingCart, X, CalendarClock, Truck, Download,
 } from "lucide-react";
 import { useInventoryController } from "@/hooks/useInventory";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
-import { SuccessToast, type Product } from "./_shared";
+import { SuccessToast, labelClass, fieldClass, type Product } from "./_shared";
 import StaffRentalInventory from "./StaffRentalInventory";
 
 /* Staff inventory only: the existing product hook remains the authoritative
@@ -133,6 +134,39 @@ const outline = "inline-flex h-[42px] items-center justify-center gap-2 rounded-
 const primary = "inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]";
 const filterClass = "h-[40px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs text-[#2B174C] outline-none focus:border-[#2B174C]";
 const headClass = "truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]";
+// Manager Inventory Restock button design.
+const staffRestockAction = "inline-flex items-center gap-1 rounded-lg bg-[#E5F8EC] px-2 py-1.5 text-[10px] font-semibold text-[#23834A] hover:bg-[#D5F0DF] disabled:cursor-not-allowed disabled:opacity-40";
+// Same filter control as the Manager Inventory (ManagerInventoryFilterSelect).
+function StaffInventoryFilterSelect({ containerClassName = "", className = "", children, ...props }:
+                                        React.ComponentProps<"select"> & { containerClassName?: string }) {
+    return (
+        <span className={`relative inline-flex min-w-0 ${containerClassName}`}>
+            <select {...props} className={`h-9 w-full min-w-0 appearance-none rounded-xl border border-[#E3D8EA] bg-white py-1 pl-3 pr-9 text-xs font-semibold text-[#2B174C] outline-none focus:border-[#BFA8E2] focus-visible:ring-2 focus-visible:ring-[#F1EBFF] ${className}`}>
+                {children}
+            </select>
+            <ChevronDown aria-hidden="true" size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#806A8C]" />
+        </span>
+    );
+}
+// Same PDF report format as the Manager Inventory downloads.
+async function downloadStaffInventoryReport(title: string, headers: string[], rows: string[][],
+                                            branchName: string, dateRange: string, filename: string) {
+    const { exportTableAsPdf } = await import("@/components/dashboard/_shared");
+    exportTableAsPdf({ title, headers, rows }, {
+        storeName: sessionStorage.getItem("store_name") || "StockNBook",
+        branch: branchName,
+        dateRange,
+    }, filename);
+}
+// Date and time lines in the Manager Stock Activity format (PH time).
+function activityDateTime(value: string) {
+    const parsed = value ? new Date(value.includes(" ") ? value.replace(" ", "T") : value) : null;
+    if (!parsed || Number.isNaN(parsed.getTime())) return { date: value || "—", time: "" };
+    return {
+        date: parsed.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "Asia/Manila" }),
+        time: parsed.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Manila" }).toLowerCase(),
+    };
+}
 
 function dateInManila(value = new Date()) {
     const parts = new Intl.DateTimeFormat("en-US", {
@@ -203,10 +237,9 @@ function stockBadge(status: StockLine["status"]) {
         status === "Low Stock" ? "text-[#B07408]" : "text-[#218246]";
 }
 
-// Manager-style parent rows remain read-only for Staff. Each variant retains its
-// own Review action so condition/shortage reports refer to the correct SKU.
+// Manager-style parent rows remain read-only for Staff. Each variant has its own
+// Restock action scoped to that SKU's authorized deliveries.
 type StaffInventoryStatus = StockLine["status"] | "Expiring Soon" | "Expired";
-type StaffStockInRecord = { productId:number; variantId?:number|null; variantName?:string|null; stockInDate:string };
 function staffLineDisplayStatus(stock:number, reorder:number, expiration?:string|null): StaffInventoryStatus {
     const risk=staffExpirationRisk(expiration);
     if(risk)return risk;
@@ -231,14 +264,6 @@ function staffInventoryStatusClass(status:StaffInventoryStatus):string {
 }
 function staffInventoryStatusBadge(status:StaffInventoryStatus) {
     return <span className={`inline-block max-w-full text-center text-[10px] font-semibold leading-4 ${staffInventoryStatusClass(status)}`}>{status}</span>;
-}
-function staffStockInDay(value?:string|null):string {
-    const raw=String(value||"").trim();
-    if(!raw)return "";
-    if(/^\d{4}-\d{2}-\d{2}$/.test(raw))return raw;
-    const parsed=new Date(raw.includes(" ")?raw.replace(" ","T"):raw);
-    if(Number.isNaN(parsed.getTime()))return "";
-    return parsed.toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"});
 }
 function staffVariantDisplayName(values:Record<string,string>):string {
     return Object.values(values||{}).map(value=>String(value||"").trim()).filter(Boolean).join(", ")||"Variant";
@@ -310,6 +335,10 @@ function Stat({label,value,helper,icon,color,loading=false}: {
 
 export default function StaffInventory() {
     const inv = useInventoryController();
+    // Same UI check as Staff Rental Inventory; the Products Lambda enforces Full access again.
+    const { user } = useCurrentUser();
+    const inventoryPermission = user?.permissions?.inventory_access ?? user?.permissions?.inventory;
+    const canRestock = inventoryPermission === true || inventoryPermission === "true" || inventoryPermission === "full";
     const refreshAll = inv.refreshAll;
     const [now, setNow] = React.useState<Date | null>(null);
     const [tab, setTab] = React.useState<"sales" | "rental">("sales");
@@ -317,12 +346,18 @@ export default function StaffInventory() {
     const [category, setCategory] = React.useState("all");
     const [status, setStatus] = React.useState("all");
     const [expandedProductIds,setExpandedProductIds]=React.useState<Record<number,boolean>>({});
-    const [stockInRecords,setStockInRecords]=React.useState<StaffStockInRecord[]>([]);
     const [taskFilter, setTaskFilter] = React.useState("all");
     const [details, setDetails] = React.useState<StockLine | null>(null);
     const [showReceivingInfo, setShowReceivingInfo] = React.useState(false);
     const [canReceive, setCanReceive] = React.useState(false);
     const [receivingTasks, setReceivingTasks] = React.useState<ReceivingTask[]>([]);
+    // Staff Restock dialog: same layout as the Manager's Receive Stock (quantity only).
+    const [restockTarget, setRestockTarget] = React.useState<Product | null>(null);
+    const [restockQuantities, setRestockQuantities] = React.useState<Record<string, string>>({});
+    const [restockExpirations, setRestockExpirations] = React.useState<Record<string, string>>({});
+    const [alertsExportError, setAlertsExportError] = React.useState("");
+    // Kept across a network retry so one physical restock cannot be recorded twice.
+    const restockRequestKey = React.useRef("");
     const [shortageReports, setShortageReports] = React.useState<ShortageReport[]>([]);
     const [conditionReports, setConditionReports] = React.useState<ConditionReport[]>([]);
     const [conditionReportingSupported, setConditionReportingSupported] = React.useState(false);
@@ -341,6 +376,16 @@ export default function StaffInventory() {
         setReceivingNotes("");
         setActionError("");
         receiptRequestKey.current = "";
+    };
+    // Staff Restock: quantity-only receiving through receive_stock (Full Inventory access, own
+    // branch). The server ignores cost and price fields from Staff, so average cost and selling
+    // price stay unchanged. Available for every product and variant, at any stock level.
+    const openRestock = (product: Product) => {
+        setRestockTarget(product);
+        setRestockQuantities({});
+        setRestockExpirations({});
+        restockRequestKey.current = "";
+        setActionError("");
     };
     const [saving, setSaving] = React.useState(false);
     const [actionError, setActionError] = React.useState("");
@@ -361,19 +406,10 @@ export default function StaffInventory() {
     const [activityHistoryLoading, setActivityHistoryLoading] = React.useState(false);
     const [activityHistoryError, setActivityHistoryError] = React.useState("");
     const [historyRetry, setHistoryRetry] = React.useState(0);
-    const [salesBookings,setSalesBookings]=React.useState<SalesBooking[]>([]);
-    const [salesQueueFilter,setSalesQueueFilter]=React.useState<SalesQueueFilter>("all");
-    const [selectedSalesBookingRef,setSelectedSalesBookingRef]=React.useState<string|null>(null);
-    const [salesQueueLoading,setSalesQueueLoading]=React.useState(false);
-    const [canOperateSalesQueue,setCanOperateSalesQueue]=React.useState(false);
-    const [salesQueueSaving,setSalesQueueSaving]=React.useState(false);
-    const [salesQueueError,setSalesQueueError]=React.useState("");
-    const [salesQueueNotice,setSalesQueueNotice]=React.useState("");
-    const closeStaffNotice = React.useCallback(() => {setSalesQueueNotice("");setActionNotice("");}, []);
-    const [confirmSalesRelease,setConfirmSalesRelease]=React.useState(false);
-    const [salesQueueKey,setSalesQueueKey]=React.useState(0);
+    const closeStaffNotice = React.useCallback(() => setActionNotice(""), []);
     const [activityError, setActivityError] = React.useState<string | null>(null);
     const [activityLoading, setActivityLoading] = React.useState(true);
+    const [activityDirection, setActivityDirection] = React.useState<"all" | "in" | "out">("all");
     const isRental = tab === "rental";
     const lines = React.useMemo(() => toStockLines(inv.baseProducts), [inv.baseProducts]);
     const {low, out, attention} = React.useMemo(() => {
@@ -390,71 +426,26 @@ export default function StaffInventory() {
         if(q&&!values.join(" ").toLowerCase().includes(q))return false;
         return status==="all"||staffProductDisplayStatus(product)===status;
     }),[inv.baseProducts,search,category,status]);
-    const staffStockInDates=React.useMemo(()=>{
-        const productDates:Record<number,string>={};
-        const variantDates:Record<string,string>={};
-        const today=dateInManila();
-        const newer=(prior:string,candidate:string)=>candidate&&candidate<=today&&candidate>prior?candidate:prior;
-        for(const product of inv.baseProducts){
-            if(product.hasVariants&&product.variants?.length){
-                for(const variant of product.variants){
-                    if(Number(variant.stock)<=0)continue;
-                    const date=staffStockInDay(variant.createdAt||product.createdAt);
-                    const key=`${product.id}:${variant.id}`;
-                    variantDates[key]=newer(variantDates[key]||"",date);
-                    productDates[product.id]=newer(productDates[product.id]||"",date);
-                }
-            }else if(Number(product.stock)>0){
-                productDates[product.id]=newer(productDates[product.id]||"",staffStockInDay(product.createdAt));
-            }
-        }
-        for(const record of stockInRecords){
-            const product=inv.baseProducts.find(p=>p.id===Number(record.productId));
-            if(!product)continue;
-            const date=staffStockInDay(record.stockInDate);
-            productDates[product.id]=newer(productDates[product.id]||"",date);
-            const variantId=Number(record.variantId||0);
-            const name=String(record.variantName||"").toLowerCase().replace(/\s+/g," ").trim();
-            for(const variant of product.variants||[]){
-                const matches=variantId?variant.id===variantId:!!name&&staffVariantDisplayName(variant.variantValues).toLowerCase().replace(/\s+/g," ").trim()===name;
-                if(matches){const key=`${product.id}:${variant.id}`;variantDates[key]=newer(variantDates[key]||"",date);}
-            }
-        }
-        return {productDates,variantDates};
-    },[inv.baseProducts,stockInRecords]);
-    const tasks = React.useMemo(() => attention.filter(line => taskFilter === "all" || line.status === taskFilter),
-        [attention, taskFilter]);
+    // Status filter plus the inventory search (product, product no., category).
+    const tasks = React.useMemo(() => {
+        const query = search.trim().toLowerCase();
+        return attention.filter(line => (taskFilter === "all" || line.status === taskFilter) &&
+            (!query || [line.name, line.reference, line.category].join(" ").toLowerCase().includes(query)));
+    }, [attention, taskFilter, search]);
     const reportsByKey = React.useMemo(() => new Set(shortageReports.map(r=>`${r.productId}:${r.variantId ?? "regular"}`)),
         [shortageReports]);
     const conditionAlreadyReported = (line: StockLine, issueType: string) =>
         conditionReports.some(report => report.productId === line.product.id &&
             (report.variantId ?? null) === line.variantId && report.issueType === issueType);
-    const openProductReview = (line: StockLine) => {
-        setDetails(line);setActionError("");setReportNotes("");setConditionNotes("");
-        const risk = staffExpirationRisk(line.expirationDate);
-        setConditionIssueType(risk === "Expired" ? "expired" : risk === "Expiring Soon" ? "expiring" : "damaged");
-    };
     const branch = inv.assignedBranchName || "Assigned Branch";
-    const salesToday=dateInManila(now??new Date());
-    const visibleSalesBookings=React.useMemo(()=>salesBookings.filter(booking=>{
-            const query=search.trim().toLowerCase();
-            if(query&&![booking.reference,booking.clientName,booking.bookingType,booking.packageName,
-                ...booking.items.flatMap(item=>[item.productName,item.variantName])].join(" ").toLowerCase().includes(query))return false;
-            // Filter by operational stage only; event dates still govern actual release eligibility.
-            if(salesQueueFilter==="prepare" && !booking.items.some(item=>!item.prepared&&!item.issued))return false;
-            if(salesQueueFilter==="release" && !(booking.items.length>0 && booking.items.every(item=>item.prepared&&!item.issued)))return false;
-            return true;
-        }).sort((a,b)=>compareQueueEventDates(a.eventDate,b.eventDate,salesToday)||a.reference.localeCompare(b.reference)),
-        [salesBookings,salesQueueFilter,search,salesToday]);
-    const selectedSalesBooking=salesBookings.find(booking=>booking.reference===selectedSalesBookingRef)||null;
-    const selectedSalesReady=!!selectedSalesBooking && selectedSalesBooking.items.length>0 &&
-        selectedSalesBooking.items.every(item=>item.prepared&&!item.issued);
-    const selectedSalesReleaseEligible=selectedSalesReady && !!selectedSalesBooking &&
-        salesBookingFullyPaid(selectedSalesBooking) && selectedSalesBooking.eventDate<=salesToday && canOperateSalesQueue && !salesQueueSaving;
+    // Staff sees today's records only; the Activity filter and search narrow today's list.
     const todayActivities = React.useMemo(() => {
         const today = dateInManila(now ?? new Date());
-        return activities.filter(item => isActivityFromToday(item.at, today));
-    }, [activities, now]);
+        const query = search.trim().toLowerCase();
+        return activities.filter(item => isActivityFromToday(item.at, today) && (item.quantity ?? 0) !== 0 &&
+            (activityDirection === "all" || (activityDirection === "in" ? (item.quantity ?? 0) > 0 : (item.quantity ?? 0) < 0)) &&
+            (!query || [item.item, item.reference, item.kind].join(" ").toLowerCase().includes(query)));
+    }, [activities, now, activityDirection, search]);
 
     React.useEffect(() => {
         setNow(new Date());
@@ -490,26 +481,6 @@ export default function StaffInventory() {
         return () => window.removeEventListener("keydown", onKeyDown);
     }, [showActivityHistory]);
 
-    // Read-only, branch-scoped stock-in dates: the same existing endpoint used
-    // by the Manager list. It grants Staff no purchasing or catalog permissions.
-    React.useEffect(()=>{
-        if(isRental)return;
-        const controller=new AbortController();
-        const load=async()=>{
-            const token=sessionStorage.getItem("token");
-            if(!token)return;
-            try{
-                const response=await fetch("/api/products",{method:"POST",cache:"no-store",signal:controller.signal,
-                    headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
-                    body:JSON.stringify({action:"get_last_stock_in"})});
-                const data=await response.json().catch(()=>({}));
-                if(response.ok&&data.success===true&&Array.isArray(data.stockInRecords)&&!controller.signal.aborted){
-                    setStockInRecords(data.stockInRecords as StaffStockInRecord[]);
-                }
-            }catch{ /* Older deployments may not expose this read-only lookup. */ }
-        };
-        void load();return()=>controller.abort();
-    },[isRental,activityKey]);
 
     // Single server-validated, branch-scoped activity/task request; avoid
     // separate POS order and employee audit requests (which may expose costs).
@@ -549,36 +520,6 @@ export default function StaffInventory() {
         return ()=>controller.abort();
     }, [activityKey, isRental]);
 
-    // Dedicated operational queue: the Booking Lambda returns only the Sales inclusions
-    // reserved for confirmed/preparing bookings in this Staff member's branch.
-    React.useEffect(()=>{
-        if(isRental)return;
-        const abort=new AbortController();
-        const load=async()=>{
-            setSalesQueueLoading(true);setSalesQueueError("");
-            try{
-                const token=sessionStorage.getItem("token");
-                if(!token)throw new Error("Your session has expired. Please sign in again.");
-                const response=await fetch("/api/bookings",{method:"POST",cache:"no-store",signal:abort.signal,
-                    headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
-                    body:JSON.stringify({action:"get_staff_sales_booking_queue"})});
-                const data=await response.json().catch(()=>({}));
-                if(!response.ok||data.success!==true||!Array.isArray(data.bookings))
-                    throw new Error(String(data.error||"Unable to load Sales booking tasks."));
-                if(!abort.signal.aborted){setSalesBookings(data.bookings as SalesBooking[]);setCanOperateSalesQueue(data.canOperateSalesQueue===true);}
-            }catch(error){
-                if(!abort.signal.aborted){setSalesQueueError(error instanceof Error?error.message:"Unable to load Sales booking tasks.");setSalesBookings([]);setCanOperateSalesQueue(false);}
-            }finally{if(!abort.signal.aborted)setSalesQueueLoading(false);}
-        };
-        void load();return()=>abort.abort();
-    },[isRental,salesQueueKey]);
-    React.useEffect(()=>{
-        if(!selectedSalesBookingRef)return;
-        const close=(event:KeyboardEvent)=>{
-            if(event.key==="Escape"&&!salesQueueSaving){setSelectedSalesBookingRef(null);setConfirmSalesRelease(false);}
-        };
-        window.addEventListener("keydown",close);return()=>window.removeEventListener("keydown",close);
-    },[selectedSalesBookingRef,salesQueueSaving]);
 
     // Load the full branch history only when requested. Keep the main workspace
     // light: one summary request, 8 newest movements, and an indexed daily count.
@@ -616,26 +557,6 @@ export default function StaffInventory() {
         return () => controller.abort();
     }, [showActivityHistory, isRental, activityFilter, activityPeriod, activityPage, activityKey, historyRetry]);
 
-    const sendSalesBookingAction=async(actionName:"prepare_staff_sales_booking_item"|"release_staff_sales_booking",booking:SalesBooking,itemId?:number)=>{
-        if(salesQueueSaving)return;
-        setSalesQueueSaving(true);setSalesQueueError("");setSalesQueueNotice("");setActionNotice("");
-        try{
-            const token=sessionStorage.getItem("token");
-            if(!token)throw new Error("Your session has expired. Please sign in again.");
-            const response=await fetch("/api/bookings",{method:"POST",cache:"no-store",
-                headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
-                body:JSON.stringify({action:actionName,booking_id:booking.bookingId,...(itemId?{item_id:itemId}:{})})});
-            const result=await response.json().catch(()=>({}));
-            if(!response.ok||result.success!==true)throw new Error(String(result.error||"Unable to record booking operation."));
-            setSalesQueueNotice(actionName==="release_staff_sales_booking"?
-                `Sales inclusions released for ${booking.reference}.`:`Product preparation recorded for ${booking.reference}.`);
-            if(actionName==="release_staff_sales_booking"){
-                setSelectedSalesBookingRef(null);setConfirmSalesRelease(false);
-            }
-            setSalesQueueKey(key=>key+1);
-        }catch(error){setSalesQueueError(error instanceof Error?error.message:"Unable to process booking.");}
-        finally{setSalesQueueSaving(false);}
-    };
 
     const sendInventoryAction = async (payload: Record<string,unknown>) => {
         const token = sessionStorage.getItem("token");
@@ -648,7 +569,7 @@ export default function StaffInventory() {
     };
     const submitShortage = async (line: StockLine) => {
         if (saving) return;
-        setSaving(true);setActionError("");setActionNotice("");setSalesQueueNotice("");
+        setSaving(true);setActionError("");setActionNotice("");
         try {
             await sendInventoryAction({action:"report_staff_stock_shortage",productId:line.product.id,
                 variantId:line.variantId,notes:reportNotes.trim()});
@@ -660,7 +581,7 @@ export default function StaffInventory() {
     const submitCondition = async (line: StockLine) => {
         if (saving || !conditionReportingSupported || conditionAlreadyReported(line, conditionIssueType)) return;
         if (conditionNotes.trim().length < 5) {setActionError("Provide at least 5 characters of notes.");return;}
-        setSaving(true);setActionError("");setActionNotice("");setSalesQueueNotice("");
+        setSaving(true);setActionError("");setActionNotice("");
         try {
             await sendInventoryAction({action:"report_staff_stock_condition",productId:line.product.id,
                 variantId:line.variantId,issueType:conditionIssueType,notes:conditionNotes.trim()});
@@ -684,7 +605,7 @@ export default function StaffInventory() {
             return;
         }
         if (!receiptRequestKey.current) receiptRequestKey.current = crypto.randomUUID();
-        setSaving(true);setActionError("");setActionNotice("");setSalesQueueNotice("");
+        setSaving(true);setActionError("");setActionNotice("");
         try {
             const result = await sendInventoryAction({action:"complete_staff_stock_receipt", taskId:task.id,
                 requestKey:receiptRequestKey.current,
@@ -698,12 +619,52 @@ export default function StaffInventory() {
         } catch (error) {setActionError(error instanceof Error ? error.message : "Stock receiving failed.");}
         finally {setSaving(false);}
     };
+    // Lines and totals use the same rules as the Manager's Receive Stock dialog.
+    const restockLines = !restockTarget ? [] : restockTarget.hasVariants && restockTarget.variants?.length
+        ? restockTarget.variants.map(variant => ({key: String(variant.id), variantId: variant.id as number | null,
+            name: staffVariantDisplayName(variant.variantValues), variantNumber: String(variant.variantNumber || ""),
+            stock: Number(variant.stock ?? 0), sellable: Number(variant.sellableStock ?? variant.stock ?? 0)}))
+        : [{key: "regular", variantId: null as number | null, name: "Regular", variantNumber: "",
+            stock: Number(restockTarget.stock ?? 0), sellable: Number(restockTarget.sellableStock ?? restockTarget.stock ?? 0)}];
+    const restockTotal = restockLines.reduce((sum, line) => sum + (Number(restockQuantities[line.key]) || 0), 0);
+    const restockAvailableBefore = restockLines.reduce((sum, line) => sum + line.sellable, 0);
+    const restockNeedsReconciliation = restockLines.some(line => line.stock !== line.sellable);
+    const submitRestock = async (event: React.FormEvent) => {
+        event.preventDefault();
+        if (!restockTarget || saving) return;
+        if (!canRestock) {setActionError("Full Inventory access is required to restock.");return;}
+        const receivedDate = dateInManila();
+        const selected = restockLines.map(line => ({...line, raw: (restockQuantities[line.key] || "").trim()}))
+            .filter(line => line.raw !== "" && Number(line.raw) > 0);
+        if (selected.length === 0 || selected.some(line => !/^\d+$/.test(line.raw) || Number(line.raw) > 1000000)) {
+            setActionError("Enter a positive whole quantity for at least one product or variant.");return;
+        }
+        if (selected.some(line => restockExpirations[line.key] && restockExpirations[line.key] < receivedDate)) {
+            setActionError("Do not add stock that has already expired.");return;
+        }
+        if (!restockRequestKey.current) restockRequestKey.current = crypto.randomUUID();
+        const total = selected.reduce((sum, line) => sum + Number(line.raw), 0);
+        setSaving(true);setActionError("");setActionNotice("");
+        try {
+            const result = await sendInventoryAction({action:"receive_stock", requestKey:restockRequestKey.current,
+                product_id:restockTarget.id, receivedDate,
+                // Quantity only: no cost or pricing fields are sent (the server ignores them for Staff).
+                lines:selected.map(line => ({variantId:line.variantId, quantity:Number(line.raw),
+                    expirationDate:restockExpirations[line.key] || null}))});
+            setActionNotice(result.alreadyProcessed
+                ? `This restock of “${restockTarget.name}” was already recorded.`
+                : `“${restockTarget.name}” received +${total.toLocaleString("en-PH")} units in inventory.`);
+            setRestockTarget(null);restockRequestKey.current = "";
+            await refreshAll();setActivityKey(k=>k+1);
+        } catch (error) {setActionError(error instanceof Error ? error.message : "Unable to receive stock.");}
+        finally {setSaving(false);}
+    };
     const refresh = async () => {
         if (isRefreshing) return;
         setIsRefreshing(true);
         try {
             if (isRental) setRentalKey(k=>k+1);
-            else { await refreshAll(); setActivityKey(k=>k+1);setSalesQueueKey(k=>k+1); }
+            else { await refreshAll(); setActivityKey(k=>k+1); }
         } finally { setIsRefreshing(false); }
     };
 
@@ -762,145 +723,141 @@ export default function StaffInventory() {
                             </div>
                             <button type="button" className={`${outline} h-9 px-3 text-xs`} onClick={()=>{setActionError("");chooseReceipt(null);setShowReceivingInfo(true);}}>View Deliveries</button>
                         </section>}
-                        <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`}>
-                            <SectionHead icon={<ClipboardList size={18}/>} title="Sales Operations Queue"
-                                         subtitle="Booking inclusions to prepare and hand over · no rental equipment">
-                                <select aria-label="Filter sales booking tasks" value={salesQueueFilter}
-                                        onChange={e=>setSalesQueueFilter(e.target.value as SalesQueueFilter)}
-                                        className="h-9 w-[104px] rounded-xl border border-[#E6DDF0] bg-white px-2 text-[11px] font-semibold text-[#2B174C] outline-none focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0 focus:border-[#E6DDF0]">
-                                    <option value="all">All Tasks</option>
-                                    <option value="prepare">Prepare</option>
-                                    <option value="release">Release</option>
-                                </select>
-                            </SectionHead>
-                            {salesQueueError&&<p role="alert" className="px-3 py-2 text-[11px] text-red-700">{salesQueueError}
-                                <button type="button" className="ml-2 underline" onClick={()=>setSalesQueueKey(key=>key+1)}>Retry</button></p>}
-                            {salesQueueLoading?<div className="space-y-3 p-4" aria-busy="true">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]"/>)}</div>:
-                                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Sales operations booking queue" tabIndex={0}>
-                                    <table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                                        <colgroup><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/></colgroup>
-                                        <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>
-                                            {["Client / Booking Ref","Schedule","Booking Type","Status","Action"].map(label=><th key={label} className={headClass}>{label}</th>)}
-                                        </tr></thead>
-                                        <tbody>{visibleSalesBookings.map(booking=>{
-                                            const active=selectedSalesBookingRef===booking.reference;
-                                            const statusLabel=salesQueueBookingStatus(booking);
-                                            const open=()=>{setSelectedSalesBookingRef(booking.reference);setSalesQueueError("");};
-                                            return <tr key={booking.bookingId} tabIndex={0} aria-selected={active}
-                                                       onClick={open}
-                                                       onKeyDown={e=>{if(e.target===e.currentTarget&&(e.key==="Enter"||e.key===" ")){e.preventDefault();open();}}}
-                                                       className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"":"hover:bg-[#FCF9FF]"}`}>
-                                                <td className={`py-2 text-left align-middle ${active?"border-l-4 border-[#6F3FD3] px-3":"px-4"}`}>
-                                                    <span className="block break-words font-semibold">{booking.clientName}</span>
-                                                    <span className="mt-1 block break-all text-[10px] text-[#806A8C]">{booking.reference}</span>
-                                                </td>
-                                                <td className="px-2 py-2 text-center align-middle">
-                                                    <span className="block font-medium">{displaySalesBookingDate(booking.eventDate)}</span>
-                                                    {booking.eventTime&&<span className="mt-1 block text-[10px] text-[#806A8C]">{booking.eventTime}</span>}
-                                                </td>
-                                                <td className="px-2 py-2 text-center align-middle">
-                                                    <span className="block break-words font-medium">{salesBookingType(booking.bookingType)}</span>
-                                                    <span className="mt-1 block text-[10px] text-[#806A8C]">{booking.items.length} product {booking.items.length===1?"line":"lines"}</span>
-                                                </td>
-                                                <td className="px-2 py-2 text-center align-middle">
-                                                    <span className={`inline-block max-w-full text-center text-[10px] font-semibold leading-4 break-words ${salesQueueStatusStyles[statusLabel]||"text-[#2B174C]"}`}>
-                                                        {statusLabel}
-                                                    </span>
-                                                </td>
-                                                <td className="px-2 py-2 text-center align-middle">
-                                                    <button type="button" aria-haspopup="dialog"
-                                                            onClick={e=>{e.stopPropagation();open();}}
-                                                            className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">
-                                                        View Items
-                                                    </button>
-                                                </td>
-                                            </tr>;
-                                        })}</tbody>
-                                    </table>
-                                    {visibleSalesBookings.length===0&&<p className="p-5 text-center text-xs text-[#806A8C]">No Sales product preparation tasks match this filter.</p>}
-                                </div>}
-                        </section>
-                        <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-2">
-                            <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`}>
-                                <SectionHead icon={<ClipboardList size={18}/>} title="Stock Alerts to Review" subtitle="Low and out-of-stock products to verify or report.">
-                                    <select aria-label="Filter sales tasks" value={taskFilter} onChange={e=>setTaskFilter(e.target.value)}
-                                            className="h-9 w-[104px] shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-2 text-[11px] font-semibold text-[#2B174C] outline-none">
-                                        <option value="all">All Tasks</option><option value="Low Stock">Low Stock</option><option value="Out of Stock">Out of Stock</option>
-                                    </select>
-                                </SectionHead>
-                                <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" tabIndex={0} aria-label="Stock alerts to review">
-                                    <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                                        <colgroup><col className="w-[32%]"/><col className="w-[17%]"/><col className="w-[16%]"/><col className="w-[17%]"/><col className="w-[18%]"/></colgroup>
-                                        <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
-                                            <th className="truncate break-words px-2 py-2 font-semibold uppercase text-[#806A8C] text-center text-[10px] tracking-normal">Product</th>
-                                            <th className="truncate break-words px-2 py-2 text-center font-semibold uppercase text-[#806A8C] text-[10px] tracking-normal">Current Stock</th>
-                                            <th className="truncate break-words px-2 py-2 text-center font-semibold uppercase text-[#806A8C] text-[10px] tracking-normal">Reorder Point</th>
-                                            <th className="truncate px-2 py-2 text-center font-semibold uppercase text-[#806A8C] text-[10px] tracking-normal">Task</th>
-                                            <th className="truncate px-2 py-2 text-center font-semibold uppercase text-[#806A8C] text-[10px] tracking-normal">Action</th>
-                                        </tr></thead>
-                                        <tbody>{tasks.map(item=><tr key={item.key} className="border-b border-[#EFE8F2] text-[#2B174C] last:border-b-0">
-                                            <td className="break-words py-2 font-semibold align-middle px-4 text-left">{item.name}</td>
-                                            <td className="px-2 py-2 text-center align-middle font-semibold">{item.stock}</td>
-                                            <td className="px-2 py-2 text-center align-middle text-[#5F4E75]">{item.reorder}</td>
-                                            <td className="px-2 py-2 text-center align-middle">
-                                                <span className={`inline-block max-w-full break-words text-[10px] font-semibold leading-4 ${reportsByKey.has(item.key) ? "text-[#A43D48]" : item.status === "Out of Stock" ? "text-[#BF2438]" : "text-[#B07408]"}`}>
-                                                    {reportsByKey.has(item.key) ? "Reported" : item.status === "Out of Stock" ? "Report Shortage" : "Check / Report"}
-                                                </span>
-                                            </td>
-                                            <td className="px-2 py-2 text-center align-middle">
-                                                <button type="button" onClick={()=>openProductReview(item)} className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">Review</button>
-                                            </td>
-                                        </tr>)}</tbody>
-                                    </table>
-                                    {tasks.length===0 && <p className="px-5 py-8 text-center text-sm text-[#8A7D90]">No stock tasks match this filter.</p>}
+                        <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
+                            {/* Same container, header, filter and table design as the Manager Stock Action Center. */}
+                            <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+                                <div className="flex flex-col gap-3 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className="flex items-start gap-3">
+                                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><ClipboardList size={18}/></span>
+                                        <div>
+                                            <h2 className="text-[15px] font-bold text-[#21132E]">Stock Alerts to Review</h2>
+                                            <p className="mt-0.5 text-[11px] text-[#86778F]">Low and out-of-stock products to verify or report.</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex shrink-0 items-center gap-2">
+                                        <StaffInventoryFilterSelect containerClassName="w-[165px]" aria-label="Filter stock alerts by status" value={taskFilter} onChange={e=>setTaskFilter(e.target.value)}>
+                                            <option value="all">All Status</option><option value="Low Stock">Low Stock</option><option value="Out of Stock">Out of Stock</option>
+                                        </StaffInventoryFilterSelect>
+                                        <button type="button" title="Download filtered stock alerts report (PDF)" aria-label="Download stock alerts report"
+                                                onClick={() => void downloadStaffInventoryReport("Stock Alerts to Review",
+                                                    ["Product", "Current Stock", "Reorder Point", "Status", "Action"],
+                                                    tasks.map(item => [item.name, String(item.stock), String(item.reorder), item.status,
+                                                        item.status === "Out of Stock" ? "Restock Now" : "Restock"]),
+                                                    branch, `${taskFilter === "all" ? "All Status" : taskFilter}${search.trim() ? ` · Search: “${search.trim()}”` : ""}`,
+                                                    "stocknbook_stock_alerts_to_review")
+                                                    .then(() => setAlertsExportError(""))
+                                                    .catch(() => setAlertsExportError("Unable to download stock alerts report."))}
+                                                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]">
+                                            <Download size={16}/>
+                                        </button>
+                                    </div>
                                 </div>
+                                {alertsExportError && <p role="alert" className="px-4 py-1 text-xs text-red-600">{alertsExportError}</p>}
+                                {tasks.length===0 ? (
+                                    <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">No stock alerts match the selected filters.</div>
+                                ) : (
+                                    <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden" role="region" tabIndex={0} aria-label="Stock alerts to review">
+                                        <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                            <colgroup><col className="w-[32%]"/><col className="w-[17%]"/><col className="w-[16%]"/><col className="w-[17%]"/><col className="w-[18%]"/></colgroup>
+                                            <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
+                                                {["Product","Current Stock","Reorder Point","Status","Action"].map(label=><th key={label} className={headClass}>{label}</th>)}
+                                            </tr></thead>
+                                            <tbody>{tasks.map(item=><tr key={item.key} className="border-b border-[#EFE8F2] last:border-b-0">
+                                                <td className="break-words py-2 font-semibold text-[#2B174C] px-4 text-left">{item.name}</td>
+                                                <td className="px-2 py-2 text-center font-semibold text-[#4F3A5A]">{item.stock}</td>
+                                                <td className="px-2 py-2 text-center text-[#5F4E75]">{item.reorder}</td>
+                                                <td className="px-2 py-2 text-center">
+                                                    <span className={`inline-block max-w-full text-center text-[10px] font-semibold leading-4 ${item.status === "Out of Stock" ? "text-[#D92C3F]" : "text-[#C77A00]"}`}>{item.status}</span>
+                                                </td>
+                                                <td className="px-2 py-2 text-center">
+                                                    <button type="button" onClick={()=>openRestock(item.product)} disabled={!canRestock} title={canRestock ? undefined : "Full Inventory access is required to restock."} className="inline-flex w-full max-w-[118px] items-center justify-center rounded-lg border border-[#D9CDF0] bg-[#F5F0FF] px-2 py-1.5 text-center text-[10px] font-semibold leading-4 text-[#5330B6] transition hover:bg-[#ECE3FF] disabled:cursor-not-allowed disabled:opacity-40">{item.status === "Out of Stock" ? "Restock Now" : "Restock"}</button>
+                                                </td>
+                                            </tr>)}</tbody>
+                                        </table>
+                                    </div>
+                                )}
                             </section>
-                            <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`} aria-label="Today's Recent Consumable Activity">
-                                <SectionHead icon={<ArrowLeftRight size={18}/>} title="Today's Recent Consumable Activity" subtitle="Consumable stock movements recorded today (PH time, read-only)" />
-                                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" tabIndex={0} aria-label="Today's recent consumable activity">
-                                    {activityLoading ? <div aria-busy="true" className="space-y-3 p-4">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]" />)}</div> :
-                                        activityError ? <p role="alert" className="px-4 py-5 text-xs text-red-700">{activityError} <button type="button" className="ml-2 underline" onClick={()=>setActivityKey(key=>key+1)}>Retry</button></p> : <>
-                                            <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                                                <colgroup><col className="w-[16%]"/><col className="w-[30%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
-                                                <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>{["Time","Product","Activity","Qty","Reference No."].map(label=><th key={label} className={headClass}>{label}</th>)}</tr></thead>
-                                                <tbody>{todayActivities.map(item=><tr key={item.id} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                                                    <td className="py-2 align-middle px-4 text-left">{safeDate(item.at)}</td>
-                                                    <td className="px-2 py-2 align-middle font-medium">{item.item}</td>
-                                                    <td className="px-2 py-2 text-center align-middle"><span className={`inline-block max-w-full break-words font-semibold text-[10px] ${activityBadge(item.kind)}`}>{item.kind}</span></td>
-                                                    <td className="px-2 py-2 text-center align-middle font-semibold">{quantityLabel(item.quantity)}</td>
-                                                    <td className="break-all px-2 py-2 align-middle">{item.reference}</td>
-                                                </tr>)}</tbody>
-                                            </table>
-                                            {todayActivities.length===0&&<p className="px-5 py-8 text-center text-sm text-[#8A7D90]">No consumable stock activity recorded today.</p>}
-                                        </>}
+                            {/* Same container, header and table design as the Manager Consumable Stock Activity. */}
+                            <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm" aria-label="Today's Recent Consumable Activity">
+                                <div className="flex min-w-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className="flex min-w-0 flex-1 items-start gap-3">
+                                        <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><CalendarClock size={18}/></span>
+                                        <div>
+                                            <h2 className="text-[15px] font-bold text-[#21132E]">Today&apos;s Recent Consumable Activity</h2>
+                                            <p className="mt-0.5 text-[11px] text-[#86778F]">Consumable stock movements recorded today (PH time, read-only)</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex shrink-0 items-center justify-end gap-1.5">
+                                        <StaffInventoryFilterSelect containerClassName="w-[116px]" aria-label="Filter today's consumable activity" value={activityDirection}
+                                                                    onChange={e=>setActivityDirection(e.target.value as "all" | "in" | "out")}>
+                                            <option value="all">All Activity</option><option value="in">Stock In</option><option value="out">Stock Out</option>
+                                        </StaffInventoryFilterSelect>
+                                    </div>
                                 </div>
+                                {activityLoading ? (
+                                    <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">Loading recent stock activity...</div>
+                                ) : activityError ? (
+                                    <p role="alert" className="px-5 py-8 text-center text-sm text-red-700">{activityError} <button type="button" className="ml-2 underline" onClick={()=>setActivityKey(key=>key+1)}>Retry</button></p>
+                                ) : todayActivities.length===0 ? (
+                                    <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">{activityDirection === "all" && !search.trim() ? "No consumable stock activity recorded today." : "No consumable stock activity today matches the selected filters."}</div>
+                                ) : (
+                                    <div className="min-h-0 flex-1 w-full overflow-y-auto overflow-x-hidden" role="region" tabIndex={0} aria-label="Today's recent consumable activity">
+                                        <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                            <colgroup><col className="w-[19%]"/><col className="w-[27%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
+                                            <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
+                                                {["Date & Time","Product","Activity","Qty","Reference No."].map(label=><th key={label} className={headClass}>{label}</th>)}
+                                            </tr></thead>
+                                            <tbody>{todayActivities.map(item=>{
+                                                const at=activityDateTime(item.at);
+                                                return <tr key={item.id} className="border-b border-[#EFE8F2] last:border-b-0">
+                                                    <td className="py-2 text-[#4F3A5A] px-4 text-left">
+                                                        <div className="whitespace-nowrap font-medium">{at.date}</div>
+                                                        {at.time&&<div className="mt-0.5 whitespace-nowrap text-[10px] text-[#8A7D90]">{at.time}</div>}
+                                                    </td>
+                                                    <td className="break-words px-2 py-2 font-medium text-[#2B174C]">{item.item}</td>
+                                                    <td className="px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${(item.quantity ?? 0) > 0 ? "text-[#23834A]" : "text-[#D92C3F]"}`}>{(item.quantity ?? 0) > 0 ? "Stock In" : "Stock Out"}</span></td>
+                                                    <td className={`px-2 py-2 text-center font-semibold ${(item.quantity ?? 0) > 0 ? "text-[#23834A]" : "text-[#D92C3F]"}`}>{(item.quantity ?? 0) > 0 ? "+" : "-"}{Math.abs(item.quantity ?? 0).toLocaleString("en-PH")}</td>
+                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{item.reference}</td>
+                                                </tr>;
+                                            })}</tbody>
+                                        </table>
+                                    </div>
+                                )}
                             </section>
                         </div>
-                        <section id="staff-sales-list" className={card}>
-                            <SectionHead icon={<Package size={18}/>} title="Branch Sales Inventory List" subtitle={`Products available for daily stock operations · ${branch}`}>
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <select aria-label="Filter categories" className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none" value={category} onChange={e=>setCategory(e.target.value)}><option value="all">All Categories</option>
-                                        {categories.map(cat=><option key={cat} value={cat}>{cat}</option>)}
-                                    </select>
-                                    <select aria-label="Filter stock statuses" className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none" value={status} onChange={e=>setStatus(e.target.value)}>
-                                        <option value="all">All Status</option>{["In Stock","Low Stock","Out of Stock","Expiring Soon","Expired"].map(value=><option key={value} value={value}>{value}</option>)}
-                                    </select>
+                        {/* Same container, header, filters and search layout as the Manager Branch Inventory List (Staff actions only). */}
+                        <section id="staff-sales-list" className="overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+                            <div className="flex flex-col gap-3 px-4 py-3.5 xl:flex-row xl:items-center xl:justify-between">
+                                <div className="flex items-start gap-3">
+                                    <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><Package size={18}/></span>
+                                    <div>
+                                        <h2 className="text-[15px] font-bold text-[#21132E]">Branch Sales Inventory List</h2>
+                                        <p className="mt-0.5 text-[11px] text-[#86778F]">Products available for daily stock operations · {branch}</p>
+                                    </div>
                                 </div>
-                            </SectionHead>
-                            <div className="border-b border-[#E9E1EE] px-4 py-3">
-                                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center">
-                                    <label className="relative min-w-0"><span className="sr-only">Search sales inventory</span>
-                                        <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
-                                        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products, variants, clients or booking references..." className="h-[44px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]"/>
-                                    </label>
-                                    {canReceive && <button type="button" className={primary} onClick={()=>{setActionError("");setShowReceivingInfo(true);}}><PackagePlus size={16}/> Record Stock In{receivingTasks.length ? ` (${receivingTasks.length})` : ""}</button>}
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <StaffInventoryFilterSelect containerClassName="w-[168px]" aria-label="Filter categories" value={category} onChange={e=>setCategory(e.target.value)}>
+                                        <option value="all">All Categories</option>{categories.map(cat=><option key={cat} value={cat}>{cat}</option>)}
+                                    </StaffInventoryFilterSelect>
+                                    <StaffInventoryFilterSelect containerClassName="w-[140px]" aria-label="Filter stock statuses" value={status} onChange={e=>setStatus(e.target.value)}>
+                                        <option value="all">All Status</option>{["In Stock","Low Stock","Out of Stock","Expiring Soon","Expired"].map(value=><option key={value} value={value}>{value}</option>)}
+                                    </StaffInventoryFilterSelect>
                                 </div>
                             </div>
-                            <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Branch sales inventory list" tabIndex={0}>
-                                <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                                    <colgroup><col className="w-[10%]"/><col className="w-[24%]"/><col className="w-[12%]"/><col className="w-[9%]"/><col className="w-[8.5%]"/><col className="w-[9%]"/><col className="w-[8.5%]"/><col className="w-[9%]"/><col className="w-[10%]"/></colgroup>
+                            <div className="border-b border-[#E9E1EE] px-4 pb-4">
+                                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto]">
+                                    <label className="relative min-w-0"><span className="sr-only">Search sales inventory</span>
+                                        <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
+                                        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search product no., products, variants, or categories..." className="h-[44px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]"/>
+                                    </label>
+                                    {canReceive && <button type="button" className="inline-flex h-[44px] items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-5 text-sm font-semibold text-[#5330B6] shadow-sm transition hover:bg-[#ECE3FF]" onClick={()=>{setActionError("");setShowReceivingInfo(true);}}><PackagePlus size={16}/> Record Stock In{receivingTasks.length ? ` (${receivingTasks.length})` : ""}</button>}
+                                </div>
+                            </div>
+                            <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain" role="region" aria-label="Branch sales inventory list" tabIndex={0}>
+                                <table className="w-full min-w-0 table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                    <colgroup><col className="w-[14%]"/><col className="w-[24%]"/><col className="w-[12%]"/><col className="w-[10%]"/><col className="w-[9%]"/><col className="w-[10%]"/><col className="w-[10%]"/><col className="w-[11%]"/></colgroup>
                                     <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
-                                        {['Product No.','Product','Category','Available Stock','Reorder Point','Last Stock In','Expiration','Status','Action'].map(label=><th key={label} className={headClass}>{label}</th>)}
+                                        {['Product No.','Product','Category','Available Stock','Reorder Point','Expiration','Status','Action'].map(label=><th key={label} className={headClass}>{label}</th>)}
                                     </tr></thead>
                                     <tbody>{visibleProducts.map(product=>{
                                         const variants=product.hasVariants&&product.variants?.length?product.variants:[];
@@ -909,7 +866,6 @@ export default function StaffInventory() {
                                         const reorder=expandable?variants.reduce((sum,v)=>sum+Math.max(0,Number(v.alertLevel||0)),0):Math.max(0,Number(product.alertLevel||0));
                                         const expirations=(expandable?variants.map(v=>v.expirationDate):[product.expirationDate]).filter((v):v is string=>!!v);
                                         const expiration=expirations.map(v=>v.slice(0,10)).sort()[0]||null;
-                                        const productLine=lines.find(line=>line.product.id===product.id);
                                         const sellableProduct={...product,
                                             stock:product.sellableStock ?? product.stock,
                                             variants:variants.map(v=>({...v,stock:v.sellableStock ?? v.stock}))};
@@ -919,31 +875,29 @@ export default function StaffInventory() {
                                         return <React.Fragment key={product.id}>
                                             <tr className={`h-12 border-b border-[#EFE8F2] text-[#2B174C] hover:bg-[#FFFCF8] ${expandable?'cursor-pointer':''}`}
                                                 onClick={expandable?()=>setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]})):undefined}>
-                                                <td className="break-all py-2 font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px] px-4 text-left">
-                                                    <div className="flex items-center justify-start gap-1.5"><span>{product.productNumber||"—"}</span>{expandable?<ChevronDown size={13} className={`shrink-0 transition ${expanded?'rotate-180':''}`}/>:null}</div>
+                                                <td className="whitespace-nowrap py-2 px-4 text-left font-semibold">
+                                                    <div className="flex items-center justify-start gap-1.5">{expandable?<ChevronDown size={13} className={`shrink-0 transition ${expanded?'rotate-180':''}`}/>:<span className="inline-block w-[13px] shrink-0" aria-hidden="true"/>}<span>{product.productNumber||"—"}</span></div>
                                                 </td>
                                                 <td className="break-words px-2 py-2 font-semibold">{product.name}</td>
                                                 <td className="break-words px-2 py-2 text-[#5F4E75]">{product.category||"—"}</td>
                                                 <td className="px-2 py-2 text-center font-semibold">{availableStock.toLocaleString('en-PH')}</td>
                                                 <td className="px-2 py-2 text-center text-[#5F4E75]">{reorder.toLocaleString('en-PH')}</td>
-                                                <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.productDates[product.id])}</td>
                                                 <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(expiration)}</td>
                                                 <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(sellableProduct))}</td>
-                                                <td className="px-2 py-2 text-center"><button type="button" className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
-                                                                                              onClick={e=>{e.stopPropagation();if(expandable)setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]}));else if(productLine)openProductReview(productLine);}}>{expandable?(expanded?'Hide':'Variants'):'View'}</button></td>
+                                                <td className="px-2 py-2 text-center"><button type="button" disabled={!canRestock} aria-label={`Restock ${product.name}`}
+                                                                                              title={canRestock?undefined:"Full Inventory access is required to restock."} className={staffRestockAction}
+                                                                                              onClick={e=>{e.stopPropagation();openRestock(product);}}><PackagePlus size={11}/> Restock</button></td>
                                             </tr>
                                             {expandable&&expanded&&variants.map(variant=>{
-                                                const line=lines.find(row=>row.product.id===product.id&&row.variantId===variant.id);
                                                 return <tr key={variant.id} className="h-12 border-b border-[#EFE8F2] bg-[#FCF9FF] text-[#2B174C]">
-                                                    <td className="break-all py-2 px-4 text-left font-mono text-[9px] text-[#9B8AAA]" title="Variant Number">{variant.variantNumber||"—"}</td>
+                                                    <td className="whitespace-nowrap py-2 pr-4 pl-[35px] text-left text-[10px] font-semibold text-[#5F3D82]" title="Variant Number">{variant.variantNumber||"—"}</td>
                                                     <td className="break-words px-2 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {staffVariantDisplayName(variant.variantValues)}</td>
                                                     <td className="px-2 py-2 text-[#8A7D90]">Variant</td>
                                                     <td className="px-2 py-2 text-center font-semibold">{Number(variant.sellableStock ?? variant.stock ?? 0).toLocaleString('en-PH')}</td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">{Number(variant.alertLevel||0).toLocaleString('en-PH')}</td>
-                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(staffStockInDates.variantDates[`${product.id}:${variant.id}`])}</td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(variant.expirationDate)}</td>
                                                     <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.sellableStock ?? variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
-                                                    <td className="px-2 py-2 text-center"><button type="button" disabled={!line} onClick={()=>line&&openProductReview(line)} className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">View</button></td>
+                                                    <td className="px-2 py-2 text-center"><button type="button" disabled={!canRestock} aria-label={`Restock ${product.name} variant`} title={canRestock?undefined:"Full Inventory access is required to restock."} onClick={()=>openRestock(product)} className={staffRestockAction}><PackagePlus size={11}/> Restock</button></td>
                                                 </tr>;
                                             })}
                                         </React.Fragment>;
@@ -954,71 +908,6 @@ export default function StaffInventory() {
                         </section>
                     </div>}
         </main>
-        {selectedSalesBooking&&!isRental&&<div role="presentation" className="fixed inset-0 z-[85] flex items-center justify-center bg-[#21132E]/55 p-4"
-                                               onMouseDown={e=>{if(e.target===e.currentTarget&&!salesQueueSaving)setSelectedSalesBookingRef(null);}}>
-            <section role="dialog" aria-modal="true" aria-label="Sales products for this booking"
-                     className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-xl">
-                <header className="flex items-center justify-between gap-3 border-b border-[#E9E1EE] px-5 py-4">
-                    <div><h3 className="text-lg font-bold text-[#21132E]">Sales Products for this Booking</h3>
-                        <p className="mt-1 break-all text-xs text-[#806A8C]">{selectedSalesBooking.reference}</p></div>
-                    <button type="button" className={`${outline} h-9 px-3 text-xs`} disabled={salesQueueSaving} onClick={()=>setSelectedSalesBookingRef(null)}><X size={15}/> Close</button>
-                </header>
-                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
-                    <div className="grid gap-3 rounded-xl border border-[#E6DDF0] bg-[#FBF9FE] p-4 text-xs sm:grid-cols-3">
-                        <div><p className="text-[10px] font-semibold uppercase text-[#806A8C]">Client</p><p className="mt-1 font-semibold text-[#21132E]">{selectedSalesBooking.clientName}</p></div>
-                        <div><p className="text-[10px] font-semibold uppercase text-[#806A8C]">Schedule</p><p className="mt-1 font-semibold text-[#21132E]">{displaySalesBookingDate(selectedSalesBooking.eventDate)}{selectedSalesBooking.eventTime?` · ${selectedSalesBooking.eventTime}`:""}</p></div>
-                        <div><p className="text-[10px] font-semibold uppercase text-[#806A8C]">Booking Type</p><p className="mt-1 font-semibold text-[#21132E]">{salesBookingType(selectedSalesBooking.bookingType)}</p>
-                            {selectedSalesBooking.packageName&&<p className="mt-1 text-[#806A8C]">{selectedSalesBooking.packageName}</p>}</div>
-                    </div>
-                    <section className="overflow-hidden rounded-xl border border-[#E6DDF0]">
-                        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3">
-                            <div><h4 className="text-sm font-bold text-[#21132E]">Sales Product Checklist</h4>
-                                <p className="mt-1 text-[11px] text-[#806A8C]">{selectedSalesBooking.items.length} product {selectedSalesBooking.items.length===1?"line":"lines"} · {selectedSalesBooking.items.reduce((s,i)=>s+i.quantity,0)} booked units</p>
-                                <p className="text-[11px] text-[#806A8C]">{selectedSalesBooking.items.filter(i=>i.prepared).length} of {selectedSalesBooking.items.length} prepared</p></div>
-                            <span className={`rounded-full px-3 py-1 text-[10px] font-semibold ${salesBookingFullyPaid(selectedSalesBooking)?"bg-[#E5F7ED] text-[#218246]":"bg-[#FFF3D8] text-[#926400]"}`}>
-                                {salesBookingFullyPaid(selectedSalesBooking)?"Fully Paid":"Balance Pending"}</span>
-                        </div>
-                        <div className="max-h-[320px] min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                            <colgroup><col className="w-[42%]"/><col className="w-[10%]"/><col className="w-[20%]"/><col className="w-[28%]"/></colgroup>
-                            <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>{["Product / Variant","Qty","Status","Action"].map(label=><th className={headClass} key={label}>{label}</th>)}</tr></thead>
-                            <tbody>{selectedSalesBooking.items.map(item=><tr key={item.itemId} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                                <td className="break-words py-2 font-medium px-4 text-left">{item.productName}{item.variantName?` — ${item.variantName}`:""}</td>
-                                <td className="px-2 py-2 text-center font-semibold">{item.quantity}</td>
-                                <td className={`px-2 py-2 text-center text-[10px] font-semibold ${item.issued?"text-[#1D4ED8]":item.prepared?"text-[#23834A]":"text-[#A56607]"}`}>{item.issued?"Handed Over":item.prepared?"Prepared":"Needs Preparation"}</td>
-                                <td className="px-2 py-2 text-center">{!item.prepared&&!item.issued?
-                                    <button type="button" className={`${outline} h-9 w-full px-2 text-xs disabled:opacity-40`}
-                                            disabled={!canOperateSalesQueue||salesQueueSaving} onClick={()=>void sendSalesBookingAction("prepare_staff_sales_booking_item",selectedSalesBooking,item.itemId)}>
-                                        {salesQueueSaving?"Saving...":"Mark Prepared"}</button>:
-                                    <span className="text-[11px] text-[#806A8C]">{item.issued?"Released":"Ready for booking release"}</span>}</td>
-                            </tr>)}</tbody>
-                        </table></div>
-                        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#F0EAF4] px-4 py-3">
-                            <p className="max-w-lg text-[11px] text-[#806A8C]">All Sales inclusions must be physically prepared and the full booking balance recorded before handover. Confirmed reservations already reduced available stock.</p>
-                            <button type="button" className={`${primary} h-10 text-xs disabled:cursor-not-allowed disabled:opacity-40`}
-                                    disabled={!selectedSalesReleaseEligible} onClick={()=>setConfirmSalesRelease(true)}><Truck size={16}/> Release Sales Products</button>
-                        </div>
-                        {!selectedSalesReady&&<p className="px-4 pb-3 text-[11px] text-[#926400]">Prepare every Sales product line first.</p>}
-                        {!canOperateSalesQueue&&<p className="px-4 pb-3 text-[11px] text-[#926400]">Full Inventory permission is required to prepare or hand over Sales products.</p>}
-                        {selectedSalesReady&&!salesBookingFullyPaid(selectedSalesBooking)&&<p className="px-4 pb-3 text-[11px] text-[#926400]">Full booking payment is required before release.</p>}
-                        {selectedSalesReady&&salesBookingFullyPaid(selectedSalesBooking)&&selectedSalesBooking.eventDate>salesToday&&<p className="px-4 pb-3 text-[11px] text-[#926400]">Wait until the scheduled event date before releasing products.</p>}
-                    </section>
-                    {salesQueueError&&<p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{salesQueueError}</p>}
-                </div>
-                <div className="flex justify-end border-t border-[#E9E1EE] px-5 py-3"><button type="button" className={`${outline} h-9 text-xs`} onClick={()=>setSelectedSalesBookingRef(null)}>Close</button></div>
-            </section>
-        </div>}
-        {confirmSalesRelease&&selectedSalesBooking&&!isRental&&<div role="presentation" className="fixed inset-0 z-[100] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4">
-            <section role="alertdialog" aria-modal="true" aria-label="Confirm Sales booking handover" className="max-h-[90dvh] w-full max-w-lg space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
-                <h3 className="text-lg font-bold text-[#21132E]">Release Sales Products</h3>
-                <p className="text-xs text-[#5A476A]">Confirm the physical handover of all {selectedSalesBooking.items.reduce((sum,item)=>sum+item.quantity,0)} Sales units under {selectedSalesBooking.reference}. This action does not deduct inventory a second time.</p>
-                {salesQueueError&&<p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{salesQueueError}</p>}
-                <div className="flex justify-end gap-2"><button type="button" className={outline} disabled={salesQueueSaving} onClick={()=>setConfirmSalesRelease(false)}>Cancel</button>
-                    <button type="button" className={`${primary} disabled:opacity-40`} disabled={!selectedSalesReleaseEligible}
-                            onClick={()=>void sendSalesBookingAction("release_staff_sales_booking",selectedSalesBooking)}>
-                        {salesQueueSaving?"Saving...":"Confirm Handover"}</button></div>
-            </section>
-        </div>}
-
         {showActivityHistory && !isRental && <div className="fixed inset-0 z-[95] flex items-center justify-center bg-[#21132E]/50 p-4"
                                                   onMouseDown={event=>{if(event.target===event.currentTarget)setShowActivityHistory(false);}}>
             <section role="dialog" aria-modal="true" aria-labelledby="staff-activity-title"
@@ -1072,9 +961,73 @@ export default function StaffInventory() {
             </section>
         </div>}
         {!isRental && <SuccessToast
-            toast={salesQueueNotice ? {title:"Sales queue updated", message:salesQueueNotice} : actionNotice ? {title:"Inventory task completed", message:actionNotice} : null}
+            toast={actionNotice ? {title:"Inventory task completed", message:actionNotice} : null}
             onClose={closeStaffNotice}
         />}
+        {restockTarget && <div role="dialog" aria-modal="true" aria-label="Receive Stock"
+                               className="fixed inset-0 z-[130] flex items-center justify-center bg-black/50 px-3 py-5">
+            {/* Same layout and wording as the Manager's Receive Stock dialog. */}
+            <div className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+                <div className="flex items-center justify-between border-b border-[#E9E1EE] px-6 py-4">
+                    <h2 className="text-xl font-bold text-[#21132E]">Receive Stock</h2>
+                    <button type="button" onClick={()=>{setRestockTarget(null);setActionError("");}} disabled={saving} aria-label="Close Receive Stock"
+                            className="text-2xl text-[#806A8C] hover:text-[#2B174C] disabled:opacity-50">×</button>
+                </div>
+                <form onSubmit={submitRestock} className="flex min-h-0 flex-col">
+                    <div className="space-y-5 overflow-y-auto px-6 py-5">
+                        <div>
+                            <h3 className="text-base font-bold text-[#21132E]">{restockTarget.name}</h3>
+                            <p className="mt-1 text-xs text-[#806A8C]">Product No. {restockTarget.productNumber || "—"} · {restockTarget.category}</p>
+                            <div className="mt-3 grid grid-cols-2 gap-3 rounded-xl bg-[#F7F1FF] p-4">
+                                <div><div className="text-xs text-[#806A8C]">Available Now (POS / Bookings)</div>
+                                    <div className="mt-1 text-xl font-bold text-[#2B174C]">{restockAvailableBefore.toLocaleString("en-PH")}</div></div>
+                                <div><div className="text-xs text-[#806A8C]">Available After Receiving</div>
+                                    <div className="mt-1 text-xl font-bold text-[#2B174C]">{restockNeedsReconciliation ? "—" : (restockAvailableBefore + restockTotal).toLocaleString("en-PH")}</div></div>
+                            </div>
+                            {restockNeedsReconciliation && <p role="alert" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                                Some recorded stock is not currently sellable in this branch (for example expired batches). Ask your Manager to reconcile the records; newly received units are still added.
+                            </p>}
+                        </div>
+                        <section className="space-y-3">
+                            <h3 className="text-sm font-bold text-[#21132E]">{restockTarget.hasVariants ? "Variants to Restock" : "Stock to Receive"}</h3>
+                            <p className="text-xs text-[#806A8C]">Enter the quantity to add. Leave other variants blank to keep them unchanged.</p>
+                            {restockLines.map(line => (
+                                <div key={line.key} className="space-y-3 rounded-xl border border-[#E3D8EA] p-4">
+                                    <div className="flex justify-between gap-3">
+                                        <div><strong className="text-sm text-[#2B174C]">{line.name}</strong>
+                                            {line.variantNumber && <p className="mt-1 text-[11px] text-[#806A8C]">Variant No. {line.variantNumber}</p>}</div>
+                                        <span className="text-xs text-[#806A8C]">Available: {line.sellable.toLocaleString("en-PH")} pcs</span>
+                                    </div>
+                                    <div className="grid gap-3 sm:grid-cols-2">
+                                        <div className="space-y-1"><label className={labelClass}>Quantity to Add</label>
+                                            <input type="number" min="0" step="1" value={restockQuantities[line.key] || ""}
+                                                   onChange={e=>{setRestockQuantities(old=>({...old,[line.key]:e.target.value}));restockRequestKey.current="";}}
+                                                   placeholder="0" className={fieldClass}/></div>
+                                        <div className="space-y-1"><label className={labelClass}>Expiration Date (Optional)</label>
+                                            <input type="date" value={restockExpirations[line.key] || ""}
+                                                   onChange={e=>{setRestockExpirations(old=>({...old,[line.key]:e.target.value}));restockRequestKey.current="";}}
+                                                   className={fieldClass}/></div>
+                                    </div>
+                                    <p className="text-xs text-[#806A8C]">Available after receiving: {line.stock !== line.sellable ? "Reconciliation required" : `${(line.sellable + (Number(restockQuantities[line.key]) || 0)).toLocaleString("en-PH")} pcs`}</p>
+                                </div>
+                            ))}
+                            <div className="flex justify-between border-t border-[#E3D8EA] pt-3 text-sm font-semibold text-[#2B174C]">
+                                <span>Total Stock to Add</span><span>+{restockTotal.toLocaleString("en-PH")} pcs</span>
+                            </div>
+                        </section>
+                        {actionError && <p role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-700">{actionError}</p>}
+                    </div>
+                    <div className="flex justify-end gap-2 border-t border-[#E3D8EA] bg-white px-6 py-4">
+                        <button type="button" onClick={()=>{setRestockTarget(null);setActionError("");}} disabled={saving}
+                                className="rounded-xl border border-[#E3D8EA] px-5 py-2.5 text-sm font-semibold text-[#2B174C]">Cancel</button>
+                        <button type="submit" disabled={saving || restockTotal <= 0 || !canRestock}
+                                className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
+                            {saving ? "Saving..." : "Confirm Stock In"}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>}
         {(details || showReceivingInfo) && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#21132E]/50 p-4" onMouseDown={event=>{if(event.target===event.currentTarget && !saving){setDetails(null);setShowReceivingInfo(false);setActionError("");}}}>
             <section role="dialog" aria-modal="true" aria-label={details ? "Stock review" : "Authorized stock receiving"} className="max-h-[90vh] w-full max-w-lg overflow-y-auto overflow-x-hidden rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
                 <div className="flex items-start justify-between gap-4"><h3 className="text-lg font-bold text-[#21132E]">{details ? "Stock Review" : "Record Stock In"}</h3>
@@ -1151,5 +1104,219 @@ export default function StaffInventory() {
                 </div>}
             </section>
         </div>}
+    </>;
+}
+
+/* Sales Operations Queue, moved from Staff Inventory to Staff Bookings. The state, Booking
+   Lambda actions, validations, dialogs and permissions below are the original queue code;
+   `search` comes from the Staff Bookings search bar. */
+export function StaffSalesOperationsQueue({ search = "" }: { search?: string }) {
+    const [now, setNow] = React.useState<Date | null>(null);
+    React.useEffect(() => {
+        setNow(new Date());
+        const interval = window.setInterval(() => setNow(new Date()), 30000);
+        return () => window.clearInterval(interval);
+    }, []);
+    const [salesBookings,setSalesBookings]=React.useState<SalesBooking[]>([]);
+    const [salesQueueFilter,setSalesQueueFilter]=React.useState<SalesQueueFilter>("all");
+    const [selectedSalesBookingRef,setSelectedSalesBookingRef]=React.useState<string|null>(null);
+    const [salesQueueLoading,setSalesQueueLoading]=React.useState(false);
+    const [canOperateSalesQueue,setCanOperateSalesQueue]=React.useState(false);
+    const [salesQueueSaving,setSalesQueueSaving]=React.useState(false);
+    const [salesQueueError,setSalesQueueError]=React.useState("");
+    const [salesQueueNotice,setSalesQueueNotice]=React.useState("");
+    const closeSalesNotice = React.useCallback(() => setSalesQueueNotice(""), []);
+    const [confirmSalesRelease,setConfirmSalesRelease]=React.useState(false);
+    const [salesQueueKey,setSalesQueueKey]=React.useState(0);
+    const salesToday=dateInManila(now??new Date());
+    const visibleSalesBookings=React.useMemo(()=>salesBookings.filter(booking=>{
+            const query=search.trim().toLowerCase();
+            if(query&&![booking.reference,booking.clientName,booking.bookingType,booking.packageName,
+                ...booking.items.flatMap(item=>[item.productName,item.variantName])].join(" ").toLowerCase().includes(query))return false;
+            // Filter by operational stage only; event dates still govern actual release eligibility.
+            if(salesQueueFilter==="prepare" && !booking.items.some(item=>!item.prepared&&!item.issued))return false;
+            if(salesQueueFilter==="release" && !(booking.items.length>0 && booking.items.every(item=>item.prepared&&!item.issued)))return false;
+            return true;
+        }).sort((a,b)=>compareQueueEventDates(a.eventDate,b.eventDate,salesToday)||a.reference.localeCompare(b.reference)),
+        [salesBookings,salesQueueFilter,search,salesToday]);
+    const selectedSalesBooking=salesBookings.find(booking=>booking.reference===selectedSalesBookingRef)||null;
+    const selectedSalesReady=!!selectedSalesBooking && selectedSalesBooking.items.length>0 &&
+        selectedSalesBooking.items.every(item=>item.prepared&&!item.issued);
+    const selectedSalesReleaseEligible=selectedSalesReady && !!selectedSalesBooking &&
+        salesBookingFullyPaid(selectedSalesBooking) && selectedSalesBooking.eventDate<=salesToday && canOperateSalesQueue && !salesQueueSaving;
+    // Dedicated operational queue: the Booking Lambda returns only the Sales inclusions
+    // reserved for confirmed/preparing bookings in this Staff member's branch.
+    React.useEffect(()=>{
+        const abort=new AbortController();
+        const load=async()=>{
+            setSalesQueueLoading(true);setSalesQueueError("");
+            try{
+                const token=sessionStorage.getItem("token");
+                if(!token)throw new Error("Your session has expired. Please sign in again.");
+                const response=await fetch("/api/bookings",{method:"POST",cache:"no-store",signal:abort.signal,
+                    headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
+                    body:JSON.stringify({action:"get_staff_sales_booking_queue"})});
+                const data=await response.json().catch(()=>({}));
+                if(!response.ok||data.success!==true||!Array.isArray(data.bookings))
+                    throw new Error(String(data.error||"Unable to load Sales booking tasks."));
+                if(!abort.signal.aborted){setSalesBookings(data.bookings as SalesBooking[]);setCanOperateSalesQueue(data.canOperateSalesQueue===true);}
+            }catch(error){
+                if(!abort.signal.aborted){setSalesQueueError(error instanceof Error?error.message:"Unable to load Sales booking tasks.");setSalesBookings([]);setCanOperateSalesQueue(false);}
+            }finally{if(!abort.signal.aborted)setSalesQueueLoading(false);}
+        };
+        void load();return()=>abort.abort();
+    },[salesQueueKey]);
+    React.useEffect(()=>{
+        if(!selectedSalesBookingRef)return;
+        const close=(event:KeyboardEvent)=>{
+            if(event.key==="Escape"&&!salesQueueSaving){setSelectedSalesBookingRef(null);setConfirmSalesRelease(false);}
+        };
+        window.addEventListener("keydown",close);return()=>window.removeEventListener("keydown",close);
+    },[selectedSalesBookingRef,salesQueueSaving]);
+    const sendSalesBookingAction=async(actionName:"prepare_staff_sales_booking_item"|"release_staff_sales_booking",booking:SalesBooking,itemId?:number)=>{
+        if(salesQueueSaving)return;
+        setSalesQueueSaving(true);setSalesQueueError("");setSalesQueueNotice("");
+        try{
+            const token=sessionStorage.getItem("token");
+            if(!token)throw new Error("Your session has expired. Please sign in again.");
+            const response=await fetch("/api/bookings",{method:"POST",cache:"no-store",
+                headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
+                body:JSON.stringify({action:actionName,booking_id:booking.bookingId,...(itemId?{item_id:itemId}:{})})});
+            const result=await response.json().catch(()=>({}));
+            if(!response.ok||result.success!==true)throw new Error(String(result.error||"Unable to record booking operation."));
+            setSalesQueueNotice(actionName==="release_staff_sales_booking"?
+                `Sales inclusions released for ${booking.reference}.`:`Product preparation recorded for ${booking.reference}.`);
+            if(actionName==="release_staff_sales_booking"){
+                setSelectedSalesBookingRef(null);setConfirmSalesRelease(false);
+            }
+            setSalesQueueKey(key=>key+1);
+        }catch(error){setSalesQueueError(error instanceof Error?error.message:"Unable to process booking.");}
+        finally{setSalesQueueSaving(false);}
+    };
+
+    return <>
+        <section className={`${card} flex h-[340px] min-h-0 min-w-0 flex-col`}>
+            <SectionHead icon={<ClipboardList size={18}/>} title="Sales Operations Queue"
+                         subtitle="Booking inclusions to prepare and hand over · no rental equipment">
+                <select aria-label="Filter sales booking tasks" value={salesQueueFilter}
+                        onChange={e=>setSalesQueueFilter(e.target.value as SalesQueueFilter)}
+                        className="h-9 w-[104px] rounded-xl border border-[#E6DDF0] bg-white px-2 text-[11px] font-semibold text-[#2B174C] outline-none focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0 focus:border-[#E6DDF0]">
+                    <option value="all">All Tasks</option>
+                    <option value="prepare">Prepare</option>
+                    <option value="release">Release</option>
+                </select>
+            </SectionHead>
+            {salesQueueError&&<p role="alert" className="px-3 py-2 text-[11px] text-red-700">{salesQueueError}
+                <button type="button" className="ml-2 underline" onClick={()=>setSalesQueueKey(key=>key+1)}>Retry</button></p>}
+            {salesQueueLoading?<div className="space-y-3 p-4" aria-busy="true">{[1,2,3,4].map(x=><div key={x} className="h-8 animate-pulse rounded-lg bg-[#F2EDF8]"/>)}</div>:
+                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Sales operations booking queue" tabIndex={0}>
+                    <table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                        <colgroup><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/><col className="w-[20%]"/></colgroup>
+                        <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>
+                            {["Client / Booking Ref","Schedule","Booking Type","Status","Action"].map(label=><th key={label} className={headClass}>{label}</th>)}
+                        </tr></thead>
+                        <tbody>{visibleSalesBookings.map(booking=>{
+                            const active=selectedSalesBookingRef===booking.reference;
+                            const statusLabel=salesQueueBookingStatus(booking);
+                            const open=()=>{setSelectedSalesBookingRef(booking.reference);setSalesQueueError("");};
+                            return <tr key={booking.bookingId} tabIndex={0} aria-selected={active}
+                                       onClick={open}
+                                       onKeyDown={e=>{if(e.target===e.currentTarget&&(e.key==="Enter"||e.key===" ")){e.preventDefault();open();}}}
+                                       className={`cursor-pointer border-t border-[#F0EAF4] text-[#2B174C] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#7C3AED] ${active?"":"hover:bg-[#FCF9FF]"}`}>
+                                <td className={`py-2 text-left align-middle ${active?"border-l-4 border-[#6F3FD3] px-3":"px-4"}`}>
+                                    <span className="block break-words font-semibold">{booking.clientName}</span>
+                                    <span className="mt-1 block break-all text-[10px] text-[#806A8C]">{booking.reference}</span>
+                                </td>
+                                <td className="px-2 py-2 text-center align-middle">
+                                    <span className="block font-medium">{displaySalesBookingDate(booking.eventDate)}</span>
+                                    {booking.eventTime&&<span className="mt-1 block text-[10px] text-[#806A8C]">{booking.eventTime}</span>}
+                                </td>
+                                <td className="px-2 py-2 text-center align-middle">
+                                    <span className="block break-words font-medium">{salesBookingType(booking.bookingType)}</span>
+                                    <span className="mt-1 block text-[10px] text-[#806A8C]">{booking.items.length} product {booking.items.length===1?"line":"lines"}</span>
+                                </td>
+                                <td className="px-2 py-2 text-center align-middle">
+                                    <span className={`inline-block max-w-full text-center text-[10px] font-semibold leading-4 break-words ${salesQueueStatusStyles[statusLabel]||"text-[#2B174C]"}`}>
+                                        {statusLabel}
+                                    </span>
+                                </td>
+                                <td className="px-2 py-2 text-center align-middle">
+                                    <button type="button" aria-haspopup="dialog"
+                                            onClick={e=>{e.stopPropagation();open();}}
+                                            className="inline-flex min-h-[32px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50">
+                                        View Items
+                                    </button>
+                                </td>
+                            </tr>;
+                        })}</tbody>
+                    </table>
+                    {visibleSalesBookings.length===0&&<p className="p-5 text-center text-xs text-[#806A8C]">No Sales product preparation tasks match this filter.</p>}
+                </div>}
+        </section>
+        {selectedSalesBooking&&<div role="presentation" className="fixed inset-0 z-[85] flex items-center justify-center bg-[#21132E]/55 p-4"
+                                    onMouseDown={e=>{if(e.target===e.currentTarget&&!salesQueueSaving)setSelectedSalesBookingRef(null);}}>
+            <section role="dialog" aria-modal="true" aria-label="Sales products for this booking"
+                     className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-xl">
+                <header className="flex items-center justify-between gap-3 border-b border-[#E9E1EE] px-5 py-4">
+                    <div><h3 className="text-lg font-bold text-[#21132E]">Sales Products for this Booking</h3>
+                        <p className="mt-1 break-all text-xs text-[#806A8C]">{selectedSalesBooking.reference}</p></div>
+                    <button type="button" className={`${outline} h-9 px-3 text-xs`} disabled={salesQueueSaving} onClick={()=>setSelectedSalesBookingRef(null)}><X size={15}/> Close</button>
+                </header>
+                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+                    <div className="grid gap-3 rounded-xl border border-[#E6DDF0] bg-[#FBF9FE] p-4 text-xs sm:grid-cols-3">
+                        <div><p className="text-[10px] font-semibold uppercase text-[#806A8C]">Client</p><p className="mt-1 font-semibold text-[#21132E]">{selectedSalesBooking.clientName}</p></div>
+                        <div><p className="text-[10px] font-semibold uppercase text-[#806A8C]">Schedule</p><p className="mt-1 font-semibold text-[#21132E]">{displaySalesBookingDate(selectedSalesBooking.eventDate)}{selectedSalesBooking.eventTime?` · ${selectedSalesBooking.eventTime}`:""}</p></div>
+                        <div><p className="text-[10px] font-semibold uppercase text-[#806A8C]">Booking Type</p><p className="mt-1 font-semibold text-[#21132E]">{salesBookingType(selectedSalesBooking.bookingType)}</p>
+                            {selectedSalesBooking.packageName&&<p className="mt-1 text-[#806A8C]">{selectedSalesBooking.packageName}</p>}</div>
+                    </div>
+                    <section className="overflow-hidden rounded-xl border border-[#E6DDF0]">
+                        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3">
+                            <div><h4 className="text-sm font-bold text-[#21132E]">Sales Product Checklist</h4>
+                                <p className="mt-1 text-[11px] text-[#806A8C]">{selectedSalesBooking.items.length} product {selectedSalesBooking.items.length===1?"line":"lines"} · {selectedSalesBooking.items.reduce((s,i)=>s+i.quantity,0)} booked units</p>
+                                <p className="text-[11px] text-[#806A8C]">{selectedSalesBooking.items.filter(i=>i.prepared).length} of {selectedSalesBooking.items.length} prepared</p></div>
+                            <span className={`rounded-full px-3 py-1 text-[10px] font-semibold ${salesBookingFullyPaid(selectedSalesBooking)?"bg-[#E5F7ED] text-[#218246]":"bg-[#FFF3D8] text-[#926400]"}`}>
+                                {salesBookingFullyPaid(selectedSalesBooking)?"Fully Paid":"Balance Pending"}</span>
+                        </div>
+                        <div className="max-h-[320px] min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                            <colgroup><col className="w-[42%]"/><col className="w-[10%]"/><col className="w-[20%]"/><col className="w-[28%]"/></colgroup>
+                            <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>{["Product / Variant","Qty","Status","Action"].map(label=><th className={headClass} key={label}>{label}</th>)}</tr></thead>
+                            <tbody>{selectedSalesBooking.items.map(item=><tr key={item.itemId} className="border-t border-[#F0EAF4] text-[#2B174C]">
+                                <td className="break-words py-2 font-medium px-4 text-left">{item.productName}{item.variantName?` — ${item.variantName}`:""}</td>
+                                <td className="px-2 py-2 text-center font-semibold">{item.quantity}</td>
+                                <td className={`px-2 py-2 text-center text-[10px] font-semibold ${item.issued?"text-[#1D4ED8]":item.prepared?"text-[#23834A]":"text-[#A56607]"}`}>{item.issued?"Handed Over":item.prepared?"Prepared":"Needs Preparation"}</td>
+                                <td className="px-2 py-2 text-center">{!item.prepared&&!item.issued?
+                                    <button type="button" className={`${outline} h-9 w-full px-2 text-xs disabled:opacity-40`}
+                                            disabled={!canOperateSalesQueue||salesQueueSaving} onClick={()=>void sendSalesBookingAction("prepare_staff_sales_booking_item",selectedSalesBooking,item.itemId)}>
+                                        {salesQueueSaving?"Saving...":"Mark Prepared"}</button>:
+                                    <span className="text-[11px] text-[#806A8C]">{item.issued?"Released":"Ready for booking release"}</span>}</td>
+                            </tr>)}</tbody>
+                        </table></div>
+                        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#F0EAF4] px-4 py-3">
+                            <p className="max-w-lg text-[11px] text-[#806A8C]">All Sales inclusions must be physically prepared and the full booking balance recorded before handover. Confirmed reservations already reduced available stock.</p>
+                            <button type="button" className={`${primary} h-10 text-xs disabled:cursor-not-allowed disabled:opacity-40`}
+                                    disabled={!selectedSalesReleaseEligible} onClick={()=>setConfirmSalesRelease(true)}><Truck size={16}/> Release Sales Products</button>
+                        </div>
+                        {!selectedSalesReady&&<p className="px-4 pb-3 text-[11px] text-[#926400]">Prepare every Sales product line first.</p>}
+                        {!canOperateSalesQueue&&<p className="px-4 pb-3 text-[11px] text-[#926400]">Full Inventory permission is required to prepare or hand over Sales products.</p>}
+                        {selectedSalesReady&&!salesBookingFullyPaid(selectedSalesBooking)&&<p className="px-4 pb-3 text-[11px] text-[#926400]">Full booking payment is required before release.</p>}
+                        {selectedSalesReady&&salesBookingFullyPaid(selectedSalesBooking)&&selectedSalesBooking.eventDate>salesToday&&<p className="px-4 pb-3 text-[11px] text-[#926400]">Wait until the scheduled event date before releasing products.</p>}
+                    </section>
+                    {salesQueueError&&<p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{salesQueueError}</p>}
+                </div>
+                <div className="flex justify-end border-t border-[#E9E1EE] px-5 py-3"><button type="button" className={`${outline} h-9 text-xs`} onClick={()=>setSelectedSalesBookingRef(null)}>Close</button></div>
+            </section>
+        </div>}
+        {confirmSalesRelease&&selectedSalesBooking&&<div role="presentation" className="fixed inset-0 z-[100] flex items-center justify-center bg-[#21132E]/55 p-3 sm:p-4">
+            <section role="alertdialog" aria-modal="true" aria-label="Confirm Sales booking handover" className="max-h-[90dvh] w-full max-w-lg space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
+                <h3 className="text-lg font-bold text-[#21132E]">Release Sales Products</h3>
+                <p className="text-xs text-[#5A476A]">Confirm the physical handover of all {selectedSalesBooking.items.reduce((sum,item)=>sum+item.quantity,0)} Sales units under {selectedSalesBooking.reference}. This action does not deduct inventory a second time.</p>
+                {salesQueueError&&<p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{salesQueueError}</p>}
+                <div className="flex justify-end gap-2"><button type="button" className={outline} disabled={salesQueueSaving} onClick={()=>setConfirmSalesRelease(false)}>Cancel</button>
+                    <button type="button" className={`${primary} disabled:opacity-40`} disabled={!selectedSalesReleaseEligible}
+                            onClick={()=>void sendSalesBookingAction("release_staff_sales_booking",selectedSalesBooking)}>
+                        {salesQueueSaving?"Saving...":"Confirm Handover"}</button></div>
+            </section>
+        </div>}
+        <SuccessToast toast={salesQueueNotice ? {title:"Sales queue updated", message:salesQueueNotice} : null} onClose={closeSalesNotice}/>
     </>;
 }

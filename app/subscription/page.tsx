@@ -3,6 +3,7 @@
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
     AlertTriangle,
@@ -203,6 +204,7 @@ function formatCurrentDashboardDateTime(value: Date) {
 
 export default function SubscriptionPage() {
     const { user, loading: userLoading } = useCurrentUser();
+    const router = useRouter();
     const [data, setData] = useState<SubscriptionResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
@@ -220,6 +222,11 @@ export default function SubscriptionPage() {
     const [submitting, setSubmitting] = useState(false);
     const [message, setMessage] = useState("");
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
+    const staffBlocked = user?.role === "staff" || data?.role === "staff";
+
+    useEffect(() => {
+        if (!userLoading && staffBlocked) router.replace("/dashboard");
+    }, [userLoading, staffBlocked, router]);
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -265,7 +272,7 @@ export default function SubscriptionPage() {
     }
 
     useEffect(() => {
-        if (userLoading || !user) return;
+        if (userLoading || !user || user.role === "staff") return;
 
         if (token) {
             loadSubscription();
@@ -276,7 +283,7 @@ export default function SubscriptionPage() {
     // the admin approves a payment or the expiration date changes in MySQL.
     // Silent checks preserve the current dialog and never flash a loading page.
     useEffect(() => {
-        if (userLoading || !user || !token) return;
+        if (userLoading || !user || user.role === "staff" || !token) return;
         const refreshIfVisible = () => {
             if (document.visibilityState === "visible") void loadSubscription(true);
         };
@@ -504,6 +511,8 @@ export default function SubscriptionPage() {
         }
     }
 
+    if (staffBlocked) return null;
+
     if (userLoading || (loading && !data)) {
         return (
             <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
@@ -534,7 +543,7 @@ export default function SubscriptionPage() {
     const inReviewGrace = subscription.access_status === "GRACE";
     const onStarterFallback = subscription.access_status === "STARTER_FALLBACK" &&
         (isExpired || subscription.status?.toUpperCase() === "CANCELLED");
-    const canManage = data.can_manage_subscription;
+    const canManage = data.role === "owner" && data.can_manage_subscription;
 
     const upgradePlans = subscription.available_plans.filter(
         (plan) => getPlanDirection(plan, currentPlan) === "upgrade",
@@ -569,11 +578,8 @@ export default function SubscriptionPage() {
 
     return (
         <div
-            style={{
-                backgroundColor: "#FDFAF4",
-                fontFamily: "Georgia, 'Times New Roman', serif",
-            }}
-            className="flex min-h-screen overflow-x-hidden text-[#1A1220]"
+            style={{ backgroundColor: "#FDFAF4" }}
+            className="flex min-h-screen overflow-x-hidden font-sans text-[#1A1220]"
         >
             <RoleSidebar />
 
@@ -653,60 +659,51 @@ export default function SubscriptionPage() {
                         </div>
                     )}
 
-                    <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                        <div className="rounded-2xl border border-[#E6DDE8] bg-white px-5 py-5 shadow-[0_3px_10px_rgba(45,27,78,0.055)] transition-shadow hover:shadow-[0_5px_16px_rgba(45,27,78,0.07)]">
-                            <div className="flex items-start justify-between gap-4">
-                                <div>
-                                    <p className="text-xs font-bold uppercase tracking-[0.08em] text-[#7A6E88]">Current Plan</p>
-                                    <div className="mt-2 flex items-baseline gap-2">
-                                        <h2 className="text-[26px] font-bold tracking-[-0.025em] text-[#1A1220]">{currentPlan.name}</h2>
-                                        <span className="rounded-full bg-[#F4E9C6] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#8B6B1B]">
-                                            {isExpired ? "Expired" : isExpiring ? "Expiring" : "Active"}
-                                        </span>
-                                    </div>
-                                    <p className="mt-1 text-xs text-[#8A7D92]">
-                                        {formatPrice(currentPlan.price)} / month
-                                    </p>
-                                    {onStarterFallback && <p className="mt-2 text-xs font-semibold text-[#B53C3C]">Effective access: {effectivePlan.name}</p>}
-                                    {inReviewGrace && <p className="mt-2 text-xs font-semibold text-[#8B6B1B]">Temporary payment-review access</p>}
+                    {/* Match the compact icon-left KPI card sizing used in Dashboard. */}
+                    <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        <div className="flex min-h-[116px] min-w-0 items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
+                            <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
+                                <CreditCard size={24} strokeWidth={1.9} />
+                            </span>
+                            <div className="min-w-0 flex-1">
+                                <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">Current Plan</p>
+                                <div className="mt-1 flex flex-wrap items-center gap-2">
+                                    <p className="text-[28px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">{currentPlan.name}</p>
+                                    <span className="rounded-full bg-[#F4E9C6] px-2 py-1 text-[10px] font-semibold text-[#8B6B1B]">
+                                        {isExpired ? "Expired" : isExpiring ? "Expiring" : "Active"}
+                                    </span>
                                 </div>
-                                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#F3ECFF] text-[#6D35D4] ring-1 ring-[#E9DDF9]">
-                                    <CreditCard className="h-5 w-5" />
-                                </div>
+                                <p className="mt-2 text-[11px] leading-4 text-[#8A7D92]">{formatPrice(currentPlan.price)} / month</p>
+                                {onStarterFallback && <p className="mt-1 text-xs font-semibold text-[#B53C3C]">Effective access: {effectivePlan.name}</p>}
+                                {inReviewGrace && <p className="mt-1 text-xs font-semibold text-[#8B6B1B]">Temporary payment-review access</p>}
                             </div>
                         </div>
-
-                        <div className="rounded-2xl border border-[#E6DDE8] bg-white px-5 py-5 shadow-[0_3px_10px_rgba(45,27,78,0.055)] transition-shadow hover:shadow-[0_5px_16px_rgba(45,27,78,0.07)]">
-                            <div className="flex items-start justify-between gap-4">
-                                <div>
-                                    <p className="text-xs font-bold uppercase tracking-[0.08em] text-[#7A6E88]">Subscription Status</p>
-                                    <h2 className={`mt-2 text-[27px] font-bold capitalize tracking-[-0.03em] ${isExpired ? "text-[#B53C3C]" : isExpiring ? "text-[#A8790C]" : "text-[#16854B]"}`}>
-                                        {subscription.status || "Active"}
-                                    </h2>
-                                    <p className="mt-1 text-xs text-[#8A7D92]">
-                                        {subscription.pending_payment ? "Payment is awaiting platform admin review." : canManage ? "You control billing for this store." : "Billing is controlled by the account owner."}
-                                    </p>
-                                </div>
-                                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#EAF8F0] text-[#16854B] ring-1 ring-[#D8F0E2]">
-                                    <ShieldCheck className="h-5 w-5" />
-                                </div>
+                        <div className="flex min-h-[116px] min-w-0 items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
+                            <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#E8F7EE] text-[#138342]">
+                                <ShieldCheck size={24} strokeWidth={1.9} />
+                            </span>
+                            <div className="min-w-0 flex-1">
+                                <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">Subscription Status</p>
+                                <p className={`mt-1 break-words text-[28px] font-bold capitalize leading-none tracking-[-0.03em] ${isExpired ? "text-[#B53C3C]" : isExpiring ? "text-[#A8790C]" : "text-[#16854B]"}`}>
+                                    {subscription.status || "Active"}
+                                </p>
+                                <p className="mt-2 text-[11px] leading-4 text-[#8A7D92]">
+                                    {subscription.pending_payment ? "Payment is awaiting platform admin review." : canManage ? "You control billing for this store." : "Billing is controlled by the account owner."}
+                                </p>
                             </div>
                         </div>
-
-                        <div className="rounded-2xl border border-[#E6DDE8] bg-white px-5 py-5 shadow-[0_3px_10px_rgba(45,27,78,0.055)] transition-shadow hover:shadow-[0_5px_16px_rgba(45,27,78,0.07)]">
-                            <div className="flex items-start justify-between gap-4">
-                                <div>
-                                    <p className="text-xs font-bold uppercase tracking-[0.08em] text-[#7A6E88]">Plan Access</p>
-                                    <h2 className="mt-2 text-[26px] font-bold tracking-[-0.025em] text-[#2D1B4E]">
-                                        {canManage ? "Owner managed" : "View only"}
-                                    </h2>
-                                    <p className="mt-1 text-xs text-[#8A7D92]">
-                                        {canManage ? "Upgrade requests require payment proof and admin approval." : "Ask the owner to change the subscription."}
-                                    </p>
-                                </div>
-                                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#F3ECFF] text-[#6D35D4] ring-1 ring-[#E9DDF9]">
-                                    {canManage ? <TrendingUp className="h-5 w-5" /> : <LockKeyhole className="h-5 w-5" />}
-                                </div>
+                        <div className="flex min-h-[116px] min-w-0 items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
+                            <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#EEF3FF] text-[#3566D4]">
+                                {canManage ? <TrendingUp size={24} strokeWidth={1.9} /> : <LockKeyhole size={24} strokeWidth={1.9} />}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                                <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">Plan Access</p>
+                                <p className="mt-1 break-words text-[28px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
+                                    {canManage ? "Owner managed" : "View only"}
+                                </p>
+                                <p className="mt-2 text-[11px] leading-4 text-[#8A7D92]">
+                                    {canManage ? "Upgrade requests require payment proof and admin approval." : "Ask the owner to change the subscription."}
+                                </p>
                             </div>
                         </div>
                     </section>
@@ -835,161 +832,163 @@ export default function SubscriptionPage() {
                         </div>
                     </section>
 
-                    <section className="mt-6">
-                        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-                            <div>
-                                <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#1A1220]">Available plans</h2>
-                                <p className="mt-1 text-xs text-[#8A7D92]">
-                                    {canManage
-                                        ? "Compare available tiers, renew expiring plans, or subscribe again after expiration."
-                                        : "Compare available plans. Plan changes are managed by the account owner."}
-                                </p>
-                            </div>
-                            {subscription.pending_payment && (
-                                <span className="inline-flex w-fit items-center rounded-full bg-[#FFF5D9] px-3 py-1.5 text-[10px] font-semibold text-[#8B6B1B]">
+                    {canManage && (
+                        <section className="mt-6">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                                <div>
+                                    <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#1A1220]">Available plans</h2>
+                                    <p className="mt-1 text-xs text-[#8A7D92]">
+                                        {canManage
+                                            ? "Compare available tiers, renew expiring plans, or subscribe again after expiration."
+                                            : "Compare available plans. Plan changes are managed by the account owner."}
+                                    </p>
+                                </div>
+                                {subscription.pending_payment && (
+                                    <span className="inline-flex w-fit items-center rounded-full bg-[#FFF5D9] px-3 py-1.5 text-[10px] font-semibold text-[#8B6B1B]">
                                     Payment awaiting review
                                 </span>
-                            )}
-                        </div>
+                                )}
+                            </div>
 
-                        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                            {subscription.available_plans.map((plan) => {
-                                const direction = getPlanDirection(plan, currentPlan);
-                                const isCurrent = direction === "current";
-                                const isUpgrade = direction === "upgrade";
-                                const isLower = direction === "downgrade";
-                                const canRenewThisPlan = isCurrent && (isExpired || isExpiring);
-                                const canSelectPaidPlanAfterExpiry = isExpired && isLower && plan.price > 0;
-                                const isEffectiveFreePlan = onStarterFallback && plan.id === effectivePlan.id;
-                                const canChoose = canManage && !subscription.pending_payment &&
-                                    (isUpgrade || canRenewThisPlan || canSelectPaidPlanAfterExpiry);
-                                const downgradeIssues = isLower
-                                    ? getDowngradeLimitIssues(plan, subscription.usage)
-                                    : [];
-                                const canFitTargetPlan = downgradeIssues.length === 0;
+                            <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                                {subscription.available_plans.map((plan) => {
+                                    const direction = getPlanDirection(plan, currentPlan);
+                                    const isCurrent = direction === "current";
+                                    const isUpgrade = direction === "upgrade";
+                                    const isLower = direction === "downgrade";
+                                    const canRenewThisPlan = isCurrent && (isExpired || isExpiring);
+                                    const canSelectPaidPlanAfterExpiry = isExpired && isLower && plan.price > 0;
+                                    const isEffectiveFreePlan = onStarterFallback && plan.id === effectivePlan.id;
+                                    const canChoose = canManage && !subscription.pending_payment &&
+                                        (isUpgrade || canRenewThisPlan || canSelectPaidPlanAfterExpiry);
+                                    const downgradeIssues = isLower
+                                        ? getDowngradeLimitIssues(plan, subscription.usage)
+                                        : [];
+                                    const canFitTargetPlan = downgradeIssues.length === 0;
 
-                                return (
-                                    <article
-                                        key={plan.id}
-                                        className={`relative rounded-2xl border bg-white p-5 shadow-[0_3px_10px_rgba(45,27,78,0.055)] transition-all hover:-translate-y-0.5 hover:shadow-[0_6px_18px_rgba(45,27,78,0.08)] ${
-                                            isCurrent
-                                                ? "border-[#6D35D4] ring-2 ring-[#6D35D4]/10"
-                                                : "border-[#E6DDE8]"
-                                        }`}
-                                    >
-                                        {isCurrent && (
-                                            <span className="absolute right-4 top-4 rounded-full bg-[#F3ECFF] px-2.5 py-1 text-[10px] font-semibold text-[#6D35D4]">
+                                    return (
+                                        <article
+                                            key={plan.id}
+                                            className={`relative rounded-2xl border bg-white p-5 shadow-[0_3px_10px_rgba(45,27,78,0.055)] transition-all hover:-translate-y-0.5 hover:shadow-[0_6px_18px_rgba(45,27,78,0.08)] ${
+                                                isCurrent
+                                                    ? "border-[#6D35D4] ring-2 ring-[#6D35D4]/10"
+                                                    : "border-[#E6DDE8]"
+                                            }`}
+                                        >
+                                            {isCurrent && (
+                                                <span className="absolute right-4 top-4 rounded-full bg-[#F3ECFF] px-2.5 py-1 text-[10px] font-semibold text-[#6D35D4]">
                                                 {isExpired ? "Previous paid plan" : "Current plan"}
                                             </span>
-                                        )}
+                                            )}
 
-                                        <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#9A7A25]">
-                                            {isEffectiveFreePlan ? "Current free access" : isCurrent ? (isExpired ? "Expired subscription" : isExpiring ? "Expiring soon" : "Active") : isUpgrade ? "Upgrade option" : "Lower-tier plan"}
-                                        </p>
-                                        <h3 className="mt-2 text-[21px] font-bold tracking-[-0.02em] text-[#1A1220]">{plan.name}</h3>
-                                        <p className="mt-1 text-[25px] font-bold tracking-[-0.025em] text-[#2D1B4E]">
-                                            {formatPrice(plan.price)}
-                                            <span className="ml-1 text-xs font-medium text-[#8A7D92]">/month</span>
-                                        </p>
+                                            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#9A7A25]">
+                                                {isEffectiveFreePlan ? "Current free access" : isCurrent ? (isExpired ? "Expired subscription" : isExpiring ? "Expiring soon" : "Active") : isUpgrade ? "Upgrade option" : "Lower-tier plan"}
+                                            </p>
+                                            <h3 className="mt-2 text-[21px] font-bold tracking-[-0.02em] text-[#1A1220]">{plan.name}</h3>
+                                            <p className="mt-1 text-[25px] font-bold tracking-[-0.025em] text-[#2D1B4E]">
+                                                {formatPrice(plan.price)}
+                                                <span className="ml-1 text-xs font-medium text-[#8A7D92]">/month</span>
+                                            </p>
 
-                                        <div className="mt-5 grid grid-cols-2 gap-2 text-xs">
-                                            <div className="rounded-lg bg-[#FBF9FD] px-3 py-2">
-                                                <span className="block text-[#8A7D92]">Inventory</span>
-                                                <strong className="mt-0.5 block text-[#3C3046]">{formatLimit(plan.max_inventory)}</strong>
+                                            <div className="mt-5 grid grid-cols-2 gap-2 text-xs">
+                                                <div className="rounded-lg bg-[#FBF9FD] px-3 py-2">
+                                                    <span className="block text-[#8A7D92]">Inventory</span>
+                                                    <strong className="mt-0.5 block text-[#3C3046]">{formatLimit(plan.max_inventory)}</strong>
+                                                </div>
+                                                <div className="rounded-lg bg-[#FBF9FD] px-3 py-2">
+                                                    <span className="block text-[#8A7D92]">Bookings</span>
+                                                    <strong className="mt-0.5 block text-[#3C3046]">{formatLimit(plan.max_bookings)}</strong>
+                                                </div>
+                                                <div className="rounded-lg bg-[#FBF9FD] px-3 py-2">
+                                                    <span className="block text-[#8A7D92]">Staff</span>
+                                                    <strong className="mt-0.5 block text-[#3C3046]">{formatLimit(plan.max_staff)}</strong>
+                                                </div>
+                                                <div className="rounded-lg bg-[#FBF9FD] px-3 py-2">
+                                                    <span className="block text-[#8A7D92]">Branches</span>
+                                                    <strong className="mt-0.5 block text-[#3C3046]">{formatLimit(plan.max_branches)}</strong>
+                                                </div>
                                             </div>
-                                            <div className="rounded-lg bg-[#FBF9FD] px-3 py-2">
-                                                <span className="block text-[#8A7D92]">Bookings</span>
-                                                <strong className="mt-0.5 block text-[#3C3046]">{formatLimit(plan.max_bookings)}</strong>
-                                            </div>
-                                            <div className="rounded-lg bg-[#FBF9FD] px-3 py-2">
-                                                <span className="block text-[#8A7D92]">Staff</span>
-                                                <strong className="mt-0.5 block text-[#3C3046]">{formatLimit(plan.max_staff)}</strong>
-                                            </div>
-                                            <div className="rounded-lg bg-[#FBF9FD] px-3 py-2">
-                                                <span className="block text-[#8A7D92]">Branches</span>
-                                                <strong className="mt-0.5 block text-[#3C3046]">{formatLimit(plan.max_branches)}</strong>
-                                            </div>
-                                        </div>
 
-                                        <div className="mt-4 space-y-2">
-                                            {featureList(plan).slice(4).map((feature) => (
-                                                <div key={feature.label} className="flex items-center justify-between text-xs">
-                                                    <span className="text-[#5D5168]">{feature.label}</span>
-                                                    <span className={feature.enabled ? "font-semibold text-[#16854B]" : "text-[#A49AA9]"}>
+                                            <div className="mt-4 space-y-2">
+                                                {featureList(plan).slice(4).map((feature) => (
+                                                    <div key={feature.label} className="flex items-center justify-between text-xs">
+                                                        <span className="text-[#5D5168]">{feature.label}</span>
+                                                        <span className={feature.enabled ? "font-semibold text-[#16854B]" : "text-[#A49AA9]"}>
                                                         {feature.enabled ? "Included" : "Not included"}
                                                     </span>
-                                                </div>
-                                            ))}
-                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
 
-                                        <div className="mt-5">
-                                            {isEffectiveFreePlan ? (
-                                                <div className="rounded-xl border border-[#E7DCEB] bg-[#FAF7FC] px-4 py-3 text-center text-xs font-semibold text-[#7A6E88]">Starter access is active; your saved records are preserved.</div>
-                                            ) : isCurrent && !canRenewThisPlan ? (
-                                                <div className="rounded-xl border border-[#E7DCEB] bg-[#FAF7FC] px-4 py-3 text-center text-xs font-semibold text-[#7A6E88]">You are currently using this plan</div>
-                                            ) : !canManage ? (
-                                                <div className="rounded-xl border border-[#E7DCEB] bg-[#FAF7FC] px-4 py-3 text-center text-xs font-semibold text-[#7A6E88]">
-                                                    Managed by the account owner
-                                                </div>
-                                            ) : isLower && !canSelectPaidPlanAfterExpiry ? (
-                                                <div
-                                                    className={`rounded-xl border px-4 py-3 text-xs ${
-                                                        canFitTargetPlan
-                                                            ? "border-[#E8D8A7] bg-[#FFF9E8] text-[#7A5A12]"
-                                                            : "border-[#F0C8C8] bg-[#FFF4F4] text-[#A43A3A]"
-                                                    }`}
-                                                >
-                                                    <p className="text-center font-semibold">
-                                                        {canFitTargetPlan
-                                                            ? `Eligible for downgrade to ${plan.name} at renewal`
-                                                            : `Cannot downgrade to ${plan.name} yet`}
-                                                    </p>
-
-                                                    {canFitTargetPlan ? (
-                                                        <p className="mt-1 text-center text-[10px] font-medium leading-4 opacity-80">
-                                                            Your current usage fits this plan. Downgrades should be scheduled for the end of the current subscription period so remaining paid access is preserved.
+                                            <div className="mt-5">
+                                                {isEffectiveFreePlan ? (
+                                                    <div className="rounded-xl border border-[#E7DCEB] bg-[#FAF7FC] px-4 py-3 text-center text-xs font-semibold text-[#7A6E88]">Starter access is active; your saved records are preserved.</div>
+                                                ) : isCurrent && !canRenewThisPlan ? (
+                                                    <div className="rounded-xl border border-[#E7DCEB] bg-[#FAF7FC] px-4 py-3 text-center text-xs font-semibold text-[#7A6E88]">You are currently using this plan</div>
+                                                ) : !canManage ? (
+                                                    <div className="rounded-xl border border-[#E7DCEB] bg-[#FAF7FC] px-4 py-3 text-center text-xs font-semibold text-[#7A6E88]">
+                                                        Managed by the account owner
+                                                    </div>
+                                                ) : isLower && !canSelectPaidPlanAfterExpiry ? (
+                                                    <div
+                                                        className={`rounded-xl border px-4 py-3 text-xs ${
+                                                            canFitTargetPlan
+                                                                ? "border-[#E8D8A7] bg-[#FFF9E8] text-[#7A5A12]"
+                                                                : "border-[#F0C8C8] bg-[#FFF4F4] text-[#A43A3A]"
+                                                        }`}
+                                                    >
+                                                        <p className="text-center font-semibold">
+                                                            {canFitTargetPlan
+                                                                ? `Eligible for downgrade to ${plan.name} at renewal`
+                                                                : `Cannot downgrade to ${plan.name} yet`}
                                                         </p>
-                                                    ) : (
-                                                        <div className="mt-2 space-y-1 border-t border-[#F0C8C8] pt-2 text-[10px] font-medium">
-                                                            <p>Reduce usage before moving to this plan:</p>
-                                                            {downgradeIssues.map((issue) => (
-                                                                <div
-                                                                    key={issue.label}
-                                                                    className="flex items-center justify-between gap-3"
-                                                                >
-                                                                    <span>{issue.label}</span>
-                                                                    <span className="font-semibold">
+
+                                                        {canFitTargetPlan ? (
+                                                            <p className="mt-1 text-center text-[10px] font-medium leading-4 opacity-80">
+                                                                Your current usage fits this plan. Downgrades should be scheduled for the end of the current subscription period so remaining paid access is preserved.
+                                                            </p>
+                                                        ) : (
+                                                            <div className="mt-2 space-y-1 border-t border-[#F0C8C8] pt-2 text-[10px] font-medium">
+                                                                <p>Reduce usage before moving to this plan:</p>
+                                                                {downgradeIssues.map((issue) => (
+                                                                    <div
+                                                                        key={issue.label}
+                                                                        className="flex items-center justify-between gap-3"
+                                                                    >
+                                                                        <span>{issue.label}</span>
+                                                                        <span className="font-semibold">
                                                                         {issue.current.toLocaleString("en-PH")} / {formatLimit(issue.limit)}
                                                                     </span>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            ) : subscription.pending_payment ? (
-                                                <div className="rounded-xl border border-[#E8D8A7] bg-[#FFF9E8] px-4 py-3 text-center text-xs font-semibold text-[#8B6B1B]">
-                                                    Payment awaiting review
-                                                </div>
-                                            ) : (
-                                                <button
-                                                    type="button"
-                                                    disabled={!canChoose}
-                                                    onClick={() => {
-                                                        setSelectedPlan(plan);
-                                                        setUpgradeStep("details");
-                                                    }}
-                                                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#412563] focus:outline-none focus:ring-4 focus:ring-[#6D35D4]/15 disabled:cursor-not-allowed disabled:opacity-50"
-                                                >
-                                                    <CreditCard className="h-4 w-4" />
-                                                    {isCurrent ? `Renew ${plan.name}` : isLower ? `Subscribe to ${plan.name}` : `Upgrade to ${plan.name}`}
-                                                </button>
-                                            )}
-                                        </div>
-                                    </article>
-                                );
-                            })}
-                        </div>
-                    </section>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ) : subscription.pending_payment ? (
+                                                    <div className="rounded-xl border border-[#E8D8A7] bg-[#FFF9E8] px-4 py-3 text-center text-xs font-semibold text-[#8B6B1B]">
+                                                        Payment awaiting review
+                                                    </div>
+                                                ) : (
+                                                    <button
+                                                        type="button"
+                                                        disabled={!canChoose}
+                                                        onClick={() => {
+                                                            setSelectedPlan(plan);
+                                                            setUpgradeStep("details");
+                                                        }}
+                                                        className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#412563] focus:outline-none focus:ring-4 focus:ring-[#6D35D4]/15 disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        <CreditCard className="h-4 w-4" />
+                                                        {isCurrent ? `Renew ${plan.name}` : isLower ? `Subscribe to ${plan.name}` : `Upgrade to ${plan.name}`}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </article>
+                                    );
+                                })}
+                            </div>
+                        </section>
+                    )}
 
                     {canManage && upgradePlans.length === 0 && !isExpired && (
                         <div className="mt-5 rounded-xl border border-[#E7DCEB] bg-white px-5 py-4 text-sm text-[#7A6E88] shadow-[0_2px_8px_rgba(45,27,78,0.03)]">

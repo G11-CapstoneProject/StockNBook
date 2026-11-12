@@ -41,6 +41,39 @@ function RentalInventoryFilterSelect({ containerClassName = "", className = "", 
     );
 }
 
+// Inclusive YYYY-MM-DD date range used by the Rental Stock Activity and
+// Equipment Condition & Monitoring "Date range" filters.
+function isValidInventoryDateRange(start: string, end: string) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(start) && /^\d{4}-\d{2}-\d{2}$/.test(end) && start <= end;
+}
+function inventoryDateRangeLabel(start: string, end: string) {
+    return isValidInventoryDateRange(start, end) ? `${start} to ${end}` : "Choose a date range";
+}
+// Start/End Date inputs shown under a panel header while "Date range" is selected.
+function InventoryDateRangeFields({ label, start, end, onStartChange, onEndChange }: {
+    label: string; start: string; end: string;
+    onStartChange: (value: string) => void; onEndChange: (value: string) => void;
+}) {
+    const reversed = Boolean(start && end && start > end);
+    return (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-[11px]">
+            <label className="flex items-center gap-1.5 font-semibold text-[#4E2C66]">Start Date
+                <input type="date" aria-label={`${label} start date`} value={start} max={end || undefined}
+                       onChange={e => onStartChange(e.target.value)}
+                       className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-2 text-[11px] font-normal text-[#2B174C]"/>
+            </label>
+            <label className="flex items-center gap-1.5 font-semibold text-[#4E2C66]">End Date
+                <input type="date" aria-label={`${label} end date`} value={end} min={start || undefined}
+                       onChange={e => onEndChange(e.target.value)}
+                       className="h-9 rounded-xl border border-[#E3D8EA] bg-white px-2 text-[11px] font-normal text-[#2B174C]"/>
+            </label>
+            {reversed
+                ? <p role="alert" className="font-medium text-[#D92C3F]">Start Date cannot be later than End Date.</p>
+                : (!start || !end) && <p className="text-[#86778F]">Choose a Start Date and End Date (both dates included).</p>}
+        </div>
+    );
+}
+
 // Staff and manager activity labels share the same operational stock direction.
 function rentalActivityDirection(record: RentalActivity): "in" | "out" | "other" {
     if (["received", "returned", "missing_replaced", "missing_resolved", "maintenance_completed"].includes(record.type)) return "in";
@@ -65,8 +98,9 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const [search, setSearch] = React.useState("");
     const [category, setCategory] = React.useState("All Categories");
     const [status, setStatus] = React.useState("All Status");
-    const [activityDateFilter, setActivityDateFilter] = React.useState<"today" | "all" | "date">("today");
-    const [activityDate, setActivityDate] = React.useState("");
+    const [activityDateFilter, setActivityDateFilter] = React.useState<"today" | "all" | "range">("today");
+    const [activityStartDate, setActivityStartDate] = React.useState("");
+    const [activityEndDate, setActivityEndDate] = React.useState("");
     const [activityDirection, setActivityDirection] = React.useState<"all" | "in" | "out">("all");
     const [dialog, setDialog] = React.useState<{
         mode: "add" | "edit" | "receive" | "maintenance" | "review" | "correct";
@@ -79,6 +113,10 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const closeInventoryToast = React.useCallback(() => { setNotice(""); setExportError(""); }, []);
     const [importOpen, setImportOpen] = React.useState(false);
     const [conditionStatusFilter,setConditionStatusFilter] = React.useState("all");
+    // Defaults to all loaded records so unresolved issues from earlier days stay visible.
+    const [conditionDateFilter,setConditionDateFilter] = React.useState<"today" | "all" | "range">("all");
+    const [conditionStartDate,setConditionStartDate] = React.useState("");
+    const [conditionEndDate,setConditionEndDate] = React.useState("");
     const [conditionDetail,setConditionDetail] = React.useState<ManagerConditionIssue|RentalMaintenanceHistory|null>(null);
     const [categoriesOpen, setCategoriesOpen] = React.useState(false);
     const [exportOpen, setExportOpen] = React.useState(false);
@@ -91,6 +129,9 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const [datesError, setDatesError] = React.useState("");
 
     const categories = rental.categories;
+    // The equipment list search also narrows the activity and condition panels and their exports.
+    const searchQuery = search.trim().toLowerCase();
+    const searchLabel = searchQuery ? ` · Search: “${search.trim()}”` : "";
     // Filter the branch-scoped recent activity that is actually returned by the API.
     // The backend limits this feed, so "All loaded" never implies lifetime history.
     const filteredRentalActivity = React.useMemo(() => {
@@ -100,11 +141,14 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             if (Number.isNaN(occurredAt.getTime())) return false;
             const key = occurredAt.toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" });
             if (activityDateFilter === "today" && key !== todayKey) return false;
-            if (activityDateFilter === "date" && (!activityDate || key !== activityDate)) return false;
+            // Date Range includes both selected days; an incomplete or reversed range shows no records.
+            if (activityDateFilter === "range" && (!isValidInventoryDateRange(activityStartDate, activityEndDate) ||
+                key < activityStartDate || key > activityEndDate)) return false;
+            if (searchQuery && ![record.equipmentName, record.referenceNumber].join(" ").toLowerCase().includes(searchQuery)) return false;
             return activityDirection === "all" || rentalActivityDirection(record) === activityDirection;
         });
-    }, [rental.recentActivity, activityDateFilter, activityDate, activityDirection]);
-    const activityRange = `${activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? "Today" : activityDate || "Choose a date"} · ${activityDirection === "all" ? "All activity" : activityDirection === "in" ? "Stock In" : "Stock Out"}`;
+    }, [rental.recentActivity, activityDateFilter, activityStartDate, activityEndDate, activityDirection, searchQuery]);
+    const activityRange = `${activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? "Today" : inventoryDateRangeLabel(activityStartDate, activityEndDate)} · ${activityDirection === "all" ? "All activity" : activityDirection === "in" ? "Stock In" : "Stock Out"}${searchLabel}`;
     const downloadPanel = (title: string, headers: string[], rows: string[][], range = "All loaded records") => {
         void exportRentalPanelPdf(title, headers, rows, range)
             .then(() => { setExportError(""); setNotice(`${title} PDF downloaded. Check your browser downloads.`); })
@@ -118,7 +162,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             .some(value => value.toLowerCase().includes(query));
         const availability = appliedDates ? datesAvailability?.get(item.id) : item.bookableToday;
         return found && (category === "All Categories" || item.category === category) &&
-            (status === "All Status" || equipmentStatuses(item, true, availability).includes(status));
+            (status === "All Status" || equipmentStatusGroup(item, availability) === status);
     }), [rental.equipment, search, category, status, datesAvailability, appliedDates]);
 
     const managerConditionIssues=React.useMemo(()=>buildManagerConditionIssues(
@@ -127,7 +171,22 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     // One list for open issues and completed work, filtered by status.
     const conditionRows=React.useMemo(()=>buildManagerConditionRows(managerConditionIssues,rental.maintenanceHistory),
         [managerConditionIssues,rental.maintenanceHistory]);
-    const visibleConditionRows=conditionStatusFilter==="all"?conditionRows:conditionRows.filter(row=>row.status===conditionStatusFilter);
+    // Status and date filters combine. Dates use each row's existing recorded date
+    // (the date shown under its Status) in Philippine time; Date Range includes both days.
+    const conditionRangeValid=isValidInventoryDateRange(conditionStartDate,conditionEndDate);
+    const visibleConditionRows=React.useMemo(()=>{
+        const todayKey=new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"});
+        return conditionRows.filter(row=>{
+            if(conditionStatusFilter!=="all"&&row.status!==conditionStatusFilter)return false;
+            if(searchQuery&&![row.equipmentName,row.issue,row.status,row.recordedBy].join(" ").toLowerCase().includes(searchQuery))return false;
+            if(conditionDateFilter==="all")return true;
+            const key=managerConditionDateKey(row.date);
+            if(!key)return false;
+            if(conditionDateFilter==="today")return key===todayKey;
+            return conditionRangeValid&&key>=conditionStartDate&&key<=conditionEndDate;
+        });
+    },[conditionRows,conditionStatusFilter,conditionDateFilter,conditionStartDate,conditionEndDate,conditionRangeValid,searchQuery]);
+    const conditionRange=`${conditionDateFilter==="all"?"All loaded records":conditionDateFilter==="today"?"Today":inventoryDateRangeLabel(conditionStartDate,conditionEndDate)} · ${conditionStatusFilter==="all"?"All status":conditionStatusFilter}${searchLabel}`;
 
     const resetDates = () => {
         setAppliedDates(null); setDatesAvailability(null);
@@ -190,6 +249,20 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             const restocked = rental.equipment.find(item => item.id === mutation.equipmentId) || dialog?.item;
             setNoticeTitle("Stock restocked successfully");
             setNotice(`“${restocked?.name || "Rental equipment"}” received +${mutation.quantity.toLocaleString("en-PH")} units in inventory.`);
+            return;
+        }
+        if (mutation.action === "update_equipment") {
+            // Same confirmation as Consumable Inventory's Update Product.
+            setNoticeTitle("Product updated successfully");
+            setNotice(mutation.totalUnits !== undefined
+                ? `“${mutation.name}” was updated in inventory. Stock count corrected to ${mutation.totalUnits.toLocaleString("en-PH")} units.`
+                : `“${mutation.name}” was updated in inventory.`);
+            return;
+        }
+        if (mutation.action === "archive_equipment") {
+            // Same confirmation as Consumable Inventory's Delete Product.
+            setNoticeTitle("Product deleted successfully");
+            setNotice(`“${mutation.confirmName}” was removed from future operations while its historical records were preserved.`);
             return;
         }
         setNoticeTitle("Rental inventory updated");
@@ -262,23 +335,34 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                             </div>
                         </div>
                         <div className="ml-auto flex shrink-0 items-center gap-2">
+                            <RentalInventoryFilterSelect containerClassName="w-[105px]" value={conditionDateFilter} aria-label="Filter equipment condition by date"
+                                                         onChange={e => setConditionDateFilter(e.target.value as "today" | "all" | "range")}>
+                                <option value="today">Today</option><option value="all">All loaded</option><option value="range">Date range</option>
+                            </RentalInventoryFilterSelect>
                             <RentalInventoryFilterSelect containerClassName="w-[160px]" value={conditionStatusFilter} aria-label="Filter equipment condition by status"
                                                          onChange={e => setConditionStatusFilter(e.target.value)}>
                                 <option value="all">All Status</option>
                                 {MANAGER_CONDITION_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
                             </RentalInventoryFilterSelect>
                             <button type="button" title="Download displayed equipment condition report (PDF)" aria-label="Download equipment condition report"
+                                    disabled={conditionDateFilter === "range" && !conditionRangeValid}
                                     onClick={() => downloadPanel("Equipment Condition & Monitoring", ["Equipment", "Units", "Issue", "Status", "Recorded By"],
-                                        visibleConditionRows.map(row => [row.equipmentName, String(row.units), row.issue, row.status, row.recordedBy || "Not recorded"]))}
-                                    className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]"><Download size={16}/></button>
+                                        visibleConditionRows.map(row => [row.equipmentName, String(row.units), row.issue, row.status, row.recordedBy || "Not recorded"]), conditionRange)}
+                                    className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] hover:bg-[#F7F1FF] disabled:opacity-40"><Download size={16}/></button>
                         </div>
                     </div>
+                    {conditionDateFilter === "range" && <InventoryDateRangeFields label="Equipment condition" start={conditionStartDate} end={conditionEndDate}
+                                                                                  onStartChange={setConditionStartDate} onEndChange={setConditionEndDate}/>}
                     {rental.loading ? <PanelSkeleton/> : !rental.connected ?
                         <EmptyPanel label="Connect rental inventory to view equipment condition."/> :
                         !rental.monitoringDataReady ?
                             <EmptyPanel label="Update the rental inventory Lambda and hook to display maintenance monitoring history."/> :
                             visibleConditionRows.length===0 ?
-                                <EmptyPanel label={conditionStatusFilter==="all" ? "No equipment issues or repair activity recorded yet." : `No equipment with status “${conditionStatusFilter}”.`}/> :
+                                <EmptyPanel label={conditionDateFilter==="range"&&!conditionRangeValid
+                                    ? "Choose a valid Start Date and End Date to view equipment condition records."
+                                    : (conditionDateFilter!=="all"||searchQuery)
+                                        ? "No equipment condition records match the selected filters."
+                                        : conditionStatusFilter==="all" ? "No equipment issues or repair activity recorded yet." : `No equipment with status “${conditionStatusFilter}”.`}/> :
                                 <ManagerConditionTable rows={visibleConditionRows} onView={setConditionDetail}/>}
                 </section>
 
@@ -286,15 +370,13 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     <PanelHeading icon={<CalendarClock size={18}/>} title="Rental Stock Activity"
                                   subtitle="Equipment receipts, rentals, and maintenance in loaded recent records."
                                   actions={<div className="flex shrink-0 items-center gap-1.5">
-                                      <RentalInventoryFilterSelect containerClassName="w-[104px]" value={activityDateFilter} aria-label="Filter rental activity date" onChange={e => setActivityDateFilter(e.target.value as "today" | "all" | "date")}>
-                                          <option value="today">Today</option><option value="all">All loaded</option><option value="date">Choose date</option>
+                                      <RentalInventoryFilterSelect containerClassName="w-[104px]" value={activityDateFilter} aria-label="Filter rental activity date" onChange={e => setActivityDateFilter(e.target.value as "today" | "all" | "range")}>
+                                          <option value="today">Today</option><option value="all">All loaded</option><option value="range">Date range</option>
                                       </RentalInventoryFilterSelect>
-                                      {activityDateFilter === "date" && <input type="date" aria-label="Choose rental activity date" value={activityDate} onChange={e => setActivityDate(e.target.value)}
-                                                                               className="h-9 max-w-[135px] rounded-xl border border-[#E3D8EA] bg-white px-1 text-[11px] text-[#2B174C]"/>}
                                       <RentalInventoryFilterSelect containerClassName="w-[114px]" value={activityDirection} aria-label="Filter rental activity movement" onChange={e => setActivityDirection(e.target.value as "all" | "in" | "out")}>
                                           <option value="all">All Activity</option><option value="in">Stock In</option><option value="out">Stock Out</option>
                                       </RentalInventoryFilterSelect>
-                                      <button type="button" disabled={rental.loading || (activityDateFilter === "date" && !activityDate)}
+                                      <button type="button" disabled={rental.loading || (activityDateFilter === "range" && !isValidInventoryDateRange(activityStartDate, activityEndDate))}
                                               title="Download filtered rental activity PDF" aria-label="Download filtered rental stock activity"
                                               onClick={() => downloadPanel("Rental Stock Activity", ["Date", "Time", "Equipment", "Activity", "Qty", "Reference No."],
                                                   filteredRentalActivity.map(record => {
@@ -306,6 +388,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                                   }), activityRange)}
                                               className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] hover:bg-[#F7F1FF] disabled:opacity-40"><Download size={16}/></button>
                                   </div>}/>
+                    {activityDateFilter === "range" && <InventoryDateRangeFields label="Rental activity" start={activityStartDate} end={activityEndDate}
+                                                                                 onStartChange={setActivityStartDate} onEndChange={setActivityEndDate}/>}
                     {rental.loading ? <PanelSkeleton/> : !rental.connected ? <EmptyPanel label="Connect rental records to view activity."/> :
                         filteredRentalActivity.length === 0 ? <EmptyPanel label="No rental movements match the selected filters."/> : (
                             <div className="min-h-0 flex-1 overflow-auto">
@@ -346,7 +430,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                             <option>All Categories</option>{categories.map(name=><option key={name}>{name}</option>)}
                         </RentalInventoryFilterSelect>
                         <RentalInventoryFilterSelect containerClassName="w-[148px]" value={status} onChange={e=>setStatus(e.target.value)} aria-label="Filter rental equipment status">
-                            {["All Status","Fully Available","Available","Low Availability","Unavailable","Fully Booked","Needs Review","On Hold","Out on Rental","Missing Units","Stock Discrepancy"].map(value=><option key={value}>{value}</option>)}
+                            {/* Available / Unavailable group the existing availability labels (see equipmentStatusGroup). */}
+                            {["All Status","Available","Unavailable"].map(value=><option key={value}>{value}</option>)}
                         </RentalInventoryFilterSelect>
                         <button type="button" aria-expanded={dateFiltersOpen} onClick={()=>setDateFiltersOpen(v=>!v)}
                                 className="flex h-9 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
@@ -377,7 +462,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     <button type="button" onClick={()=>{setFromDate("");setToDate("");resetDates();}}
                             className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-4 font-semibold text-[#2B174C]">Clear</button>
                     {datesError && <p role="alert" className="w-full text-red-700">{datesError}</p>}
-                    <p className="w-full text-[#86778F]">Checking dates changes the Availability status and available quantity for that period. Fully Booked counts only confirmed reservations. Physical stock and equipment conditions are shown separately.</p>
+                    <p className="w-full text-[#86778F]">Checking dates changes the Status and available quantity for that period. Fully Booked counts only confirmed reservations. Physical stock and equipment conditions are shown separately.</p>
                 </div>}
                 <div className="grid gap-3 px-4 pb-4 xl:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
                     <label className="relative min-w-0">
@@ -397,11 +482,11 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     </button>
                 </div>
                 {appliedDates && <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-xs font-medium text-[#5330B6]">
-                    Booking availability for {appliedDates.from} to {appliedDates.to} · The "Available" column and Availability badges refer to these dates.
+                    Booking availability for {appliedDates.from} to {appliedDates.to} · The "Available" column and Status badges refer to these dates.
                 </p>}
-                <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain border-t border-[#E9E1EE]" style={{ maxHeight: 360 }} role="region" aria-label="Branch rental equipment list" tabIndex={0}>
-                    <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[10%]"/><col className="w-[18%]"/><col className="w-[10%]"/><col className="w-[8%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[9.5%]"/><col className="w-[20%]"/></colgroup>
+                <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain border-t border-[#E9E1EE]" style={{ maxHeight: 360 }} role="region" aria-label="Branch rental equipment list" tabIndex={0}>
+                    <table className="w-full min-w-0 table-auto text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                        <colgroup><col className="w-[13%]"/><col className="w-[16%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[9.5%]"/><col className="w-[20%]"/></colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                         <tr className="border-b border-[#E9E1EE]">
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment No.</th>
@@ -411,7 +496,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">{appliedDates ? "Available" : "Available Today"}</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Rented Out</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">On Hold</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Availability</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Status</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Action</th>
                         </tr>
                         </thead>
@@ -421,9 +506,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                 filtered.length === 0 ? <tr><td colSpan={9} className="px-5 py-12 text-center text-sm text-[#86778F]">No matching rental equipment.</td></tr> :
                                     filtered.map(item => (
                                         <tr key={item.id} className="h-12 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
-                                            <td className="break-all py-2 px-4 text-left font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">
-                                                <span className="block whitespace-nowrap">{item.equipmentNumber || "—"}</span>
-                                            </td>
+                                            {/* Same typography as the Rental Product column; the complete number stays on one line. */}
+                                            <td className="whitespace-nowrap py-2 px-4 text-left font-semibold text-[#2B174C]">{item.equipmentNumber || "—"}</td>
                                             <td className="px-2 py-2 font-semibold text-[#2B174C]">{item.name}</td>
                                             <td className="px-2 py-2 text-[#5F4E75]">{item.category}</td>
                                             <td className="px-2 py-2 text-center font-semibold">{item.totalUnits}</td>
@@ -467,6 +551,13 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                                                      close={() => setDialog(null)}
                                                                      onNavigate={(mode) => setDialog({mode, item:dialog.item})}
                                                                      categories={categories}
+                                                                     equipment={rental.equipment}
+                                                                     onDelete={dialog.mode === "edit" && dialog.item ? () => {
+                                                                         // Same as Consumable Edit Product: close the editor, then confirm deletion.
+                                                                         const target = dialog.item;
+                                                                         setDialog(null);
+                                                                         setRetireItem(target);
+                                                                     } : undefined}
                                                                      onSave={async (mutation) => { await onSaved(mutation); setDialog(null); }}/>
             }
             {retireItem&&<RetireEquipmentDialog item={retireItem} saving={rental.saving}
@@ -513,15 +604,14 @@ function equipmentConditionLabels(item: RentalEquipment): string[] {
     return labels;
 }
 
-function equipmentStatuses(item: RentalEquipment, checkingDates: boolean, onDates?: number): string[] {
-    if (!item.active) return ["Archived"];
-    return [
-        equipmentDisplayStatus(item, checkingDates, onDates),
-        ...equipmentConditionLabels(item),
-        ...(item.rentedOutUnits > 0 ? ["Out on Rental"] : []),
-        ...(item.missingUnits > 0 ? ["Missing Units"] : []),
-        ...(hasRentalStockDiscrepancy(item) ? ["Stock Discrepancy"] : []),
-    ];
+// The Branch Rental Equipment List Status filter offers only Available and Unavailable.
+// It groups the existing availability labels using the same calculation as the Status
+// column; no status is added, renamed or stored. Archived and Not Checked match neither.
+function equipmentStatusGroup(item: RentalEquipment, onDates?: number): "Available" | "Unavailable" | null {
+    const label = equipmentDisplayStatus(item, true, onDates);
+    if (label === "Fully Available" || label === "Available" || label === "Low Availability") return "Available";
+    if (label === "Unavailable" || label === "Fully Booked") return "Unavailable";
+    return null;
 }
 
 function IssueBadge({issue}:{issue:string}) {
@@ -584,6 +674,13 @@ function ManagerConditionDate({value}:{value:string|null|undefined}) {
     if(!value)return <>—</>;
     const parsed=/^\d{4}-\d{2}-\d{2}$/.test(value)?new Date(`${value}T12:00:00+08:00`):new Date(value);
     return <>{Number.isNaN(parsed.getTime())?'—':parsed.toLocaleDateString('en-PH',{timeZone:'Asia/Manila',month:'short',day:'numeric',year:'numeric'})}</>;
+}
+// Calendar day (Asia/Manila) of a condition row, read the same way ManagerConditionDate displays it.
+function managerConditionDateKey(value:string|null|undefined):string{
+    if(!value)return "";
+    if(/^\d{4}-\d{2}-\d{2}$/.test(value))return value;
+    const parsed=new Date(value);
+    return Number.isNaN(parsed.getTime())?"":parsed.toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"});
 }
 const MANAGER_CONDITION_STATUSES=["Under Repair","Pending Inspection","Unresolved","Repair Completed","Replaced","Recovered"];
 type ManagerConditionRow = {
@@ -662,41 +759,76 @@ function ManagerConditionDetails({entry,onClose}:{entry:ManagerConditionIssue|Re
         </section>
     </div>;
 }
+// Delete Rental Product mirrors the Consumable Delete Product dialog. The Rental
+// backend (archive_equipment) re-checks every restriction when confirmed, keeps
+// bookings and history, and records any remaining units as Stock Out. Rental
+// products are always removed from the active list, never hard-deleted.
+const RENTAL_PRODUCT_DELETE_REASON = "Deleted from the active rental inventory list.";
 function RetireEquipmentDialog({item,saving,close,onSave}:{
     item:RentalEquipment;saving:boolean;close:()=>void;onSave:(mutation:RentalMutation)=>Promise<void>;
 }) {
-    const [confirmName,setConfirmName]=React.useState("");
-    const [reason,setReason]=React.useState("");
     const [error,setError]=React.useState("");
     const [submitting,setSubmitting]=React.useState(false);
-    const blocked=item.rentedOutUnits>0||item.maintenanceUnits>0||item.missingUnits>0;
-    const submit=async(event:React.FormEvent)=>{
-        event.preventDefault();setError("");
-        if(blocked){setError("Resolve rented-out, held or missing equipment first.");return;}
-        if(confirmName.trim()!==item.name||reason.trim().length<10){setError("Type the exact equipment name and explain the deletion (10+ characters).");return;}
-        setSubmitting(true);
-        try{await onSave({action:"archive_equipment",equipmentId:item.id,confirmName,reason:reason.trim()});}
-        catch(cause){setError(cause instanceof Error?cause.message:"Unable to delete equipment from the active catalog.");}
-        finally{setSubmitting(false);}
+    const submittingRef=React.useRef(false);
+    // The same restrictions the backend enforces before deletion.
+    const blockers=[
+        ...(item.rentedOutUnits>0?[`${item.rentedOutUnits} unit(s) are out on rental. Complete the rental return first.`]:[]),
+        ...(item.maintenanceUnits>0?[`${item.maintenanceUnits} unit(s) are on hold for inspection, cleaning, or repair. Finish the equipment care first.`]:[]),
+        ...(item.missingUnits>0?[`${item.missingUnits} unit(s) are reported missing. Resolve the missing report first.`]:[]),
+    ];
+    const blocked=blockers.length>0;
+    const confirmDelete=async()=>{
+        if(blocked||saving||submittingRef.current)return;
+        submittingRef.current=true;setSubmitting(true);setError("");
+        // confirmName is the selected product's current name; the backend rejects the
+        // request if it no longer matches this equipment ID (wrong or renamed product).
+        try{await onSave({action:"archive_equipment",equipmentId:item.id,confirmName:item.name,reason:RENTAL_PRODUCT_DELETE_REASON});}
+        catch(cause){setError(cause instanceof Error?cause.message:"Unable to delete this rental product.");}
+        finally{submittingRef.current=false;setSubmitting(false);}
     };
-    return <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/50 p-4" role="presentation">
-        <form role="dialog" aria-modal="true" aria-label="Delete rental equipment" onSubmit={submit}
-              className="w-full max-w-lg space-y-4 rounded-2xl border border-[#E6DDF0] bg-white p-6 shadow-xl">
-            <h3 className="text-lg font-bold text-[#21132E]">Delete Rental Equipment</h3>
-            <p className="text-sm text-[#5A476A]">Delete <strong>{item.name}</strong> from the active rental equipment list.
-                To protect existing bookings and accounting records, the system keeps historical bookings and audit entries.</p>
-            {item.totalUnits>0&&<p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900">
-                {item.totalUnits} remaining units will be removed from available inventory with an audited stock adjustment.
-                Only proceed if the equipment has actually been taken out of service.</p>}
-            {blocked&&<p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">Cannot delete equipment with rentals, holds, or missing units.</p>}
-            <label className="block space-y-1 text-xs font-semibold text-[#5A476A]">Reason for deletion
-                <textarea required rows={3} maxLength={400} value={reason} onChange={e=>setReason(e.target.value)} className={rentalFieldClass} placeholder="Example: Equipment permanently retired after physical disposal"/></label>
-            <label className="block space-y-1 text-xs font-semibold text-[#5A476A]">Type equipment name to confirm: {item.name}
-                <input required value={confirmName} onChange={e=>setConfirmName(e.target.value)} className={rentalFieldClass}/></label>
-            {error&&<p role="alert" className="text-xs text-red-700">{error}</p>}
-            <div className="flex justify-end gap-2"><button type="button" onClick={close} disabled={submitting} className="rounded-lg border px-4 py-2 text-sm">Cancel</button>
-                <button disabled={saving||submitting||blocked} className="rounded-lg bg-[#B62C42] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{submitting?"Deleting...":"Confirm Delete"}</button></div>
-        </form>
+    return <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm" role="presentation">
+        <div role="dialog" aria-modal="true" aria-label="Delete Rental Product" className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-xl sm:p-6">
+            <div className="flex items-start justify-between gap-4">
+                <div>
+                    <h3 className="text-[18px] font-bold text-[#1A1220]">Delete Rental Product</h3>
+                    <p className="mt-1 text-sm text-[#6A5D6F]">StockNBook checks business usage before removing{" "}
+                        <span className="font-semibold text-[#1A1220]">{item.name}</span>.</p>
+                </div>
+                <button type="button" onClick={close} disabled={submitting} aria-label="Close rental product removal dialog"
+                        className="shrink-0 text-[#9B8AAA] hover:text-[#1A1220]">✕</button>
+            </div>
+            <div className="mt-4">
+                {blocked ? (
+                    <div className="rounded-xl border border-[#F1D39D] bg-[#FFF8E8] px-4 py-3">
+                        <p className="text-sm font-semibold text-[#9A6500]">This rental product cannot be removed yet.</p>
+                        <div className="mt-1 space-y-1 text-xs leading-5 text-[#785C27]">
+                            {blockers.map(blocker=><p key={blocker}>• {blocker}</p>)}
+                        </div>
+                        <p className="mt-2 text-xs leading-5 text-[#785C27]">Resolve the rented-out, on-hold, or missing units before removing the product.</p>
+                    </div>
+                ) : (
+                    <div className="rounded-xl border border-[#D8CBE9] bg-[#F8F3FF] px-4 py-3">
+                        <p className="text-sm font-semibold text-[#4E2C66]">This rental product will be deleted from the active inventory list.</p>
+                        <p className="mt-1 text-xs leading-5 text-[#6A5D6F]">It will disappear from future bookings, restocks, and active rental inventory selections,
+                            while historical bookings, reports, and stock activity remain preserved. Any remaining units will be recorded as Stock Out.</p>
+                        {item.totalUnits>0&&<p className="mt-2 text-xs font-semibold leading-5 text-[#69402A]">
+                            {item.totalUnits} remaining unit(s) will be deducted as Stock Out. Confirm only if they are being removed from service.</p>}
+                        <p className="mt-2 text-xs font-medium text-[#5A476A]">Products with active or upcoming booking reservations cannot be removed; this is checked again when you confirm.</p>
+                    </div>
+                )}
+                {error&&<div role="alert" className="mt-3 rounded-xl border border-[#F2C7CC] bg-[#FFF3F4] px-4 py-3">
+                    <p className="text-sm font-semibold text-[#B42335]">Product removal could not be completed.</p>
+                    <p className="mt-1 text-xs leading-5 text-[#7F5960]">{error}</p>
+                </div>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+                <button type="button" onClick={close} disabled={submitting}
+                        className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]">Cancel</button>
+                <button type="button" disabled={saving||submitting||blocked} onClick={()=>void confirmDelete()}
+                        className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-40">
+                    {submitting?"Deleting...":blocked?"Removal Blocked":"Delete Product"}</button>
+            </div>
+        </div>
     </div>;
 }
 
@@ -788,14 +920,16 @@ function validRentalDate(value:string) {
     const parsed=new Date(`${value}T00:00:00Z`);
     return Number.isFinite(parsed.getTime())&&parsed.toISOString().slice(0,10)===value;
 }
-function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
+function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,equipment=[],onDelete}:{
     mode:EditorMode;item:RentalEquipment|null;close:()=>void;
     onNavigate:(mode:EditorMode)=>void;onSave:(mutation:RentalMutation)=>Promise<void>;saving:boolean;
     categories:string[];
+    // Edit Rental Product only: duplicate-name check and the dialog's Delete Product button.
+    equipment?:RentalEquipment[];onDelete?:()=>void;
 }) {
     const [name,setName]=React.useState(item?.name||"");
     const [category,setCategory]=React.useState(item?.category||"");
-    const [quantity,setQuantity]=React.useState(mode==="add"?"0":mode==="correct"?String(item?.totalUnits??0):"");
+    const [quantity,setQuantity]=React.useState(mode==="add"?"0":(mode==="correct"||mode==="edit")?String(item?.totalUnits??0):"");
     const [physicalCountVerified,setPhysicalCountVerified]=React.useState(false);
     const [unitCost,setUnitCost]=React.useState("");
     const [rentalRate,setRentalRate]=React.useState(item?.rentalRatePerDay==null?"":String(item.rentalRatePerDay));
@@ -832,6 +966,12 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
             if(!validRentalMoney(rentalRate)){
                 setError("Rental Rate per day must be a nonnegative amount with up to two decimals.");return;
             }
+            // Same rule as Consumable Edit Product: names are unique among active products
+            // in the branch. The Rental backend still enforces this when saving.
+            if(mode==="edit"&&equipment.some(other=>other.active&&other.id!==item?.id&&
+                other.name.trim().toLowerCase()===name.trim().toLowerCase())){
+                setError(`Rental product “${name.trim()}” already exists in this branch.`);return;
+            }
             if(mode==="add"){
                 if(!Number.isSafeInteger(qty)||qty<0||qty>2147483647){
                     setError("Stock must be a nonnegative whole number.");return;
@@ -842,8 +982,19 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
                     alertLevel:0,rentalRatePerDay:Number(rentalRate), pricingMethod:"manual",
                     ...(purchase?{initialPurchase:purchase}:{})};
             }else{
+                // Stock (Units) is edited directly. A changed count is an audited physical stock
+                // correction (never a restock), saved only by this Update Product request.
+                if(quantity.trim()===""||!Number.isSafeInteger(qty)||qty<0||qty>2147483647){
+                    setError("Stock must be a nonnegative whole number.");return;
+                }
+                const stockChanged=qty!==item!.totalUnits;
+                if(stockChanged&&(reason.trim().length<10||!physicalCountVerified)){
+                    setError("Explain the stock count correction (10+ characters) and confirm the physical count.");return;
+                }
                 mutation={action:"update_equipment",equipmentId:item!.id,name:name.trim(),category:category.trim(),
-                    alertLevel:item!.alertLevel,rentalRatePerDay:Number(rentalRate), pricingMethod:"manual"};
+                    alertLevel:item!.alertLevel,rentalRatePerDay:Number(rentalRate), pricingMethod:"manual",
+                    ...(stockChanged?{totalUnits:qty,expectedTotalUnits:item!.totalUnits,
+                        reason:reason.trim(),physicalCountVerified:true as const}:{})};
             }
         }else if(mode==="correct"&&item){
             if(!Number.isSafeInteger(qty)||qty<0||qty>2147483647||qty===item.totalUnits){
@@ -877,6 +1028,93 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories}:{
         finally{submittingRef.current=false;setSubmitting(false);}
     };
     const btn="rounded-xl bg-[#2B174C] px-5 py-3 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-40";
+    // Edit Rental Product uses the Consumable Edit Product layout, buttons and
+    // confirmation. It shares this dialog's state, validation and save logic.
+    // Rental products have no variants; stock stays read-only (Restock / Correct Stock Count).
+    if(mode==="edit"&&item){
+        const editStockValid=quantity.trim()!==""&&Number.isSafeInteger(qty)&&qty>=0&&qty<=2147483647;
+        const editStockChanged=!(editStockValid&&qty===item.totalUnits);
+        return <>
+            <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm" role="presentation">
+                <div role="dialog" aria-modal="true" aria-label="Edit Rental Product"
+                     className="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-2xl bg-white p-5 shadow-xl sm:p-6">
+                    <div className="mb-4 flex items-center justify-between">
+                        <h2 className="text-[18px] font-bold text-[#1A1220]">Edit Rental Product</h2>
+                        <button type="button" onClick={close} disabled={submitting} aria-label="Close" className="text-[#9B8AAA] hover:text-[#1A1220]">✕</button>
+                    </div>
+                    <form onSubmit={prepare} className="space-y-3">
+                        <div className="rounded-xl bg-[#F7F1FF] px-3 py-2 text-xs font-medium text-[#4E2C66]">Product No.: {item.equipmentNumber || "—"} · {item.name}</div>
+                        <h3 className="pt-2 text-sm font-bold text-[#1A1220]">Product Information</h3>
+                        <div className="space-y-1"><label className={rentalLabelClass}>Rental Product Name</label>
+                            <input required maxLength={150} value={name} onChange={e=>setName(e.target.value)} className={rentalFieldClass} placeholder="Enter rental product name"/></div>
+                        <div className="space-y-1"><label className={rentalLabelClass}>Category</label>
+                            <select required value={category} onChange={e=>setCategory(e.target.value)} className={rentalFieldClass}>
+                                <option value="">Select category</option>{categories.map(value=><option key={value} value={value}>{value}</option>)}
+                            </select>
+                            {categories.length===0&&<p className="text-[11px] text-[#9B8AAA]">Create a rental category in Manage Categories first.</p>}
+                        </div>
+                        <h3 className="border-t border-[#E6DDF0] pt-5 text-sm font-bold text-[#1A1220]">Inventory &amp; Pricing</h3>
+                        <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1"><label className={rentalLabelClass}>Stock (Units)</label>
+                                <input type="number" min="0" max="2147483647" step="1" required value={quantity}
+                                       onChange={e=>setQuantity(e.target.value)} className={rentalFieldClass}/></div>
+                            <div className="space-y-1"><label className={rentalLabelClass}>Average Unit Cost</label>
+                                <input readOnly className={`${rentalFieldClass} bg-[#F7F1FF]`} value={peso(item.averageUnitCost)}/></div>
+                        </div>
+                        <p className="text-[11px] text-[#9B8AAA]">Change Stock only to correct a verified physical count. Record newly received equipment through Restock. Changes are saved only when you click Update Product.</p>
+                        {editStockChanged&&<section className="space-y-3 rounded-xl border border-[#E6DDF0] bg-[#FFFCF8] p-4" aria-label="Stock count correction">
+                            <h4 className="text-sm font-bold text-[#21132E]">Stock Count Correction</h4>
+                            <p className="text-[11px] text-[#806A8C]">Current total: <strong>{item.totalUnits}</strong> · New total: <strong>{editStockValid?qty:"—"}</strong>
+                                {editStockValid&&<> · Difference: <strong>{qty-item.totalUnits>0?"+":""}{qty-item.totalUnits}</strong></>}.
+                                {" "}Confirmed reservations, rented-out, held and missing units stay protected. This is recorded as an audited correction, not a restock.</p>
+                            <div className="space-y-1"><label className={rentalLabelClass}>Reason / Physical Count Evidence</label>
+                                <textarea required minLength={10} maxLength={500} rows={3} className={rentalFieldClass} value={reason} onChange={e=>setReason(e.target.value)}
+                                          placeholder="Explain the verified recount and why the previous quantity was incorrect"/></div>
+                            <label className="flex items-center gap-2 text-xs font-medium text-[#5A476A]">
+                                <input type="checkbox" checked={physicalCountVerified} onChange={e=>setPhysicalCountVerified(e.target.checked)}/>
+                                I physically verified these units; this is not a new delivery.
+                            </label>
+                        </section>}
+                        <div className="space-y-1"><label className={rentalLabelClass}>Final Daily Rental Rate (₱ for one item)</label>
+                            <input type="number" min="0" max="100000000" step="0.01" required value={rentalRate}
+                                   onChange={e=>setRentalRate(e.target.value)}
+                                   className={rentalFieldClass} placeholder="Enter daily rental rate"/>
+                            <p className="text-[11px] text-[#9B8AAA]">Charge for ONE item for ONE day. For example, 10 tables × this daily price × 2 days. Set your business's daily rental price; confirmed past bookings aren't repriced.</p>
+                        </div>
+                        {error&&<p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+                        <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-2">
+                            <button type="button" onClick={onDelete} disabled={!onDelete||submitting}
+                                    className="w-full rounded-xl border border-red-200 bg-red-50 py-3 text-sm font-semibold text-red-600 transition hover:bg-red-100 disabled:opacity-40">
+                                <span className="inline-flex items-center justify-center gap-2"><Trash2 size={15}/>DELETE PRODUCT</span>
+                            </button>
+                            <button type="submit" disabled={saving||submitting}
+                                    className="w-full rounded-xl bg-[#2B174C] py-3 text-sm font-semibold text-white transition hover:bg-[#1B0D31] disabled:opacity-40">UPDATE PRODUCT</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            {pending&&<div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm" role="presentation">
+                <div role="alertdialog" aria-modal="true" aria-label="Confirm rental product update"
+                     className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-5 shadow-xl sm:p-6">
+                    <div className="mb-3 flex items-start justify-between gap-4">
+                        <div>
+                            <h3 className="text-[19px] font-bold text-[#1A1220]">Update Product</h3>
+                            <p className="mt-1 text-sm text-[#6A5D6F]">Are you sure you want to save this product?</p>
+                            {pending.action==="update_equipment"&&pending.totalUnits!==undefined&&<p className="mt-2 text-xs font-semibold text-[#69402A]">
+                                Stock will be corrected from {item.totalUnits} to {pending.totalUnits} units as an audited stock correction, not a restock.</p>}
+                        </div>
+                        <button type="button" disabled={submitting} onClick={()=>setPending(null)} aria-label="Close confirmation" className="text-[#9B8AAA] hover:text-[#1A1220]">✕</button>
+                    </div>
+                    <div className="mt-4 flex justify-end gap-2">
+                        <button type="button" disabled={submitting} onClick={()=>setPending(null)}
+                                className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]">Cancel</button>
+                        <button type="button" disabled={saving||submitting} onClick={()=>void confirm()}
+                                className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-40">{submitting?"Saving...":"Update Product"}</button>
+                    </div>
+                </div>
+            </div>}
+        </>;
+    }
     return <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 px-3 py-4 backdrop-blur-sm" role="presentation">
         <div role="dialog" aria-modal="true" aria-label={title} className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-[#E6DDF0] px-5 py-4 sm:px-6">
@@ -1098,12 +1336,13 @@ function rentalReportRows(items:RentalEquipment[],filters:RentalExportFilters,av
     const headings = ["Product No.","Rental Product","Category","Avg. Unit Cost (PHP)",
         "Rental Rate / Day (PHP)","Total Units","Available Now",
         ...(filters.appliedDates?["Available in Selected Dates"]:[]),
-        "Rented Out","Maintenance","Missing","Availability","Condition / Alert"];
+        "Rented Out","Maintenance","Missing","Status","Condition / Alert"];
     const rows = items.map(item => [item.equipmentNumber||"—",item.name,item.category,
         item.averageUnitCost??"—",item.rentalRatePerDay??"—",item.totalUnits,availableNow(item),
         ...(filters.appliedDates?[availability?.get(item.id)??"—"]:[]),
         item.rentedOutUnits,item.maintenanceUnits,item.missingUnits,
-        equipmentDisplayStatus(item,Boolean(filters.appliedDates),availability?.get(item.id)),
+        // Same Status as the table column, so a Status-filtered export matches the screen.
+        equipmentDisplayStatus(item,true,filters.appliedDates?availability?.get(item.id):item.bookableToday),
         equipmentConditionLabels(item).join(", ")||"—"]);
     return {headings,rows};
 }

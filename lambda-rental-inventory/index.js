@@ -554,7 +554,7 @@ const V2_COMPLETION_REQUESTS = `(SELECT
 // Rental activity (inventory_movements of equipment stock rows).
 const V2_RENTAL_MOVEMENTS = `(SELECT
         mm.id, mm.store_id, mm.branch_id, rbi.equipment_id, mm.movement_type AS type,
-        ABS(mm.quantity_change) AS quantity,
+        ABS(mm.quantity_change) AS quantity, mm.quantity_bucket, mm.quantity_change,
         CASE WHEN mm.reason LIKE 'Ref %: %'
                  THEN SUBSTRING_INDEX(SUBSTRING(mm.reason, 5), ': ', 1)
              ELSE NULL END AS reference_number,
@@ -907,6 +907,49 @@ async function createEquipment(db,scope,raw,source, importedUnitCost = null) {
     }
     return { equipmentId,equipmentNumber,purchase,referenceNumber:equipmentNumber };
 }
+// Audited physical stock count correction (Sales Inventory equivalent): no fake
+// purchase, no staff delivery, no double count on a browser retry. Shared by
+// correct_equipment_stock and Edit Rental Product (update_equipment). It always runs
+// inside the caller's transaction, so a failed check rolls back the whole request.
+async function applyEquipmentStockCorrection(db,scope,current,body) {
+    const target=whole(body.totalUnits,"Verified total equipment units");
+    const reason=requiredText(body.reason,500,"Stock correction reason");
+    if(reason.length<10)fail(400,"Explain the stock count correction in at least 10 characters.");
+    if(body.physicalCountVerified!==true)
+        fail(400,"Confirm that the corrected quantity was physically counted. Use Restock for newly received units.");
+    const before=Number(current.total_units);
+    // Reject a correction prepared against an outdated count (stock changed while the
+    // Edit dialog was open). Optional, so the existing correct_equipment_stock payload still works.
+    if(body.expectedTotalUnits!==undefined&&body.expectedTotalUnits!==null&&
+        whole(body.expectedTotalUnits,"Expected total equipment units")!==before)
+        fail(409,"Stock changed since this product was opened. Close it, reopen the product, and verify the count again.");
+    if(target===before)fail(400,"The corrected total must differ from the current total.");
+    // Lock commitments under the equipment row (same order as Booking
+    // confirmation), then calculate peak overlapping reservations.
+    await db.execute(`SELECT bki.id FROM booking_items bki
+                      WHERE bki.store_id=? AND bki.equipment_id=? AND bki.item_type='rental'
+                        AND bki.item_status IN ('reserved','released') FOR UPDATE`,
+        [scope.storeId,current.id]);
+    const [reservations]=await db.execute(`SELECT a.quantity,a.status,
+                                                  DATE_FORMAT(a.start_date,'%Y-%m-%d') AS startDate,
+                                                  DATE_FORMAT(a.end_date,'%Y-%m-%d') AS endDate
+                                           FROM ${V2_RENTAL_ALLOCATIONS} a
+                                           WHERE a.store_id=? AND a.branch_id=? AND a.equipment_id=?
+                                             AND a.status IN ('reserved','checked_out')
+                                           ORDER BY a.start_date,a.id`,[scope.storeId,scope.branchId,current.id]);
+    const dates=reservations.flatMap(r=>[String(r.startDate),String(r.endDate)]).sort();
+    const peak=dates.length?computePeak(reservations,dates[0],dates[dates.length-1],todayPh()):0;
+    const activeHeld=Number(current.maintenance_units)+Number(current.missing_units);
+    const minimum=Math.max(Number(current.rented_out_units),peak)+activeHeld;
+    if(target<minimum)
+        fail(409,`Cannot reduce total below ${minimum}: confirmed bookings, rented-out, held and missing equipment must remain accounted for.`);
+    const difference=target-before;
+    await v2AdjustEquipmentStock(db,current.inventory_id,{total:difference});
+    await appendMovement(db,scope,current.id,'adjustment',Math.abs(difference),current.equipment_number,
+        `Physical stock correction ${difference>0?'+':''}${difference}: ${reason}`,difference>0?1:-1);
+    return {equipmentId:current.id,referenceNumber:current.equipment_number,
+        previousTotal:before,correctedTotal:target,quantityChange:difference};
+}
 async function mutate(db,scope,body) {
     switch(body.action) {
         case "create_equipment": return createEquipment(db,scope,body,"add");
@@ -978,50 +1021,24 @@ async function mutate(db,scope,body) {
                 [scope.storeId,scope.branchId,key(name),current.id]);
             if (sameName.length) fail(409, "A rental record with that name, number, or request key already exists.");
             const cat = await categoryId(db,scope,category);
+            // Edit Rental Product may include a verified stock count correction. It is applied
+            // in this same transaction, so the product update and the correction (movement and
+            // audit included) succeed or fail together.
+            const correction = body.totalUnits === undefined || body.totalUnits === null ? null
+                : await applyEquipmentStockCorrection(db,scope,current,body);
             await db.execute(`UPDATE equipment e
                                   JOIN branch_inventory ebi ON ebi.id=?
                                   SET e.equipment_name=?,e.category_id=?,e.rental_rate_per_day=?,
                                       ebi.reorder_level=?
                               WHERE e.id=? AND e.store_id=?`,
                 [current.inventory_id,name,cat,pricing.rate,alert,current.id,scope.storeId]);
-            return { equipmentId:current.id,referenceNumber:current.equipment_number };
+            return { equipmentId:current.id,referenceNumber:current.equipment_number,
+                ...(correction ? {previousTotal:correction.previousTotal,correctedTotal:correction.correctedTotal,
+                    quantityChange:correction.quantityChange} : {}) };
         }
         case "correct_equipment_stock": {
-            // Sales Inventory's audited stock correction equivalent: no fake
-            // purchase, no staff delivery, no double count on a browser retry.
             const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
-            const target=whole(body.totalUnits,"Verified total equipment units");
-            const reason=requiredText(body.reason,500,"Stock correction reason");
-            if(reason.length<10)fail(400,"Explain the stock count correction in at least 10 characters.");
-            if(body.physicalCountVerified!==true)
-                fail(400,"Confirm that the corrected quantity was physically counted. Use Restock for newly received units.");
-            const before=Number(current.total_units);
-            if(target===before)fail(400,"The corrected total must differ from the current total.");
-            // Lock commitments under the equipment row (same order as Booking
-            // confirmation), then calculate peak overlapping reservations.
-            await db.execute(`SELECT bki.id FROM booking_items bki
-                              WHERE bki.store_id=? AND bki.equipment_id=? AND bki.item_type='rental'
-                                AND bki.item_status IN ('reserved','released') FOR UPDATE`,
-                [scope.storeId,current.id]);
-            const [reservations]=await db.execute(`SELECT a.quantity,a.status,
-                                                          DATE_FORMAT(a.start_date,'%Y-%m-%d') AS startDate,
-                                                          DATE_FORMAT(a.end_date,'%Y-%m-%d') AS endDate
-                                                   FROM ${V2_RENTAL_ALLOCATIONS} a
-                                                   WHERE a.store_id=? AND a.branch_id=? AND a.equipment_id=?
-                                                     AND a.status IN ('reserved','checked_out')
-                                                   ORDER BY a.start_date,a.id`,[scope.storeId,scope.branchId,current.id]);
-            const dates=reservations.flatMap(r=>[String(r.startDate),String(r.endDate)]).sort();
-            const peak=dates.length?computePeak(reservations,dates[0],dates[dates.length-1],todayPh()):0;
-            const activeHeld=Number(current.maintenance_units)+Number(current.missing_units);
-            const minimum=Math.max(Number(current.rented_out_units),peak)+activeHeld;
-            if(target<minimum)
-                fail(409,`Cannot reduce total below ${minimum}: confirmed bookings, rented-out, held and missing equipment must remain accounted for.`);
-            const difference=target-before;
-            await v2AdjustEquipmentStock(db,current.inventory_id,{total:difference});
-            await appendMovement(db,scope,current.id,'adjustment',Math.abs(difference),current.equipment_number,
-                `Physical stock correction ${difference>0?'+':''}${difference}: ${reason}`,difference>0?1:-1);
-            return {equipmentId:current.id,referenceNumber:current.equipment_number,
-                previousTotal:before,correctedTotal:target,quantityChange:difference};
+            return applyEquipmentStockCorrection(db,scope,current,body);
         }
         case "receive_equipment": {
             const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
@@ -1246,7 +1263,7 @@ async function getInventory(db,scope) {
                                               DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
                                               COALESCE(e.equipment_number,'') AS referenceNumber,m.description AS description
                                        FROM ${V2_RENTAL_MOVEMENTS} m LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
-                                       WHERE m.store_id=? AND m.branch_id=? ORDER BY m.occurred_at DESC,m.id DESC LIMIT 100`,
+                                       WHERE m.store_id=? AND m.branch_id=? AND m.equipment_id IS NOT NULL ORDER BY m.occurred_at DESC,m.id DESC LIMIT 100`,
         [scope.storeId,scope.branchId]);
     // Manager monitoring history uses the stock movement ledger (read-only).
     const [maintenanceHistory]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,
@@ -1533,11 +1550,17 @@ async function staffRentalWorkspace(db, scope) {
                                                 OR (a.status='returned' AND (a.inspection_status IN ('pending','cleaning')
                                                     OR (a.inspection_status='damaged' AND COALESCE(m.quantity_remaining,0)>0))))
                                             ORDER BY a.end_date ASC,a.start_date ASC,a.id ASC LIMIT 300`,[scope.storeId,scope.branchId]);
+    // Staff stock activity: equipment rows only (consumable movements share this table) and only
+    // real stock changes (not events such as "prepared" or "inspected"). direction = Stock In when
+    // on-hand increases or units return from reserved/held; Stock Out for the opposite.
     const [activity] = await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,COALESCE(e.name,'Archived equipment') AS equipmentName,
                                                 m.type,m.quantity,DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
-                                                COALESCE(e.equipment_number,'') AS referenceNumber
+                                                COALESCE(e.equipment_number,'') AS referenceNumber,
+                                                CASE WHEN (m.quantity_bucket='on_hand')=(m.quantity_change>=0) THEN 'in' ELSE 'out' END AS direction
                                          FROM ${V2_RENTAL_MOVEMENTS} m LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
-                                         WHERE m.store_id=? AND m.branch_id=? ORDER BY m.occurred_at DESC,m.id DESC LIMIT 30`,[scope.storeId,scope.branchId]);
+                                         WHERE m.store_id=? AND m.branch_id=?
+                                           AND m.equipment_id IS NOT NULL AND m.quantity_bucket<>'event'
+                                         ORDER BY m.occurred_at DESC,m.id DESC LIMIT 30`,[scope.storeId,scope.branchId]);
     // Staff receiving tasks are not part of stocknbook_v2.
     const pendingReceipts=[];
     const [missingReports]=await db.execute(`SELECT r.id,r.equipment_id AS equipmentId,e.name AS equipmentName,
@@ -1980,6 +2003,14 @@ async function staffRentalMutation(db,scope,body) {
 
 async function staffRentalStockMutation(db,scope,body) {
     const action=String(body.action||"");
+    if(action==="staff_restock_equipment") {
+        // Staff restock: record units that physically arrived (any stock level). No unit cost
+        // is accepted from Staff, so the equipment keeps its current average cost and rental rate.
+        const current=await lockEquipment(db,scope,id(body.equipmentId,"Equipment ID"));
+        const purchase=await receivePurchase(db,scope,current,{quantity:body.quantity},"staff_restock");
+        return {equipmentId:current.id,quantity:whole(body.quantity,"Quantity",true),
+            referenceNumber:current.equipment_number,receivingNumber:purchase.receivingNumber};
+    }
     if(action==="staff_receive_rental_purchase") {
         // Staff receiving tasks are not part of stocknbook_v2.
         id(body.taskId,"Purchase receiving task");
@@ -2204,7 +2235,8 @@ const STAFF_WRITE_ACTIONS = new Set(["prepare_rental_allocation","release_rental
     "return_rental_allocation","inspect_rental_allocation","clean_rental_allocation",
     "release_rental_booking","return_rental_booking",
     "staff_receive_rental_purchase","staff_report_equipment_issue",
-    "staff_complete_routine_maintenance","staff_mark_repaired_ready","staff_mark_missing_recovered","staff_mark_missing_replaced"]);
+    "staff_complete_routine_maintenance","staff_mark_repaired_ready","staff_mark_missing_recovered","staff_mark_missing_replaced",
+    "staff_restock_equipment"]);
 const WRITE_ACTIONS = new Set(["create_equipment","import_equipment","update_equipment","correct_equipment_stock","receive_equipment",
     "approve_maintenance_repair","approve_repair_completion","resolve_missing_equipment","archive_equipment",
     "create_rental_category","rename_rental_category",
@@ -2231,7 +2263,9 @@ exports.handler = async (event) => {
         if(!body||typeof body!=="object"||Array.isArray(body))fail(400,"Invalid request body.");
         const action=String(body.action||"");
         if(!READ_ACTIONS.has(action)&&!WRITE_ACTIONS.has(action)&&!STAFF_READ_ACTIONS.has(action)&&!STAFF_WRITE_ACTIONS.has(action))fail(400,"Unknown rental inventory action.");
-        if(role==="staff"&&!STAFF_READ_ACTIONS.has(action)&&!STAFF_WRITE_ACTIONS.has(action))fail(403,"Staff cannot access rental catalog operations.");
+        // check_availability is read-only and returns only equipment IDs and available units for the
+        // caller's own branch; Staff use it for Date Availability in the Branch Rental Equipment List.
+        if(role==="staff"&&!STAFF_READ_ACTIONS.has(action)&&!STAFF_WRITE_ACTIONS.has(action)&&action!=="check_availability")fail(403,"Staff cannot access rental catalog operations.");
         if(role!=="staff"&&(STAFF_READ_ACTIONS.has(action)||STAFF_WRITE_ACTIONS.has(action)))
             fail(403,"Only Staff can perform daily rental operations.");
         // Owners retain financial oversight. Catalog changes and physical repair approvals belong to managers.
@@ -2310,7 +2344,8 @@ exports.handler = async (event) => {
         }
         const result=STAFF_WRITE_ACTIONS.has(action)
             ? (["staff_receive_rental_purchase","staff_report_equipment_issue",
-                "staff_complete_routine_maintenance","staff_mark_repaired_ready","staff_mark_missing_recovered","staff_mark_missing_replaced"].includes(action)
+                "staff_complete_routine_maintenance","staff_mark_repaired_ready","staff_mark_missing_recovered","staff_mark_missing_replaced",
+                "staff_restock_equipment"].includes(action)
                 ? await staffRentalStockMutation(db,scope,body)
                 : ['release_rental_booking','return_rental_booking'].includes(action)
                     ? await staffRentalBookingMutation(db,scope,body)

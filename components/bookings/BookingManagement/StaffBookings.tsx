@@ -10,6 +10,9 @@ import {
     Wallet,
 } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { StaffSalesOperationsQueue } from "@/components/inventory/StaffInventory";
+import StaffRentalInventory from "@/components/inventory/StaffRentalInventory";
 import {
     Booking,
     BookingAccess,
@@ -89,11 +92,19 @@ export default function StaffBookings() {
     const [cancelLoading, setCancelLoading] = useState(false);
     const [cancelSubmitting, setCancelSubmitting] = useState(false);
     const [cancelError, setCancelError] = useState("");
+    // The Sales and Rental Operations Queues (moved here from Staff Inventory) keep their
+    // Inventory permission: Staff without Inventory access do not see them, and the
+    // Booking and Rental Lambdas still authorize every queue action.
+    const { user: currentUser } = useCurrentUser();
+    const inventoryPermission = currentUser?.permissions?.inventory_access ?? currentUser?.permissions?.inventory;
+    const canSeeOperationsQueues = ["true", "full", "view", "view_only", "viewOnly"].includes(String(inventoryPermission));
+    const [queueRefreshKey, setQueueRefreshKey] = useState(0);
 
     const canView = access === "view" || access === "standard" || access === "full";
     // A Staff "full" legacy flag does not grant Manager price/cancellation controls.
     const canManage = false;
-    // All Staff Booking pages are read-only. Operational actions are in Staff Inventory.
+    // Booking records stay read-only for Staff. Physical preparation, release and return
+    // actions are in the Sales/Rental Operations Queues on this page (Inventory permission).
     const canConfirmStandard = false;
     const canOperateBookings = false;
     const [approvalModal, setApprovalModal] = useState<Booking | null>(null);
@@ -743,7 +754,11 @@ export default function StaffBookings() {
                         </span>
 
                         <button
-                            onClick={() => void loadBookings()}
+                            onClick={() => {
+                                void loadBookings();
+                                // Remount the relocated queues so they reload as well.
+                                setQueueRefreshKey((key) => key + 1);
+                            }}
                             disabled={loading}
                             aria-label="Refresh bookings"
                             title="Refresh bookings"
@@ -848,6 +863,14 @@ export default function StaffBookings() {
                                 )}
                             </div>
                         </div>
+
+                        {canSeeOperationsQueues && (
+                            <div className="mb-3 grid min-w-0 items-stretch gap-3 xl:grid-cols-2" aria-label="Booking operations queues">
+                                <StaffSalesOperationsQueue key={`sales-queue-${queueRefreshKey}`} search={search} />
+                                <StaffRentalInventory key={`rental-queue-${queueRefreshKey}`} branchName={branchName}
+                                                      section="queue" queueSearch={search} />
+                            </div>
+                        )}
 
                         <div className="mb-3 flex flex-wrap gap-2.5">
                             {TABS.map((tab) => (

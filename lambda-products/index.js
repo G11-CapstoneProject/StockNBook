@@ -2018,7 +2018,7 @@ async function getProductRemovalImpact(
                 COALESCE(SUM(bi.reserved_quantity),0) AS reserved,
                 COALESCE(SUM(bi.unavailable_quantity),0) AS unavailable
          FROM branch_inventory bi
-         JOIN product_variants v ON v.id=bi.variant_id
+                  JOIN product_variants v ON v.id=bi.variant_id
          WHERE v.product_id=? AND v.deleted_at IS NULL AND bi.store_id=? AND bi.branch_id=?`,
         [productId, storeId, activeBranchId]
     );
@@ -2245,7 +2245,7 @@ async function recordProductDeletionStockOut(connection, storeId, branchId, prod
         `SELECT bi.id, bi.on_hand_quantity, bi.reserved_quantity, bi.unavailable_quantity,
                 v.variant_number, v.is_default
          FROM branch_inventory bi
-         JOIN product_variants v ON v.id=bi.variant_id
+                  JOIN product_variants v ON v.id=bi.variant_id
          WHERE v.product_id=? AND v.deleted_at IS NULL AND bi.store_id=? AND bi.branch_id=?
          ORDER BY bi.id FOR UPDATE`,
         [productId, storeId, branchId]
@@ -2932,10 +2932,11 @@ exports.handler = async (event) => {
         if (tokenRole === "staff" && !new Set([
             "get_products", "get_staff_inventory_workspace", "get_staff_inventory_activity",
             "complete_staff_stock_receipt", "report_staff_stock_shortage", "report_staff_stock_condition",
+            "receive_stock",
         ]).has(action)) {
             return unauthorized(headers, "This product operation is not permitted for staff.");
         }
-        if (tokenRole === "staff" && ["complete_staff_stock_receipt", "report_staff_stock_shortage", "report_staff_stock_condition"].includes(action)) {
+        if (tokenRole === "staff" && ["complete_staff_stock_receipt", "report_staff_stock_shortage", "report_staff_stock_condition", "receive_stock"].includes(action)) {
             const [rows] = await connection.execute(
                 `SELECT permissions FROM users WHERE id=? AND store_id=? AND branch_id=? AND role='staff' LIMIT 1`,
                 [Number(decoded.staff_id),storeId,activeBranchId]);
@@ -3078,13 +3079,14 @@ exports.handler = async (event) => {
                     `SELECT m.id, m.created_at AS at, p.name AS productName,
                             pv.variant_values AS variantValues, m.movement_type AS kind,
                             m.quantity_delta AS quantity, m.reference_type AS referenceType,
-                            m.reference_id AS reference, m.actor_name AS actorName
+                            CASE WHEN m.movement_type IN ('OPENING_STOCK','PRODUCT_DELETION') OR m.reference_id IS NULL OR m.reference_id=''
+                                 THEN p.product_number ELSE m.reference_id END AS reference, m.actor_name AS actorName
                      FROM ${V2_INVENTORY_MOVEMENTS} m
-                         JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
-                         JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
-                         LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id=bi.variant_id AND pv.product_id=p.id
-                     WHERE m.store_id=? AND m.branch_id=? AND ${operationalMovementsOnly}
-                     ORDER BY m.created_at DESC, m.id DESC LIMIT 8`, [storeId,activeBranchId]);
+                    JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
+                    JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
+                    LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id=bi.variant_id AND pv.product_id=p.id
+                    WHERE m.store_id=? AND m.branch_id=? AND ${operationalMovementsOnly}
+                    ORDER BY m.created_at DESC, m.id DESC LIMIT 8`, [storeId,activeBranchId]);
                 // A proper daily count, independent of list limits and previous days.
                 // Count actual movement rows, not unique POS orders or stock units.
                 const [todayRows] = await connection.execute(
@@ -3292,12 +3294,13 @@ exports.handler = async (event) => {
            applying the manager's chosen selling price within the same transaction.
            Variant definitions are untouched. */
         if (action === "receive_stock") {
-            // This action changes costs and can reprice stock.
-            // Staff may only complete a Manager-authorized physical receipt through
-            // complete_staff_stock_receipt; never permit the general receiving path.
-            if (!["owner", "manager"].includes(tokenRole)) {
-                return unauthorized(headers, "Only a Manager or Owner may receive stock and change pricing. Staff must use an authorized receiving task.");
+            // Owners/Managers may also record a unit cost and repricing. Staff (Full Inventory
+            // access and own branch, both checked above) may restock QUANTITY ONLY: cost and
+            // pricing fields from Staff are ignored, so average cost and selling price stay unchanged.
+            if (!["owner", "manager", "staff"].includes(tokenRole)) {
+                return unauthorized(headers, "Only an Owner, Manager, or authorized Staff may receive stock.");
             }
+            const staffRestock = tokenRole === "staff";
             const productId = Number(body.product_id ?? body.productId);
             if (!activeBranchId || !Number.isInteger(productId) || productId <= 0) {
                 return badRequest(headers, "A valid product and branch are required.");
@@ -3328,7 +3331,7 @@ exports.handler = async (event) => {
                 const quantity = Number(raw.quantity);
                 // Restock only adds quantity. A unit cost is optional; without one the
                 // line keeps the product's current average unit cost.
-                const unitCostProvided = raw.unitPurchaseCost !== undefined && raw.unitPurchaseCost !== null &&
+                const unitCostProvided = !staffRestock && raw.unitPurchaseCost !== undefined && raw.unitPurchaseCost !== null &&
                     String(raw.unitPurchaseCost).trim() !== "";
                 const unitPurchaseCost = unitCostProvided ? Number(raw.unitPurchaseCost) : null;
                 let expirationDate;
@@ -3355,7 +3358,7 @@ exports.handler = async (event) => {
                 }
                 // Pricing choice is optional for older clients; default to keeping
                 // the existing retail price. The server always calculates average cost.
-                const pricingDecision = String(raw.pricingDecision || "keep").trim().toLowerCase();
+                const pricingDecision = staffRestock ? "keep" : String(raw.pricingDecision || "keep").trim().toLowerCase();
                 if (!["keep", "suggested", "manual"].includes(pricingDecision)) {
                     return badRequest(headers, "Selling price decision must be Keep, Suggested, or Manual.");
                 }
@@ -3530,7 +3533,7 @@ exports.handler = async (event) => {
                     costPrice:line.averageCost,salesPrice:line.selectedPrice,
                     expirationDate:line.expirationDate,
                     reference:`${receiptReference}-${lineIndex + 1}`,
-                    actorId:Number(decoded?.manager_id||decoded?.user_id||0)||null,
+                    actorId:Number(decoded?.manager_id||decoded?.staff_id||decoded?.user_id||0)||null,
                     actorRole:tokenRole,actorName:actingEmployee.name,
                     allowVerifiedReceiptWithCatalogDrift:true,
                 }));
@@ -3657,10 +3660,10 @@ exports.handler = async (event) => {
                         pv.variant_values AS variantValues, m.quantity_delta AS quantity,
                         COALESCE(NULLIF(pv.variant_number,''), p.product_number) AS productNumber
                  FROM ${V2_INVENTORY_MOVEMENTS} m
-                      JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id
-                       AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
-                      JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
-                      LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id=bi.variant_id AND pv.product_id=p.id
+                          JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id
+                     AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
+                          JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
+                          LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id=bi.variant_id AND pv.product_id=p.id
                  WHERE m.store_id=? AND m.branch_id=?
                    AND m.reference_type='PRODUCT_DELETION' AND m.quantity_delta<0
                    AND m.created_at >= FROM_UNIXTIME(?) AND m.created_at < FROM_UNIXTIME(?)

@@ -20,10 +20,10 @@ import {
     UserPlus,
     UsersRound,
     UserX,
-    Download, ArrowUpRight,
+    Download,
     X,
 } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type AccessMode = "none" | "view" | "full";
@@ -147,24 +147,6 @@ export default function ManagerStaffManagementPage() {
     const [pageLoading, setPageLoading] = useState(true);
 
     const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
-    const [activeTeamDetail, setActiveTeamDetail] = useState<"invites" | null>(null);
-    const teamDetailTriggerRef = useRef<HTMLButtonElement | null>(null);
-    const teamDetailCloseRef = useRef<HTMLButtonElement | null>(null);
-    const openTeamDetail = (detail: "invites", trigger: HTMLButtonElement) => {
-        teamDetailTriggerRef.current = trigger;
-        setActiveTeamDetail(detail);
-    };
-    const closeTeamDetail = () => {
-        setActiveTeamDetail(null);
-        window.requestAnimationFrame(() => teamDetailTriggerRef.current?.focus());
-    };
-    useEffect(() => {
-        if (!activeTeamDetail) return;
-        teamDetailCloseRef.current?.focus();
-        const originalOverflow = document.body.style.overflow;
-        document.body.style.overflow = "hidden";
-        return () => { document.body.style.overflow = originalOverflow; };
-    }, [activeTeamDetail]);
 
     const [staffList, setStaffList] = useState<StaffMember[]>([]);
     const [staffSearch, setStaffSearch] = useState("");
@@ -307,7 +289,7 @@ export default function ManagerStaffManagementPage() {
             .then(module => module.exportTableAsPdf({
                 title: "Pending Staff Invitations",
                 headers: ["Email", "Invited", "Expires", "Access", "Status"],
-                rows: filteredPendingInvites.map(invite => [invite.email, invite.invitedAt,
+                rows: pendingInvites.map(invite => [invite.email, invite.invitedAt,
                     invite.expiresAt, formatPermissions(invite.permissions), "Pending"]),
             }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
                 branch: branchName, dateRange: "Pending invitations" }, "manager_staff_invites"))
@@ -379,15 +361,6 @@ export default function ManagerStaffManagementPage() {
         });
     }, [branchName, staffList, staffSearch, statusFilter]);
 
-    const filteredPendingInvites = useMemo(() => {
-        const query = staffSearch.trim().toLowerCase();
-        if (statusFilter !== "all" && statusFilter !== "pending") return [];
-
-        return pendingInvites.filter((invite) => {
-            const searchText = `${invite.email} ${branchName} pending ${formatRoleSummary(invite.permissions)}`.toLowerCase();
-            return query ? searchText.includes(query) : true;
-        });
-    }, [branchName, pendingInvites, staffSearch, statusFilter]);
 
     const updateFeatureAccess = (
         feature: "pos" | "bookings" | "inventory" | "packages" | "analytics" | "forecasting",
@@ -709,7 +682,7 @@ export default function ManagerStaffManagementPage() {
                     </header>
 
                     <section className="space-y-4 px-6 py-5">
-                        <div className="grid gap-4 md:grid-cols-3">
+                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                             <SummaryCard
                                 icon={<UsersRound size={25} strokeWidth={2} />}
                                 title="Total Staff"
@@ -730,6 +703,13 @@ export default function ManagerStaffManagementPage() {
                                 value={staffSummary.inactive}
                                 subtitle="Currently inactive"
                                 tone="red"
+                            />
+                            <SummaryCard
+                                icon={<Clock3 size={25} strokeWidth={2} />}
+                                title="Pending Invitations"
+                                value={staffSummary.pending}
+                                subtitle="Awaiting account activation"
+                                tone="amber"
                             />
                         </div>
 
@@ -798,69 +778,39 @@ export default function ManagerStaffManagementPage() {
                         )}
 
                         <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-4">
+                            <div className="flex flex-col gap-4 px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
                                 <div className="flex min-w-0 items-center gap-3">
-                                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]">
-                                    <UsersRound size={21} strokeWidth={2} />
-                                </span>
-
+                                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]">
+                                        <UsersRound size={21} strokeWidth={2} />
+                                    </span>
                                     <div className="min-w-0">
-                                        <h2 className="text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">
-                                            Staff List
-                                        </h2>
-                                        <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                            Staff members assigned to {branchName}.
-                                        </p>
+                                        <h2 className="text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">Staff List</h2>
+                                        <p className="mt-0.5 text-xs text-[#7A6A84]">Staff members assigned to {branchName}.</p>
                                     </div>
                                 </div>
-                                <button type="button" onClick={exportStaffListAsPdf} title="Download staff list as PDF" aria-label="Download staff list as PDF" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]">
-                                    <Download size={17}/>
-                                </button>
-                            </div>
-
-                            <div className="border-b border-[#E6DDF0] px-4 py-3 sm:px-5">
-                                <div className="flex flex-col gap-3 lg:flex-row">
-                                    <div className="relative min-w-0 flex-1">
-                                        <Search
-                                            size={18}
-                                            className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"
-                                        />
-
+                                <div className="flex w-full min-w-0 flex-col gap-2.5 sm:flex-row sm:items-center xl:w-auto xl:flex-1 xl:justify-end">
+                                    <div className="relative min-w-0 flex-1 xl:max-w-[520px]">
+                                        <Search size={18} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
                                         <input
                                             value={staffSearch}
-                                            onChange={(event) =>
-                                                setStaffSearch(event.target.value)
-                                            }
+                                            onChange={(event) => setStaffSearch(event.target.value)}
                                             placeholder="Search staff name, email, branch, or role..."
+                                            aria-label="Search staff"
                                             className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                         />
-
                                         {staffSearch && (
-                                            <button
-                                                type="button"
-                                                onClick={() => setStaffSearch("")}
-                                                aria-label="Clear staff search"
-                                                className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]"
-                                            >
+                                            <button type="button" onClick={() => setStaffSearch("")} aria-label="Clear staff search"
+                                                    className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] transition hover:bg-[#F1E9FF] hover:text-[#2B174C]">
                                                 <X size={15} />
                                             </button>
                                         )}
                                     </div>
-
-                                    <div className="flex flex-wrap items-center gap-2.5">
+                                    <div className="flex shrink-0 flex-wrap items-center gap-2.5">
                                         <div className="relative">
-                                            <Filter
-                                                size={16}
-                                                className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]"
-                                            />
-
+                                            <Filter size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]" />
                                             <select
                                                 value={statusFilter}
-                                                onChange={(event) =>
-                                                    setStatusFilter(
-                                                        event.target.value as StaffStatusFilter
-                                                    )
-                                                }
+                                                onChange={(event) => setStatusFilter(event.target.value as StaffStatusFilter)}
                                                 aria-label="Filter staff by status"
                                                 className="h-[48px] min-w-[150px] appearance-none rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-sm font-semibold text-[#2B174C] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                             >
@@ -869,43 +819,25 @@ export default function ManagerStaffManagementPage() {
                                                 <option value="inactive">Inactive</option>
                                                 <option value="pending">Pending</option>
                                             </select>
-
-                                            <ChevronDown
-                                                size={15}
-                                                className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]"
-                                            />
+                                            <ChevronDown size={15} className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-[#806A8C]" />
                                         </div>
-
-                                        <button
-                                            type="button"
-                                            onClick={() => setShowAddDialog(true)}
-                                            title="Add a staff member"
-                                            className="inline-flex h-[48px] min-w-[158px] items-center justify-center gap-2 rounded-xl px-5 text-sm font-semibold shadow-sm transition hover:brightness-110 active:scale-[0.99]"
-                                            style={{
-                                                backgroundColor: "#2B174C",
-                                                border: "1px solid #2B174C",
-                                                color: "#FFFFFF",
-                                                boxShadow:
-                                                    "0 4px 10px rgba(43, 23, 76, 0.22)",
-                                            }}
-                                        >
-                                            <Plus
-                                                size={18}
-                                                strokeWidth={2.2}
-                                                color="#FFFFFF"
-                                            />
-                                            <span style={{ color: "#FFFFFF" }}>
-                                                Add Staff
-                                            </span>
+                                        <button type="button" onClick={exportStaffListAsPdf} title="Download staff list as PDF" aria-label="Download staff list as PDF"
+                                                className="inline-flex h-[48px] w-[48px] shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#6D35D4] shadow-sm transition hover:bg-[#F7F1FF]">
+                                            <Download size={17} />
+                                        </button>
+                                        <button type="button" onClick={() => setShowAddDialog(true)} title="Add a staff member"
+                                                className="inline-flex h-[48px] min-w-[140px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]">
+                                            <Plus size={18} strokeWidth={2.2} />
+                                            Add Staff
                                         </button>
                                     </div>
                                 </div>
                             </div>
 
                             {pageLoading && staffList.length === 0 ? (
-                                <div className="min-h-[180px] xl:min-h-[210px] p-4"><ModuleSkeleton variant="team" /></div>
+                                <div className="p-4"><ModuleSkeleton variant="team" /></div>
                             ) : filteredStaff.length === 0 ? (
-                                <div className="flex min-h-[180px] xl:min-h-[210px] flex-col items-center justify-center px-4 text-center">
+                                <div className="flex min-h-[136px] flex-col items-center justify-center px-4 text-center">
                                 <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#F1EBFF] text-[#6D35D4]">
                                     <UsersRound size={22} />
                                 </span>
@@ -1025,141 +957,88 @@ export default function ManagerStaffManagementPage() {
                             )}
                         </section>
 
-                        {/* Compact navigation preserves the detailed records in their original tables. */}
-                        <section aria-label="Team records" className="grid grid-cols-1 gap-3">
-                            <button type="button" onClick={(event) => openTeamDetail("invites", event.currentTarget)}
-                                    className="group flex min-w-0 flex-col gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 text-left shadow-sm transition hover:border-[#C9AFE9] hover:bg-[#FFFCF7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6D35D4]">
-                                <span className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20}/></span><span className="min-w-0"><span className="block text-[16px] font-bold text-[#1A1220]">Pending Invites</span><span className="block text-xs text-[#7A6A84]">Staff awaiting account activation</span></span></span>
-                                <span className="text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
-                                <span className="mt-auto inline-flex items-center gap-1 text-xs font-semibold text-[#6D35D4] group-hover:underline">View Invites <ArrowUpRight size={15}/></span>
-                            </button>
-                        </section>
-
-                        {activeTeamDetail && (
-                            <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-3 backdrop-blur-[2px] sm:p-5"
-                                 onMouseDown={(event) => { if (event.target === event.currentTarget) closeTeamDetail(); }}
-                                 onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeTeamDetail(); } }}>
-                                <div role="dialog" aria-modal="true" aria-labelledby="staff-team-detail-title"
-                                     className="flex max-h-[90vh] w-full max-w-[1120px] flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-[#FFFDF8] shadow-2xl">
-                                    <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#E6DDF0] bg-white px-5 py-4">
-                                        <h2 id="staff-team-detail-title" className="text-[18px] font-bold text-[#1A1220]">Pending Invites</h2>
-                                        <button ref={teamDetailCloseRef} type="button" aria-label="Close details" onClick={closeTeamDetail}
-                                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] hover:bg-[#F7F1FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#6D35D4]"><X size={19}/></button>
-                                    </div>
-                                    <div className="min-h-0 overflow-y-auto p-3 sm:p-5">
-                                        {activeTeamDetail === "invites" && (
-                                            <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                                                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] px-5 py-3">
-                                                    <div className="flex min-w-0 items-center gap-3">
-                                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]">
-                                    <Clock3 size={20} />
-                                </span>
-                                                        <div className="min-w-0">
-                                                            <h2 className="text-[18px] font-bold text-[#1A1220]">
-                                                                Pending Invites
-                                                            </h2>
-                                                            <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                                Invitations waiting to be accepted.
-                                                            </p>
-                                                        </div>
-                                                    </div>
-
-                                                    <div className="flex items-center gap-2">
-                                                        <span className="inline-flex items-center rounded-full bg-[#FFF7E8] px-3 py-1.5 text-xs font-semibold text-[#A56607]">
-                                                            {filteredPendingInvites.length} pending
-                                                        </span>
-                                                        <button type="button" onClick={exportPendingStaffInvitesAsPdf} title="Download pending staff invites as PDF" aria-label="Download pending staff invites as PDF" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]"><Download size={17}/></button>
-                                                    </div>
-                                                </div>
-
-                                                <div className="p-4">
-                                                    {pageLoading ? (
-                                                        <EmptyState text="Loading invites..." />
-                                                    ) : filteredPendingInvites.length === 0 ? (
-                                                        <EmptyState
-                                                            text={
-                                                                staffSearch || statusFilter === "pending"
-                                                                    ? "No pending invite matched your filter."
-                                                                    : "No pending invites yet."
-                                                            }
-                                                        />
-                                                    ) : (
-                                                        <div className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain">
-                                                            <div
-                                                                className="overflow-hidden rounded-[14px]"
-                                                                style={{
-                                                                    boxShadow:
-                                                                        "inset 0 0 0 1px #EAE2F0",
-                                                                }}
-                                                            >
-                                                                <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
-                                                                    <thead className="bg-[#FFFCF8]">
-                                                                    <tr className="border-b border-[#E6DDF0]">
-                                                                        <TableHeader align="center">Email</TableHeader>
-                                                                        <TableHeader>Invitation</TableHeader>
-                                                                        <TableHeader>Access</TableHeader>
-                                                                        <TableHeader align="center">
-                                                                            Actions
-                                                                        </TableHeader>
-                                                                    </tr>
-                                                                    </thead>
-                                                                    <tbody>
-                                                                    {filteredPendingInvites.map(
-                                                                        (invite) => (
-                                                                            <tr
-                                                                                key={invite.id}
-                                                                                className="border-b border-[#EEE7F2] bg-white last:border-b-0"
-                                                                            >
-                                                                                <td className="px-2.5 py-2.5 text-sm font-semibold text-[#1A1220]">
-                                                                                    {invite.email}
-                                                                                </td>
-                                                                                <td className="px-2.5 py-2.5 text-xs text-[#7A6A84]">
-                                                                                    Invited {invite.invitedAt}
-                                                                                    <br />
-                                                                                    Expires {invite.expiresAt}
-                                                                                </td>
-                                                                                <td className="max-w-[420px] px-2.5 py-2.5 text-xs text-[#806A8C]">
-                                                                                    <p className="truncate">
-                                                                                        {formatPermissions(
-                                                                                            invite.permissions
-                                                                                        )}
-                                                                                    </p>
-                                                                                </td>
-                                                                                <td className="px-2.5 py-2.5 text-center">
-                                                                                    <div className="inline-flex items-center gap-2">
-                                                                                        <StatusBadge
-                                                                                            label="Pending"
-                                                                                            tone="gold"
-                                                                                        />
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            onClick={() =>
-                                                                                                handleResendInvite(
-                                                                                                    invite.email
-                                                                                                )
-                                                                                            }
-                                                                                            className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg bg-[#F1EBFF] px-3 text-xs font-semibold text-[#6D35D4] transition hover:bg-[#E6DCFF]"
-                                                                                        >
-                                                                                            <Send size={14} />
-                                                                                            Resend
-                                                                                        </button>
-                                                                                    </div>
-                                                                                </td>
-                                                                            </tr>
-                                                                        )
-                                                                    )}
-                                                                    </tbody>
-                                                                </table>
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </section>
-                                        )}
+                        <section aria-label="Pending staff invitations" className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-3 p-4">
+                                <div className="flex min-w-0 items-center gap-3">
+                                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#FFF6DF] text-[#A56607]"><Clock3 size={20} /></span>
+                                    <div className="min-w-0">
+                                        <h2 className="text-[16px] font-bold text-[#1A1220]">Pending Invites</h2>
+                                        <p className="text-xs text-[#7A6A84]">Staff awaiting account activation</p>
                                     </div>
                                 </div>
+                                <div className="flex items-center gap-2.5">
+                                    <span className="text-xs font-semibold text-[#A56607]">{pendingInvites.length} pending</span>
+                                    {pendingInvites.length > 0 && (
+                                        <button type="button" onClick={exportPendingStaffInvitesAsPdf} title="Download pending staff invites as PDF" aria-label="Download pending staff invites as PDF"
+                                                className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#6D35D4] transition hover:bg-[#F7F1FF]"><Download size={17} /></button>
+                                    )}
+                                </div>
                             </div>
-                        )}
+                            {pendingInvites.length > 0 && (
+                                <div className="border-t border-[#E6DDF0] px-4 py-3">
+                                    <div className="max-h-[320px] overflow-auto">
+                                        <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                            <thead className="bg-[#FFFCF8]">
+                                            <tr className="border-b border-[#E6DDF0]">
+                                                <TableHeader align="center">Email</TableHeader>
+                                                <TableHeader>Invitation</TableHeader>
+                                                <TableHeader>Access</TableHeader>
+                                                <TableHeader align="center">
+                                                    Actions
+                                                </TableHeader>
+                                            </tr>
+                                            </thead>
+                                            <tbody>
+                                            {pendingInvites.map(
+                                                (invite) => (
+                                                    <tr
+                                                        key={invite.id}
+                                                        className="border-b border-[#EEE7F2] bg-white last:border-b-0"
+                                                    >
+                                                        <td className="px-2.5 py-2.5 text-sm font-semibold text-[#1A1220]">
+                                                            {invite.email}
+                                                        </td>
+                                                        <td className="px-2.5 py-2.5 text-xs text-[#7A6A84]">
+                                                            Invited {invite.invitedAt}
+                                                            <br />
+                                                            Expires {invite.expiresAt}
+                                                        </td>
+                                                        <td className="max-w-[420px] px-2.5 py-2.5 text-xs text-[#806A8C]">
+                                                            <p className="truncate">
+                                                                {formatPermissions(
+                                                                    invite.permissions
+                                                                )}
+                                                            </p>
+                                                        </td>
+                                                        <td className="px-2.5 py-2.5 text-center">
+                                                            <div className="inline-flex items-center gap-2">
+                                                                <StatusBadge
+                                                                    label="Pending"
+                                                                    tone="gold"
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() =>
+                                                                        handleResendInvite(
+                                                                            invite.email
+                                                                        )
+                                                                    }
+                                                                    className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg bg-[#F1EBFF] px-3 text-xs font-semibold text-[#6D35D4] transition hover:bg-[#E6DCFF]"
+                                                                >
+                                                                    <Send size={14} />
+                                                                    Resend
+                                                                </button>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                )
+                                            )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </section>
 
                     </section>
                 </main>
@@ -1583,7 +1462,7 @@ function SummaryCard({
     title: string;
     value: number;
     subtitle: string;
-    tone: "purple" | "green" | "red";
+    tone: "purple" | "green" | "red" | "amber";
 }) {
     const style = {
         purple: {
@@ -1600,6 +1479,11 @@ function SummaryCard({
             iconBackground: "bg-[#FDEDED]",
             iconColor: "text-[#C13333]",
             borderColor: "#F0D2D2",
+        },
+        amber: {
+            iconBackground: "bg-[#FFF6DF]",
+            iconColor: "text-[#A56607]",
+            borderColor: "#F2DFC0",
         },
     }[tone];
 

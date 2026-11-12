@@ -2,21 +2,20 @@
 
 import * as React from "react";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import { SuccessToast } from "./_shared";
+import { SuccessToast, labelClass, fieldClass } from "./_shared";
 import {
-    AlertTriangle, CalendarClock, ClipboardCheck, ClipboardList, Eye, CalendarDays,
-    PackageCheck, PackageSearch, Search, Sparkles, Truck, X, ChevronLeft, ChevronRight,
+    AlertTriangle, CalendarClock, ClipboardCheck, ClipboardList, CalendarDays,
+    PackageCheck, PackagePlus, PackageSearch, Search, Sparkles, Truck, X, ChevronLeft, ChevronRight, ChevronDown,
 } from "lucide-react";
-import { useStaffRentalInventory, type StaffRentalAllocation, type StaffRentalAction, type StaffRentalEquipmentSchedule, type StaffRentalEquipmentCalendar } from "@/hooks/useRentalInventory";
+import { useStaffRentalInventory, type StaffRentalEquipment, type StaffRentalAllocation, type StaffRentalAction, type StaffRentalEquipmentSchedule, type StaffRentalEquipmentCalendar } from "@/hooks/useRentalInventory";
 
 const panel = "min-w-0 overflow-hidden rounded-2xl border border-[#E6DDF0] bg-white shadow-sm";
 const action = "inline-flex h-[40px] items-center justify-center gap-2 rounded-xl border border-[#E6DDF0] bg-white px-4 text-xs font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50";
 const primary = "inline-flex h-[40px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-xs font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-50";
 const th = "truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]";
 // Match the Manager rental inventory's compact, colored table action buttons.
-const viewAction = "inline-flex min-h-8 items-center justify-center gap-1 rounded-lg bg-[#F1EBFF] px-2.5 py-1.5 text-[11px] font-semibold text-[#5330B6] hover:bg-[#EAE0FF] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5330B6]";
 const scheduleAction = "inline-flex min-h-8 items-center justify-center gap-1 rounded-lg bg-[#EAF1FF] px-2.5 py-1.5 text-[11px] font-semibold text-[#2D539D] hover:bg-[#DCE8FF] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2D539D]";
-const issueAction = "inline-flex min-h-8 items-center justify-center gap-1 rounded-lg bg-[#FFF0F0] px-2.5 py-1.5 text-[11px] font-semibold text-[#C52C45] hover:bg-[#FFE2E6] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#C52C45] disabled:cursor-not-allowed disabled:opacity-40";
+const restockAction = "inline-flex min-h-8 items-center justify-center gap-1 rounded-lg bg-[#E5F8EC] px-2.5 py-1.5 text-[11px] font-semibold text-[#23834A] hover:bg-[#D5F0DF] disabled:cursor-not-allowed disabled:opacity-40";
 const weekDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 function shiftRentalMonth(month: string, offset: number) {
     const [year,number]=month.split("-").map(Number);
@@ -158,26 +157,53 @@ function dateTime(s?: string | null): {date: string; time: string} {
         time: parsed.toLocaleTimeString("en-PH", {timeZone: "Asia/Manila", hour: "numeric", minute: "2-digit"}),
     };
 }
-const staffActivityLabels: Record<string, string> = {
-    received: "Stock Received", rented_out: "Rented Out", returned: "Returned",
-    maintenance_started: "Maintenance", maintenance_completed: "Repair Completed",
-    missing_reported: "Missing", missing_resolved: "Found", missing_replaced: "Replaced",
-    adjustment: "Stock Adjustment", prepared: "Prepared", inspected: "Inspected",
-    cleaned: "Cleaned", damage_reported: "Damage Reported",
-};
 // Prepared/inspected/damage-reported events document work, not physical stock changes.
 const staffPositiveMovements = new Set(["received", "returned", "maintenance_completed", "missing_resolved", "missing_replaced", "cleaned"]);
 const staffNegativeMovements = new Set(["rented_out", "maintenance_started", "missing_reported"]);
-function Header({ icon, title, subtitle, right }: {icon:React.ReactNode;title:string;subtitle:string;right?:React.ReactNode}) {
-    return <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
-        <div className="flex items-center gap-3"><span className="rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]">{icon}</span>
-            <div><h3 className="text-[15px] font-bold text-[#21132E]">{title}</h3><p className="text-[11px] text-[#86778F]">{subtitle}</p></div></div>{right}
-    </div>;
+// Stock In / Stock Out: the server's classification, or the movement type on older Lambdas.
+// null = not a stock movement (hidden from the stock activity table).
+function staffRentalDirection(event:{type:string;direction?:"in"|"out"}):"in"|"out"|null {
+    if(event.direction==="in"||event.direction==="out")return event.direction;
+    if(staffPositiveMovements.has(event.type))return "in";
+    if(staffNegativeMovements.has(event.type))return "out";
+    return null;
+}
+// Same filter control as the Manager Rental Inventory (RentalInventoryFilterSelect).
+function StaffRentalFilterSelect({ containerClassName = "", className = "", children, ...props }:
+                                     React.ComponentProps<"select"> & { containerClassName?: string }) {
+    return (
+        <span className={`relative inline-flex min-w-0 ${containerClassName}`}>
+            <select {...props} className={`h-9 w-full min-w-0 appearance-none rounded-xl border border-[#E3D8EA] bg-white py-1 pl-3 pr-9 text-xs font-semibold text-[#2B174C] outline-none focus:border-[#BFA8E2] focus-visible:ring-2 focus-visible:ring-[#F1EBFF] ${className}`}>
+                {children}
+            </select>
+            <ChevronDown aria-hidden="true" size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#806A8C]" />
+        </span>
+    );
+}
+// Same availability labels as the Manager Branch Rental Equipment List (equipmentDisplayStatus):
+// quantity is today's bookable units, or the checked dates' available units.
+function staffEquipmentStatus(e:StaffRentalEquipment, quantity?:number):string {
+    if(quantity===undefined||!Number.isFinite(quantity))return "Not Checked";
+    const maximumUsable=Math.max(0,e.totalUnits-e.maintenanceUnits-e.missingUnits);
+    if(quantity<=0)return maximumUsable>0?"Fully Booked":"Unavailable";
+    if(e.alertLevel>0&&quantity<=e.alertLevel)return "Low Availability";
+    if(quantity===e.totalUnits&&e.maintenanceUnits===0&&e.missingUnits===0)return "Fully Available";
+    return "Available";
+}
+// Status filter groups (no new statuses): same mapping as the Manager list.
+function staffEquipmentStatusGroup(label:string):"Available"|"Unavailable"|null {
+    if(label==="Fully Available"||label==="Available"||label==="Low Availability")return "Available";
+    if(label==="Unavailable"||label==="Fully Booked")return "Unavailable";
+    return null;
 }
 function Empty({children}:{children:React.ReactNode}) {
     return <div className="flex min-h-28 flex-col items-center justify-center gap-2 p-5 text-center text-xs text-[#806A8C]"><PackageSearch size={22}/>{children}</div>;
 }
-export default function StaffRentalInventory({branchName}:{branchName:string}) {
+export default function StaffRentalInventory({branchName,section="inventory",queueSearch}:{branchName:string;
+    // "queue" renders only the Rental Operations Queue (used by Staff Bookings);
+    // "inventory" renders the Staff Rental Inventory without the queue.
+    section?:"inventory"|"queue";queueSearch?:string}) {
+    const showInventory=section!=="queue";
     const rental=useStaffRentalInventory();
     const {user}=useCurrentUser();
     const inventoryPermission=user?.permissions?.inventory_access ?? user?.permissions?.inventory;
@@ -193,7 +219,48 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const [bookingOperationNotes,setBookingOperationNotes]=React.useState("");
     const [bookingOperationError,setBookingOperationError]=React.useState("");
     const [careFilter,setCareFilter]=React.useState<"all"|"inspection"|"cleaning"|"routine"|"repairs"|"missing">("all");
-    const [rentalProductFilter,setRentalProductFilter]=React.useState("all");
+    const [categoryFilter,setCategoryFilter]=React.useState("All Categories");
+    const [statusFilter,setStatusFilter]=React.useState("All Status");
+    const [rentalActivityFilter,setRentalActivityFilter]=React.useState<"all"|"in"|"out">("all");
+    // Date Availability: same Lambda check and behavior as the Manager Branch Rental Equipment List.
+    const [dateFiltersOpen,setDateFiltersOpen]=React.useState(false);
+    const [fromDate,setFromDate]=React.useState("");
+    const [toDate,setToDate]=React.useState("");
+    const [appliedDates,setAppliedDates]=React.useState<{from:string;to:string}|null>(null);
+    const [datesAvailability,setDatesAvailability]=React.useState<Map<number,number>|null>(null);
+    const [datesLoading,setDatesLoading]=React.useState(false);
+    const [datesError,setDatesError]=React.useState("");
+    const resetDates=()=>{setAppliedDates(null);setDatesAvailability(null);setDatesError("");};
+    const checkDates=async()=>{
+        if(!fromDate||!toDate||toDate<fromDate){setDatesError("Choose a valid start and end date.");return;}
+        setDatesError("");setDatesLoading(true);setAppliedDates(null);setDatesAvailability(null);
+        try{
+            const rows=await rental.checkAvailability(fromDate,toDate);
+            setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits])));
+            setAppliedDates({from:fromDate,to:toDate});
+        }catch(error){setDatesError(error instanceof Error?error.message:"Unable to check availability.");}
+        finally{setDatesLoading(false);}
+    };
+    React.useEffect(()=>{
+        if(!appliedDates)return;
+        let active=true;
+        const update=async()=>{
+            if(document.visibilityState!=="visible")return;
+            try{
+                const rows=await rental.checkAvailability(appliedDates.from,appliedDates.to);
+                if(active){setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits])));setDatesError("");}
+            }catch(error){
+                if(active){
+                    setDatesAvailability(null); // Never leave a stale date availability on screen.
+                    setDatesError(error instanceof Error?error.message:"Unable to refresh rental availability.");
+                }
+            }
+        };
+        const onFocus=()=>{void update();};
+        window.addEventListener("focus",onFocus);
+        const timer=window.setInterval(onFocus,15_000);
+        return ()=>{active=false;window.removeEventListener("focus",onFocus);window.clearInterval(timer);};
+    },[appliedDates,rental.checkAvailability]);
     const [selected,setSelected]=React.useState<StaffRentalAllocation|null>(null);
     const [viewEquipment,setViewEquipment]=React.useState<number|null>(null);
     const [scheduleEquipmentId,setScheduleEquipmentId]=React.useState<number|null>(null);
@@ -216,12 +283,20 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         {kind:"complete";id:number;label:string;max:number} |
         {kind:"replace";id:number;label:string;max:number} |
         {kind:"routine";id:number;label:string;max:number} | null>(null);
+    // Staff Restock: same Receive Stock dialog as the Manager (quantity only).
+    const [restockItem,setRestockItem]=React.useState<StaffRentalEquipment|null>(null);
+    const [restockQuantity,setRestockQuantity]=React.useState("");
+    const [restockError,setRestockError]=React.useState("");
     const [stockQuantity,setStockQuantity]=React.useState("");
     const [stockNotes,setStockNotes]=React.useState("");
     const [stockSafetyChecked,setStockSafetyChecked]=React.useState(false);
     const [issueType,setIssueType]=React.useState<"routine"|"damage"|"missing">("damage");
     const today=manilaDate();
-    const todayRentalActivity=rental.activity.filter(event=>rentalActivityManilaDate(event.occurredAt)===today);
+    // Staff sees today's records only; the Activity filter and search narrow today's list.
+    const todayRentalActivity=rental.activity.filter(event=>rentalActivityManilaDate(event.occurredAt)===today&&
+        staffRentalDirection(event)!==null&&
+        (rentalActivityFilter==="all"||staffRentalDirection(event)===rentalActivityFilter)&&
+        (!search.trim()||[event.equipmentName,event.referenceNumber].join(" ").toLowerCase().includes(search.trim().toLowerCase())));
     const equipmentById=React.useMemo(()=>new Map(rental.equipment.map(e=>[e.id,e])),[rental.equipment]);
     const allTasks=React.useMemo(()=>rental.allocations.map(a=>({item:a,type:taskType(a)})).filter(x=>x.type!==null),[rental.allocations]);
     const inspectionTasks=allTasks.filter(x=>x.type==="inspect");
@@ -334,8 +409,11 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         reference:report.bookingReference||`MISS-${String(report.id).padStart(6,"0")}`,
         report,
     }));
+    // Status filter (each care task type has exactly one displayed status) plus the list search.
+    const careQuery=search.trim().toLowerCase();
     const visibleCareTasks=[...careTasks,...missingCareTasks].filter(task=>
-        careFilter==="all"||task.kind===careFilter);
+        (careFilter==="all"||task.kind===careFilter)&&
+        (!careQuery||[task.equipmentName,task.reference].join(" ").toLowerCase().includes(careQuery)));
 
     const bookingTasks=allTasks.filter(x=>x.type!=="clean"&&x.type!=="damage");
     // Show ONE row per booking. Keep every equipment line's existing workflow action
@@ -372,7 +450,7 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
     const returnUnits=returnBookings.reduce((sum,group)=>sum+dueReturnTasks(group).reduce((s,x)=>s+x.item.quantity,0),0);
     // Filter booking rows by their matching individual task; the selected checklist
     // still shows ALL currently actionable equipment for that booking.
-    const queueQuery=search.trim().toLowerCase();
+    const queueQuery=(queueSearch ?? search).trim().toLowerCase();
     const visibleBookingGroups=bookingGroups.filter(group=>{
         const text=[group.reference,group.clientName,group.bookingType,group.packageName,
             ...group.tasks.flatMap(x=>[x.item.equipmentName,x.item.equipmentNumber])].join(" ").toLowerCase();
@@ -450,8 +528,12 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
             setBookingOperationError(error instanceof Error?error.message:"Unable to process this booking.");
         }
     };
-    const rentalProductNames=[...new Set(rental.equipment.map(e=>e.name))].sort();
-    const visibleEquipment=rental.equipment.filter(e=>[e.name,e.category,e.equipmentNumber,...(e.unitNumbers||[])].join(" ").toLowerCase().includes(search.trim().toLowerCase())&&(rentalProductFilter==="all"||e.name===rentalProductFilter));
+    const rentalCategories=[...new Set(rental.equipment.map(e=>e.category))].sort((a,b)=>a.localeCompare(b));
+    const visibleEquipment=rental.equipment.filter(e=>{
+        if(![e.name,e.category,e.equipmentNumber,...(e.unitNumbers||[])].join(" ").toLowerCase().includes(search.trim().toLowerCase()))return false;
+        if(categoryFilter!=="All Categories"&&e.category!==categoryFilter)return false;
+        return statusFilter==="All Status"||staffEquipmentStatusGroup(staffEquipmentStatus(e,appliedDates?datesAvailability?.get(e.id):e.bookableToday))===statusFilter;
+    });
     const selectedEquipment=rental.equipment.find(e=>e.id===viewEquipment);
     const openRentalAction=(item:StaffRentalAllocation)=>{
         if(taskType(item)==="release"||taskType(item)==="return")return;
@@ -507,6 +589,21 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
         if(!canOperate)return;
         setStockTask(task);setStockQuantity("1");setStockNotes("");setStockSafetyChecked(false);setIssueType("damage");setSubmitError("");
     };
+    const submitRestock=async(event:React.FormEvent)=>{
+        event.preventDefault();
+        if(!restockItem||rental.saving)return;
+        if(!canOperate){setRestockError("Full Inventory access is required to restock.");return;}
+        if(restockQuantity.trim()===""||!Number.isSafeInteger(Number(restockQuantity))||Number(restockQuantity)<=0||Number(restockQuantity)>2147483647){
+            setRestockError("Enter a positive whole quantity to add.");return;
+        }
+        const quantity=Number(restockQuantity);
+        setRestockError("");setNotice("");
+        try{
+            await rental.actStock({action:"staff_restock_equipment",equipmentId:restockItem.id,quantity});
+            setNotice(`“${restockItem.name}” received +${quantity.toLocaleString("en-PH")} units in inventory.`);
+            setRestockItem(null);
+        }catch(error){setRestockError(error instanceof Error?error.message:"Unable to receive stock.");}
+    };
     const performStock=async()=>{
         if(!canOperate){setSubmitError("Full Inventory access is required for equipment condition tasks.");return;}
         if(!stockTask)return;
@@ -535,9 +632,9 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
             setStockTask(null);
         } catch(error){setSubmitError(error instanceof Error?error.message:"Unable to save rental operation.");}
     };
-    return <div className="space-y-4" aria-label="Staff Rental Inventory">
+    return <div className="space-y-4" aria-label={showInventory?"Staff Rental Inventory":"Rental Operations Queue"}>
         {!canOperate&&<p role="status" className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3 text-xs text-[#5330B6]">View-only Inventory access: equipment activity is visible, but receiving, rental handover, returns, and condition changes require Full access.</p>}
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[
+        {showInventory&&<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[
             {title:"Ready for Release",num:ready,caption:`${readyUnits} units prepared for handover`,icon:<Truck size={19}/>},
             {title:"For Return Today / Overdue",num:forReturn,caption:`${returnUnits} units due back`,icon:<CalendarClock size={19}/>},
             {title:"Previous Returns To Finalize",num:inspection,caption:`${inspectionUnits} previously returned units on hold`,icon:<ClipboardCheck size={19}/>},
@@ -560,8 +657,9 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                     </span>
                 </>}
             </div>
-        ))}</div>
-        <section className={`${panel} flex h-[340px] min-h-0 flex-col`}>
+        ))}</div>}
+        {/* Rental Operations Queue: rendered only in Staff Bookings (section="queue"). */}
+        {!showInventory&&<section className={`${panel} flex h-[340px] min-h-0 flex-col`}>
             <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
                 <div className="flex min-w-0 flex-1 items-center gap-3">
                     <span className="shrink-0 rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]"><ClipboardList size={18}/></span>
@@ -622,181 +720,223 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                 {rental.connected&&visibleBookingGroups.length===0&&<Empty>No matching booking tasks. Select All Tasks, or confirm a booking with rental equipment.</Empty>}
                 {visibleBookingGroups.length>50&&<p className="border-t border-[#F0EAF4] px-3 py-2 text-[11px] text-[#806A8C]">Showing the first 50 bookings. Use the search or filters to find another booking.</p>}
             </div>
-        </section>
+        </section>}
         {rental.error&&<p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">Rental operations unavailable: {rental.error} <button type="button" className="underline" onClick={()=>void rental.refresh(true)}>Retry</button></p>}
-        <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-2">
-            {/* Reinstated using the original purple/white table design; operations reuse existing rental actions. */}
-            <section className={`${panel} flex h-[340px] min-h-0 flex-col`} aria-label="Equipment Care and Maintenance">
-                <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
-                    <div className="flex min-w-0 flex-1 items-center gap-3">
-                        <span className="shrink-0 rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]"><ClipboardCheck size={18}/></span>
-                        <div className="min-w-0">
-                            <h3 className="text-[15px] font-bold text-[#21132E]">Equipment Care &amp; Maintenance</h3>
-                            <p className="text-[11px] leading-4 text-[#86778F]">Finalize older return inspections, repair equipment, and track missing items.</p>
+        {showInventory&&<>
+            <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
+                {/* Reinstated using the original purple/white table design; operations reuse existing rental actions. */}
+                <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm" aria-label="Equipment Care and Maintenance">
+                    <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
+                        <div className="flex min-w-0 flex-1 items-center gap-3">
+                            <span className="shrink-0 rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]"><ClipboardCheck size={18}/></span>
+                            <div className="min-w-0">
+                                <h3 className="text-[15px] font-bold text-[#21132E]">Equipment Care &amp; Maintenance</h3>
+                                <p className="text-[11px] leading-4 text-[#86778F]">Finalize older return inspections, repair equipment, and track missing items.</p>
+                            </div>
+                        </div>
+                        <StaffRentalFilterSelect containerClassName="w-[160px] shrink-0" aria-label="Filter equipment care by status" value={careFilter}
+                                                 onChange={e=>setCareFilter(e.target.value as typeof careFilter)}>
+                            <option value="all">All Status</option>
+                            <option value="inspection">Pending Inspection</option>
+                            <option value="cleaning">Needs Cleaning</option>
+                            <option value="routine">Routine Care</option>
+                            <option value="repairs">Damaged</option>
+                            <option value="missing">Missing</option>
+                        </StaffRentalFilterSelect>
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Equipment care and maintenance tasks" tabIndex={0}>
+                        <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                            <colgroup><col className="w-[24%]"/><col className="w-[31%]"/><col className="w-[9%]"/><col className="w-[17%]"/><col className="w-[19%]"/></colgroup>
+                            <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>
+                                {['Equipment','Work Item / Reference','Units','Status','Action'].map(h=><th key={h} className={th}>{h}</th>)}
+                            </tr></thead>
+                            <tbody>{visibleCareTasks.map(task=><tr key={task.key} className="border-t border-[#F0EAF4] text-[#2B174C]">
+                                <td className="py-2 align-middle font-medium px-4 text-left">{task.equipmentName}</td>
+                                <td className="px-2 py-2 align-middle">
+                                    <div className="font-medium">{task.kind==="inspection"?'Finalize previous return inspection':
+                                        task.kind==="cleaning"?'Clean returned equipment':
+                                            task.kind==="routine"?'Routine cleaning / upkeep':
+                                                task.kind==="repairs"?'Repair / safety review':'Missing equipment investigation'}</div>
+                                    <div className="mx-auto mt-1 max-w-[220px] break-all text-[10px] text-[#86778F]">{task.reference}</div>
+                                    {task.kind==="inspection"&&task.allocation.inspectionNotes&&
+                                        <p title={task.allocation.inspectionNotes} className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]">{task.allocation.inspectionNotes}</p>}
+                                    {(task.kind==="routine"||task.kind==="repairs")&&task.maintenance.reason&&
+                                        <p title={task.maintenance.reason} className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]">{task.maintenance.reason}</p>}
+                                    {task.kind==="missing"&&task.report.reason&&
+                                        <p title={task.report.reason} className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]">{task.report.reason}</p>}
+                                </td>
+                                <td className="px-2 py-2 text-center align-middle font-semibold tabular-nums">{task.units}</td>
+                                <td className="px-2 py-2 text-center align-middle">
+                                    {task.kind==="inspection"?<span className="break-words text-[10px] font-semibold text-[#C27416]">Pending Inspection</span>:
+                                        task.kind==="cleaning"?<span className="break-words text-[10px] font-semibold text-[#C27416]">Needs Cleaning</span>:
+                                            task.kind==="routine"?<span className="break-words text-[10px] font-semibold text-[#5330B6]">Routine Care</span>:
+                                                task.kind==="missing"?<span className="break-words text-[10px] font-semibold text-[#A43D48]">Missing</span>:
+                                                    <span className="break-words text-[10px] font-semibold text-[#A43D48]">Damaged</span>}
+                                </td>
+                                <td className="px-2 py-2 align-middle text-center">
+                                    {task.kind==="inspection"?
+                                        <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving}
+                                                onClick={()=>setConfirmRecordedReturn(task.allocation)}>Finalize Return</button>:
+                                        task.kind==="cleaning"?
+                                            <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving}
+                                                    onClick={()=>openRentalAction(task.allocation)}>Mark Cleaned</button>:
+                                            task.kind==="routine"?
+                                                <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving||task.units<1}
+                                                        onClick={()=>startStockTask({kind:'routine',id:task.maintenance.id,label:task.equipmentName,max:task.units})}>Mark Care Done</button>:
+                                                task.kind==="missing"?
+                                                    <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving||task.units<1}
+                                                            onClick={()=>startStockTask({kind:'replace',id:task.report.id,label:task.equipmentName,max:task.units})}>Mark Replaced</button>:
+                                                    <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving||task.units<1}
+                                                            onClick={()=>startStockTask({kind:'complete',id:task.maintenance.id,label:task.equipmentName,max:task.units})}>Mark Repaired</button>}
+                                </td>
+                            </tr>)}</tbody>
+                        </table>
+                        {rental.connected&&visibleCareTasks.length===0&&<Empty>{careFilter==='all'&&!careQuery?
+                            'No pending inspections, care, repair, or missing-equipment tasks.':'No matching equipment care tasks.'}</Empty>}
+                    </div>
+                </section>
+                {/* Same container, header and Activity filter as the Manager Rental Stock Activity; today's records only. */}
+                <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
+                    <div className="flex min-w-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex min-w-0 flex-1 items-start gap-3">
+                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><CalendarClock size={18}/></span>
+                            <div className="min-w-0"><h2 className="text-[15px] font-bold text-[#21132E]">Today's Rental Stock Activity</h2>
+                                <p className="mt-0.5 text-[11px] text-[#86778F]">Equipment receipts, rental movements, and repairs recorded today.</p></div>
+                        </div>
+                        <div className="flex shrink-0 items-center justify-end">
+                            <StaffRentalFilterSelect containerClassName="w-[114px]" aria-label="Filter today's rental activity" value={rentalActivityFilter}
+                                                     onChange={e=>setRentalActivityFilter(e.target.value as "all"|"in"|"out")}>
+                                <option value="all">All Activity</option><option value="in">Stock In</option><option value="out">Stock Out</option>
+                            </StaffRentalFilterSelect>
                         </div>
                     </div>
-                    <select aria-label="Filter equipment care tasks" value={careFilter}
-                            onChange={e=>setCareFilter(e.target.value as typeof careFilter)}
-                            className="h-9 w-[118px] shrink-0 cursor-pointer rounded-xl border border-[#E6DDF0] bg-white px-2 text-[11px] font-semibold text-[#2B174C] outline-none focus:border-[#D2BCEC]">
-                        <option value="all">All Tasks</option>
-                        <option value="inspection">Inspections</option>
-                        <option value="cleaning">Cleaning</option>
-                        <option value="routine">Routine Care</option>
-                        <option value="repairs">Repairs</option>
-                        <option value="missing">Missing</option>
-                    </select>
-                </div>
-                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Equipment care and maintenance tasks" tabIndex={0}>
-                    <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[24%]"/><col className="w-[31%]"/><col className="w-[9%]"/><col className="w-[17%]"/><col className="w-[19%]"/></colgroup>
-                        <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>
-                            {['Equipment','Work Item / Reference','Units','Status','Action'].map(h=><th key={h} className={th}>{h}</th>)}
-                        </tr></thead>
-                        <tbody>{visibleCareTasks.map(task=><tr key={task.key} className="border-t border-[#F0EAF4] text-[#2B174C]">
-                            <td className="py-2 align-middle font-medium px-4 text-left">{task.equipmentName}</td>
-                            <td className="px-2 py-2 align-middle">
-                                <div className="font-medium">{task.kind==="inspection"?'Finalize previous return inspection':
-                                    task.kind==="cleaning"?'Clean returned equipment':
-                                        task.kind==="routine"?'Routine cleaning / upkeep':
-                                            task.kind==="repairs"?'Repair / safety review':'Missing equipment investigation'}</div>
-                                <div className="mx-auto mt-1 max-w-[220px] break-all text-[10px] text-[#86778F]">{task.reference}</div>
-                                {task.kind==="inspection"&&task.allocation.inspectionNotes&&
-                                    <p title={task.allocation.inspectionNotes} className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]">{task.allocation.inspectionNotes}</p>}
-                                {(task.kind==="routine"||task.kind==="repairs")&&task.maintenance.reason&&
-                                    <p title={task.maintenance.reason} className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]">{task.maintenance.reason}</p>}
-                                {task.kind==="missing"&&task.report.reason&&
-                                    <p title={task.report.reason} className="mt-1 line-clamp-2 break-words text-[10px] text-[#806A8C]">{task.report.reason}</p>}
-                            </td>
-                            <td className="px-2 py-2 text-center align-middle font-semibold tabular-nums">{task.units}</td>
-                            <td className="px-2 py-2 text-center align-middle">
-                                {task.kind==="inspection"?<span className="break-words text-[10px] font-semibold text-[#C27416]">Pending Inspection</span>:
-                                    task.kind==="cleaning"?<span className="break-words text-[10px] font-semibold text-[#C27416]">Needs Cleaning</span>:
-                                        task.kind==="routine"?<span className="break-words text-[10px] font-semibold text-[#5330B6]">Routine Care</span>:
-                                            task.kind==="missing"?<span className="break-words text-[10px] font-semibold text-[#A43D48]">Missing</span>:
-                                                <span className="break-words text-[10px] font-semibold text-[#A43D48]">Damaged</span>}
-                            </td>
-                            <td className="px-2 py-2 align-middle text-center">
-                                {task.kind==="inspection"?
-                                    <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving}
-                                            onClick={()=>setConfirmRecordedReturn(task.allocation)}>Finalize Return</button>:
-                                    task.kind==="cleaning"?
-                                        <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving}
-                                                onClick={()=>openRentalAction(task.allocation)}>Mark Cleaned</button>:
-                                        task.kind==="routine"?
-                                            <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving||task.units<1}
-                                                    onClick={()=>startStockTask({kind:'routine',id:task.maintenance.id,label:task.equipmentName,max:task.units})}>Mark Care Done</button>:
-                                            task.kind==="missing"?
-                                                <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving||task.units<1}
-                                                        onClick={()=>startStockTask({kind:'replace',id:task.report.id,label:task.equipmentName,max:task.units})}>Mark Replaced</button>:
-                                                <button type="button" className="inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" disabled={!canOperate||rental.saving||task.units<1}
-                                                        onClick={()=>startStockTask({kind:'complete',id:task.maintenance.id,label:task.equipmentName,max:task.units})}>Mark Repaired</button>}
-                            </td>
-                        </tr>)}</tbody>
-                    </table>
-                    {rental.connected&&visibleCareTasks.length===0&&<Empty>{careFilter==='all'?
-                        'No pending inspections, care, repair, or missing-equipment tasks.':'No matching equipment care tasks.'}</Empty>}
-                </div>
-            </section>
-            <section className="flex h-[340px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
-                <div className="flex items-start gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
-                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
-                        <CalendarClock size={18}/>
-                    </span>
-                    <div>
-                        <h2 className="text-[15px] font-bold text-[#21132E]">Today's Rental Stock Activity</h2>
-                        <p className="mt-0.5 text-[11px] text-[#86778F]">Equipment receipts, rental movements, and repairs recorded today.</p>
+                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Today's rental stock activity" tabIndex={0}>
+                        <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                            <colgroup><col className="w-[16%]"/><col className="w-[30%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
+                            <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]">
+                            <tr className="border-b border-[#E9E1EE]">
+                                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Date &amp; Time</th>
+                                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Activity</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Qty</th>
+                                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Reference No.</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {todayRentalActivity.map(event => {
+                                const when = dateTime(event.occurredAt);
+                                // Same Stock In / Stock Out wording and colors as the Manager stock activity.
+                                const positive = staffRentalDirection(event) === "in";
+                                return <tr key={event.id} className="border-b border-[#EFE8F2] last:border-0">
+                                    <td className="whitespace-nowrap py-2 text-[#5F4E75] px-4 text-left">
+                                        {when.date}
+                                        {when.time && <div className="mt-0.5 text-[10px] text-[#8A7D90]">{when.time}</div>}
+                                    </td>
+                                    <td className="px-2 py-2 font-semibold text-[#2B174C]">{event.equipmentName}</td>
+                                    <td className={`px-2 py-2 text-center font-medium ${positive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>{positive ? "Stock In" : "Stock Out"}</td>
+                                    <td className={`px-2 py-2 text-center font-semibold ${positive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>
+                                        {positive ? "+" : "−"}{Math.abs(event.quantity)}
+                                    </td>
+                                    <td className="break-all px-2 py-2 text-[#5F4E75]">{event.referenceNumber || "—"}</td>
+                                </tr>;
+                            })}
+                            </tbody>
+                        </table>
+                        {rental.connected && todayRentalActivity.length === 0 && <Empty>{rentalActivityFilter==="all"&&!search.trim()?"No rental stock movements recorded today.":"No rental stock movements today match the selected filters."}</Empty>}
+                    </div>
+                </section>
+            </div>
+            {/* Same header, filter and search layout as the Manager Branch Rental Equipment List. */}
+            <section className="overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3.5">
+                    <div className="flex items-start gap-3">
+                        <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><PackageCheck size={18}/></span>
+                        <div>
+                            <h2 className="text-[15px] font-bold text-[#21132E]">Branch Rental Equipment List</h2>
+                            <p className="mt-0.5 text-[11px] text-[#86778F]">Daily rental availability · {branchName}</p>
+                        </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <StaffRentalFilterSelect containerClassName="w-[154px]" value={categoryFilter} onChange={e=>setCategoryFilter(e.target.value)} aria-label="Filter rental category">
+                            <option>All Categories</option>{rentalCategories.map(name=><option key={name}>{name}</option>)}
+                        </StaffRentalFilterSelect>
+                        <StaffRentalFilterSelect containerClassName="w-[148px]" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} aria-label="Filter rental equipment status">
+                            {["All Status","Available","Unavailable"].map(value=><option key={value}>{value}</option>)}
+                        </StaffRentalFilterSelect>
+                        <button type="button" aria-expanded={dateFiltersOpen} onClick={()=>setDateFiltersOpen(v=>!v)}
+                                className="flex h-9 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
+                            <CalendarClock size={15}/> {appliedDates ? "Dates Applied" : "Date Availability"} <ChevronDown size={14}/>
+                        </button>
                     </div>
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Today's rental stock activity" tabIndex={0}>
-                    <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[16%]"/><col className="w-[30%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
-                        <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]">
-                        <tr className="border-b border-[#E9E1EE]">
-                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Date &amp; Time</th>
-                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Activity</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Qty</th>
-                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Reference No.</th>
-                        </tr>
-                        </thead>
-                        <tbody>
-                        {todayRentalActivity.map(event => {
-                            const when = dateTime(event.occurredAt);
-                            const positive = staffPositiveMovements.has(event.type);
-                            const negative = staffNegativeMovements.has(event.type);
-                            const label = staffActivityLabels[event.type] || event.type.replaceAll("_", " ");
-                            return <tr key={event.id} className="border-b border-[#EFE8F2] last:border-0">
-                                <td className="whitespace-nowrap py-2 text-[#5F4E75] px-4 text-left">
-                                    {when.date}
-                                    {when.time && <div className="mt-0.5 text-[10px] text-[#8A7D90]">{when.time}</div>}
-                                </td>
-                                <td className="px-2 py-2 font-semibold text-[#2B174C]">{event.equipmentName}</td>
-                                <td className={`px-2 py-2 text-center font-medium ${positive ? "text-[#23834A]" : negative ? "text-[#D92C3F]" : "text-[#5F4E75]"}`}>{label}</td>
-                                <td className={`px-2 py-2 text-center font-semibold ${positive ? "text-[#23834A]" : negative ? "text-[#D92C3F]" : "text-[#4F3A5A]"}`}>
-                                    {positive ? "+" : negative ? "−" : ""}{Math.abs(event.quantity)}
-                                </td>
-                                <td className="break-all px-2 py-2 text-[#5F4E75]">{event.referenceNumber || "—"}</td>
-                            </tr>;
-                        })}
-                        </tbody>
-                    </table>
-                    {rental.connected && todayRentalActivity.length === 0 && <Empty>No rental stock movements recorded today.</Empty>}
-                </div>
-            </section>
-        </div>
-        <section className={panel}><Header icon={<PackageCheck size={18}/>} title="Branch Rental Equipment List" subtitle={`Daily rental availability · ${branchName}`}
-                                           right={<select className={action} aria-label="Filter rental product" value={rentalProductFilter} onChange={e=>setRentalProductFilter(e.target.value)}><option value="all">All Rental Products</option>{rentalProductNames.map(name=><option key={name} value={name}>{name}</option>)}</select>}/>
-            <div className="border-b border-[#E9E1EE] px-4 py-3">
-                <div className="w-full">
-                    <label className="relative min-w-0"><span className="sr-only">Search rental equipment or booking</span>
+                {dateFiltersOpen && <div className="flex flex-wrap items-end gap-3 border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-3 text-xs">
+                    <label className="space-y-1 font-semibold text-[#4E2C66]">From
+                        <input type="date" value={fromDate} onChange={e=>{setFromDate(e.target.value);resetDates();}} className="block h-10 rounded-xl border border-[#E3D8EA] bg-white px-3 text-[#2B174C]"/>
+                    </label>
+                    <label className="space-y-1 font-semibold text-[#4E2C66]">To (inclusive)
+                        <input type="date" min={fromDate||undefined} value={toDate} onChange={e=>{setToDate(e.target.value);resetDates();}} className="block h-10 rounded-xl border border-[#E3D8EA] bg-white px-3 text-[#2B174C]"/>
+                    </label>
+                    <button type="button" disabled={!fromDate||!toDate||toDate<fromDate||datesLoading} onClick={()=>void checkDates()}
+                            className="h-10 rounded-xl bg-[#2B174C] px-4 font-semibold text-white disabled:opacity-50">{datesLoading?"Checking...":"Check Dates"}</button>
+                    <button type="button" onClick={()=>{setFromDate("");setToDate("");resetDates();}}
+                            className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-4 font-semibold text-[#2B174C]">Clear</button>
+                    {datesError && <p role="alert" className="w-full text-red-700">{datesError}</p>}
+                    <p className="w-full text-[#86778F]">Checking dates changes the Status and available quantity for that period. Fully Booked counts only confirmed reservations. Physical stock and equipment conditions are shown separately.</p>
+                </div>}
+                <div className="grid gap-3 px-4 pb-4">
+                    <label className="relative min-w-0"><span className="sr-only">Search rental equipment</span>
                         <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
-                        <input className="h-[44px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]" placeholder="Search equipment or booking..." value={search} onChange={e=>setSearch(e.target.value)}/>
+                        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search equipment no., rental products, or categories..."
+                               className="h-11 w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-3 text-sm text-[#2B174C] outline-none placeholder:text-[#9B8AAA] focus:border-[#5A35A5]"/>
                     </label>
                 </div>
-            </div>
-            <div className="max-h-[360px] w-full overflow-y-auto overflow-x-hidden overscroll-contain border-t border-[#E9E1EE]" role="region" aria-label="Branch rental equipment list" tabIndex={0}>
-                <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                    <colgroup><col className="w-[10%]"/><col className="w-[20%]"/><col className="w-[8%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[10%]"/><col className="w-[27.5%]"/></colgroup>
-                    <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
-                    <tr className="border-b border-[#E9E1EE]">
-                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment No.</th>
-                        <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Rental Product</th>
-                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Total Units</th>
-                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Available Today</th>
-                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Rented Out</th>
-                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">On Hold</th>
-                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Availability</th>
-                        <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Action</th>
-                    </tr>
-                    </thead>
-                    <tbody>{visibleEquipment.map(e=>{
-                        const readyNow=Math.max(0,e.totalUnits-e.rentedOutUnits-e.maintenanceUnits-e.missingUnits);
-                        const maximumUsable=Math.max(0,e.totalUnits-e.maintenanceUnits-e.missingUnits);
-                        const availability=e.bookableToday<=0?(maximumUsable>0?'Fully Booked':'Unavailable'):e.alertLevel>0&&e.bookableToday<=e.alertLevel?'Low Availability':e.bookableToday===e.totalUnits&&e.maintenanceUnits===0&&e.missingUnits===0?'Fully Available':'Available';
-                        const availabilityColor=availability==='Fully Available'||availability==='Available'?'text-[#23834A]':availability==='Low Availability'?'text-[#A66A00]':'text-[#D92C3F]';
-                        return <tr key={e.id} className="h-12 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
-                            <td className="break-all py-2 px-4 text-left font-mono text-[9px] font-semibold text-[#5F4E75] xl:text-[10px]">{e.equipmentNumber||'—'}</td>
-                            <td className="px-2 py-2 font-semibold">{e.name}</td>
-                            <td className="px-2 py-2 text-center font-semibold">{e.totalUnits}</td>
-                            <td className="px-2 py-2 text-center font-semibold" title="Available today after overlapping confirmed reservations, not just physically ready units">{e.bookableToday}</td>
-                            <td className="px-2 py-2 text-center">{e.rentedOutUnits}</td>
-                            <td className="px-2 py-2 text-center" title={`On Hold: ${holdBreakdown.get(e.id)?.inspection??0} inspection, ${holdBreakdown.get(e.id)?.cleaning??0} cleaning, ${holdBreakdown.get(e.id)?.routine??0} routine care, ${holdBreakdown.get(e.id)?.repairs??0} repair. Outstanding missing units: ${e.missingUnits}.`}>
-                                <span>{e.maintenanceUnits}</span>
-                                {e.missingUnits > 0 && <span className="mt-1 block whitespace-nowrap text-[10px] font-semibold text-[#B45309]">Missing: {e.missingUnits}</span>}
-                            </td>
-                            <td className="px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${availabilityColor}`}>{availability}</span></td>
-                            <td className="px-2 py-2 text-center"><div className="flex flex-wrap items-center justify-center gap-1.5">
-                                <button type="button" className={viewAction} onClick={()=>setViewEquipment(e.id)}><Eye size={13}/> View</button>
-                                <button type="button" className={scheduleAction} onClick={()=>openSchedule(e.id)}><CalendarDays size={13}/> View Schedule</button>
-                                <button type="button" className={issueAction} disabled={!canOperate||readyNow<=0}
-                                        onClick={()=>startStockTask({kind:'issue',id:e.id,label:e.name,max:readyNow})}><AlertTriangle size={13}/> Report Issue</button>
-                            </div></td>
-                        </tr>;
-                    })}</tbody>
-                </table>
-                {rental.connected&&visibleEquipment.length===0&&<Empty>No rental equipment found in this branch.</Empty>}
-            </div>
-        </section>
+                {appliedDates && <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-xs font-medium text-[#5330B6]">
+                    Booking availability for {appliedDates.from} to {appliedDates.to} · The "Available" column and Status badges refer to these dates.
+                </p>}
+                <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain border-t border-[#E9E1EE]" role="region" aria-label="Branch rental equipment list" tabIndex={0}>
+                    <table className="w-full min-w-0 table-auto text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                        <colgroup><col className="w-[14%]"/><col className="w-[17%]"/><col className="w-[10%]"/><col className="w-[7%]"/><col className="w-[8%]"/><col className="w-[7%]"/><col className="w-[7.5%]"/><col className="w-[9.5%]"/><col className="w-[20%]"/></colgroup>
+                        <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
+                        <tr className="border-b border-[#E9E1EE]">
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment No.</th>
+                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Rental Product</th>
+                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Category</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Total Units</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">{appliedDates ? "Available" : "Available Today"}</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Rented Out</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">On Hold</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Status</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Action</th>
+                        </tr>
+                        </thead>
+                        <tbody>{visibleEquipment.map(e=>{
+                            const availability=staffEquipmentStatus(e,appliedDates?datesAvailability?.get(e.id):e.bookableToday);
+                            const availabilityColor=availability==='Fully Available'||availability==='Available'?'text-[#23834A]':availability==='Low Availability'?'text-[#A66A00]':availability==='Not Checked'?'text-[#6B6174]':'text-[#D92C3F]';
+                            return <tr key={e.id} className="h-12 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
+                                <td className="whitespace-nowrap py-2 px-4 text-left font-semibold">{e.equipmentNumber||'—'}</td>
+                                <td className="px-2 py-2 font-semibold">{e.name}</td>
+                                <td className="px-2 py-2 text-[#5F4E75]">{e.category}</td>
+                                <td className="px-2 py-2 text-center font-semibold">{e.totalUnits}</td>
+                                <td className="px-2 py-2 text-center font-semibold" title={appliedDates?"Available units for the selected date range":"Available today after overlapping confirmed reservations, not just physically ready units"}>{appliedDates?(datesAvailability?.get(e.id)??"—"):e.bookableToday}</td>
+                                <td className="px-2 py-2 text-center">{e.rentedOutUnits}</td>
+                                <td className="px-2 py-2 text-center" title={`On Hold: ${holdBreakdown.get(e.id)?.inspection??0} inspection, ${holdBreakdown.get(e.id)?.cleaning??0} cleaning, ${holdBreakdown.get(e.id)?.routine??0} routine care, ${holdBreakdown.get(e.id)?.repairs??0} repair. Outstanding missing units: ${e.missingUnits}.`}>
+                                    <span>{e.maintenanceUnits}</span>
+                                    {e.missingUnits > 0 && <span className="mt-1 block whitespace-nowrap text-[10px] font-semibold text-[#B45309]">Missing: {e.missingUnits}</span>}
+                                </td>
+                                <td className="px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${availabilityColor}`}>{availability}</span></td>
+                                <td className="px-2 py-2 text-center"><div className="flex flex-wrap items-center justify-center gap-1.5">
+                                    <button type="button" className={scheduleAction} onClick={()=>openSchedule(e.id)}><CalendarDays size={13}/> View Schedule</button>
+                                    <button type="button" className={restockAction} disabled={!canOperate} aria-label={`Restock ${e.name}`}
+                                            title={canOperate?undefined:"Full Inventory access is required to restock."}
+                                            onClick={()=>{setRestockItem(e);setRestockQuantity("");setRestockError("");}}><PackagePlus size={13}/> Restock</button>
+                                </div></td>
+                            </tr>;
+                        })}</tbody>
+                    </table>
+                    {rental.connected&&visibleEquipment.length===0&&<Empty>No rental equipment matches the selected filters.</Empty>}
+                </div>
+            </section>
+        </>}
         {/* Only the queue presentation changes: equipment actions still use their existing confirmation dialogs and API. */}
         {selectedQueueBooking && <div role="presentation" className="fixed inset-0 z-[80] flex items-center justify-center bg-[#21132E]/55 p-4"
                                       onMouseDown={e=>{if(e.target===e.currentTarget&&!rental.saving)setSelectedQueueReference(null);}}>
@@ -1016,6 +1156,70 @@ export default function StaffRentalInventory({branchName}:{branchName:string}) {
                 <div className="flex justify-end"><button type="button" className={action} onClick={()=>setScheduleEquipmentId(null)}>Close</button></div>
             </section>
         </div>}
+        {restockItem&&(()=>{
+            // Same layout and wording as the Manager's rental Receive Stock dialog.
+            const availableBefore=Math.max(0,restockItem.totalUnits-restockItem.rentedOutUnits-restockItem.maintenanceUnits-restockItem.missingUnits);
+            const needsReconciliation=restockItem.rentedOutUnits+restockItem.maintenanceUnits+restockItem.missingUnits>restockItem.totalUnits;
+            const qty=Number(restockQuantity)||0;
+            const busy=rental.saving;
+            const formatUnits=(value:number)=>value.toLocaleString("en-PH");
+            return <div role="dialog" aria-modal="true" aria-label="Receive Stock"
+                        className="fixed inset-0 z-[130] flex items-center justify-center bg-black/50 px-3 py-5">
+                <div className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+                    <div className="flex items-center justify-between border-b border-[#E9E1EE] px-6 py-4">
+                        <h2 className="text-xl font-bold text-[#21132E]">Receive Stock</h2>
+                        <button type="button" onClick={()=>setRestockItem(null)} disabled={busy} aria-label="Close Receive Stock"
+                                className="text-2xl text-[#806A8C] hover:text-[#2B174C] disabled:opacity-50">×</button>
+                    </div>
+                    <form onSubmit={submitRestock} className="flex min-h-0 flex-col">
+                        <div className="space-y-5 overflow-y-auto px-6 py-5">
+                            <div>
+                                <h3 className="text-base font-bold text-[#21132E]">{restockItem.name}</h3>
+                                <p className="mt-1 text-xs text-[#806A8C]">Product No. {restockItem.equipmentNumber || "—"} · {restockItem.category}</p>
+                                <div className="mt-3 grid grid-cols-2 gap-3 rounded-xl bg-[#F7F1FF] p-4">
+                                    <div><div className="text-xs text-[#806A8C]">Available Now (Physically Ready)</div>
+                                        <div className="mt-1 text-xl font-bold text-[#2B174C]">{formatUnits(availableBefore)}</div></div>
+                                    <div><div className="text-xs text-[#806A8C]">Available After Receiving</div>
+                                        <div className="mt-1 text-xl font-bold text-[#2B174C]">{needsReconciliation ? "—" : formatUnits(availableBefore + qty)}</div></div>
+                                </div>
+                                {needsReconciliation && <p role="alert" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                                    Assigned units exceed physical stock. Review booking, repair and missing records before receiving more stock; no new availability is projected until the records agree.
+                                </p>}
+                            </div>
+                            <section className="space-y-3">
+                                <h3 className="text-sm font-bold text-[#21132E]">Stock to Receive</h3>
+                                <p className="text-xs text-[#806A8C]">Enter the quantity to add.</p>
+                                <div className="space-y-3 rounded-xl border border-[#E3D8EA] p-4">
+                                    <div className="flex justify-between gap-3">
+                                        <div><strong className="text-sm text-[#2B174C]">Regular</strong></div>
+                                        <span className="text-xs text-[#806A8C]">Available: {formatUnits(availableBefore)} pcs</span>
+                                    </div>
+                                    <div className="grid gap-3 sm:grid-cols-2">
+                                        <div className="space-y-1"><label className={labelClass}>Quantity to Add</label>
+                                            <input type="number" min="0" step="1" value={restockQuantity}
+                                                   onChange={e => setRestockQuantity(e.target.value)}
+                                                   placeholder="0" className={fieldClass}/></div>
+                                    </div>
+                                    <p className="text-xs text-[#806A8C]">Available after receiving: {needsReconciliation ? "Reconciliation required" : `${formatUnits(availableBefore + qty)} pcs`}</p>
+                                </div>
+                                <div className="flex justify-between border-t border-[#E3D8EA] pt-3 text-sm font-semibold text-[#2B174C]">
+                                    <span>Total Stock to Add</span><span>+{formatUnits(qty)} pcs</span>
+                                </div>
+                            </section>
+                            {restockError && <p role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-700">{restockError}</p>}
+                        </div>
+                        <div className="flex justify-end gap-2 border-t border-[#E3D8EA] bg-white px-6 py-4">
+                            <button type="button" onClick={()=>setRestockItem(null)} disabled={busy}
+                                    className="rounded-xl border border-[#E3D8EA] px-5 py-2.5 text-sm font-semibold text-[#2B174C]">Cancel</button>
+                            <button type="submit" disabled={busy || qty <= 0}
+                                    className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
+                                {busy ? "Saving..." : "Confirm Stock In"}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>;
+        })()}
         {stockTask&&<div role="presentation" className="fixed inset-0 z-[105] flex items-center justify-center bg-[#21132E]/50 p-4">
             <section role="dialog" aria-modal="true" aria-label="Physical rental equipment task" className="max-h-[90dvh] w-full max-w-lg space-y-4 overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-xl">
                 <div className="flex items-center justify-between"><h3 className="text-lg font-bold text-[#21132E]">

@@ -743,9 +743,8 @@ function normalizeOperationalAccess(permissions, moduleName, role) {
         : ["pos", "pos_access", "sales_access"];
     const selected = keys.find((key) => Object.prototype.hasOwnProperty.call(values, key));
     if (!selected) {
-        // Sensible legacy defaults: Manager sees branch sales; Staff runs checkout.
-        if (moduleName === "pos") return role === "manager" ? "view" : role === "staff" ? "full" : "none";
-        return role === "manager" ? "full" : "none";
+        // Unspecified grants must not create employee privileges.
+        return "none";
     }
     const access = values[selected];
     if (access === true || access === 1 || access === "1" || access === "true" || access === "full") return "full";

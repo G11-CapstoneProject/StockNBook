@@ -1261,7 +1261,9 @@ async function getInventory(db,scope) {
     const [activity]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,
                                               COALESCE(e.name,'Archived equipment') AS equipmentName,m.type,m.quantity,
                                               DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
-                                              COALESCE(e.equipment_number,'') AS referenceNumber,m.description AS description
+                                              COALESCE((SELECT bk.booking_reference FROM bookings bk WHERE bk.store_id=m.store_id
+                                                                                                       AND bk.booking_reference=m.reference_number LIMIT 1),
+                                                 e.equipment_number,'') AS referenceNumber,m.description AS description
                                        FROM ${V2_RENTAL_MOVEMENTS} m LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
                                        WHERE m.store_id=? AND m.branch_id=? AND m.equipment_id IS NOT NULL ORDER BY m.occurred_at DESC,m.id DESC LIMIT 100`,
         [scope.storeId,scope.branchId]);
@@ -1351,7 +1353,7 @@ async function getInventory(db,scope) {
     const [categories]=await db.execute(`SELECT name FROM ${V2_RENTAL_CATEGORIES} c WHERE c.store_id=? AND c.archived_at IS NULL ORDER BY name`,
         [scope.storeId]);
     const unitNumbers=await identifiers.listEquipmentUnitNumbers(db,{storeId:scope.storeId,branchId:scope.branchId});
-    return {success:true, storeId:scope.storeId, branchId:scope.branchId, storeName:scope.storeName, branchName:scope.branchName, bookingSyncConnected: process.env.RENTAL_BOOKING_SYNC_ENABLED === "true", equipment:equipment.map(row=>({ ...row,id:Number(row.id),totalUnits:Number(row.totalUnits),
+    return {success:true, storeId:scope.storeId, branchId:scope.branchId, storeName:scope.storeName, branchName:scope.branchName, bookingSyncConnected: true, equipment:equipment.map(row=>({ ...row,id:Number(row.id),totalUnits:Number(row.totalUnits),
             unitNumbers:unitNumbers.get(Number(row.id))||[],
             bookableToday:rentalBookableProjection(row,bookedToday.get(Number(row.id))),
             rentedOutUnits:Number(row.rentedOutUnits),maintenanceUnits:Number(row.maintenanceUnits),missingUnits:Number(row.missingUnits),
@@ -1398,7 +1400,10 @@ function computePeak(rows, from, to, today) {
     return peak;
 }
 async function checkAvailability(db,scope,body) {
-    if(process.env.RENTAL_BOOKING_SYNC_ENABLED!=="true") fail(409,"Date availability is not connected to booking allocations yet. Connect booking/booking_items writes before enabling this filter.");
+    // Booking allocations ARE synchronized: the Bookings Lambda writes booking_items
+    // (Confirmed -> 'reserved', Cancelled -> 'cancelled') and this Lambda moves them on
+    // (release -> 'released', return -> 'returned'), so the old RENTAL_BOOKING_SYNC_ENABLED
+    // switch no longer blocks date availability.
     const from=isoDate(body.start_date,"Start date"),to=isoDate(body.end_date,"End date");
     if(from>to)fail(400,"End date must be on or after start date.");
     if((Date.parse(`${to}T00:00:00Z`)-Date.parse(`${from}T00:00:00Z`))/86400000>366)fail(400,"Availability range cannot exceed 366 days.");
@@ -1410,8 +1415,18 @@ async function checkAvailability(db,scope,body) {
                                                                             AND a.start_date<=? AND (a.end_date>=? OR a.status='checked_out')`,[scope.storeId,scope.branchId,to,from]);
     const grouped=new Map();for(const row of allocations){const k=Number(row.equipmentId);grouped.set(k,[...(grouped.get(k)||[]),row]);}
     const today=todayPh();
-    return {success:true,availability:equipment.map(e=>({equipmentId:Number(e.id),availableUnits:Math.max(0,
-                Number(e.total_units)-Number(e.maintenance_units)-Number(e.missing_units)-computePeak(grouped.get(Number(e.id))||[],from,to,today))}))};
+    // Per equipment, for the whole selected period (peak simultaneous use, not a sum):
+    //   availableUnits = usable (total - maintenance/inspection hold - missing)
+    //                    - peak of confirmed ('reserved') + released ('checked_out') allocations
+    //   reservedUnits  = peak of confirmed allocations not yet released.
+    // Rented Out (physically released) is branch_inventory.reserved_quantity, returned separately.
+    return {success:true,availability:equipment.map(e=>{
+            const rows=grouped.get(Number(e.id))||[];
+            const usable=Number(e.total_units)-Number(e.maintenance_units)-Number(e.missing_units);
+            return {equipmentId:Number(e.id),
+                availableUnits:Math.max(0,usable-computePeak(rows,from,to,today)),
+                reservedUnits:computePeak(rows.filter(row=>String(row.status)==="reserved"),from,to,today)};
+        })};
 }
 
 
@@ -1555,7 +1570,9 @@ async function staffRentalWorkspace(db, scope) {
     // on-hand increases or units return from reserved/held; Stock Out for the opposite.
     const [activity] = await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,COALESCE(e.name,'Archived equipment') AS equipmentName,
                                                 m.type,m.quantity,DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
-                                                COALESCE(e.equipment_number,'') AS referenceNumber,
+                                                COALESCE((SELECT bk.booking_reference FROM bookings bk WHERE bk.store_id=m.store_id
+                                                                                                         AND bk.booking_reference=m.reference_number LIMIT 1),
+                                                 e.equipment_number,'') AS referenceNumber,
                                                 CASE WHEN (m.quantity_bucket='on_hand')=(m.quantity_change>=0) THEN 'in' ELSE 'out' END AS direction
                                          FROM ${V2_RENTAL_MOVEMENTS} m LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
                                          WHERE m.store_id=? AND m.branch_id=?
@@ -2218,9 +2235,8 @@ function rentalInventoryPermission(permissions, role) {
     }
     if (!selected || typeof selected !== "object" || Array.isArray(selected)) selected = {};
     const value = selected.inventory_access !== undefined ? selected.inventory_access : selected.inventory;
-    // Older Manager records without an Inventory key retain their original
-    // full-access default; an explicit denial always takes priority.
-    if (value === undefined || value === null) return role === "manager" ? "full" : "none";
+    // Missing permissions are denied for all employee roles.
+    if (value === undefined || value === null) return "none";
     if (value === true || value === 1 || value === "true" || value === "full") return "full";
     if (["view", "view_only", "viewOnly"].includes(value)) return "view";
     return "none";
@@ -2230,6 +2246,21 @@ function rentalInventoryPermission(permissions, role) {
 const RENTAL_REQUEST_CACHE = new Map();
 
 const READ_ACTIONS = new Set(["get_manager_inventory","check_availability"]);
+// A booking-related rental handover requires an explicit Bookings Operational
+// grant in addition to Inventory Operational. General stock reporting needs only
+// the Inventory permission and remains unaffected.
+const STAFF_BOOKING_WRITE_ACTIONS = new Set([
+    "prepare_rental_allocation", "release_rental_allocation", "return_rental_allocation",
+    "inspect_rental_allocation", "clean_rental_allocation",
+    "release_rental_booking", "return_rental_booking",
+]);
+function staffBookingOperationalPermission(raw) {
+    let p = raw;
+    if (typeof p === "string") { try { p = JSON.parse(p); } catch { p = {}; } }
+    if (!p || typeof p !== "object" || Array.isArray(p)) return false;
+    // Explicit granular denial always overrides legacy boolean fields.
+    return p.bookings_access !== undefined ? p.bookings_access === "full" : false;
+}
 const STAFF_READ_ACTIONS = new Set(["get_staff_rental_workspace","get_staff_equipment_schedule","get_staff_equipment_calendar"]);
 const STAFF_WRITE_ACTIONS = new Set(["prepare_rental_allocation","release_rental_allocation",
     "return_rental_allocation","inspect_rental_allocation","clean_rental_allocation",
@@ -2304,6 +2335,8 @@ exports.handler = async (event) => {
             if(access==="none")fail(403,"Inventory access is not assigned to this Staff account.");
             if(STAFF_WRITE_ACTIONS.has(action) && access!=="full")
                 fail(403,"Full Inventory access is required for rental receiving, releases, returns and condition tasks.");
+            if (STAFF_BOOKING_WRITE_ACTIONS.has(action) && !staffBookingOperationalPermission(staff[0].permissions))
+                fail(403,"Bookings Operational access is required for booking-related rental actions.");
             actor=trim(staff[0].staff_name,150)||actor;
             actorId=staffId;
         }

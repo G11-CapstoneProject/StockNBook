@@ -3,7 +3,6 @@
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import OwnerReports from "@/components/reports/OwnerReports";
 import ManagerReports from "@/components/reports/ManagerReports";
-import StaffReports from "@/components/reports/StaffReports";
 import RequirePermission from "@/components/permissions/RequirePermission";
 import { ModulePageSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -47,7 +46,7 @@ export default function ReportsPage() {
         );
     }
 
-    if (!user) return null;
+    if (!user || role === "staff") return null;
 
     return (
         <RequirePermission permission="reports">
@@ -58,9 +57,7 @@ export default function ReportsPage() {
                         <OwnerReports key={workspaceKey} assignedBranch={branch} storeName={storeName} />
                     ) : role === "manager" ? (
                         <ManagerReports key={workspaceKey} assignedBranch={branch} storeName={storeName} />
-                    ) : (
-                        <StaffReports key={workspaceKey} assignedBranch={branch} storeName={storeName} />
-                    )}
+                    ) : null}
                 </main>
             </div>
         </RequirePermission>

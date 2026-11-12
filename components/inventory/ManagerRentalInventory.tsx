@@ -121,10 +121,12 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const [categoriesOpen, setCategoriesOpen] = React.useState(false);
     const [exportOpen, setExportOpen] = React.useState(false);
     const [dateFiltersOpen, setDateFiltersOpen] = React.useState(false);
-    const [fromDate, setFromDate] = React.useState("");
-    const [toDate, setToDate] = React.useState("");
+    // Date Availability opens on today (Asia/Manila) and loads automatically (see below).
+    const [fromDate, setFromDate] = React.useState(rentalToday);
+    const [toDate, setToDate] = React.useState(rentalToday);
     const [appliedDates, setAppliedDates] = React.useState<{from:string;to:string}|null>(null);
     const [datesAvailability, setDatesAvailability] = React.useState<Map<number,number>|null>(null);
+    const [datesReserved, setDatesReserved] = React.useState<Map<number,number>|null>(null);
     const [datesLoading, setDatesLoading] = React.useState(false);
     const [datesError, setDatesError] = React.useState("");
 
@@ -189,23 +191,31 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const conditionRange=`${conditionDateFilter==="all"?"All loaded records":conditionDateFilter==="today"?"Today":inventoryDateRangeLabel(conditionStartDate,conditionEndDate)} · ${conditionStatusFilter==="all"?"All status":conditionStatusFilter}${searchLabel}`;
 
     const resetDates = () => {
-        setAppliedDates(null); setDatesAvailability(null);
+        setAppliedDates(null); setDatesAvailability(null); setDatesReserved(null);
         // Returning to today retains the valid Fully Booked status filter.
         setDatesError("");
     };
-    const checkDates = async () => {
-        if (!fromDate || !toDate || toDate < fromDate) {
+    const checkDates = async (from = fromDate, to = toDate) => {
+        if (!from || !to || to < from) {
             setDatesError("Choose a valid start and end date."); return;
         }
-        setDatesError(""); setDatesLoading(true); setAppliedDates(null); setDatesAvailability(null);
+        setDatesError(""); setDatesLoading(true); setAppliedDates(null); setDatesAvailability(null); setDatesReserved(null);
         try {
-            const rows = await rental.checkAvailability(fromDate, toDate);
-            setDatesAvailability(new Map(rows.map(row => [row.equipmentId,row.availableUnits])));
-            setAppliedDates({from:fromDate,to:toDate});
+            const rows = await rental.checkAvailability(from, to);
+            setDatesAvailability(new Map(rows.map(row => [row.equipmentId,row.availableUnits]))); setDatesReserved(new Map(rows.map(row=>[row.equipmentId,row.reservedUnits])));
+            setAppliedDates({from,to});
         } catch(error) {
             setDatesError(error instanceof Error ? error.message : "Unable to check availability.");
         } finally { setDatesLoading(false); }
     };
+    // Load today's availability when the page opens (no Check Dates click needed).
+    const initialDatesChecked = React.useRef(false);
+    React.useEffect(() => {
+        if (initialDatesChecked.current) return;
+        initialDatesChecked.current = true;
+        void checkDates();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
     React.useEffect(() => {
         if (!appliedDates) return;
         let active=true;
@@ -214,12 +224,12 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             try {
                 const rows=await rental.checkAvailability(appliedDates.from,appliedDates.to);
                 if (active) {
-                    setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits])));
+                    setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits]))); setDatesReserved(new Map(rows.map(row=>[row.equipmentId,row.reservedUnits])));
                     setDatesError("");
                 }
             } catch (error) {
                 if (active) {
-                    setDatesAvailability(null); // Never leave a stale date availability on screen.
+                    setDatesAvailability(null); setDatesReserved(null); // Never leave a stale date availability on screen.
                     setDatesError(error instanceof Error ? error.message : "Unable to refresh rental availability.");
                 }
             }
@@ -237,10 +247,10 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             // quantities may have changed and must be rechecked immediately.
             try {
                 const rows=await rental.checkAvailability(appliedDates.from,appliedDates.to);
-                setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits])));
+                setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits]))); setDatesReserved(new Map(rows.map(row=>[row.equipmentId,row.reservedUnits])));
                 setDatesError("");
             } catch (error) {
-                setDatesAvailability(null);
+                setDatesAvailability(null); setDatesReserved(null);
                 setDatesError(error instanceof Error ? error.message : "Unable to refresh rental availability.");
             }
         } else resetDates();
@@ -282,7 +292,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     };
     const downloadExport = (format:"xlsx"|"pdf") => {
         setExportOpen(false);
-        const details = {category,status,appliedDates};
+        const details = {category,status,appliedDates,reserved:datesReserved};
         try {
             if (format === "xlsx") exportRentalExcel(filtered, details, datesAvailability);
             else exportRentalPdf(filtered, details, datesAvailability);
@@ -435,7 +445,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                         </RentalInventoryFilterSelect>
                         <button type="button" aria-expanded={dateFiltersOpen} onClick={()=>setDateFiltersOpen(v=>!v)}
                                 className="flex h-9 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
-                            <CalendarClock size={15}/> {appliedDates ? "Dates Applied" : "Date Availability"} <ChevronDown size={14}/>
+                            <CalendarClock size={15}/> {appliedDates ? (appliedDates.from === rentalToday() && appliedDates.to === rentalToday() ? "Today" : "Dates Applied") : "Date Availability"} <ChevronDown size={14}/>
                         </button>
                         <div className="relative">
                             <button type="button" aria-expanded={exportOpen} onClick={()=>setExportOpen(v=>!v)}
@@ -459,7 +469,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     </label>
                     <button type="button" disabled={!fromDate||!toDate||toDate<fromDate||datesLoading} onClick={()=>void checkDates()}
                             className="h-10 rounded-xl bg-[#2B174C] px-4 font-semibold text-white disabled:opacity-50">{datesLoading?"Checking...":"Check Dates"}</button>
-                    <button type="button" onClick={()=>{setFromDate("");setToDate("");resetDates();}}
+                    <button type="button" onClick={()=>{const today=rentalToday();setFromDate(today);setToDate(today);void checkDates(today,today);}}
                             className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-4 font-semibold text-[#2B174C]">Clear</button>
                     {datesError && <p role="alert" className="w-full text-red-700">{datesError}</p>}
                     <p className="w-full text-[#86778F]">Checking dates changes the Status and available quantity for that period. Fully Booked counts only confirmed reservations. Physical stock and equipment conditions are shown separately.</p>
@@ -482,18 +492,19 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                     </button>
                 </div>
                 {appliedDates && <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-xs font-medium text-[#5330B6]">
-                    Booking availability for {appliedDates.from} to {appliedDates.to} · The "Available" column and Status badges refer to these dates.
+                    <AvailabilityDatesNote from={appliedDates.from} to={appliedDates.to} today={rentalToday()}/>
                 </p>}
                 <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain border-t border-[#E9E1EE]" style={{ maxHeight: 360 }} role="region" aria-label="Branch rental equipment list" tabIndex={0}>
                     <table className="w-full min-w-0 table-auto text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[13%]"/><col className="w-[16%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[9.5%]"/><col className="w-[20%]"/></colgroup>
+                        <colgroup><col className="w-[12%]"/><col className="w-[13%]"/><col className="w-[8%]"/><col className="w-[7%]"/><col className="w-[8%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[7.5%]"/><col className="w-[9%]"/><col className="w-[20%]"/></colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                         <tr className="border-b border-[#E9E1EE]">
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment No.</th>
                             <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Rental Product</th>
                             <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Category</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Total Units</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">{appliedDates ? "Available" : "Available Today"}</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Available</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Reserved</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Rented Out</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">On Hold</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Status</th>
@@ -501,9 +512,9 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                         </tr>
                         </thead>
                         <tbody>
-                        {rental.loading ? <tr><td colSpan={9} className="p-5"><PanelSkeleton/></td></tr> :
-                            !rental.connected ? <tr><td colSpan={9} className="px-5 py-12 text-center text-sm text-[#86778F]">Rental data is not connected. No equipment is displayed here.</td></tr> :
-                                filtered.length === 0 ? <tr><td colSpan={9} className="px-5 py-12 text-center text-sm text-[#86778F]">No matching rental equipment.</td></tr> :
+                        {rental.loading ? <tr><td colSpan={10} className="p-5"><PanelSkeleton/></td></tr> :
+                            !rental.connected ? <tr><td colSpan={10} className="px-5 py-12 text-center text-sm text-[#86778F]">Rental data is not connected. No equipment is displayed here.</td></tr> :
+                                filtered.length === 0 ? <tr><td colSpan={10} className="px-5 py-12 text-center text-sm text-[#86778F]">No matching rental equipment.</td></tr> :
                                     filtered.map(item => (
                                         <tr key={item.id} className="h-12 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
                                             {/* Same typography as the Rental Product column; the complete number stays on one line. */}
@@ -512,6 +523,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                             <td className="px-2 py-2 text-[#5F4E75]">{item.category}</td>
                                             <td className="px-2 py-2 text-center font-semibold">{item.totalUnits}</td>
                                             <td className="px-2 py-2 text-center font-semibold" title={appliedDates ? "Available units for the selected date range" : "Available today after confirmed reservations; physically ready units are tracked separately"}>{appliedDates ? (datesAvailability?.get(item.id) ?? "—") : item.bookableToday}</td>
+                                            <td className="px-2 py-2 text-center" title="Confirmed bookings not yet released, for the selected dates">{appliedDates ? (datesReserved?.get(item.id) ?? "—") : "—"}</td>
                                             <td className="px-2 py-2 text-center">{item.rentedOutUnits}</td>
                                             <td className="px-2 py-2 text-center" title={`On hold for inspection, care, or repair: ${item.maintenanceUnits}. Unrecovered missing units: ${item.missingUnits}.`}>
                                                 <span>{item.maintenanceUnits}</span>
@@ -519,7 +531,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                             </td>
                                             <td className="px-2 py-2 text-center"><IssueBadge issue={equipmentDisplayStatus(item, true, appliedDates ? datesAvailability?.get(item.id) : item.bookableToday)} /></td>
                                             <td className="px-2 py-2 text-center">
-                                                <div className="flex flex-wrap items-center justify-center gap-1.5">
+                                                <div className="flex flex-nowrap items-center justify-center gap-1.5 whitespace-nowrap">
                                                     <button type="button" onClick={()=>setDialog({mode:"receive",item})} disabled={!canManage||!item.active}
                                                             aria-label={`Restock ${item.name}`}
                                                             className="inline-flex items-center gap-1 rounded-lg bg-[#E5F8EC] px-2.5 py-1.5 font-semibold text-[#23834A] hover:bg-[#D5F0DF] disabled:opacity-40"><PackagePlus size={13}/> Restock</button>
@@ -913,6 +925,22 @@ const rentalFieldClass = "w-full rounded-xl border border-[#E3D8EA] bg-white p-3
 const rentalLabelClass = "text-xs font-semibold text-[#5A476A]";
 function validRentalMoney(value:string) {
     return /^\d+(?:\.\d{1,2})?$/.test(value.trim()) && Number(value) <= 100000000;
+}
+// Date Availability banner: readable dates ("November 13, 2026"), one date or a range.
+function formatAvailabilityDate(value: string) {
+    const parsed = new Date(`${value}T12:00:00+08:00`);
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString("en-US", {
+        timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric",
+    });
+}
+function AvailabilityDatesNote({ from, to, today }: { from: string; to: string; today: string }) {
+    const single = from === to;
+    return <>
+        Showing booking availability {single ? "for" : "from"}{" "}
+        <strong className="font-semibold">{single && from === today ? "today, " : ""}{formatAvailabilityDate(from)}</strong>
+        {!single && <> to <strong className="font-semibold">{formatAvailabilityDate(to)}</strong></>}.
+        {" "}The Available and Reserved columns and Status badges reflect {single ? "this date" : "these dates"}.
+    </>;
 }
 function rentalToday() { return new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"}); }
 function validRentalDate(value:string) {
@@ -1331,15 +1359,16 @@ function peso(value:number|null|undefined) {
 
 type RentalExportFilters = {
     category:string;status:string;appliedDates:{from:string;to:string}|null;
+    reserved?:Map<number,number>|null;
 };
 function rentalReportRows(items:RentalEquipment[],filters:RentalExportFilters,availability:Map<number,number>|null) {
     const headings = ["Product No.","Rental Product","Category","Avg. Unit Cost (PHP)",
         "Rental Rate / Day (PHP)","Total Units","Available Now",
-        ...(filters.appliedDates?["Available in Selected Dates"]:[]),
+        ...(filters.appliedDates?["Available in Selected Dates","Reserved in Selected Dates"]:[]),
         "Rented Out","Maintenance","Missing","Status","Condition / Alert"];
     const rows = items.map(item => [item.equipmentNumber||"—",item.name,item.category,
         item.averageUnitCost??"—",item.rentalRatePerDay??"—",item.totalUnits,availableNow(item),
-        ...(filters.appliedDates?[availability?.get(item.id)??"—"]:[]),
+        ...(filters.appliedDates?[availability?.get(item.id)??"—",filters.reserved?.get(item.id)??"—"]:[]),
         item.rentedOutUnits,item.maintenanceUnits,item.missingUnits,
         // Same Status as the table column, so a Status-filtered export matches the screen.
         equipmentDisplayStatus(item,true,filters.appliedDates?availability?.get(item.id):item.bookableToday),

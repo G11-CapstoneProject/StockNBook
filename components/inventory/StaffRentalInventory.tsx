@@ -5,7 +5,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { SuccessToast, labelClass, fieldClass } from "./_shared";
 import {
     AlertTriangle, CalendarClock, ClipboardCheck, ClipboardList, CalendarDays,
-    PackageCheck, PackagePlus, PackageSearch, Search, Sparkles, Truck, X, ChevronLeft, ChevronRight, ChevronDown,
+    PackageCheck, PackagePlus, PackageSearch, Search, Truck, X, ChevronLeft, ChevronRight, ChevronDown,
 } from "lucide-react";
 import { useStaffRentalInventory, type StaffRentalEquipment, type StaffRentalAllocation, type StaffRentalAction, type StaffRentalEquipmentSchedule, type StaffRentalEquipmentCalendar } from "@/hooks/useRentalInventory";
 
@@ -196,6 +196,22 @@ function staffEquipmentStatusGroup(label:string):"Available"|"Unavailable"|null 
     if(label==="Unavailable"||label==="Fully Booked")return "Unavailable";
     return null;
 }
+// Date Availability banner: readable dates ("November 13, 2026"), one date or a range.
+function formatAvailabilityDate(value: string) {
+    const parsed = new Date(`${value}T12:00:00+08:00`);
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString("en-US", {
+        timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric",
+    });
+}
+function AvailabilityDatesNote({ from, to, today }: { from: string; to: string; today: string }) {
+    const single = from === to;
+    return <>
+        Showing booking availability {single ? "for" : "from"}{" "}
+        <strong className="font-semibold">{single && from === today ? "today, " : ""}{formatAvailabilityDate(from)}</strong>
+        {!single && <> to <strong className="font-semibold">{formatAvailabilityDate(to)}</strong></>}.
+        {" "}The Available and Reserved columns and Status badges reflect {single ? "this date" : "these dates"}.
+    </>;
+}
 function Empty({children}:{children:React.ReactNode}) {
     return <div className="flex min-h-28 flex-col items-center justify-center gap-2 p-5 text-center text-xs text-[#806A8C]"><PackageSearch size={22}/>{children}</div>;
 }
@@ -224,23 +240,33 @@ export default function StaffRentalInventory({branchName,section="inventory",que
     const [rentalActivityFilter,setRentalActivityFilter]=React.useState<"all"|"in"|"out">("all");
     // Date Availability: same Lambda check and behavior as the Manager Branch Rental Equipment List.
     const [dateFiltersOpen,setDateFiltersOpen]=React.useState(false);
-    const [fromDate,setFromDate]=React.useState("");
-    const [toDate,setToDate]=React.useState("");
+    // Date Availability opens on today (Asia/Manila) and loads automatically (see below).
+    const [fromDate,setFromDate]=React.useState(manilaDate);
+    const [toDate,setToDate]=React.useState(manilaDate);
     const [appliedDates,setAppliedDates]=React.useState<{from:string;to:string}|null>(null);
     const [datesAvailability,setDatesAvailability]=React.useState<Map<number,number>|null>(null);
+    const [datesReserved,setDatesReserved]=React.useState<Map<number,number>|null>(null);
     const [datesLoading,setDatesLoading]=React.useState(false);
     const [datesError,setDatesError]=React.useState("");
-    const resetDates=()=>{setAppliedDates(null);setDatesAvailability(null);setDatesError("");};
-    const checkDates=async()=>{
-        if(!fromDate||!toDate||toDate<fromDate){setDatesError("Choose a valid start and end date.");return;}
-        setDatesError("");setDatesLoading(true);setAppliedDates(null);setDatesAvailability(null);
+    const resetDates=()=>{setAppliedDates(null);setDatesAvailability(null);setDatesReserved(null);setDatesError("");};
+    const checkDates=async(from=fromDate,to=toDate)=>{
+        if(!from||!to||to<from){setDatesError("Choose a valid start and end date.");return;}
+        setDatesError("");setDatesLoading(true);setAppliedDates(null);setDatesAvailability(null);setDatesReserved(null);
         try{
-            const rows=await rental.checkAvailability(fromDate,toDate);
-            setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits])));
-            setAppliedDates({from:fromDate,to:toDate});
+            const rows=await rental.checkAvailability(from,to);
+            setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits]))); setDatesReserved(new Map(rows.map(row=>[row.equipmentId,row.reservedUnits])));
+            setAppliedDates({from,to});
         }catch(error){setDatesError(error instanceof Error?error.message:"Unable to check availability.");}
         finally{setDatesLoading(false);}
     };
+    // Load today's availability when the inventory view opens (not needed for the Bookings queue).
+    const initialDatesChecked=React.useRef(false);
+    React.useEffect(()=>{
+        if(!showInventory||initialDatesChecked.current)return;
+        initialDatesChecked.current=true;
+        void checkDates();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    },[]);
     React.useEffect(()=>{
         if(!appliedDates)return;
         let active=true;
@@ -248,10 +274,10 @@ export default function StaffRentalInventory({branchName,section="inventory",que
             if(document.visibilityState!=="visible")return;
             try{
                 const rows=await rental.checkAvailability(appliedDates.from,appliedDates.to);
-                if(active){setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits])));setDatesError("");}
+                if(active){setDatesAvailability(new Map(rows.map(row=>[row.equipmentId,row.availableUnits]))); setDatesReserved(new Map(rows.map(row=>[row.equipmentId,row.reservedUnits])));setDatesError("");}
             }catch(error){
                 if(active){
-                    setDatesAvailability(null); // Never leave a stale date availability on screen.
+                    setDatesAvailability(null);setDatesReserved(null); // Never leave a stale date availability on screen.
                     setDatesError(error instanceof Error?error.message:"Unable to refresh rental availability.");
                 }
             }
@@ -299,9 +325,6 @@ export default function StaffRentalInventory({branchName,section="inventory",que
         (!search.trim()||[event.equipmentName,event.referenceNumber].join(" ").toLowerCase().includes(search.trim().toLowerCase())));
     const equipmentById=React.useMemo(()=>new Map(rental.equipment.map(e=>[e.id,e])),[rental.equipment]);
     const allTasks=React.useMemo(()=>rental.allocations.map(a=>({item:a,type:taskType(a)})).filter(x=>x.type!==null),[rental.allocations]);
-    const inspectionTasks=allTasks.filter(x=>x.type==="inspect");
-    const inspection=inspectionTasks.length;
-    const inspectionUnits=inspectionTasks.reduce((sum,x)=>sum+(x.item.returnedReceivedUnits??x.item.quantity),0);
     // Earlier returns awaiting their one-time condition check also hold stock.
     // Show the SAME pending allocation in Equipment Care (not a duplicate task
     // or new maintenance record) so every genuine hold has a visible action.
@@ -397,10 +420,6 @@ export default function StaffRentalInventory({branchName,section="inventory",que
         }).finally(()=>{if(!abort.signal.aborted)setCalendarLoading(false);});
         return ()=>abort.abort();
     },[scheduleEquipmentId,scheduleMonth,rental.getEquipmentCalendar]);
-    // Count the Equipment Care rows (like Previous Returns); units are shown in the caption.
-    const cleaningTasks=careTasks.filter(t=>t.kind==="cleaning");
-    const cleaning=cleaningTasks.length;
-    const cleaningUnits=cleaningTasks.reduce((sum,t)=>sum+t.units,0);
     // Missing rows are report-scoped so replacement cannot accidentally change
     // a different booking's unresolved equipment or its customer claim.
     const missingCareTasks=rental.missingReports.map(report=>({
@@ -438,16 +457,6 @@ export default function StaffRentalInventory({branchName,section="inventory",que
         return Array.from(groups.values()).sort((left,right)=>
             compareQueueEventDates(left.scheduleDate,right.scheduleDate,today) || left.reference.localeCompare(right.reference));
     },[bookingTasks,today]);
-    // Release and return are booking-wide, so these KPIs count the same booking rows as the queue.
-    // Ready = every equipment line prepared and the rental start date reached.
-    const readyBookings=bookingGroups.filter(group=>group.tasks.length>0&&
-        group.tasks.every(x=>x.type==="release"&&x.item.startDate<=today));
-    const ready=readyBookings.length;
-    const readyUnits=readyBookings.reduce((sum,group)=>sum+group.tasks.reduce((s,x)=>s+x.item.quantity,0),0);
-    const dueReturnTasks=(group:BookingQueueGroup)=>group.tasks.filter(x=>x.type==="return"&&x.item.endDate<=today);
-    const returnBookings=bookingGroups.filter(group=>dueReturnTasks(group).length>0);
-    const forReturn=returnBookings.length;
-    const returnUnits=returnBookings.reduce((sum,group)=>sum+dueReturnTasks(group).reduce((s,x)=>s+x.item.quantity,0),0);
     // Filter booking rows by their matching individual task; the selected checklist
     // still shows ALL currently actionable equipment for that booking.
     const queueQuery=(queueSearch ?? search).trim().toLowerCase();
@@ -602,6 +611,7 @@ export default function StaffRentalInventory({branchName,section="inventory",que
             await rental.actStock({action:"staff_restock_equipment",equipmentId:restockItem.id,quantity});
             setNotice(`“${restockItem.name}” received +${quantity.toLocaleString("en-PH")} units in inventory.`);
             setRestockItem(null);
+            if(appliedDates)void checkDates(appliedDates.from,appliedDates.to);
         }catch(error){setRestockError(error instanceof Error?error.message:"Unable to receive stock.");}
     };
     const performStock=async()=>{
@@ -634,13 +644,28 @@ export default function StaffRentalInventory({branchName,section="inventory",que
     };
     return <div className="space-y-4" aria-label={showInventory?"Staff Rental Inventory":"Rental Operations Queue"}>
         {!canOperate&&<p role="status" className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3 text-xs text-[#5330B6]">View-only Inventory access: equipment activity is visible, but receiving, rental handover, returns, and condition changes require Full access.</p>}
+        {/* Staff Rental: match the four-card Consumable inventory presentation. */}
         {showInventory&&<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[
-            {title:"Ready for Release",num:ready,caption:`${readyUnits} units prepared for handover`,icon:<Truck size={19}/>},
-            {title:"For Return Today / Overdue",num:forReturn,caption:`${returnUnits} units due back`,icon:<CalendarClock size={19}/>},
-            {title:"Previous Returns To Finalize",num:inspection,caption:`${inspectionUnits} previously returned units on hold`,icon:<ClipboardCheck size={19}/>},
-            {title:"Needs Cleaning",num:cleaning,caption:`${cleaningUnits} units held until cleaning is recorded`,icon:<Sparkles size={19}/>},
-        ].map(c=>(
-            <div key={c.title} aria-busy={rental.loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
+            {title:"Available Today",num:rental.equipment.reduce((total,e)=>total+e.bookableToday,0),
+                caption:"Units available for rental bookings today",icon:<PackageCheck size={20}/>,tone:"green"},
+            {title:"Reserved Today",num:appliedDates?.from===today&&appliedDates?.to===today&&datesReserved
+                    ? Array.from(datesReserved.values()).reduce((total,units)=>total+units,0)
+                    : rental.allocations.filter(a=>a.status==="reserved"&&a.startDate<=today&&a.endDate>=today)
+                        .reduce((total,a)=>total+a.quantity,0),
+                caption:"Confirmed bookings not yet released",icon:<CalendarClock size={20}/>,tone:"purple"},
+            {title:"Rented Out",num:rental.equipment.reduce((total,e)=>total+e.rentedOutUnits,0),
+                caption:"Units physically released to customers",icon:<Truck size={20}/>,tone:"blue"},
+            {title:"On Hold",num:rental.equipment.reduce((total,e)=>total+e.maintenanceUnits,0),
+                caption:"Units held for equipment care or repair",icon:<ClipboardCheck size={20}/>,tone:"amber"},
+        ].map(c=>{
+            const iconTones: Record<string,string>={
+                green:"bg-[#E5F8EC] text-[#23834A]",
+                purple:"bg-[#F1ECFF] text-[#5F35D8]",
+                blue:"bg-[#E9F2FF] text-[#1E6FE8]",
+                amber:"bg-[#FFF3DE] text-[#E68A00]",
+            };
+            const iconTone=iconTones[c.tone];
+            return <section key={c.title} aria-busy={rental.loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
                 {rental.loading ? <>
                     <span className="h-14 w-14 shrink-0 animate-pulse rounded-full bg-[#EEE8F3]" aria-hidden="true"/>
                     <span className="min-w-0 flex-1 space-y-2.5" role="status" aria-label={`Loading ${c.title}`}>
@@ -649,15 +674,15 @@ export default function StaffRentalInventory({branchName,section="inventory",que
                         <span className="block h-2.5 w-40 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
                     </span>
                 </> : <>
-                    <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#F1EBFF] text-[#5A35A5]" aria-hidden="true">{c.icon}</span>
+                    <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconTone}`} aria-hidden="true">{c.icon}</span>
                     <span className="min-w-0 flex-1">
                         <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{c.title}</span>
                         <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{rental.connected ? c.num.toLocaleString("en-PH") : "—"}</span>
                         <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{rental.connected ? c.caption : "Rental data unavailable"}</span>
                     </span>
                 </>}
-            </div>
-        ))}</div>}
+            </section>;
+        })}</div>}
         {/* Rental Operations Queue: rendered only in Staff Bookings (section="queue"). */}
         {!showInventory&&<section className={`${panel} flex h-[340px] min-h-0 flex-col`}>
             <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
@@ -865,7 +890,7 @@ export default function StaffRentalInventory({branchName,section="inventory",que
                         </StaffRentalFilterSelect>
                         <button type="button" aria-expanded={dateFiltersOpen} onClick={()=>setDateFiltersOpen(v=>!v)}
                                 className="flex h-9 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
-                            <CalendarClock size={15}/> {appliedDates ? "Dates Applied" : "Date Availability"} <ChevronDown size={14}/>
+                            <CalendarClock size={15}/> {appliedDates ? (appliedDates.from === manilaDate() && appliedDates.to === manilaDate() ? "Today" : "Dates Applied") : "Date Availability"} <ChevronDown size={14}/>
                         </button>
                     </div>
                 </div>
@@ -878,7 +903,7 @@ export default function StaffRentalInventory({branchName,section="inventory",que
                     </label>
                     <button type="button" disabled={!fromDate||!toDate||toDate<fromDate||datesLoading} onClick={()=>void checkDates()}
                             className="h-10 rounded-xl bg-[#2B174C] px-4 font-semibold text-white disabled:opacity-50">{datesLoading?"Checking...":"Check Dates"}</button>
-                    <button type="button" onClick={()=>{setFromDate("");setToDate("");resetDates();}}
+                    <button type="button" onClick={()=>{const today=manilaDate();setFromDate(today);setToDate(today);void checkDates(today,today);}}
                             className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-4 font-semibold text-[#2B174C]">Clear</button>
                     {datesError && <p role="alert" className="w-full text-red-700">{datesError}</p>}
                     <p className="w-full text-[#86778F]">Checking dates changes the Status and available quantity for that period. Fully Booked counts only confirmed reservations. Physical stock and equipment conditions are shown separately.</p>
@@ -891,18 +916,19 @@ export default function StaffRentalInventory({branchName,section="inventory",que
                     </label>
                 </div>
                 {appliedDates && <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-xs font-medium text-[#5330B6]">
-                    Booking availability for {appliedDates.from} to {appliedDates.to} · The "Available" column and Status badges refer to these dates.
+                    <AvailabilityDatesNote from={appliedDates.from} to={appliedDates.to} today={manilaDate()}/>
                 </p>}
                 <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain border-t border-[#E9E1EE]" role="region" aria-label="Branch rental equipment list" tabIndex={0}>
                     <table className="w-full min-w-0 table-auto text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[14%]"/><col className="w-[17%]"/><col className="w-[10%]"/><col className="w-[7%]"/><col className="w-[8%]"/><col className="w-[7%]"/><col className="w-[7.5%]"/><col className="w-[9.5%]"/><col className="w-[20%]"/></colgroup>
+                        <colgroup><col className="w-[13%]"/><col className="w-[15%]"/><col className="w-[9%]"/><col className="w-[7%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[7%]"/><col className="w-[7.5%]"/><col className="w-[9%]"/><col className="w-[17%]"/></colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                         <tr className="border-b border-[#E9E1EE]">
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment No.</th>
                             <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Rental Product</th>
                             <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Category</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Total Units</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">{appliedDates ? "Available" : "Available Today"}</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Available</th>
+                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Reserved</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Rented Out</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">On Hold</th>
                             <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Status</th>
@@ -918,13 +944,14 @@ export default function StaffRentalInventory({branchName,section="inventory",que
                                 <td className="px-2 py-2 text-[#5F4E75]">{e.category}</td>
                                 <td className="px-2 py-2 text-center font-semibold">{e.totalUnits}</td>
                                 <td className="px-2 py-2 text-center font-semibold" title={appliedDates?"Available units for the selected date range":"Available today after overlapping confirmed reservations, not just physically ready units"}>{appliedDates?(datesAvailability?.get(e.id)??"—"):e.bookableToday}</td>
+                                <td className="px-2 py-2 text-center" title="Confirmed bookings not yet released, for the selected dates">{appliedDates?(datesReserved?.get(e.id)??"—"):"—"}</td>
                                 <td className="px-2 py-2 text-center">{e.rentedOutUnits}</td>
                                 <td className="px-2 py-2 text-center" title={`On Hold: ${holdBreakdown.get(e.id)?.inspection??0} inspection, ${holdBreakdown.get(e.id)?.cleaning??0} cleaning, ${holdBreakdown.get(e.id)?.routine??0} routine care, ${holdBreakdown.get(e.id)?.repairs??0} repair. Outstanding missing units: ${e.missingUnits}.`}>
                                     <span>{e.maintenanceUnits}</span>
                                     {e.missingUnits > 0 && <span className="mt-1 block whitespace-nowrap text-[10px] font-semibold text-[#B45309]">Missing: {e.missingUnits}</span>}
                                 </td>
                                 <td className="px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${availabilityColor}`}>{availability}</span></td>
-                                <td className="px-2 py-2 text-center"><div className="flex flex-wrap items-center justify-center gap-1.5">
+                                <td className="px-2 py-2 text-center"><div className="flex flex-nowrap items-center justify-center gap-1.5 whitespace-nowrap">
                                     <button type="button" className={scheduleAction} onClick={()=>openSchedule(e.id)}><CalendarDays size={13}/> View Schedule</button>
                                     <button type="button" className={restockAction} disabled={!canOperate} aria-label={`Restock ${e.name}`}
                                             title={canOperate?undefined:"Full Inventory access is required to restock."}

@@ -848,6 +848,7 @@ async function canReadAuditLogs(
     branchId: number | null, employeeId: number | null
 ) {
     if (role === "owner") return true;
+    if (role !== "manager") return false;
     if (!branchId || !employeeId) return false;
     const [rows] = await connection.execute(
         `SELECT permissions FROM users
@@ -1108,6 +1109,14 @@ export async function GET(request: NextRequest) {
                 connection, storeId, role, branchId, staffId, range, searchParams
             );
             return NextResponse.json({ success: true, data: audit });
+        }
+
+        // Staff never have a Reports workspace. The narrow employee-actions
+        // response below is retained for existing dashboard operations.
+        if (scope !== "employee_actions" && scope !== "employee-actions" &&
+            !(await canReadAuditLogs(connection, role, storeId, branchId,
+                role === "manager" ? asPositiveInteger(token.manager_id ?? token.managerId) : null))) {
+            return jsonError("You do not have permission to view reports.", 403);
         }
 
         // Staff dashboard only needs today's employee activity. Allow it to

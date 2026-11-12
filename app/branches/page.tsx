@@ -31,7 +31,6 @@ type Permissions = {
     pos: boolean;
     reports: boolean;
     staff_management: boolean;
-    branch_settings: boolean;
 };
 
 type Branch = {
@@ -121,7 +120,6 @@ const defaultPermissions: Permissions = {
     pos: true,
     reports: false,
     staff_management: false,
-    branch_settings: false,
 };
 
 function getBranchStatus(branch: Branch): BranchStatus {
@@ -1490,7 +1488,6 @@ export default function BranchesPage() {
                                         <div className="grid gap-2 sm:grid-cols-2">
                                             {(
                                                 [
-                                                    ["dashboard", "Dashboard"],
                                                     ["bookings", "Bookings"],
                                                     ["packages", "Packages"],
                                                     [
@@ -1499,14 +1496,10 @@ export default function BranchesPage() {
                                                     ],
                                                     ["inventory", "Inventory"],
                                                     ["pos", "Sales / POS"],
-                                                    ["reports", "Reports"],
+                                                    ["reports", "Audit Logs"],
                                                     [
                                                         "staff_management",
                                                         "Staff Management",
-                                                    ],
-                                                    [
-                                                        "branch_settings",
-                                                        "Branch Settings",
                                                     ],
                                                 ] as Array<
                                                     [keyof Permissions, string]
@@ -1517,12 +1510,12 @@ export default function BranchesPage() {
                                                     label={label}
                                                     checked={addPermissions[key]}
                                                     onChange={(checked) =>
-                                                        setAddPermissions(
-                                                            (current) => ({
-                                                                ...current,
-                                                                [key]: checked,
-                                                            })
-                                                        )
+                                                        setAddPermissions((current) => ({
+                                                            ...current,
+                                                            [key]: checked,
+                                                            ...(key === "packages" && !checked ? { packages_manage: false } : {}),
+                                                            ...(key === "packages_manage" && checked ? { packages: true } : {}),
+                                                        }))
                                                     }
                                                 />
                                             ))}
@@ -1774,6 +1767,7 @@ export default function BranchesPage() {
                                                 setEditPermissions((prev) => ({
                                                     ...prev,
                                                     packages: checked,
+                                                    ...(checked ? {} : { packages_manage: false }),
                                                 }))
                                             }
                                         />
@@ -1786,6 +1780,7 @@ export default function BranchesPage() {
                                                 setEditPermissions((prev) => ({
                                                     ...prev,
                                                     packages_manage: checked,
+                                                    ...(checked ? { packages: true } : {}),
                                                 }))
                                             }
                                         />
@@ -1810,7 +1805,7 @@ export default function BranchesPage() {
                                             }
                                         />
                                         <AccessToggle
-                                            label="Reports"
+                                            label="Audit Logs"
                                             checked={editPermissions.reports}
                                             onChange={(checked) =>
                                                 setEditPermissions((prev) => ({
@@ -1828,18 +1823,6 @@ export default function BranchesPage() {
                                                 setEditPermissions((prev) => ({
                                                     ...prev,
                                                     staff_management: checked,
-                                                }))
-                                            }
-                                        />
-                                        <AccessToggle
-                                            label="Branch Settings"
-                                            checked={
-                                                editPermissions.branch_settings
-                                            }
-                                            onChange={(checked) =>
-                                                setEditPermissions((prev) => ({
-                                                    ...prev,
-                                                    branch_settings: checked,
                                                 }))
                                             }
                                         />

@@ -910,9 +910,9 @@ function validatePackageInput(pkg) {
     return "";
 }
 
-// Fetch live package access for the signed-in branch account. A Manager's
-// unconfigured permission keeps its default full access; Staff must be
-// explicitly granted view/full. Never trust browser-stored permissions.
+// Package visibility and mutation are separate grants. Managers need both
+// packages + packages_manage for writes; Staff are always read-only.
+// Resolve current account permissions from the database, never the browser.
 async function getPackageAccess(connection, decoded, role, storeId) {
     if (role === "owner") return "full";
     if (role !== "manager" && role !== "staff") return "none";
@@ -924,7 +924,7 @@ async function getPackageAccess(connection, decoded, role, storeId) {
     const [rows] = await connection.execute(
         `SELECT permissions FROM users
          WHERE id = ? AND store_id = ? AND branch_id = ? AND role = ? AND status = 'active'
-             LIMIT 1`,
+         LIMIT 1`,
         [accountId, storeId, branchId, role]
     );
     if (!rows.length) return "none";
@@ -932,14 +932,14 @@ async function getPackageAccess(connection, decoded, role, storeId) {
     if (typeof permissions === "string") {
         try { permissions = JSON.parse(permissions); } catch { permissions = {}; }
     }
-    if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) {
-        permissions = {};
-    }
-    const value = permissions.packages;
-    if (isManager && value === undefined) return "full";
-    if (value === true || value === "full" || value === "true") return "full";
-    if (value === "view" || value === "view_only" || value === "viewOnly") return "view";
-    return "none";
+    if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) return "none";
+    const selected = isManager ? permissions.packages :
+        (permissions.package_access !== undefined ? permissions.package_access : permissions.packages);
+    const canView = selected === true || selected === "true" || selected === "full" ||
+        selected === "view" || selected === "view_only" || selected === "viewOnly";
+    if (!canView) return "none";
+    if (isManager && permissions.packages_manage === true) return "full";
+    return "view";
 }
 
 exports.handler = async (event) => {

@@ -1147,6 +1147,130 @@ function sanitizeEmailHeader(value) {
         .trim();
 }
 
+// Only the Owner can grant Manager-level modules. Dashboard and the
+// read-only branch Settings information are not optional role grants.
+function normalizeManagerRolePermissions(raw) {
+    const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const enabled = (key) => source[key] === true;
+    return {
+        dashboard: true,
+        bookings: enabled("bookings"),
+        packages: enabled("packages"),
+        packages_manage: enabled("packages") && enabled("packages_manage"),
+        inventory: enabled("inventory"),
+        pos: enabled("pos"),
+        reports: enabled("reports"), // Existing backend key for Audit Logs.
+        staff_management: enabled("staff_management"),
+    };
+}
+
+// Staff permissions are an explicit allowlist. A Manager cannot delegate
+// modules the Owner did not grant or use crafted requests to grant Manager
+// powers (Reports/Audit Logs, Analytics, Forecasting, branch administration).
+function normalizeStaffRolePermissions(raw, managerRaw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw Object.assign(new Error("Provide a valid staff permission object."), { statusCode: 400 });
+    }
+    let manager = managerRaw;
+    if (typeof manager === "string") {
+        try { manager = JSON.parse(manager); } catch { manager = {}; }
+    }
+    if (!manager || typeof manager !== "object" || Array.isArray(manager)) manager = {};
+    const allowedKeys = new Set([
+        "dashboard", "pos", "pos_access", "bookings", "bookings_access",
+        "inventory", "inventory_access", "inventory_stock_receive",
+        "packages", "package_access",
+        // These older fields may still be submitted as disabled by existing clients.
+        "reports", "reports_access", "analytics", "analytics_access",
+        "forecasting", "forecasting_access"
+    ]);
+    const disabled = (value) => value === false || value === "none" || value === null || value === undefined;
+    for (const [key, value] of Object.entries(raw)) {
+        if (!allowedKeys.has(key) && !disabled(value)) {
+            throw Object.assign(new Error(`Staff cannot receive the ${key} permission.`), { statusCode: 403 });
+        }
+        if (["reports", "reports_access", "analytics", "analytics_access", "forecasting", "forecasting_access"].includes(key) && !disabled(value)) {
+            throw Object.assign(new Error("Audit Logs, Analytics and Forecasting cannot be delegated to Staff."), { statusCode: 403 });
+        }
+    }
+    const mode = (key, fallbackKey, accepted) => {
+        const value = raw[key] === undefined ? raw[fallbackKey] : raw[key];
+        if (disabled(value)) return "none";
+        if (value === true || value === "true") {
+            return accepted.includes("full") ? "full" : "view";
+        }
+        if (typeof value === "string" && accepted.includes(value)) return value;
+        throw Object.assign(new Error(`Invalid ${key} access level.`), { statusCode: 400 });
+    };
+    const pos = mode("pos_access", "pos", ["view", "full"]);
+    const bookings = mode("bookings_access", "bookings", ["view", "full"]);
+    const inventory = mode("inventory_access", "inventory", ["view", "full"]);
+    const packages = mode("package_access", "packages", ["view"]);
+    for (const [key, access] of Object.entries({ pos, bookings, inventory, packages })) {
+        if (access !== "none" && manager[key] !== true) {
+            throw Object.assign(new Error(`Your account cannot delegate ${key} access.`), { statusCode: 403 });
+        }
+    }
+    const receive = raw.inventory_stock_receive === true;
+    if (receive && (inventory !== "full" || manager.inventory !== true)) {
+        throw Object.assign(new Error("Stock receiving requires authorized full Inventory access."), { statusCode: 403 });
+    }
+    if (raw.dashboard !== undefined && raw.dashboard !== true) {
+        throw Object.assign(new Error("Staff Dashboard is always available."), { statusCode: 400 });
+    }
+    return {
+        dashboard: true,
+        pos: pos !== "none", pos_access: pos,
+        bookings: bookings !== "none", bookings_access: bookings,
+        inventory: inventory !== "none", inventory_access: inventory,
+        inventory_stock_receive: receive,
+        packages: packages !== "none", package_access: packages,
+    };
+}
+
+// Role defaults apply only to missing/invalid legacy permissions. A successful
+// login must NEVER overwrite an Owner/Manager-selected invitation grant.
+function effectiveEmployeePermissions(raw, role) {
+    let value = raw;
+    if (typeof value === "string") {
+        try { value = JSON.parse(value); } catch { value = {}; }
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) value = {};
+    if (role === "manager") return normalizeManagerRolePermissions(value);
+    if (role !== "staff") return {};
+    const level = (field, fallback, permitted) => {
+        const candidate = value[field] === undefined ? value[fallback] : value[field];
+        if (candidate === true || candidate === "true") return permitted.includes("full") ? "full" : "view";
+        if (typeof candidate === "string" && permitted.includes(candidate)) return candidate;
+        // Prior Bookings standard-confirmation privileges must NOT be retained.
+        if (field === "bookings_access" && ["standard", "confirm_standard"].includes(candidate)) return "view";
+        return "none";
+    };
+    const pos = level("pos_access", "pos", ["view", "full"]);
+    const bookings = level("bookings_access", "bookings", ["view", "full"]);
+    const inventory = level("inventory_access", "inventory", ["view", "full"]);
+    const packages = level("package_access", "packages", ["view"]);
+    return {
+        dashboard: true,
+        pos: pos !== "none", pos_access: pos,
+        bookings: bookings !== "none", bookings_access: bookings,
+        inventory: inventory !== "none", inventory_access: inventory,
+        inventory_stock_receive: inventory === "full" && value.inventory_stock_receive === true,
+        packages: packages !== "none", package_access: packages,
+    };
+}
+
+// Permission changes appear in the Owner's employee-action Audit Logs.
+async function recordStaffPermissionChange(connection, { storeId, branchId, managerId, managerName, staffId, action, permissions }) {
+    await connection.execute(
+        `INSERT INTO employee_actions
+         (store_id, branch_id, user_id, user_name, user_role, module, reference_number, action, entity_id, details)
+         VALUES (?, ?, ?, ?, 'Manager', 'Staff Management', NULL, ?, ?, ?)`,
+        [storeId, branchId, managerId, String(managerName || "Manager").slice(0, 150),
+            action, staffId, JSON.stringify({ staff_id: staffId, permissions })]
+    );
+}
+
 function permissionLabel(permission) {
     const labels = {
         dashboard: "Dashboard",
@@ -1155,7 +1279,7 @@ function permissionLabel(permission) {
         packages_manage: "Manage Packages",
         inventory: "Inventory",
         pos: "Sales / POS",
-        reports: "Reports",
+        reports: "Audit Logs",
         analytics: "Analytics",
         forecasting: "Forecasting",
         staff_management: "Staff Management",
@@ -1388,11 +1512,6 @@ function buildStaffInvitationEmail({
         { label: "Bookings", flag: "bookings", access: "bookings_access" },
         { label: "Inventory", flag: "inventory", access: "inventory_access" },
         { label: "Packages", flag: "packages", access: "package_access" },
-        { label: "Reports", flag: "reports", access: "reports_access" },
-        { label: "Analytics", flag: "analytics", access: "analytics_access" },
-        { label: "Forecasting", flag: "forecasting", access: "forecasting_access" },
-        { label: "Staff Management", flag: "staff_management" },
-        { label: "Branch Settings", flag: "branch_settings" },
     ];
     const enabledPermissions = invitationModules.flatMap(({ label, flag, access }) => {
         const granular = access ? permissions?.[access] : undefined;
@@ -1403,7 +1522,7 @@ function buildStaffInvitationEmail({
 
     const permissionItems = enabledPermissions.length > 0
         ? enabledPermissions.map(({ label, level }) =>
-            `<span style="display:inline-block;margin:4px 18px 4px 0;color:#5B32C5;font-size:13px;font-weight:700;">${escapeHtml(label)}${level === "View Only" ? ' <span style="color:#8A7896;font-weight:400;">(View only)</span>' : ""}</span>`
+            `<span style="display:inline-block;margin:4px 18px 4px 0;color:#5B32C5;font-size:13px;font-weight:700;">${escapeHtml(label)}${level === "View Only" ? ' <span style="color:#8A7896;font-weight:400;">(View only)</span>' : label === "Dashboard" ? "" : ' <span style="color:#8A7896;font-weight:400;">(Operational access)</span>'}</span>`
         ).join("")
         : `<span style="color:#7A6E88;font-size:13px;">Your access will be configured by your branch manager.</span>`;
 
@@ -3814,7 +3933,7 @@ module.exports.handler = async (event) => {
                         const inviteLink =
                             `${APP_BASE_URL}/accept-invite?token=${encodeURIComponent(inviteToken)}`;
 
-                        const permissions = branch.permissions || {};
+                        const permissions = normalizeManagerRolePermissions(branch.permissions);
 
                         // Permanent role-specific Employee ID within this store and branch.
                         const employeeCode = await identifiers.generateEmployeeCode(connection, {
@@ -4382,7 +4501,7 @@ module.exports.handler = async (event) => {
             const staffEmail = String(body.staff_email || "")
                 .trim()
                 .toLowerCase();
-            const permissions = body.permissions || {};
+            const requestedPermissions = body.permissions;
 
             if (!staffName || !staffEmail) {
                 return {
@@ -4451,6 +4570,14 @@ module.exports.handler = async (event) => {
                 };
             }
 
+            let permissions;
+            try {
+                permissions = normalizeStaffRolePermissions(requestedPermissions, managerPermissions);
+            } catch (err) {
+                return { statusCode: err.statusCode || 400, headers,
+                    body: JSON.stringify({ error: err.message }) };
+            }
+
             const [existingStaff] = await connection.execute(
                 `SELECT id
                  FROM users
@@ -4516,8 +4643,11 @@ module.exports.handler = async (event) => {
                 roleCode: "SF",
             });
 
-            await connection.execute(
-                `INSERT INTO users
+            let invitedStaffResult;
+            await connection.beginTransaction();
+            try {
+                [invitedStaffResult] = await connection.execute(
+                    `INSERT INTO users
                  (
                      store_id,
                      branch_id,
@@ -4531,18 +4661,29 @@ module.exports.handler = async (event) => {
                      employee_code
                  )
                  VALUES (?, ?, ?, 'staff', COALESCE(?, ''), ?, SHA2(?, 256), ?, ?, ?)`,
-                [
-                    storeId,
-                    branchId,
-                    managerId,
-                    staffName,
-                    staffEmail,
-                    inviteToken,
-                    "pending",
-                    JSON.stringify(permissions),
-                    employeeCode,
-                ]
-            );
+                    [
+                        storeId,
+                        branchId,
+                        managerId,
+                        staffName,
+                        staffEmail,
+                        inviteToken,
+                        "pending",
+                        JSON.stringify(permissions),
+                        employeeCode,
+                    ]
+                );
+
+                await recordStaffPermissionChange(connection, {
+                    storeId, branchId, managerId, managerName: manager.manager_name,
+                    staffId: Number(invitedStaffResult.insertId), action: "Invited staff with permissions", permissions,
+                });
+
+                await connection.commit();
+            } catch (err) {
+                await connection.rollback();
+                throw err;
+            }
 
             const invitation = {
                 staff_email: staffEmail,
@@ -4861,10 +5002,7 @@ module.exports.handler = async (event) => {
                         store_name: manager.store_name,
                         branch_id: manager.branch_id,
                         branch_name: manager.branch_name,
-                        permissions:
-                            typeof manager.permissions === "string"
-                                ? JSON.parse(manager.permissions || "{}")
-                                : manager.permissions || {},
+                        permissions: effectiveEmployeePermissions(manager.permissions, "manager"),
                     }),
                 };
             }
@@ -4943,10 +5081,7 @@ module.exports.handler = async (event) => {
                         store_name: staff.store_name,
                         branch_id: staff.branch_id,
                         branch_name: staff.branch_name,
-                        permissions:
-                            typeof staff.permissions === "string"
-                                ? JSON.parse(staff.permissions || "{}")
-                                : staff.permissions || {},
+                        permissions: effectiveEmployeePermissions(staff.permissions, "staff"),
                     }),
                 };
             }
@@ -5400,7 +5535,7 @@ module.exports.handler = async (event) => {
                         branch_name: staff.branch_name,
                         role: "staff",
                         status: "active",
-                        permissions: staff.permissions,
+                        permissions: effectiveEmployeePermissions(staff.permissions, "staff"),
                     }),
                 };
             } catch (inviteError) {
@@ -5802,7 +5937,8 @@ module.exports.handler = async (event) => {
             const managerId = decoded.manager_id;
             const storeId = decoded.store_id;
             const branchId = decoded.branch_id;
-            const { staff_id, staff_email, permissions = {} } = body;
+            const { staff_id, staff_email } = body;
+            const requestedPermissions = body.permissions;
 
             if (!staff_id && !staff_email) {
                 return {
@@ -5813,7 +5949,7 @@ module.exports.handler = async (event) => {
             }
 
             const [managerRows] = await connection.execute(
-                `SELECT permissions
+                `SELECT permissions, full_name
                  FROM users
                  WHERE id = ?
                    AND role = 'manager'
@@ -5847,50 +5983,81 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            let result;
+            let permissions;
+            try {
+                permissions = normalizeStaffRolePermissions(requestedPermissions, managerPermissions);
+            } catch (err) {
+                return { statusCode: err.statusCode || 400, headers,
+                    body: JSON.stringify({ error: err.message }) };
+            }
 
-            if (staff_id) {
-                [result] = await connection.execute(
-                    `UPDATE users
+            const [targetStaff] = await connection.execute(
+                `SELECT id FROM users WHERE role = 'staff' AND store_id = ? AND branch_id = ?
+                 AND manager_id = ? AND ${staff_id ? "id = ?" : "email = ?"} LIMIT 1`,
+                [storeId, branchId, managerId, staff_id || staff_email]
+            );
+            if (!targetStaff.length) {
+                return { statusCode: 404, headers, body: JSON.stringify({ error: "Staff not found" }) };
+            }
+
+            let result;
+            await connection.beginTransaction();
+            try {
+                if (staff_id) {
+                    [result] = await connection.execute(
+                        `UPDATE users
                      SET permissions = ?
                      WHERE id = ?
                        AND role = 'staff'
                        AND store_id = ?
                        AND branch_id = ?
                        AND manager_id = ?`,
-                    [
-                        JSON.stringify(permissions || {}),
-                        staff_id,
-                        storeId,
-                        branchId,
-                        managerId,
-                    ]
-                );
-            } else {
-                [result] = await connection.execute(
-                    `UPDATE users
+                        [
+                            JSON.stringify(permissions || {}),
+                            staff_id,
+                            storeId,
+                            branchId,
+                            managerId,
+                        ]
+                    );
+                } else {
+                    [result] = await connection.execute(
+                        `UPDATE users
                      SET permissions = ?
                      WHERE email = ?
                        AND role = 'staff'
                        AND store_id = ?
                        AND branch_id = ?
                        AND manager_id = ?`,
-                    [
-                        JSON.stringify(permissions || {}),
-                        staff_email,
-                        storeId,
-                        branchId,
-                        managerId,
-                    ]
-                );
-            }
+                        [
+                            JSON.stringify(permissions || {}),
+                            staff_email,
+                            storeId,
+                            branchId,
+                            managerId,
+                        ]
+                    );
+                }
 
-            if (result.affectedRows === 0) {
-                return {
-                    statusCode: 404,
-                    headers,
-                    body: JSON.stringify({ error: "Staff not found" }),
-                };
+                if (result.affectedRows === 0) {
+                    await connection.rollback();
+                    return {
+                        statusCode: 404,
+                        headers,
+                        body: JSON.stringify({ error: "Staff not found" }),
+                    };
+                }
+
+                await recordStaffPermissionChange(connection, {
+                    storeId, branchId, managerId,
+                    managerName: managerRows[0].full_name || "Manager",
+                    staffId: Number(targetStaff[0].id),
+                    action: "Updated staff permissions", permissions,
+                });
+                await connection.commit();
+            } catch (err) {
+                await connection.rollback();
+                throw err;
             }
 
             return {
@@ -6154,12 +6321,7 @@ module.exports.handler = async (event) => {
                 .trim()
                 .toLowerCase();
 
-            const permissions =
-                body.permissions &&
-                typeof body.permissions === "object" &&
-                !Array.isArray(body.permissions)
-                    ? body.permissions
-                    : {};
+            const permissions = normalizeManagerRolePermissions(body.permissions);
 
             if (!branchId) {
                 return {
@@ -6772,6 +6934,7 @@ module.exports.handler = async (event) => {
                 manager_email,
                 permissions = {},
             } = body;
+            const validatedManagerPermissions = normalizeManagerRolePermissions(permissions);
 
             if (!branch_id || !branch_name) {
                 return {
@@ -6866,7 +7029,7 @@ module.exports.handler = async (event) => {
                     [
                         manager_name || null,
                         manager_email || null,
-                        JSON.stringify(permissions || {}),
+                        JSON.stringify(validatedManagerPermissions),
                         branch_id,
                         storeId,
                     ]
@@ -6884,7 +7047,7 @@ module.exports.handler = async (event) => {
                         branch_status: normalizedBranchStatus,
                         inactive_reason:
                         normalizedInactiveReason,
-                        saved_permissions: permissions,
+                        saved_permissions: validatedManagerPermissions,
                     }),
                 };
             } catch (err) {
@@ -7179,10 +7342,7 @@ module.exports.handler = async (event) => {
                         store_name: manager.store_name,
                         branch_id: manager.branch_id,
                         branch_name: manager.branch_name,
-                        permissions:
-                            typeof manager.permissions === "string"
-                                ? JSON.parse(manager.permissions || "{}")
-                                : manager.permissions || {},
+                        permissions: effectiveEmployeePermissions(manager.permissions, "manager"),
                     }),
                 };
             }
@@ -7234,10 +7394,7 @@ module.exports.handler = async (event) => {
                         branch_id: staff.branch_id,
                         branch_name: staff.branch_name,
                         manager_id: staff.manager_id,
-                        permissions:
-                            typeof staff.permissions === "string"
-                                ? JSON.parse(staff.permissions || "{}")
-                                : staff.permissions || {},
+                        permissions: effectiveEmployeePermissions(staff.permissions, "staff"),
                     }),
                 };
             }

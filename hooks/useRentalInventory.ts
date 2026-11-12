@@ -150,6 +150,8 @@ export type RentalSummary = {
 export type RentalAvailability = {
     equipmentId: number;
     availableUnits: number;
+    // Confirmed but not yet released units in the selected period (peak simultaneous).
+    reservedUnits: number;
 };
 
 export type RentalIssue = {
@@ -506,8 +508,9 @@ export function useRentalInventory(branchId?: number) {
             start_date: startDate, end_date: endDate});
         if (!Array.isArray(result.availability)) throw new Error("Availability data was not returned.");
         return result.availability
-            .filter((v: unknown): v is {equipmentId: number; availableUnits: number} => Boolean(v && typeof v === "object"))
-            .map((v) => ({equipmentId: Number(v.equipmentId), availableUnits: nonnegativeInteger(v.availableUnits)}))
+            .filter((v: unknown): v is {equipmentId: number; availableUnits: number; reservedUnits?: number} => Boolean(v && typeof v === "object"))
+            .map((v) => ({equipmentId: Number(v.equipmentId), availableUnits: nonnegativeInteger(v.availableUnits),
+                reservedUnits: nonnegativeInteger(v.reservedUnits)}))
             .filter(v => Number.isSafeInteger(v.equipmentId) && v.equipmentId > 0);
     }, [validBranchId, invalidExplicitBranch]);
 
@@ -734,8 +737,9 @@ export function useStaffRentalInventory() {
         const result=await rentalRequest({action:"check_availability",start_date:startDate,end_date:endDate});
         if(!Array.isArray(result.availability))throw new Error("Availability data was not returned.");
         return result.availability
-            .filter((v: unknown): v is {equipmentId: number; availableUnits: number} => Boolean(v && typeof v === "object"))
-            .map((v) => ({equipmentId: Number(v.equipmentId), availableUnits: nonnegativeInteger(v.availableUnits)}))
+            .filter((v: unknown): v is {equipmentId: number; availableUnits: number; reservedUnits?: number} => Boolean(v && typeof v === "object"))
+            .map((v) => ({equipmentId: Number(v.equipmentId), availableUnits: nonnegativeInteger(v.availableUnits),
+                reservedUnits: nonnegativeInteger(v.reservedUnits)}))
             .filter(v => Number.isSafeInteger(v.equipmentId) && v.equipmentId > 0);
     },[]);
     return { equipment, allocations, activity, pendingReceipts, maintenanceTasks, missingReports,

@@ -498,7 +498,7 @@ const V2_INVENTORY_BATCHES = `(SELECT
 const V2_INVENTORY_MOVEMENTS = `(SELECT
         m.id, m.store_id, m.branch_id, m.branch_inventory_id, m.movement_type,
         m.quantity_change AS quantity_delta, m.quantity_before, m.quantity_after, m.unit_cost,
-        m.reference_type,
+        m.reference_type, m.reference_id AS source_reference_id,
         CASE WHEN m.reason LIKE 'Ref %: %'
                  THEN SUBSTRING_INDEX(SUBSTRING(m.reason, 5), ': ', 1)
              ELSE CAST(m.reference_id AS CHAR) END AS reference_id,
@@ -2820,7 +2820,7 @@ exports.handler = async (event) => {
             try { permissions = typeof manager.permissions === "string" ? JSON.parse(manager.permissions) : manager.permissions || {}; }
             catch { permissions = {}; }
             const value = permissions.inventory_access !== undefined ? permissions.inventory_access : permissions.inventory;
-            const access = value === undefined || value === null || value === true || value === "true" || value === "full"
+            const access = value === true || value === "true" || value === "full"
                 ? "full" : ["view","view_only","viewOnly"].includes(value) ? "view" : "none";
             if (access === "none" || (access !== "full" && !inventoryReadActions.has(action))) {
                 return jsonResponse(403, headers, {error: "Insufficient Manager Inventory permission."});
@@ -2973,7 +2973,8 @@ exports.handler = async (event) => {
                 try {managerPermissions=typeof managers[0].permissions==="string" ? JSON.parse(managers[0].permissions) : (managers[0].permissions||{});}
                 catch { managerPermissions={}; }
                 if (["set_staff_receiving_permission","get_staff_receiving_permissions"].includes(action)) {
-                    if (managerPermissions.staff_management!==true) return unauthorized(headers,"Staff management access required.");
+                    if (managerPermissions.staff_management!==true || managerPermissions.inventory!==true)
+                        return unauthorized(headers,"Staff management and Inventory access are both required.");
                 } else if (managerPermissions.inventory!==true && managerPermissions.inventory_access!=="full") {
                     return unauthorized(headers,"Manager inventory access required.");
                 }
@@ -3020,6 +3021,20 @@ exports.handler = async (event) => {
             const manilaDayStartEpoch = Math.floor(Date.parse(`${manilaToday}T00:00:00Z`) / 1000) - 8 * 3600;
             const operationalMovementsOnly = `m.movement_type <> 'OPENING_BALANCE'
                     AND (m.reference_type IS NULL OR m.reference_type <> 'DEMO_SEED')`;
+            // Staff activity Reference No. (today's list and the activity history): the POS order
+            // number, else the booking reference, else the product number. Restocks, stock edits and
+            // opening stock always show the product number (also for variant products); other
+            // variant lines show their variant number. Never internal IDs or request keys.
+            const staffActivityReferenceSql = `COALESCE(
+                (SELECT o.order_number FROM orders o WHERE m.reference_type='POS_ORDER'
+                   AND o.order_id=m.source_reference_id AND o.store_id=m.store_id LIMIT 1),
+                (SELECT bk.booking_reference FROM bookings bk WHERE m.reference_type='BOOKING'
+                   AND bk.id=m.source_reference_id AND bk.store_id=m.store_id LIMIT 1),
+                CASE WHEN m.reference_type='STOCK_RECEIPT'
+                       OR m.movement_type IN ('OPENING_STOCK','MANAGER_RECEIPT','STAFF_RECEIPT')
+                     THEN p.product_number END,
+                CASE WHEN p.has_variants=1 THEN NULLIF(pv.variant_number,'') END,
+                p.product_number)`;
             if (action === "get_staff_inventory_activity") {
                 const filter = ["all","sales","receiving","adjustments"].includes(body.filter) ? body.filter : "all";
                 const period = ["today","week","all"].includes(body.period) ? body.period : "week";
@@ -3039,8 +3054,8 @@ exports.handler = async (event) => {
                 const [rows] = await connection.execute(
                     `SELECT m.id, m.created_at AS at, p.name AS productName,
                             pv.variant_values AS variantValues, m.movement_type AS kind,
-                            m.quantity_delta AS quantity, m.reference_id AS reference,
-                            m.actor_name AS actorName
+                            m.quantity_delta AS quantity, ${staffActivityReferenceSql} AS reference,
+                         m.actor_name AS actorName
                      FROM ${V2_INVENTORY_MOVEMENTS} m
                          JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
                          JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
@@ -3079,14 +3094,13 @@ exports.handler = async (event) => {
                     `SELECT m.id, m.created_at AS at, p.name AS productName,
                             pv.variant_values AS variantValues, m.movement_type AS kind,
                             m.quantity_delta AS quantity, m.reference_type AS referenceType,
-                            CASE WHEN m.movement_type IN ('OPENING_STOCK','PRODUCT_DELETION') OR m.reference_id IS NULL OR m.reference_id=''
-                                 THEN p.product_number ELSE m.reference_id END AS reference, m.actor_name AS actorName
+                         ${staffActivityReferenceSql} AS reference, m.actor_name AS actorName
                      FROM ${V2_INVENTORY_MOVEMENTS} m
-                    JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
-                    JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
-                    LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id=bi.variant_id AND pv.product_id=p.id
-                    WHERE m.store_id=? AND m.branch_id=? AND ${operationalMovementsOnly}
-                    ORDER BY m.created_at DESC, m.id DESC LIMIT 8`, [storeId,activeBranchId]);
+                         JOIN ${V2_BRANCH_INVENTORY} bi ON bi.id=m.branch_inventory_id AND bi.store_id=m.store_id AND bi.branch_id=m.branch_id
+                         JOIN ${V2_PRODUCTS} p ON p.id=bi.product_id
+                         LEFT JOIN ${V2_PRODUCT_VARIANTS} pv ON pv.id=bi.variant_id AND pv.product_id=p.id
+                     WHERE m.store_id=? AND m.branch_id=? AND ${operationalMovementsOnly}
+                     ORDER BY m.created_at DESC, m.id DESC LIMIT 8`, [storeId,activeBranchId]);
                 // A proper daily count, independent of list limits and previous days.
                 // Count actual movement rows, not unique POS orders or stock units.
                 const [todayRows] = await connection.execute(

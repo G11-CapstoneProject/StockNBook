@@ -78,11 +78,6 @@ const invitationPermissionModules = [
     { label: "Bookings", flag: "bookings", access: "bookings_access" },
     { label: "Inventory", flag: "inventory", access: "inventory_access" },
     { label: "Packages", flag: "packages", access: "package_access" },
-    { label: "Reports", flag: "reports", access: "reports_access" },
-    { label: "Analytics", flag: "analytics", access: "analytics_access" },
-    { label: "Forecasting", flag: "forecasting", access: "forecasting_access" },
-    { label: "Staff Management", flag: "staff_management" },
-    { label: "Branch Settings", flag: "branch_settings" },
 ] as const;
 
 function getVisibleStaffAccess(permissions: Record<string, unknown>) {
@@ -90,10 +85,10 @@ function getVisibleStaffAccess(permissions: Record<string, unknown>) {
         const granular = "access" in module ? permissions[module.access] : undefined;
         const granted = granular !== undefined ? granular : permissions[module.flag];
         if (granted === true || granted === "full" || granted === "true") {
-            return [{ label: module.label, viewOnly: false }];
+            return [{ label: module.label, accessLabel: module.flag === "dashboard" ? "" : module.flag === "packages" ? "View only" : "Operational access" }];
         }
         if (granted === "view" || granted === "view_only" || granted === "viewOnly") {
-            return [{ label: module.label, viewOnly: true }];
+            return [{ label: module.label, accessLabel: "View only" }];
         }
         return [];
     });
@@ -153,10 +148,10 @@ function PermissionChips({ permissions }: { permissions: Record<string, unknown>
 
     return (
         <div className="flex flex-wrap gap-x-5 gap-y-2" aria-label="Assigned modules">
-            {enabledPermissions.map(({ label, viewOnly }) => (
+            {enabledPermissions.map(({ label, accessLabel }) => (
                 <span key={label} className="text-sm font-semibold text-[#5B32C5]">
                     {label}
-                    {viewOnly && <span className="ml-1 font-normal text-[#8A7896]">(View only)</span>}
+                    {accessLabel && <span className="ml-1 font-normal text-[#8A7896]">({accessLabel})</span>}
                 </span>
             ))}
         </div>

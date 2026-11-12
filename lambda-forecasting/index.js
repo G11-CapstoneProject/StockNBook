@@ -129,6 +129,11 @@ function getScopeFromToken(decoded, body, headers) {
         };
     }
 
+    // Forecasting is a management-only module regardless of legacy grants.
+    if (!["owner", "manager"].includes(role)) {
+        return { error: unauthorized(headers, "Forecasting is not available to this role.") };
+    }
+
     if (isBranchUser && !tokenBranchId) {
         return {
             error: badRequest(

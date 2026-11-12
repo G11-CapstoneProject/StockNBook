@@ -9,7 +9,6 @@ import PlanFeatureGate from "@/components/permissions/PlanFeatureGate";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import ManagerForecast from "@/components/forecasting/ManagerForecast";
 import OwnerForecast from "@/components/forecasting/OwnerForecast";
-import StaffForecast from "@/components/forecasting/staffForecast";
 import {
     ForecastLoadingState,
     formatCurrentDateTime,
@@ -28,7 +27,6 @@ export default function ForecastingPage() {
     } | null;
 
     const role = String(currentUser?.role || "").toLowerCase();
-    const hasForecastingAccess = currentUser?.permissions?.forecasting === true;
 
     useEffect(() => {
         const updateTime = () => setCurrentDateTime(new Date());
@@ -42,19 +40,17 @@ export default function ForecastingPage() {
     useEffect(() => {
         if (userLoading || !currentUser) return;
 
-        if (role === "staff" && !hasForecastingAccess) {
+        if (role === "staff") {
             router.push("/dashboard");
         }
-    }, [userLoading, currentUser, role, hasForecastingAccess, router]);
+    }, [userLoading, currentUser, role, router]);
 
     const subtitle =
         role === "owner"
             ? "Compare customer demand, seasonal patterns, and booking demand across branches"
-            : role === "staff"
-                ? "Review projected product demand and upcoming booking demand for your assigned branch"
-                : "Review projected product demand, seasonal signals, and upcoming booking demand for your assigned branch";
+            : "Review projected product demand, seasonal signals, and upcoming booking demand for your assigned branch";
 
-    if (!userLoading && role === "staff" && !hasForecastingAccess) {
+    if (!userLoading && role === "staff") {
         return null;
     }
 
@@ -114,8 +110,6 @@ export default function ForecastingPage() {
                             <PlanFeatureGate feature="forecasting">
                                 {role === "owner" ? (
                                     <OwnerForecast {...forecast} />
-                                ) : role === "staff" ? (
-                                    <StaffForecast {...forecast} />
                                 ) : (
                                     <ManagerForecast {...forecast} />
                                 )}

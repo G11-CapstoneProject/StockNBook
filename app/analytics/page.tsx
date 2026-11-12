@@ -9,7 +9,6 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { AnalyticsLoadingScreen } from "@/components/analytics/_shared";
 import OwnerAnalytics from "@/components/analytics/OwnerAnalytics";
 import ManagerAnalytics from "@/components/analytics/ManagerAnalytics";
-import StaffAnalytics from "@/components/analytics/StaffAnalytics";
 import PlanFeatureGate from "@/components/permissions/PlanFeatureGate";
 
 function formatCurrentDateTime(value: Date) {
@@ -41,7 +40,6 @@ export default function AnalyticsPage() {
     } | null;
 
     const role = String(currentUser?.role || "").trim().toLowerCase();
-    const hasAnalyticsAccess = currentUser?.permissions?.analytics === true;
 
     useEffect(() => {
         const updateTime = () => setCurrentDateTime(new Date());
@@ -55,25 +53,23 @@ export default function AnalyticsPage() {
     useEffect(() => {
         if (userLoading || !currentUser) return;
 
-        if (role === "staff" && !hasAnalyticsAccess) {
+        if (role === "staff") {
             router.push("/dashboard");
         }
-    }, [userLoading, currentUser, role, hasAnalyticsAccess, router]);
+    }, [userLoading, currentUser, role, router]);
 
     if (userLoading) {
         return <AnalyticsLoadingScreen />;
     }
 
-    if (!user) {
+    if (!user || role === "staff") {
         return null;
     }
 
     const subtitle =
         role === "owner"
             ? "Track sales performance, customer demand, and business insights across branches"
-            : role === "staff"
-                ? "Review analytics and performance insights for your assigned branch"
-                : "Review sales performance, customer demand, and branch insights";
+            : "Review sales performance, customer demand, and branch insights";
 
     return (
         <RequirePermission permission="analytics">
@@ -122,8 +118,6 @@ export default function AnalyticsPage() {
                                 <OwnerAnalytics />
                             ) : role === "manager" ? (
                                 <ManagerAnalytics />
-                            ) : hasAnalyticsAccess ? (
-                                <StaffAnalytics />
                             ) : null}
                         </PlanFeatureGate>
                     </section>

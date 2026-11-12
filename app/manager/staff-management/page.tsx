@@ -27,7 +27,6 @@ import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react
 import { useRouter } from "next/navigation";
 
 type AccessMode = "none" | "view" | "full";
-type ReportsAccessMode = "none" | "full";
 type StaffStatusFilter = "all" | "active" | "inactive" | "pending";
 
 type StaffPermissions = {
@@ -41,12 +40,6 @@ type StaffPermissions = {
     inventory_stock_receive: boolean;
     packages: boolean;
     package_access: AccessMode;
-    reports: boolean;
-    reports_access: ReportsAccessMode;
-    analytics: boolean;
-    analytics_access: AccessMode;
-    forecasting: boolean;
-    forecasting_access: AccessMode;
 };
 
 type PendingInvite = {
@@ -73,22 +66,6 @@ type StaffMember = {
     permissions: StaffPermissions;
 };
 
-type SubscriptionPlanAccess = {
-    name: string;
-    hasAnalytics: boolean;
-    hasForecasting: boolean;
-};
-
-type SubscriptionClientResponse = {
-    subscription?: {
-        plan?: {
-            name?: string | null;
-            has_analytics?: boolean;
-            has_forecasting?: boolean;
-        };
-    };
-};
-
 const defaultPermissions: StaffPermissions = {
     dashboard: true,
     pos: false,
@@ -100,12 +77,6 @@ const defaultPermissions: StaffPermissions = {
     inventory_stock_receive: false,
     packages: false,
     package_access: "none",
-    reports: false,
-    reports_access: "none",
-    analytics: false,
-    analytics_access: "none",
-    forecasting: false,
-    forecasting_access: "none",
 };
 
 function formatCurrentDateTime(value: Date) {
@@ -131,13 +102,6 @@ export default function ManagerStaffManagementPage() {
 
     const [branchName, setBranchName] = useState("Assigned branch");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
-
-    const [planAccess, setPlanAccess] = useState<SubscriptionPlanAccess>({
-        name: "Current",
-        hasAnalytics: false,
-        hasForecasting: false,
-    });
-    const [planAccessLoading, setPlanAccessLoading] = useState(true);
 
     const [staffName, setStaffName] = useState("");
     const [staffEmail, setStaffEmail] = useState("");
@@ -172,52 +136,6 @@ export default function ManagerStaffManagementPage() {
 
     const getToken = () => sessionStorage.getItem("token") || "";
 
-    const loadPlanAccess = useCallback(async () => {
-        const token = getToken();
-
-        if (!token) {
-            setPlanAccessLoading(false);
-            return;
-        }
-
-        try {
-            setPlanAccessLoading(true);
-
-            const res = await fetch("/api/subscription-client", {
-                method: "GET",
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    Accept: "application/json",
-                },
-                cache: "no-store",
-            });
-
-            const data = (await res.json()) as SubscriptionClientResponse;
-
-            if (!res.ok) {
-                throw new Error("Failed to verify subscription plan.");
-            }
-
-            const plan = data.subscription?.plan;
-
-            setPlanAccess({
-                name: String(plan?.name || "Current"),
-                hasAnalytics: plan?.has_analytics === true,
-                hasForecasting: plan?.has_forecasting === true,
-            });
-        } catch {
-            // Fail closed: if the plan cannot be verified, premium permissions
-            // stay locked instead of accidentally being grantable.
-            setPlanAccess({
-                name: "Current",
-                hasAnalytics: false,
-                hasForecasting: false,
-            });
-        } finally {
-            setPlanAccessLoading(false);
-        }
-    }, []);
-
     const loadStaff = useCallback(async () => {
         const token = getToken();
 
@@ -248,21 +166,9 @@ export default function ManagerStaffManagementPage() {
             const rawStaff = data.staff || data.staff_list || [];
             const rawPending = data.pending_invites || data.pendingInvites || data.invites || [];
 
-            // Independent server-owned grant avoids relying on a JWT/session flag.
-            let grants: Record<string, boolean> = {};
-            try {
-                const grantResponse = await fetch("/api/products", {method:"POST", cache:"no-store",
-                    headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
-                    body:JSON.stringify({action:"get_staff_receiving_permissions"})});
-                const grantData = await grantResponse.json().catch(()=>({}));
-                if (grantResponse.ok && Array.isArray(grantData.grants)) {
-                    grants = Object.fromEntries(grantData.grants.map((g:{staffId:number;allowed:boolean})=>[String(g.staffId), g.allowed === true]));
-                }
-            } catch { /* Keep grants fail-closed if the endpoint is unavailable. */ }
-            setStaffList(rawStaff.map((item:unknown)=>{
-                const staff=normalizeStaffMember(item);
-                return {...staff, permissions:{...staff.permissions, inventory_stock_receive:grants[String(staff.id)]===true}};
-            }));
+            // Staff Management already returns the current DB permission JSON.
+            // No secondary Inventory endpoint is needed when editing staff roles.
+            setStaffList(rawStaff.map(normalizeStaffMember));
             setPendingInvites(rawPending.map(normalizePendingInvite));
         } catch {
             alert("Something went wrong while loading staff.");
@@ -321,8 +227,7 @@ export default function ManagerStaffManagementPage() {
 
         setBranchName(sessionStorage.getItem("branch_name") || "Assigned branch");
         loadStaff();
-        void loadPlanAccess();
-    }, [router, loadStaff, loadPlanAccess]);
+    }, [router, loadStaff]);
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -363,7 +268,7 @@ export default function ManagerStaffManagementPage() {
 
 
     const updateFeatureAccess = (
-        feature: "pos" | "bookings" | "inventory" | "packages" | "analytics" | "forecasting",
+        feature: "pos" | "bookings" | "inventory" | "packages",
         value: AccessMode
     ) => {
         const accessKey = feature === "packages" ? "package_access" : `${feature}_access`;
@@ -371,20 +276,15 @@ export default function ManagerStaffManagementPage() {
         setPermissions((prev) => ({
             ...prev,
             [feature]: value !== "none",
-            [accessKey]: value,
-        }));
-    };
-
-    const updateReportsAccess = (value: ReportsAccessMode) => {
-        setPermissions((prev) => ({
-            ...prev,
-            reports: value !== "none",
-            reports_access: value,
+            [accessKey]: feature === "packages"
+                ? (value === "none" ? "none" : "view") : value,
+            ...(feature === "inventory" && value !== "full"
+                ? { inventory_stock_receive: false } : {}),
         }));
     };
 
     const updateEditFeatureAccess = (
-        feature: "pos" | "bookings" | "inventory" | "packages" | "analytics" | "forecasting",
+        feature: "pos" | "bookings" | "inventory" | "packages",
         value: AccessMode
     ) => {
         const accessKey = feature === "packages" ? "package_access" : `${feature}_access`;
@@ -392,7 +292,10 @@ export default function ManagerStaffManagementPage() {
         setEditPermissions((prev) => ({
             ...prev,
             [feature]: value !== "none",
-            [accessKey]: value,
+            [accessKey]: feature === "packages"
+                ? (value === "none" ? "none" : "view") : value,
+            ...(feature === "inventory" && value !== "full"
+                ? { inventory_stock_receive: false } : {}),
         }));
     };
 
@@ -502,18 +405,6 @@ export default function ManagerStaffManagementPage() {
                 return;
             }
 
-            // The auth Lambda handles module permissions; the products Lambda
-            // persists the narrowly scoped receiving grant after that update.
-            const grantResponse = await fetch("/api/products", {method:"POST",cache:"no-store",
-                headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
-                body:JSON.stringify({action:"set_staff_receiving_permission", staffId:editingStaff.id,
-                    allowed:editPermissions.inventory_stock_receive && editPermissions.inventory_access === "full"})});
-            const grantResult = await grantResponse.json().catch(()=>({}));
-            if (!grantResponse.ok || !grantResult.success) {
-                alert(`General permissions were saved, but stock receiving permission was not updated: ${grantResult.error || "server error"}. Please retry.`);
-                await loadStaff();
-                return;
-            }
             window.dispatchEvent(new Event("stocknbook-permissions-updated"));
             setEditingStaff(null);
             await loadStaff();
@@ -1186,11 +1077,13 @@ export default function ManagerStaffManagementPage() {
 
                                     <div className="mt-5 border-t border-[#E6DDF0] pt-5">
                                         <h3 className="text-[16px] font-bold text-[#1A1220]">Feature access</h3>
-                                        <p className="mt-1 text-xs text-[#7A6A84]">Choose which modules this staff member can access.</p>
+                                        <p className="mt-1 text-xs text-[#7A6A84]">Choose which modules this staff member can access. Operational booking tasks require Inventory operational access as well; approval and payments stay with the Manager.</p>
 
                                         <div className="mt-4 space-y-3">
                                             <AccessModeRow
                                                 label="POS / Sales"
+                                                allowView
+                                                fullLabel="Operational access"
                                                 value={permissions.pos_access}
                                                 onChange={(value) => updateFeatureAccess("pos", value as AccessMode)}
                                             />
@@ -1198,48 +1091,22 @@ export default function ManagerStaffManagementPage() {
                                                 label="Bookings"
                                                 value={permissions.bookings_access}
                                                 allowView
-                                                fullLabel="Standard Confirmation & Operations"
+                                                fullLabel="Operational access"
                                                 onChange={(value) => updateFeatureAccess("bookings", value as AccessMode)}
                                             />
                                             <AccessModeRow
                                                 label="Inventory"
+                                                allowView
+                                                fullLabel="Operational access"
                                                 value={permissions.inventory_access}
                                                 onChange={(value) => updateFeatureAccess("inventory", value as AccessMode)}
                                             />
                                             <AccessModeRow
                                                 label="Packages"
+                                                allowView
+                                                allowFull={false}
                                                 value={permissions.package_access}
                                                 onChange={(value) => updateFeatureAccess("packages", value as AccessMode)}
-                                            />
-                                            <AccessModeRow
-                                                label="Reports"
-                                                value={permissions.reports_access}
-                                                allowView={false}
-                                                onChange={(value) => updateReportsAccess(value as ReportsAccessMode)}
-                                            />
-                                            <AccessModeRow
-                                                label="Analytics"
-                                                value={permissions.analytics_access}
-                                                allowView={false}
-                                                locked={planAccessLoading || !planAccess.hasAnalytics}
-                                                lockText={
-                                                    planAccessLoading
-                                                        ? "Checking plan..."
-                                                        : `Not included in ${planAccess.name} plan`
-                                                }
-                                                onChange={(value) => updateFeatureAccess("analytics", value as AccessMode)}
-                                            />
-                                            <AccessModeRow
-                                                label="Forecasting"
-                                                value={permissions.forecasting_access}
-                                                allowView={false}
-                                                locked={planAccessLoading || !planAccess.hasForecasting}
-                                                lockText={
-                                                    planAccessLoading
-                                                        ? "Checking plan..."
-                                                        : `Not included in ${planAccess.name} plan`
-                                                }
-                                                onChange={(value) => updateFeatureAccess("forecasting", value as AccessMode)}
                                             />
                                         </div>
                                     </div>
@@ -1293,6 +1160,8 @@ export default function ManagerStaffManagementPage() {
                             <div className="space-y-3">
                                 <AccessModeRow
                                     label="POS / Sales"
+                                    allowView
+                                    fullLabel="Operational access"
                                     value={editPermissions.pos_access}
                                     onChange={(value) => updateEditFeatureAccess("pos", value as AccessMode)}
                                 />
@@ -1300,42 +1169,22 @@ export default function ManagerStaffManagementPage() {
                                     label="Bookings"
                                     value={editPermissions.bookings_access}
                                     allowView
-                                    fullLabel="Standard Confirmation & Operations"
+                                    fullLabel="Operational access"
                                     onChange={(value) => updateEditFeatureAccess("bookings", value as AccessMode)}
                                 />
                                 <AccessModeRow
                                     label="Inventory"
+                                    allowView
+                                    fullLabel="Operational access"
                                     value={editPermissions.inventory_access}
                                     onChange={(value) => updateEditFeatureAccess("inventory", value as AccessMode)}
                                 />
                                 <AccessModeRow
                                     label="Packages"
+                                    allowView
+                                    allowFull={false}
                                     value={editPermissions.package_access}
                                     onChange={(value) => updateEditFeatureAccess("packages", value as AccessMode)}
-                                />
-                                <AccessModeRow
-                                    label="Analytics"
-                                    value={editPermissions.analytics_access}
-                                    allowView={false}
-                                    locked={planAccessLoading || !planAccess.hasAnalytics}
-                                    lockText={
-                                        planAccessLoading
-                                            ? "Checking plan..."
-                                            : `Not included in ${planAccess.name} plan`
-                                    }
-                                    onChange={(value) => updateEditFeatureAccess("analytics", value as AccessMode)}
-                                />
-                                <AccessModeRow
-                                    label="Forecasting"
-                                    value={editPermissions.forecasting_access}
-                                    allowView={false}
-                                    locked={planAccessLoading || !planAccess.hasForecasting}
-                                    lockText={
-                                        planAccessLoading
-                                            ? "Checking plan..."
-                                            : `Not included in ${planAccess.name} plan`
-                                    }
-                                    onChange={(value) => updateEditFeatureAccess("forecasting", value as AccessMode)}
                                 />
                             </div>
                         </div>
@@ -1399,14 +1248,11 @@ function normalizePermissions(raw: any): StaffPermissions {
 
     parsed = parsed || {};
 
+    // Preserve the exact stored POS level. View-only must never turn into checkout access.
     const posAccess = getAccessValue(parsed.pos_access, parsed.pos);
     const bookingsAccess = getBookingAccessValue(parsed.bookings_access, parsed.bookings);
     const inventoryAccess = getAccessValue(parsed.inventory_access, parsed.inventory);
-    const packageAccess = getAccessValue(parsed.package_access, parsed.packages);
-    const reportsAccess = getReportsAccessValue(parsed.reports_access, parsed.reports);
-    const analyticsAccess = getAccessValue(parsed.analytics_access, parsed.analytics);
-    const forecastingAccess = getAccessValue(parsed.forecasting_access, parsed.forecasting);
-
+    const packageAccess = getReadOnlyAccessValue(parsed.package_access, parsed.packages);
     return {
         // Every staff member gets the dashboard — it's no longer a toggle.
         dashboard: true,
@@ -1419,36 +1265,28 @@ function normalizePermissions(raw: any): StaffPermissions {
         inventory_stock_receive: parsed.inventory_stock_receive === true,
         packages: packageAccess !== "none",
         package_access: packageAccess,
-        reports: reportsAccess !== "none",
-        reports_access: reportsAccess,
-        analytics: analyticsAccess !== "none",
-        analytics_access: analyticsAccess,
-        forecasting: forecastingAccess !== "none",
-        forecasting_access: forecastingAccess,
     };
 }
 
 function getAccessValue(value: any, legacyBoolean: any): AccessMode {
     if (value === "full" || value === "none") return value;
-    if (value === "view") return "full";
+    if (value === "view") return "view";
     if (legacyBoolean === true) return "full";
     return "none";
 }
 
-// Booking read-only must remain read-only; other legacy feature access
-// normalization is intentionally left untouched.
-function getBookingAccessValue(value: any, legacyBoolean: any): AccessMode {
-    if (value === "full" || value === "standard" || value === "confirm_standard") return "full";
-    if (value === "view") return "view";
+// Staff Booking Operational Access permits only physical fulfillment through
+// authorized Inventory actions; previous standard-confirmation is read-only.
+function getReadOnlyAccessValue(value: any, legacyBoolean: any): AccessMode {
     if (value === "none") return "none";
+    if (["view", "full", "standard", "confirm_standard", "view_only"].includes(value)) return "view";
     return legacyBoolean === true ? "view" : "none";
 }
 
-function getReportsAccessValue(value: any, legacyBoolean: any): ReportsAccessMode {
-    if (value === "full" || value === "none") return value;
-    if (value === "view") return "full";
-    if (legacyBoolean === true) return "full";
-    return "none";
+function getBookingAccessValue(value: any, legacyBoolean: any): AccessMode {
+    if (value === "full") return "full";
+    if (value === "standard" || value === "confirm_standard") return "view";
+    return getReadOnlyAccessValue(value, legacyBoolean);
 }
 
 function SummaryCard({
@@ -1571,8 +1409,8 @@ function AccessModeRow({
                            lockText = "Not included in current plan",
                        }: {
     label: string;
-    value: AccessMode | ReportsAccessMode;
-    onChange: (value: AccessMode | ReportsAccessMode) => void;
+    value: AccessMode;
+    onChange: (value: AccessMode) => void;
     allowFull?: boolean;
     allowView?: boolean;
     fullLabel?: string;
@@ -1617,7 +1455,7 @@ function AccessModeRow({
             ) : (
                 <select
                     value={value}
-                    onChange={(e) => onChange(e.target.value as AccessMode | ReportsAccessMode)}
+                    onChange={(e) => onChange(e.target.value as AccessMode)}
                     className="h-[38px] min-w-[136px] rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                 >
                     <option value="none">No access</option>
@@ -1674,13 +1512,10 @@ function formatPermissions(permissions: StaffPermissions) {
     const list: string[] = [];
 
     if (permissions.pos_access !== "none") list.push(`POS / Sales: ${formatAccess(permissions.pos_access)}`);
-    if (permissions.bookings_access !== "none") list.push(`Bookings: ${permissions.bookings_access === "full" ? "Standard Confirmation & Operations" : "View only"}`);
+    if (permissions.bookings_access !== "none") list.push(`Bookings: ${formatAccess(permissions.bookings_access)}`);
     if (permissions.inventory_access !== "none") list.push(`Inventory: ${formatAccess(permissions.inventory_access)}`);
     if (permissions.inventory_stock_receive) list.push("Authorized Stock Receiver");
     if (permissions.package_access !== "none") list.push(`Packages: ${formatAccess(permissions.package_access)}`);
-    if (permissions.reports_access !== "none") list.push(`Reports: ${formatAccess(permissions.reports_access)}`);
-    if (permissions.analytics_access !== "none") list.push(`Analytics: ${formatAccess(permissions.analytics_access)}`);
-    if (permissions.forecasting_access !== "none") list.push(`Forecasting: ${formatAccess(permissions.forecasting_access)}`);
 
     return list.length > 0 ? list.join(", ") : "No access";
 }
@@ -1691,16 +1526,13 @@ function formatRoleSummary(permissions: StaffPermissions) {
     if (permissions.bookings_access !== "none") shortLabels.push("Bookings");
     if (permissions.inventory_access !== "none") shortLabels.push("Inventory");
     if (permissions.package_access !== "none") shortLabels.push("Packages");
-    if (permissions.reports_access !== "none") shortLabels.push("Reports");
-    if (permissions.analytics_access !== "none") shortLabels.push("Analytics");
-    if (permissions.forecasting_access !== "none") shortLabels.push("Forecasting");
     return shortLabels.length > 0 ? shortLabels.join(" & ") : "No access";
 }
 
-function formatAccess(value: AccessMode | ReportsAccessMode) {
+function formatAccess(value: AccessMode) {
     if (value === "none") return "No access";
     if (value === "view") return "View only";
-    return "Full access";
+    return "Operational access";
 }
 
 function getInitials(name: string) {

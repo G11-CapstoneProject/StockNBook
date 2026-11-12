@@ -2323,12 +2323,13 @@ function normalizeOperationalAccess(permissions, moduleName, role) {
         ? ["bookings_access", "booking_access", "bookings"]
         : ["pos", "pos_access", "sales_access"];
     const selected = keys.find((key) => Object.prototype.hasOwnProperty.call(values, key));
-    if (!selected) return role === "manager" ? "full" : "none";
+    if (!selected) return "none";
     const access = values[selected];
     if (moduleName === "bookings" && role === "staff") {
-        // Even "full" Staff booking access is scoped to standard-confirm
-        // and escalation actions; it is never Manager-level write access.
-        if (access === "full" || access === "standard" || access === "confirm_standard") return "standard";
+        // Full access only authorizes specific physical fulfillment actions.
+        // Legacy standard-confirmation grants remain read-only.
+        if (access === "full") return "full";
+        if (access === "standard" || access === "confirm_standard") return "view";
         // Legacy boolean permission values still grant reading only.
         if (access === true || access === 1 || access === "1" || access === "true" ||
             access === "view" || access === "view_only" || access === "viewOnly") return "view";
@@ -3293,31 +3294,24 @@ exports.handler = async (event) => {
         const salesQueueActions = new Set([
             "get_staff_sales_booking_queue", "prepare_staff_sales_booking_item", "release_staff_sales_booking",
         ]);
-        // Full Inventory permission suffices for physical Sales fulfillment, even
-        // when the Staff has no separate Booking Management write permission.
+        // Physical fulfillment requires BOTH Booking operational and Inventory operational
+        // grants; neither grants pricing, payment, or confirmation authority.
         const salesInventoryAccess = salesQueueActions.has(action) && tokenRole === "staff"
             ? await getStaffSalesInventoryAccess(connection, decodedToken) : "none";
-        if (bookingAccess === "none" && !(tokenRole === "staff" && salesQueueActions.has(action) &&
-            salesInventoryAccess !== "none")) {
+        if (bookingAccess === "none") {
             return response(403, { error: "Bookings access is not permitted for this account." });
         }
         if (tokenRole === 'staff' && new Set([
             'assess_booking_confirmation','confirm_standard_booking',
             'request_booking_approval','advance_staff_booking'
         ]).has(action)) {
-            return response(403,{error:'Staff Bookings is view-only. Use Staff Inventory to prepare, release and inspect items.'});
+            return response(403,{error:'Staff cannot approve or confirm bookings. Use authorized Staff Inventory operations to prepare or release items.'});
         }
         const bookingReadActions = new Set([
             "get_booking_page_bookings", "get_dashboard_bookings", "get_bookings", "get_booking_items", "get_booking_financial_statement", "get_booking_claim_sources", "get_customer_review_case", "get_booking_fee_policy", "get_staff_sales_booking_queue",
         ]);
-        const standardStaffActions = new Set([
-            // Physical consumable fulfilment is authorized by Inventory access,
-            // never by the read-only Staff Booking module.
-            'prepare_staff_sales_booking_item', 'release_staff_sales_booking',
-        ]);
         if (tokenRole === 'staff' && !bookingReadActions.has(action) &&
-            !(standardStaffActions.has(action) && ['standard','full'].includes(bookingAccess)) &&
-            !(salesQueueActions.has(action) && salesInventoryAccess === 'full')) {
+            !(salesQueueActions.has(action) && bookingAccess === 'full' && salesInventoryAccess === 'full')) {
             return response(403, { error: "Staff requires authorized Bookings operations access for this action." });
         }
         if(tokenRole === 'manager' && bookingAccess !== 'full' && !bookingReadActions.has(action)) {
@@ -3345,7 +3339,8 @@ exports.handler = async (event) => {
         // Read returns reserved CONSUMABLE product inclusions, never rental equipment.
         if (salesQueueActions.has(action)) {
             if (tokenRole !== 'staff') return response(403,{error:'Staff operations account required.'});
-            if (salesInventoryAccess === 'none') return response(403,{error:'Inventory access is required.'});
+            if (bookingAccess !== 'full' || salesInventoryAccess !== 'full')
+                return response(403,{error:'Operational access to both Bookings and Inventory is required.'});
             const branchId = Number(tokenBranchId);
             if (action === 'get_staff_sales_booking_queue') {
                 const [rows] = await connection.execute(`SELECT b.id AS bookingId,b.booking_reference AS reference,

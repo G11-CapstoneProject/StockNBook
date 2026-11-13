@@ -686,8 +686,14 @@ function v2PhoneDigits(phone) {
     return String(phone || "").replace(/\D/g, "").slice(-10);
 }
 
-// The store's customer with this phone number (same normalization as customerPhoneHash).
-async function v2CustomerForPhone(connection, storeId, phone) {
+function v2CustomerNameKey(name) {
+    return String(name || "").normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+// A phone number may be shared by different customers. When a name is supplied,
+// match BOTH the phone and name so a new booking cannot rename an older customer's bookings.
+// Phone-only lookups elsewhere (such as existing customer-review workflows) remain unchanged.
+async function v2CustomerForPhone(connection, storeId, phone, name = null) {
     const digits = v2PhoneDigits(phone);
     if (!digits) return null;
     const [rows] = await connection.execute(
@@ -700,25 +706,31 @@ async function v2CustomerForPhone(connection, storeId, phone) {
         [storeId, `%${digits}`]
     );
     const wanted = customerPhoneHash(phone);
-    return rows.find((row) => (wanted ? customerPhoneHash(row.phone) === wanted : v2PhoneDigits(row.phone) === digits)) || null;
+    const nameKey = name === null ? null : v2CustomerNameKey(name);
+    return rows.find((row) =>
+        (wanted ? customerPhoneHash(row.phone) === wanted : v2PhoneDigits(row.phone) === digits) &&
+        (nameKey === null || v2CustomerNameKey(row.full_name) === nameKey)
+    ) || null;
 }
 
-// Finds the customer by phone or creates them; keeps their latest contact details.
+// Reuse a customer only when BOTH phone and name match; otherwise create a separate
+// customer record. Never overwrite an existing customer's name (bookings read it by customer_id).
 async function v2EnsureCustomer(connection, {storeId, name, facebookName = null, phone, email = null}) {
-    const existing = await v2CustomerForPhone(connection, storeId, phone);
+    const customerName = String(name || "Customer").trim().slice(0, 150);
+    const existing = await v2CustomerForPhone(connection, storeId, phone, customerName);
     if (existing) {
         await connection.execute(
             `UPDATE customers
-             SET full_name = ?, facebook_name = COALESCE(?, facebook_name), email = COALESCE(?, email)
-             WHERE id = ?`,
-            [String(name || existing.full_name).slice(0, 150), facebookName || null, email || null, existing.id]
+             SET facebook_name = COALESCE(?, facebook_name), email = COALESCE(?, email)
+             WHERE id = ? AND store_id = ?`,
+            [facebookName || null, email || null, existing.id, storeId]
         );
         return Number(existing.id);
     }
     const [created] = await connection.execute(
         `INSERT INTO customers (store_id, full_name, phone, email, facebook_name, status)
          VALUES (?, ?, ?, ?, ?, 'active')`,
-        [storeId, String(name || "Customer").slice(0, 150), String(phone || "").slice(0, 40) || null,
+        [storeId, customerName, String(phone || "").slice(0, 40) || null,
             email || null, facebookName || null]
     );
     return Number(created.insertId);

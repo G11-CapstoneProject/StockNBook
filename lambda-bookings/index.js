@@ -23,22 +23,6 @@ const dbPool = mysql.createPool({
     queueLimit: 0,
 });
 
-
-// ===== BEGIN StockNBook v2 catalog (identical in lambda-products, lambda-pos, lambda-bookings, lambda-packages) =====
-/*
- * stocknbook_v2 keeps ONE catalog row per product (products) and the prices on
- * product_variants. Every product has one hidden default variant
- * (is_default = 1) that carries the product-level price and, for a product
- * without variants, its stock. Real variants have is_default = 0.
- * Physical stock exists only in branch_inventory, and a product belongs to the
- * branch that holds the branch_inventory row of its default variant.
- *
- * Rental equipment has no variants: its branch_inventory row points at the
- * equipment row directly (branch_inventory.equipment_id).
- *
- * The read models below expose the column names this Lambda already returns,
- * so API responses and the UI stay exactly the same.
- */
 const V2_PRODUCT_STOCK_SQL = (p, bi) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
         SELECT SUM(vbi.on_hand_quantity)
         FROM product_variants vv

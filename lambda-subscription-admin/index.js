@@ -896,8 +896,8 @@ function escapePaymentEmailHtml(value) {
 }
 
 async function sendSubscriptionDecisionEmail(toEmail, details) {
-    const smtpUser = "noreplystocknbook@gmail.com";
-    const smtpPass = "xokj flbi mavr shyt"
+    const smtpUser = "stocknbook@gmail.com";
+    const smtpPass = "rrmk ivgo ojgg nkqw"
         .replace(/\s/g, "");
 
     if (!smtpUser || !smtpPass) {

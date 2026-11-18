@@ -209,7 +209,7 @@ function databaseConfig() {
     return {
         host: "127.0.0.1",
         user: "root",
-        password: "020820@Steph",
+        password: "BTA5EYVWLfWcebF",
         database: "stocknbook_v2",
         port: 3306,
     };

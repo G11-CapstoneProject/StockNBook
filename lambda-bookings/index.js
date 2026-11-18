@@ -4,6 +4,8 @@ const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
 const { createHash } = require("crypto");
+
+
 const JWT_SECRET = "stocknbook-secret-key";
 
 const dbConfig = {

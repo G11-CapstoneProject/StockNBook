@@ -711,6 +711,15 @@ export default function RoleSidebar() {
     const handleLogout = () => {
         sessionStorage.clear();
         localStorage.clear();
+
+        // Tells the public landing page (LandingPage.tsx) to play its short
+        // branding intro. Not an auth value; the landing page removes it on load.
+        try {
+            sessionStorage.setItem("stocknbook_intro_after_logout", "1");
+        } catch {
+            // Never let the intro signal block logout.
+        }
+
         window.location.href = "/";
     };
 

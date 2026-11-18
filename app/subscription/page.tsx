@@ -4,7 +4,7 @@ import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     AlertTriangle,
     BarChart3,
@@ -217,6 +217,9 @@ export default function SubscriptionPage() {
     const [otpSending, setOtpSending] = useState(false);
     const [otpSecondsRemaining, setOtpSecondsRemaining] = useState(0);
     const [otpEmailHint, setOtpEmailHint] = useState("");
+    const [otpVerifyLoading, setOtpVerifyLoading] = useState(false);
+    const [otpVerified, setOtpVerified] = useState(false);
+    const otpLastAttempt = useRef("");
     const [paymentSettings, setPaymentSettings] = useState<GCashPaymentSettings | null>(null);
     const [paymentSettingsLoading, setPaymentSettingsLoading] = useState(false);
     const [submitting, setSubmitting] = useState(false);
@@ -315,6 +318,9 @@ export default function SubscriptionPage() {
         setOtpSending(false);
         setOtpSecondsRemaining(0);
         setOtpEmailHint("");
+        setOtpVerified(false);
+        setOtpVerifyLoading(false);
+        otpLastAttempt.current = "";
         setPaymentSettings(null);
         setPaymentSettingsLoading(false);
         setSubmitting(false);
@@ -353,6 +359,8 @@ export default function SubscriptionPage() {
                 throw new Error("The verification service returned an unexpected response. Please try again.");
             }
 
+            setOtpVerified(false);
+            otpLastAttempt.current = "";
             setOtpSent(true);
             setUpgradeStep("otp");
             setOtp("");
@@ -366,7 +374,7 @@ export default function SubscriptionPage() {
         }
     }
 
-    async function continueToPayment() {
+    const continueToPayment = useCallback(async () => {
         const cleanOtp = otp.replace(/\D/g, "");
 
         if (!/^\d{6}$/.test(cleanOtp)) {
@@ -420,7 +428,53 @@ export default function SubscriptionPage() {
         } finally {
             setPaymentSettingsLoading(false);
         }
-    }
+    }, [otp, otpSecondsRemaining, token]);
+
+    // Verify as soon as six digits have been entered. The backend checks the OTP
+    // without consuming it; final payment submission performs the consuming check.
+    useEffect(() => {
+        if (!/^\d{6}$/.test(otp)) {
+            otpLastAttempt.current = "";
+            return;
+        }
+        if (upgradeStep !== "otp" || !otpSent || otpSecondsRemaining <= 0 ||
+            otpVerifyLoading || otpVerified || otpLastAttempt.current === otp) return;
+
+        const attempted = otp;
+        otpLastAttempt.current = attempted;
+        let abandoned = false;
+        const checkCode = async () => {
+            setOtpVerifyLoading(true);
+            setError("");
+            setMessage("");
+            try {
+                const response = await fetch("/api/subscription-client", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ action: "verify_payment_otp", otp: attempted }),
+                });
+                const body = await response.json().catch(() => null);
+                if (!response.ok || body?.verified !== true) {
+                    throw new Error(body?.error || "The verification code could not be confirmed.");
+                }
+                if (abandoned) return;
+                setOtpVerified(true);
+                await new Promise<void>((resolve) => window.setTimeout(resolve, 800));
+                if (!abandoned) await continueToPayment();
+            } catch (verifyError) {
+                if (abandoned) return;
+                setOtpVerified(false);
+                setOtp("");
+                setError(verifyError instanceof Error ? verifyError.message : "Verification failed.");
+                window.setTimeout(() => document.getElementById("upgrade-otp-0")?.focus(), 0);
+            } finally {
+                if (!abandoned) setOtpVerifyLoading(false);
+            }
+        };
+        void checkCode();
+        // Do not abort an in-flight verification on the timer's next tick.
+        // The UI is disabled during the server request.
+    }, [otp, otpSent, otpSecondsRemaining, upgradeStep, otpVerifyLoading, otpVerified, token, continueToPayment]);
 
     // Send the proof with the verified payment submission; never upload it to /public.
     async function encodeReceiptProof(file: File): Promise<string> {
@@ -1034,29 +1088,70 @@ export default function SubscriptionPage() {
             )}
 
             {selectedPlan && upgradeStep === "otp" && (
-                <div role="dialog" aria-modal="true" aria-labelledby="upgrade-otp-title" className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-4 py-6 backdrop-blur-md">
-                    <div className="relative my-auto w-full max-w-[430px] overflow-hidden rounded-[28px] border border-white/70 bg-white px-7 pb-7 pt-8 text-center shadow-[0_28px_80px_rgba(22,12,39,0.32)] sm:px-9">
-                        <button type="button" onClick={resetPaymentModal} disabled={otpSending} aria-label="Close OTP verification" className="absolute right-4 top-4 rounded-full p-2 text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E] disabled:cursor-not-allowed disabled:opacity-50"><X className="h-5 w-5" /></button>
-                        <div className="relative mx-auto flex h-[86px] w-[86px] items-center justify-center"><div className="absolute inset-0 rounded-full bg-[#EEE5FF]" /><div className="absolute inset-[11px] rounded-full bg-[#DCCBFF]" /><div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#2D1B4E] text-white shadow-lg"><Mail className="h-7 w-7" /></div><Sparkles className="absolute -right-1 top-1 h-4 w-4 text-[#C9951A]" /><Sparkles className="absolute -left-1 bottom-3 h-3.5 w-3.5 text-[#C9951A]" /></div>
-                        <h2 id="upgrade-otp-title" className="mt-4 font-serif text-[32px] font-semibold leading-tight text-[#2D1B4E]">Verify your email</h2>
-                        <p className="mt-2 text-sm leading-6 text-[#7A6E88]">We&apos;ve sent a 6-digit verification code to</p>
-                        <p className="mt-0.5 break-all text-sm font-bold text-[#2D1B4E]">{otpEmailHint || "your registered email"}</p>
-                        {message && (
-                            <p role="status" className="mt-3 rounded-xl border border-[#D5E8D8] bg-[#F3FAF5] px-3 py-2 text-xs font-medium leading-5 text-[#256B42]">{message}</p>
-                        )}
-                        {error && (
-                            <p role="alert" aria-live="assertive" className="mt-3 rounded-xl border border-[#EFBABA] bg-[#FFF3F3] px-3 py-2 text-xs font-medium leading-5 text-[#9B3030]">{error}</p>
-                        )}
+                <div role="dialog" aria-modal="true" aria-labelledby="upgrade-otp-title" className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-3 py-4 backdrop-blur-md sm:px-4 sm:py-6">
+                    <div className="relative my-auto w-full max-w-[430px] overflow-hidden rounded-[28px] border border-white/70 bg-white px-6 pb-7 pt-8 text-center shadow-[0_28px_80px_rgba(22,12,39,0.32)] sm:px-9">
+                        <button type="button" onClick={resetPaymentModal} disabled={otpSending || otpVerifyLoading} aria-label="Close OTP verification" className="absolute right-4 top-4 rounded-full p-2 text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E] disabled:opacity-50"><X className="h-5 w-5" /></button>
+                        <div className="relative mx-auto flex h-[86px] w-[86px] items-center justify-center">
+                            <div className="absolute inset-0 rounded-full bg-[#EEE5FF]" /><div className="absolute inset-[11px] rounded-full bg-[#DCCBFF]" />
+                            <div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#2D1B4E] text-white shadow-lg">{otpVerified ? <Check className="h-8 w-8 text-[#F1C85C]" /> : <Mail className="h-7 w-7" />}</div>
+                            <Sparkles className="absolute -right-1 top-1 h-4 w-4 text-[#C9951A]" /><Sparkles className="absolute -left-1 bottom-3 h-3.5 w-3.5 text-[#C9951A]" />
+                        </div>
+                        <h2 id="upgrade-otp-title" className="mt-4 font-serif text-[32px] font-semibold leading-tight text-[#2D1B4E]">{otpVerified ? "Verified Successfully" : "Verify your email"}</h2>
+                        <p className="mt-2 text-sm leading-6 text-[#7A6E88]">{otpVerified ? "Your email code was confirmed." : "Enter the 6-digit code sent to"}</p>
+                        {!otpVerified && <p className="mt-0.5 break-all text-sm font-bold text-[#2D1B4E]">{otpEmailHint || "your registered email"}</p>}
+                        {error && <p role="alert" className="mt-3 rounded-xl border border-[#EFBABA] bg-[#FFF3F3] px-3 py-2 text-xs font-medium leading-5 text-[#9B3030]">{error}</p>}
                         <div className="mt-6 flex justify-center gap-2 sm:gap-3">
                             {Array.from({ length: 6 }, (_, index) => (
-                                <input key={index} id={`upgrade-otp-${index}`} value={otp[index] || ""} type="text" inputMode="numeric" pattern="[0-9]*" autoComplete={index === 0 ? "one-time-code" : "off"} maxLength={1} disabled={otpSending || otpSecondsRemaining <= 0} aria-label={`OTP digit ${index + 1}`} onChange={(event) => { const digit = event.target.value.replace(/\D/g, "").slice(-1); const nextOtp = otp.split(""); nextOtp[index] = digit; setOtp(nextOtp.join("").slice(0, 6)); if (digit && index < 5) document.getElementById(`upgrade-otp-${index + 1}`)?.focus(); }} onKeyDown={(event) => { if (event.key === "Backspace") { if (otp[index]) { const nextOtp = otp.split(""); nextOtp[index] = ""; setOtp(nextOtp.join("")); return; } if (index > 0) { document.getElementById(`upgrade-otp-${index - 1}`)?.focus(); const nextOtp = otp.split(""); nextOtp[index - 1] = ""; setOtp(nextOtp.join("")); } } if (event.key === "ArrowLeft" && index > 0) document.getElementById(`upgrade-otp-${index - 1}`)?.focus(); if (event.key === "ArrowRight" && index < 5) document.getElementById(`upgrade-otp-${index + 1}`)?.focus(); }} onPaste={(event) => { event.preventDefault(); const pasted = event.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6); if (!pasted) return; setOtp(pasted); document.getElementById(`upgrade-otp-${Math.max(0, Math.min(pasted.length, 6) - 1)}`)?.focus(); }} onFocus={(event) => event.target.select()} className={["h-14 w-11 rounded-xl border bg-white text-center text-2xl font-bold text-[#2D1B4E] outline-none transition sm:w-12", "focus:border-[#6F45B8] focus:ring-4 focus:ring-[#6F45B8]/15", otp[index] ? "border-[#B99AEF] shadow-sm" : "border-[#DED3EE]", otpSecondsRemaining <= 0 ? "cursor-not-allowed bg-[#F7F4FA] text-[#A79CAF]" : ""].join(" ")} />
+                                <div key={index} className="relative">
+                                    <input
+                                        id={`upgrade-otp-${index}`} value={otp[index] || ""}
+                                        type="text" inputMode="numeric" pattern="[0-9]*" autoComplete={index === 0 ? "one-time-code" : "off"}
+                                        maxLength={1} disabled={otpSending || otpVerifyLoading || otpVerified || otpSecondsRemaining <= 0}
+                                        aria-label={`OTP digit ${index + 1}`}
+                                        onChange={(event) => {
+                                            const digit = event.target.value.replace(/\D/g, "").slice(-1);
+                                            const nextOtp = otp.padEnd(6, " ").split("");
+                                            nextOtp[index] = digit || " ";
+                                            setOtp(nextOtp.join("").replace(/ /g, "").slice(0, 6));
+                                            setError("");
+                                            if (digit && index < 5) document.getElementById(`upgrade-otp-${index + 1}`)?.focus();
+                                        }}
+                                        onKeyDown={(event) => {
+                                            if (event.key === "Backspace" && !otp[index] && index > 0) document.getElementById(`upgrade-otp-${index - 1}`)?.focus();
+                                            if (event.key === "ArrowLeft" && index > 0) document.getElementById(`upgrade-otp-${index - 1}`)?.focus();
+                                            if (event.key === "ArrowRight" && index < 5) document.getElementById(`upgrade-otp-${index + 1}`)?.focus();
+                                        }}
+                                        onPaste={(event) => {
+                                            event.preventDefault();
+                                            const pasted = event.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
+                                            if (pasted) { setOtp(pasted); setError(""); document.getElementById(`upgrade-otp-${Math.min(5, pasted.length - 1)}`)?.focus(); }
+                                        }}
+                                        onFocus={(event) => event.target.select()}
+                                        className={`snb-otp-box h-14 w-10 rounded-xl border bg-white text-center text-2xl font-bold text-[#2D1B4E] outline-none transition-all duration-200 sm:w-11 ${otpVerified ? "snb-otp-success border-[#46A36A] bg-[#F0FBF4]" : otp[index] ? "snb-otp-filled border-[#C9951A] bg-[#FFFBF2]" : "border-[#DED3EE]"} focus:border-[#6F45B8] focus:ring-4 focus:ring-[#6F45B8]/15 disabled:opacity-80`}
+                                    />
+                                    {index < 5 && <span aria-hidden="true" className={`pointer-events-none absolute -right-2 top-1/2 z-10 h-0.5 w-2 -translate-y-1/2 transition-colors duration-200 ${otp[index] ? "bg-[#C9951A]" : "bg-[#E8DFEF]"}`} />}
+                                </div>
                             ))}
                         </div>
-                        <div className="mx-auto mt-5 inline-flex items-center gap-2 rounded-full bg-[#F1E9FF] px-4 py-2 text-sm font-semibold text-[#6F45B8]"><Clock3 className="h-4 w-4" />{otpSecondsRemaining > 0 ? `Code expires in ${String(Math.floor(otpSecondsRemaining / 60)).padStart(2, "0")}:${String(otpSecondsRemaining % 60).padStart(2, "0")}` : "Code expired"}</div>
-                        <button type="button" disabled={otpSending || paymentSettingsLoading || otpSecondsRemaining <= 0 || otp.length !== 6} onClick={continueToPayment} className="mt-6 w-full rounded-xl bg-[#3B1768] px-5 py-3.5 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(59,23,104,0.22)] transition hover:bg-[#4B2180] disabled:cursor-not-allowed disabled:opacity-50">{paymentSettingsLoading ? "Loading payment details..." : "Continue to payment"}</button>
+                        {otpVerified ? (
+                            <div role="status" aria-live="polite" className="snb-otp-success-mark mt-5 flex items-center justify-center gap-2 font-semibold text-[#318653]"><Check className="h-6 w-6" /> Verified and secure</div>
+                        ) : (
+                            <div role="status" aria-live="polite" className="mx-auto mt-5 inline-flex items-center gap-2 rounded-full bg-[#F1E9FF] px-4 py-2 text-sm font-semibold tabular-nums text-[#6F45B8]"><Clock3 className="h-4 w-4" />{`${String(Math.floor(otpSecondsRemaining / 60)).padStart(2, "0")}:${String(otpSecondsRemaining % 60).padStart(2, "0")}`}</div>
+                        )}
+                        {otpVerifyLoading && !otpVerified && <p role="status" className="mt-3 text-sm font-medium text-[#6F45B8]">Checking your code...</p>}
+                        {otpVerified && paymentSettingsLoading && <p role="status" className="mt-3 text-xs text-[#7A6E88]">Opening secure checkout...</p>}
+                        {!otpVerified && otpSecondsRemaining <= 0 && <p className="mt-3 text-xs text-red-600">This code has expired. Please request another.</p>}
+                        {otpVerified && error && <button type="button" onClick={() => void continueToPayment()} disabled={paymentSettingsLoading} className="mt-3 text-sm font-semibold text-[#6F45B8] underline">Retry payment details</button>}
                         <div className="mt-6 flex items-center gap-3"><div className="h-px flex-1 bg-[#EBE4F0]" /><span className="text-xs text-[#7A6E88]">Didn&apos;t receive the code?</span><div className="h-px flex-1 bg-[#EBE4F0]" /></div>
-                        <button type="button" disabled={otpSending || otpSecondsRemaining > 0} onClick={sendPaymentOtp} className="mx-auto mt-3 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-[#6F35C5] transition hover:bg-[#F5EFFF] disabled:cursor-not-allowed disabled:text-[#B9AFCA] disabled:hover:bg-transparent"><RefreshCw className={otpSending ? "h-4 w-4 animate-spin" : "h-4 w-4"} />{otpSending ? "Sending..." : otpSecondsRemaining <= 0 ? "Resend OTP" : `Resend available in ${String(Math.floor(otpSecondsRemaining / 60)).padStart(2, "0")}:${String(otpSecondsRemaining % 60).padStart(2, "0")}`}</button>
+                        <button type="button" disabled={otpSending || otpVerifyLoading || otpVerified || otpSecondsRemaining > 0} onClick={() => void sendPaymentOtp()} aria-label="Resend verification code" className="mx-auto mt-3 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-[#6F35C5] transition hover:bg-[#F5EFFF] disabled:cursor-not-allowed disabled:text-[#B9AFCA] disabled:hover:bg-transparent"><RefreshCw className={otpSending ? "h-4 w-4 animate-spin" : "h-4 w-4"} />Resend</button>
                         <div className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-[#FAF8FC] px-4 py-3 text-xs text-[#7A6E88]"><ShieldCheck className="h-4 w-4 shrink-0 text-[#6F45B8]" /><span>For your security, never share this code with anyone.</span></div>
+                        <style jsx>{`
+                            .snb-otp-filled { box-shadow: 0 0 0 2px rgba(201,149,26,.12), 0 0 12px rgba(201,149,26,.14); animation: snbOtpPop .22s ease-out; }
+                            .snb-otp-success { box-shadow: 0 0 15px rgba(70,163,106,.26); }
+                            .snb-otp-success-mark { animation: snbOtpPop .5s ease-out both; }
+                            @keyframes snbOtpPop { from { transform: scale(.9); opacity:.55; } to { transform: scale(1); opacity:1; } }
+                            @media (prefers-reduced-motion: reduce) { .snb-otp-filled, .snb-otp-success-mark { animation: none; } }
+                        `}</style>
                     </div>
                 </div>
             )}

@@ -442,7 +442,7 @@ export default function SetupScreen() {
                                                     <div className="grid gap-4 sm:grid-cols-2">
                                                         <TextInput
                                                             label="Branch contact number"
-                                                            placeholder="09XX XXX XXXX"
+                                                            placeholder="e.g. 0912 345 6789"
                                                             value={
                                                                 branches[index]
                                                                     ?.contact_number ||

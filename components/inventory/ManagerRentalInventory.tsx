@@ -74,15 +74,12 @@ function InventoryDateRangeFields({ label, start, end, onStartChange, onEndChang
     );
 }
 
-// Staff and manager activity labels share the same operational stock direction.
+// Only actual rental receipts, booking-linked returns/replacements, releases and
+// equipment deletion belong in the Stock In / Stock Out table.
 function rentalActivityDirection(record: RentalActivity): "in" | "out" | "other" {
-    if (["received", "returned", "missing_replaced", "missing_resolved", "maintenance_completed"].includes(record.type)) return "in";
-    if (["rented_out", "missing_reported", "maintenance_started"].includes(record.type)) return "out";
-    if (record.type === "adjustment") {
-        if (/^Physical stock correction \+/.test(record.description || "")) return "in";
-        if (/^Physical stock correction -/.test(record.description || "") ||
-            /^Equipment retired:/.test(record.description || "")) return "out";
-    }
+    if (["received", "returned", "missing_replaced"].includes(record.type)) return "in";
+    if (record.type === "rented_out" || (record.type === "adjustment" &&
+        /^Equipment retired:/.test(record.description || ""))) return "out";
     return "other";
 }
 
@@ -146,8 +143,15 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             // Date Range includes both selected days; an incomplete or reversed range shows no records.
             if (activityDateFilter === "range" && (!isValidInventoryDateRange(activityStartDate, activityEndDate) ||
                 key < activityStartDate || key > activityEndDate)) return false;
+            // Missing report replacements are shown only when the backend resolves
+            // a real booking reference; keep legacy/stale MISS-###### rows hidden.
+            if (record.type === "missing_replaced" &&
+                (!record.referenceNumber || /^MISS-\d+$/i.test(record.referenceNumber))) return false;
+            // A stale API may still send maintenance or correction events; never display them here.
+            const direction = rentalActivityDirection(record);
+            if (direction === "other") return false;
             if (searchQuery && ![record.equipmentName, record.referenceNumber].join(" ").toLowerCase().includes(searchQuery)) return false;
-            return activityDirection === "all" || rentalActivityDirection(record) === activityDirection;
+            return activityDirection === "all" || direction === activityDirection;
         });
     }, [rental.recentActivity, activityDateFilter, activityStartDate, activityEndDate, activityDirection, searchQuery]);
     const activityRange = `${activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? "Today" : inventoryDateRangeLabel(activityStartDate, activityEndDate)} · ${activityDirection === "all" ? "All activity" : activityDirection === "in" ? "Stock In" : "Stock Out"}${searchLabel}`;
@@ -180,7 +184,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
         const todayKey=new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"});
         return conditionRows.filter(row=>{
             if(conditionStatusFilter!=="all"&&row.status!==conditionStatusFilter)return false;
-            if(searchQuery&&![row.equipmentName,row.issue,row.status,row.recordedBy].join(" ").toLowerCase().includes(searchQuery))return false;
+            if(searchQuery&&![row.bookingReference||"",row.equipmentName,row.issue,row.status,row.recordedBy].join(" ").toLowerCase().includes(searchQuery))return false;
             if(conditionDateFilter==="all")return true;
             const key=managerConditionDateKey(row.date);
             if(!key)return false;
@@ -378,7 +382,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
 
                 <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
                     <PanelHeading icon={<CalendarClock size={18}/>} title="Rental Stock Activity"
-                                  subtitle="Equipment receipts, rentals, and maintenance in loaded recent records."
+                                  subtitle="Restocks, replacements, returns, releases, and equipment deletions."
                                   actions={<div className="flex shrink-0 items-center gap-1.5">
                                       <RentalInventoryFilterSelect containerClassName="w-[104px]" value={activityDateFilter} aria-label="Filter rental activity date" onChange={e => setActivityDateFilter(e.target.value as "today" | "all" | "range")}>
                                           <option value="today">Today</option><option value="all">All loaded</option><option value="range">Date range</option>
@@ -393,7 +397,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                                       const occurred = new Date(record.occurredAt);
                                                       return [occurred.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "short", day: "numeric", year: "numeric" }),
                                                           occurred.toLocaleTimeString("en-PH", { timeZone: "Asia/Manila", hour: "numeric", minute: "2-digit" }),
-                                                          record.equipmentName, activityNames[record.type],
+                                                          record.equipmentName, rentalActivityDirection(record) === "in" ? "Stock In" : "Stock Out",
                                                           `${rentalActivityDirection(record) === "in" ? "+" : "−"}${record.quantity}`, record.referenceNumber || "—"];
                                                   }), activityRange)}
                                               className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] hover:bg-[#F7F1FF] disabled:opacity-40"><Download size={16}/></button>
@@ -491,9 +495,6 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                         <Plus size={16}/> Add Equipment
                     </button>
                 </div>
-                {appliedDates && <p className="border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-2 text-xs font-medium text-[#5330B6]">
-                    <AvailabilityDatesNote from={appliedDates.from} to={appliedDates.to} today={rentalToday()}/>
-                </p>}
                 <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain border-t border-[#E9E1EE]" style={{ maxHeight: 360 }} role="region" aria-label="Branch rental equipment list" tabIndex={0}>
                     <table className="w-full min-w-0 table-auto text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                         <colgroup><col className="w-[12%]"/><col className="w-[13%]"/><col className="w-[8%]"/><col className="w-[7%]"/><col className="w-[8%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[7.5%]"/><col className="w-[9%]"/><col className="w-[20%]"/></colgroup>
@@ -652,6 +653,13 @@ type ManagerConditionIssue = {
     units:number; title:string; issue:string; status:string; recordedBy:string; notes:string; reportedAt:string;
     reference:string; bookingReference:string|null;
 };
+// Issues reported while preparing a booking are saved as "Booking REF: notes";
+// the booking has its own column, so show only the notes.
+function conditionIssueNotes(reason:string|null|undefined, bookingReference:string|null|undefined) {
+    const text=String(reason||"").trim();
+    const prefix=bookingReference?`Booking ${bookingReference}: `:"";
+    return prefix&&text.startsWith(prefix)?text.slice(prefix.length).trim():text;
+}
 function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:RentalMissingReport[],
                                      inspections:RentalPendingInspection[]):ManagerConditionIssue[] {
     const active:ManagerConditionIssue[]=[];
@@ -659,14 +667,15 @@ function buildManagerConditionIssues(records:RentalMaintenanceRecord[], missing:
         active.push({kind:"maintenance",key:`maintenance-${record.id}`,equipmentName:record.equipmentName,
             units:record.units,title:record.status==='Routine'?'Routine care':record.status==='For Inspection'?'Safety inspection':'Repair / safety check',
             issue:record.status==='Routine'?'Routine Care':'Damage',status:'Under Repair',recordedBy:record.reportedBy||'',
-            notes:record.reason,reportedAt:record.dateReported,reference:`MNT-${String(record.id).padStart(6,'0')}`,
+            notes:conditionIssueNotes(record.reason,record.bookingReference),reportedAt:record.dateReported,reference:`MNT-${String(record.id).padStart(6,'0')}`,
             bookingReference:record.bookingReference||null});
     }
     for(const report of missing){
         const units=Number(report.remainingUnits??report.quantity);
         if(!Number.isSafeInteger(units)||units<=0)continue;
         active.push({kind:"missing",key:`missing-${report.id}`,equipmentName:report.equipmentName,
-            units,title:"Missing equipment",issue:"Missing",status:"Unresolved",recordedBy:report.reportedBy||'',notes:report.reason,
+            units,title:"Missing equipment",issue:"Missing",status:"Unresolved",recordedBy:report.reportedBy||'',
+            notes:conditionIssueNotes(report.reason,report.bookingReference),
             reportedAt:report.reportedAt,reference:`MISS-${String(report.id).padStart(6,'0')}`,
             bookingReference:report.bookingReference||null});
     }
@@ -696,15 +705,17 @@ function managerConditionDateKey(value:string|null|undefined):string{
 }
 const MANAGER_CONDITION_STATUSES=["Under Repair","Pending Inspection","Unresolved","Repair Completed","Replaced","Recovered"];
 type ManagerConditionRow = {
-    key:string; equipmentName:string; units:number; issue:string; status:string; recordedBy:string;
+    key:string; bookingReference:string|null; equipmentName:string; units:number; issue:string; status:string; recordedBy:string;
     date:string; entry:ManagerConditionIssue|RentalMaintenanceHistory;
 };
 // Open issues first (most urgent first), then completed repairs, replacements and recoveries.
 function buildManagerConditionRows(issues:ManagerConditionIssue[], history:RentalMaintenanceHistory[]):ManagerConditionRow[] {
-    const rows:ManagerConditionRow[]=issues.map(issue=>({key:issue.key,equipmentName:issue.equipmentName,units:issue.units,
+    const rows:ManagerConditionRow[]=issues.map(issue=>({key:issue.key,bookingReference:issue.bookingReference,
+        equipmentName:issue.equipmentName,units:issue.units,
         issue:issue.issue,status:issue.status,recordedBy:issue.recordedBy,date:issue.reportedAt,entry:issue}));
     for(const record of history){
-        rows.push({key:`history-${record.id}`,equipmentName:record.equipmentName,units:record.quantity,
+        rows.push({key:`history-${record.id}`,bookingReference:record.bookingReference||null,
+            equipmentName:record.equipmentName,units:record.quantity,
             issue:record.type==='maintenance_completed'?(record.conditionStatus==='Routine'?'Routine Care':'Damage'):'Missing',
             status:record.type==='maintenance_completed'?'Repair Completed':record.type==='missing_replaced'?'Replaced':'Recovered',
             recordedBy:record.actorName||'',date:record.occurredAt,entry:record});
@@ -738,8 +749,7 @@ function ManagerConditionTable({rows,onView}:{rows:ManagerConditionRow[];onView:
 }
 function ManagerConditionDetails({entry,onClose}:{entry:ManagerConditionIssue|RentalMaintenanceHistory;onClose:()=>void}) {
     const issue='kind' in entry;
-    const bookingReference=entry.bookingReference;
-    const reference=issue?entry.reference:entry.referenceNumber;
+    const bookingReference=entry.bookingReference||null;
     const date=issue?entry.reportedAt:entry.occurredAt;
     const notes=entry.notes;
     return <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#160C26]/65 p-4" onClick={onClose} role="presentation">
@@ -752,22 +762,13 @@ function ManagerConditionDetails({entry,onClose}:{entry:ManagerConditionIssue|Re
             <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
                 <div><dt className="text-[#86778F]">Recorded quantity</dt><dd className="mt-1 font-semibold text-[#21132E]">{issue?entry.units:entry.quantity} unit(s)</dd></div>
                 <div><dt className="text-[#86778F]">Recorded date</dt><dd className="mt-1 font-semibold text-[#21132E]"><ManagerConditionDate value={date}/></dd></div>
-                <div><dt className="text-[#86778F]">Reference</dt><dd className="mt-1 break-all font-semibold text-[#21132E]">{reference||'—'}</dd></div>
+                <div><dt className="text-[#86778F]">Booking Reference</dt><dd className="mt-1 break-all font-semibold text-[#21132E]">{bookingReference||'—'}</dd></div>
                 <div><dt className="text-[#86778F]">{issue?'Issue type':'Recorded by'}</dt><dd className="mt-1 font-semibold text-[#21132E]">{issue?entry.title:entry.actorName||'Not recorded'}</dd></div>
             </dl>
             <div className="mt-4 rounded-xl border border-[#E9E1EE] bg-[#FCFAFF] p-3">
                 <p className="text-xs font-semibold text-[#21132E]">{issue?'Incident / condition notes':'Staff activity notes'}</p>
                 <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-[#5F4E75]">{notes||'No notes recorded.'}</p>
             </div>
-            {bookingReference&&<div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#E9E1EE] p-3">
-                <div><p className="text-[10px] text-[#86778F]">RELATED BOOKING</p><p className="mt-1 break-all text-xs font-semibold text-[#2B174C]">{bookingReference}</p></div>
-                <div className="flex flex-wrap items-center gap-2">
-                    <button type="button" onClick={()=>void navigator.clipboard?.writeText(bookingReference)} className="rounded-lg border border-[#D8CBE7] px-2.5 py-1.5 text-[11px] font-semibold text-[#2B174C]">Copy Ref.</button>
-                    <a href="/bookings" className="rounded-lg bg-[#2B174C] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#1B0D31]">Open Bookings</a>
-                </div>
-                <p className="w-full text-[10px] text-[#86778F]">Search the booking reference in Bookings to review customer settlement.</p>
-            </div>}
-            <p className="mt-4 text-[11px] text-[#86778F]">Read-only monitoring. Staff verifies physical equipment; billing decisions stay in Manager Bookings.</p>
         </section>
     </div>;
 }
@@ -893,14 +894,12 @@ function RentalMetric({label,value,description,icon,tone,loading}: {
         </section>
     );
 }
-const activityNames:Record<RentalActivity["type"],string> = {
-    received:"Stock Received",rented_out:"Rented Out",returned:"Returned",
-    maintenance_started:"Maintenance",maintenance_completed:"Repair Completed",
-    missing_reported:"Missing",missing_resolved:"Found",missing_replaced:"Replaced",adjustment:"Stock Adjustment",
-};
 function ActivityRow({item}:{item:RentalActivity}) {
-    const isPositive = ["received", "returned", "maintenance_completed", "missing_resolved", "missing_replaced"].includes(item.type) ||
-        (item.type === "adjustment" && /^Physical stock correction \+/.test(item.description || ""));
+    const isPositive = rentalActivityDirection(item) === "in";
+    const actionReason = item.type === "received" ? "Restocked" :
+        item.type === "missing_replaced" ? "Replaced" :
+            item.type === "returned" ? "Returned items" :
+                item.type === "rented_out" ? "Released" : "Deleted";
     const when = new Date(item.occurredAt);
     return <tr className="border-b border-[#EFE8F2] last:border-0">
         <td className="whitespace-nowrap py-2 text-[#5F4E75] px-4 text-left">
@@ -908,8 +907,8 @@ function ActivityRow({item}:{item:RentalActivity}) {
             <div className="mt-0.5 text-[10px] text-[#8A7D90]">{when.toLocaleTimeString("en-PH",{timeZone:"Asia/Manila",hour:"numeric",minute:"2-digit"})}</div>
         </td>
         <td className="px-2 py-2 font-semibold text-[#2B174C]">{item.equipmentName}</td>
-        <td className={`px-2 py-2 text-center font-medium ${isPositive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>
-            {item.type === "adjustment" && /^Equipment retired:/.test(item.description || "") ? "Stock Out" : activityNames[item.type]}
+        <td title={actionReason} className={`px-2 py-2 text-center font-medium ${isPositive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>
+            {isPositive ? "Stock In" : "Stock Out"}
         </td>
         <td className={`px-2 py-2 text-center font-semibold ${isPositive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>
             {isPositive ? "+" : "−"}{item.quantity}
@@ -925,22 +924,6 @@ const rentalFieldClass = "w-full rounded-xl border border-[#E3D8EA] bg-white p-3
 const rentalLabelClass = "text-xs font-semibold text-[#5A476A]";
 function validRentalMoney(value:string) {
     return /^\d+(?:\.\d{1,2})?$/.test(value.trim()) && Number(value) <= 100000000;
-}
-// Date Availability banner: readable dates ("November 13, 2026"), one date or a range.
-function formatAvailabilityDate(value: string) {
-    const parsed = new Date(`${value}T12:00:00+08:00`);
-    return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString("en-US", {
-        timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric",
-    });
-}
-function AvailabilityDatesNote({ from, to, today }: { from: string; to: string; today: string }) {
-    const single = from === to;
-    return <>
-        Showing booking availability {single ? "for" : "from"}{" "}
-        <strong className="font-semibold">{single && from === today ? "today, " : ""}{formatAvailabilityDate(from)}</strong>
-        {!single && <> to <strong className="font-semibold">{formatAvailabilityDate(to)}</strong></>}.
-        {" "}The Available and Reserved columns and Status badges reflect {single ? "this date" : "these dates"}.
-    </>;
 }
 function rentalToday() { return new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Manila"}); }
 function validRentalDate(value:string) {
@@ -992,7 +975,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
                 setError("Enter a product name and select a category.");return;
             }
             if(!validRentalMoney(rentalRate)){
-                setError("Rental Rate per day must be a nonnegative amount with up to two decimals.");return;
+                setError("Rental Rate must be a nonnegative amount with up to two decimals.");return;
             }
             // Same rule as Consumable Edit Product: names are unique among active products
             // in the branch. The Rental backend still enforces this when saving.
@@ -1103,11 +1086,10 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
                                 I physically verified these units; this is not a new delivery.
                             </label>
                         </section>}
-                        <div className="space-y-1"><label className={rentalLabelClass}>Final Daily Rental Rate (₱ for one item)</label>
+                        <div className="space-y-1"><label className={rentalLabelClass}>Rental Rate (₱ / item)</label>
                             <input type="number" min="0" max="100000000" step="0.01" required value={rentalRate}
                                    onChange={e=>setRentalRate(e.target.value)}
-                                   className={rentalFieldClass} placeholder="Enter daily rental rate"/>
-                            <p className="text-[11px] text-[#9B8AAA]">Charge for ONE item for ONE day. For example, 10 tables × this daily price × 2 days. Set your business's daily rental price; confirmed past bookings aren't repriced.</p>
+                                   className={rentalFieldClass} placeholder="Enter rental rate"/>
                         </div>
                         {error&&<p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p>}
                         <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-2">
@@ -1156,11 +1138,11 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
                     <div className="grid gap-3 rounded-xl border border-[#E6DDF0] bg-[#FFFCF7] p-4 sm:grid-cols-3">
                         {[["Total Units",item.totalUnits],["Available Now",availableNow(item)],
                             ["Rented Out",item.rentedOutUnits],["Under Maintenance",item.maintenanceUnits],
-                            ["Missing Units",item.missingUnits],["Rental Rate / Day",peso(item.rentalRatePerDay)],
+                            ["Missing Units",item.missingUnits],["Rental Rate",peso(item.rentalRatePerDay)],
                             ["Average Unit Cost",peso(item.averageUnitCost)]].map(([label,value])=><div key={label}>
                             <p className="text-xs text-[#86778F]">{label}</p><strong className="text-sm text-[#2B174C]">{value}</strong></div>)}
                     </div>
-                    <p className="mb-3 text-xs text-[#86778F]">Pricing: {item.pricingMethod==="cost_based"?"Suggested Cost-Based Rate":"Manual Rental Rate"}. Daily rates are reviewed by the manager; equipment age does not automatically reduce customer charges.</p>
+                    <p className="mb-3 text-xs text-[#86778F]">Pricing: {item.pricingMethod==="cost_based"?"Suggested Cost-Based Rate":"Manual Rental Rate"}. Rental rates are reviewed by the manager; equipment age does not automatically reduce customer charges.</p>
                     {hasRentalStockDiscrepancy(item)&&<p role="alert" className="rounded-xl bg-red-50 p-3 text-xs text-red-700">Assigned units exceed physical stock. Review booking, repair and missing records before correcting.</p>}
                     <p className="text-xs text-[#86778F]">Staff handle rental check-outs and returns through the booking workflow. The manager maintains equipment, pricing and repairs.</p>
                     <div className="flex flex-wrap gap-2">
@@ -1191,19 +1173,16 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
                             </div>}
                         </div>
                         {mode==="add"&&<div className="space-y-1"><label className={rentalLabelClass}>Cost Price (₱ / unit)</label>
-                            <input type="number" min="0" step="0.01" required={qty>0} disabled={qty===0} value={unitCost} onChange={e=>setUnitCost(e.target.value)} className={rentalFieldClass} placeholder="0.00"/>
-                            <p className="text-xs text-[#9B8AAA]">Purchase cost, not the rental charge.</p></div>}
+                            <input type="number" min="0" step="0.01" required={qty>0} disabled={qty===0} value={unitCost} onChange={e=>setUnitCost(e.target.value)} className={rentalFieldClass} placeholder="0.00"/></div>}
                         {mode==="edit"&&<div className="space-y-1"><label className={rentalLabelClass}>Average Unit Cost</label>
                             <input readOnly className={`${rentalFieldClass} bg-[#F7F1FF]`} value={peso(item?.averageUnitCost)}/></div>}
-                        <div className="space-y-1 sm:col-span-2"><label className={rentalLabelClass}>Final Daily Rental Rate (₱ for one item)</label>
+                        <div className="space-y-1 sm:col-span-2"><label className={rentalLabelClass}>Rental Rate (₱ / item)</label>
                             <input type="number" min="0" max="100000000" step="0.01" required value={rentalRate}
                                    onChange={e=>setRentalRate(e.target.value)}
-                                   className={rentalFieldClass} placeholder="Enter daily rental rate"/>
-                            <p className="text-xs text-[#9B8AAA]">Charge for ONE item for ONE day. For example, 10 tables × this daily price × 2 days. Set your business's daily rental price; confirmed past bookings aren't repriced.</p>
+                                   className={rentalFieldClass} placeholder="Enter rental rate"/>
                         </div>
                     </div>
                     {mode==="edit"&&<p className="text-xs text-[#86778F]">Use Restock for newly received units; do not count deliveries that have not arrived.</p>}
-                    {mode==="add"&&qty===0&&<p className="rounded-xl bg-[#FFFCF7] p-3 text-xs text-[#86778F]">Zero opening stock: you can create a catalog item without a purchase cost and receive equipment later.</p>}
                 </>}
                 {mode==="correct"&&item&&<section className="space-y-4 rounded-xl border border-[#E6DDF0] bg-[#FFFCF8] p-4">
                     <h3 className="text-sm font-bold text-[#21132E]">Physical Count Correction</h3>
@@ -1254,8 +1233,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
             <div role="alertdialog" aria-modal="true" aria-label="Confirm rental inventory changes" className="w-full max-w-md space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
                 <h3 className="text-lg font-bold text-[#1A1220]">{mode==="add"?"Confirm Add Equipment":mode==="edit"?"Confirm Update":mode==="correct"?"Confirm Stock Correction":"Confirm Maintenance"}</h3>
                 <p className="text-sm text-[#6A5D6F]">{mode==="add"?`Add ${name.trim()} to rental inventory${qty>0 ? ` with ${qty} physically received units` : ""}?`:mode==="edit"?`Save the changes to ${name.trim()}?`:mode==="correct"?`Change the verified physical total of ${item?.name} from ${item?.totalUnits} to ${qty} units? Confirmed reservations and held units are protected.`:`Record this maintenance action for ${item?.name}?`}</p>
-                <p className="text-xs text-[#806A8C]">Physical stock changes will be confirmed by the Rental backend, not generated by the interface.</p>
-                <div className="flex justify-end gap-2"><button type="button" disabled={submitting} onClick={()=>setPending(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm">Back</button>
+                <div className="flex justify-end gap-2"><button type="button" disabled={submitting} onClick={()=>setPending(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm">Cancel</button>
                     <button type="button" disabled={saving||submitting} onClick={()=>void confirm()} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{submitting?"Saving...":"Confirm"}</button></div>
             </div>
         </div>}
@@ -1363,7 +1341,7 @@ type RentalExportFilters = {
 };
 function rentalReportRows(items:RentalEquipment[],filters:RentalExportFilters,availability:Map<number,number>|null) {
     const headings = ["Product No.","Rental Product","Category","Avg. Unit Cost (PHP)",
-        "Rental Rate / Day (PHP)","Total Units","Available Now",
+        "Rental Rate (PHP)","Total Units","Available Now",
         ...(filters.appliedDates?["Available in Selected Dates","Reserved in Selected Dates"]:[]),
         "Rented Out","Maintenance","Missing","Status","Condition / Alert"];
     const rows = items.map(item => [item.equipmentNumber||"—",item.name,item.category,
@@ -1672,7 +1650,7 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
                         <div className="border-b border-[#E3D8EA] bg-white p-4"><h3 className="text-sm font-bold text-[#21132E]">Rental Inventory &amp; Pricing Details</h3><p className="mt-1 text-xs text-[#675875]">Regular equipment only — no variants or Reorder Point.</p></div>
                         <div className="max-h-[320px] overflow-auto overscroll-contain"><table className="w-full min-w-0 table-fixed text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                             <colgroup><col className="w-[23%]"/><col className="w-[14%]"/><col className="w-[9%]"/><col className="w-[13%]"/><col className="w-[16%]"/><col className="w-[16%]"/><col className="w-[9%]"/></colgroup>
-                            <thead className="sticky top-0 z-10 bg-[#F8F3FC] text-[#5A476A]"><tr>{["Rental Product","Category","Stock","Cost Price","Rental Rate / Day","Purchase Cost","Status"].map(h=><th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]" key={h}>{h}</th>)}</tr></thead>
+                            <thead className="sticky top-0 z-10 bg-[#F8F3FC] text-[#5A476A]"><tr>{["Rental Product","Category","Stock","Cost Price","Rental Rate","Purchase Cost","Status"].map(h=><th className="truncate px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]" key={h}>{h}</th>)}</tr></thead>
                             <tbody>{(preview?.rows||[]).map((row,i)=><tr key={`${row.name}-${i}`} className="border-t border-[#EFE7F4]">
                                 <td className="py-2 font-semibold text-[#2B174C] px-4 text-left">{row.name}</td><td className="px-2 py-2">{row.category}</td>
                                 <td className="px-2 py-2 text-center">{row.openingUnits}</td><td className="px-2 py-2 text-center">{peso(row.unitCost)}</td>
@@ -1682,7 +1660,6 @@ function RentalImportDialog({close,onSave,saving,existingEquipment}:{close:()=>v
                     </section>
                 </div>
                 <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-[#E6DDF0] px-5 py-4 sm:px-6">
-                    <button type="button" disabled={submitting} onClick={()=>{setStep("select");setError("");}} className={secondary}>Back</button>
                     <button type="button" disabled={submitting} onClick={close} className={secondary}>Cancel</button>
                     <button type="button" disabled={!preview||submitting||saving} onClick={()=>void confirm()} className="rounded-xl bg-[#2B174C] px-5 py-2 text-sm font-semibold text-white disabled:opacity-40">{submitting?"Importing...":"Confirm Import"}</button>
                 </div>
@@ -1789,7 +1766,7 @@ function RentalCategoriesDialog({categories,equipment,close,onSave,saving}:{
                     <p className="text-sm text-[#6A5D6F]">{confirmAction.action==="create_rental_category"?`Are you sure you want to add “${confirmAction.name}”?`:
                         confirmAction.action==="rename_rental_category"?`Change “${confirmAction.previousName}” to “${confirmAction.name}”?`:
                             `Are you sure you want to delete “${confirmAction.name}”? This action cannot be undone.`}</p>
-                    <div className="flex flex-wrap justify-end gap-2"><button type="button" disabled={working} onClick={()=>{if(confirmAction.action==="rename_rental_category"){setEditing(confirmAction.previousName);setEditDraft(confirmAction.name);}setConfirmAction(null);}} className={secondary}>Back</button>
+                    <div className="flex flex-wrap justify-end gap-2">
                         <button type="button" disabled={working} onClick={()=>setConfirmAction(null)} className={secondary}>Cancel</button>
                         <button type="button" disabled={working||saving} onClick={()=>void confirm()} className={`rounded-xl px-4 py-2 text-sm font-semibold text-white disabled:opacity-40 ${confirmAction.action==="delete_rental_category" ? "bg-red-600 hover:bg-red-700" : "bg-[#2B174C] hover:bg-[#1B0D31]"}`}>{working?"Saving...":confirmAction.action==="rename_rental_category"?"Save Changes":confirmAction.action==="create_rental_category"?"Add Category":"Delete Category"}</button></div>
                 </div>

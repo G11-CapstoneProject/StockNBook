@@ -7,8 +7,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// ===== BEGIN StockNBook v2 read models (reports) =====
-// stocknbook_v2 tables shown with the column names this report already uses.
 const V2_PRODUCT_STOCK_SQL = (p: string, bi: string) => `CASE WHEN ${p}.has_variants = 1 THEN COALESCE((
         SELECT SUM(vbi.on_hand_quantity)
         FROM product_variants vv
@@ -211,7 +209,7 @@ function databaseConfig() {
     return {
         host: "127.0.0.1",
         user: "root",
-        password: "BTA5EYVWLfWcebF",
+        password: "020820@Steph",
         database: "stocknbook_v2",
         port: 3306,
     };
@@ -848,7 +846,6 @@ async function canReadAuditLogs(
     branchId: number | null, employeeId: number | null
 ) {
     if (role === "owner") return true;
-    if (role !== "manager") return false;
     if (!branchId || !employeeId) return false;
     const [rows] = await connection.execute(
         `SELECT permissions FROM users
@@ -1109,14 +1106,6 @@ export async function GET(request: NextRequest) {
                 connection, storeId, role, branchId, staffId, range, searchParams
             );
             return NextResponse.json({ success: true, data: audit });
-        }
-
-        // Staff never have a Reports workspace. The narrow employee-actions
-        // response below is retained for existing dashboard operations.
-        if (scope !== "employee_actions" && scope !== "employee-actions" &&
-            !(await canReadAuditLogs(connection, role, storeId, branchId,
-                role === "manager" ? asPositiveInteger(token.manager_id ?? token.managerId) : null))) {
-            return jsonError("You do not have permission to view reports.", 403);
         }
 
         // Staff dashboard only needs today's employee activity. Allow it to

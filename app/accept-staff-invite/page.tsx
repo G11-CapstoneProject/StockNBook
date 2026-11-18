@@ -9,8 +9,10 @@ import {
     CalendarDays,
     Check,
     CheckCircle2,
+    Clock3,
     Eye,
     EyeOff,
+    Phone,
     LayoutDashboard,
     Loader2,
     Lock,
@@ -25,6 +27,7 @@ import {
 } from "lucide-react";
 import {
     Suspense,
+    useCallback,
     useEffect,
     useMemo,
     useRef,
@@ -32,6 +35,28 @@ import {
 } from "react";
 
 import LandingPage from "../../components/landing/LandingPage";
+// Phone formatting stays inside this existing page/component; no helper file is required.
+const MOBILE_PHONE_PLACEHOLDER = "e.g. 0912 345 6789";
+const MOBILE_PHONE_HELP = "Enter an 11-digit Philippine mobile number starting with 09.";
+
+function normalizeMobileNumber(value: string): string {
+    const digits = String(value ?? "").replace(/\D/g, "");
+    if (digits.startsWith("63")) return `0${digits.slice(2)}`;
+    if (digits.length === 10 && digits.startsWith("9")) return `0${digits}`;
+    return digits;
+}
+
+function isValidMobileNumber(value: string): boolean {
+    return /^09\d{9}$/.test(normalizeMobileNumber(value));
+}
+
+function formatMobileInput(value: string): string {
+    const digits = normalizeMobileNumber(value).slice(0, 11);
+    return [digits.slice(0, 4), digits.slice(4, 7), digits.slice(7, 11)]
+        .filter(Boolean)
+        .join(" ");
+}
+
 
 const lora = Lora({
     subsets: ["latin"],
@@ -42,6 +67,7 @@ const lora = Lora({
 type InviteDetails = {
     staff_id: number;
     staff_name: string;
+    staff_phone: string;
     staff_email: string;
     store_id: number;
     store_name: string;
@@ -243,6 +269,7 @@ function AcceptStaffInviteContent() {
     const [currentStep, setCurrentStep] = useState(1);
     const [details, setDetails] = useState<InviteDetails | null>(null);
     const [staffName, setStaffName] = useState("");
+    const [phone, setPhone] = useState("");
     const [otp, setOtp] = useState("");
     const [otpTimer, setOtpTimer] = useState(0);
     const [password, setPassword] = useState("");
@@ -261,6 +288,8 @@ function AcceptStaffInviteContent() {
     const [activation, setActivation] = useState<ActivationResult | null>(null);
 
     const otpRefs = useRef<Array<HTMLInputElement | null>>([]);
+    const lastOtpAttempt = useRef("");
+    const [otpVerifiedAnimation, setOtpVerifiedAnimation] = useState(false);
 
     useEffect(() => {
         let active = true;
@@ -282,6 +311,7 @@ function AcceptStaffInviteContent() {
 
                 setDetails(data);
                 setStaffName(data.staff_name || "");
+                setPhone(formatMobileInput(data.staff_phone || ""));
             } catch (loadError) {
                 if (!active) return;
                 setError(
@@ -338,6 +368,8 @@ function AcceptStaffInviteContent() {
             );
 
             setOtp("");
+            lastOtpAttempt.current = "";
+            setOtpVerifiedAnimation(false);
             setOtpTimer(Number(data.expires_in || 300));
             setCurrentStep(2);
             window.setTimeout(() => otpRefs.current[0]?.focus(), 50);
@@ -380,35 +412,47 @@ function AcceptStaffInviteContent() {
         otpRefs.current[Math.min(pasted.length, 5)]?.focus();
     };
 
-    const verifyOtp = async () => {
-        if (!/^\d{6}$/.test(otp)) {
-            setError("Enter the complete 6-digit verification code.");
-            return;
-        }
-
+    const verifyOtp = useCallback(async () => {
+        if (submitting || otpVerifiedAnimation || otpTimer <= 0 || !/^\d{6}$/.test(otp)) return;
+        const completedCode = otp;
         setError("");
         setSubmitting(true);
-
         try {
             await postInviteAction("verify_staff_invite_otp", {
                 invite_token: inviteToken,
-                otp,
+                otp: completedCode,
             });
+            setOtpVerifiedAnimation(true);
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
             setCurrentStep(3);
         } catch (verifyError) {
-            setError(
-                verifyError instanceof Error
-                    ? verifyError.message
-                    : "The verification code is invalid."
-            );
+            setError(verifyError instanceof Error ? verifyError.message : "The verification code is invalid.");
+            setOtp("");
+            window.setTimeout(() => otpRefs.current[0]?.focus(), 0);
         } finally {
             setSubmitting(false);
         }
-    };
+    }, [submitting, otpVerifiedAnimation, otpTimer, otp, inviteToken]);
+
+    // Sending is triggered only when a complete code is entered; repeated
+    // renders and timer ticks cannot submit the same six digits again.
+    useEffect(() => {
+        if (!/^\d{6}$/.test(otp)) {
+            lastOtpAttempt.current = "";
+            return;
+        }
+        if (currentStep !== 2 || otpTimer <= 0 || submitting || otpVerifiedAnimation || lastOtpAttempt.current === otp) return;
+        lastOtpAttempt.current = otp;
+        void verifyOtp();
+    }, [otp, currentStep, otpTimer, submitting, otpVerifiedAnimation, verifyOtp]);
 
     const saveStaffDetails = async () => {
         if (!staffName.trim()) {
             setError("Enter your full name before continuing.");
+            return;
+        }
+        if (!isValidMobileNumber(phone)) {
+            setError("Enter a valid Philippine mobile number (e.g. 0912 345 6789).");
             return;
         }
 
@@ -421,10 +465,12 @@ function AcceptStaffInviteContent() {
                 {
                     invite_token: inviteToken,
                     staff_name: staffName.trim(),
+                    phone: normalizeMobileNumber(phone),
                 }
             );
             setDetails(data);
             setStaffName(data.staff_name);
+            setPhone(formatMobileInput(data.staff_phone || ""));
             setCurrentStep(4);
         } catch (saveError) {
             setError(
@@ -438,6 +484,11 @@ function AcceptStaffInviteContent() {
     };
 
     const activateAccount = async () => {
+        if (!isValidMobileNumber(phone)) {
+            setError("Enter a valid Philippine mobile number (e.g. 0912 345 6789).");
+            return;
+        }
+
         if (!passwordValid) {
             setError("Create a password that meets all requirements.");
             return;
@@ -469,6 +520,7 @@ function AcceptStaffInviteContent() {
                 {
                     invite_token: inviteToken,
                     staff_name: staffName.trim(),
+                    phone: normalizeMobileNumber(phone),
                     password,
                 }
             );
@@ -645,51 +697,50 @@ function AcceptStaffInviteContent() {
                     <div className="mt-6">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                             <div>
-                                <h3 className="text-lg font-bold text-[#291548]">Verify your invited email</h3>
+                                <h3 className="text-lg font-bold text-[#291548]">{otpVerifiedAnimation ? "Verified Successfully" : "Verify your invited email"}</h3>
                                 <p className="mt-1 text-sm leading-6 text-[#6A5E75]">
-                                    Enter the 6-digit code sent to {maskEmail(details.staff_email)}.
+                                    {otpVerifiedAnimation ? "Your email verification was successful." : <>Enter the 6-digit code sent to {maskEmail(details.staff_email)}.</>}
                                 </p>
                             </div>
-                            <button
-                                type="button"
-                                disabled={submitting || otpTimer > 0}
-                                onClick={sendVerificationCode}
-                                className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                                <Mail className="h-4 w-4" />
-                                Resend code
+                            <button type="button" disabled={submitting || otpVerifiedAnimation || otpTimer > 0} onClick={() => void sendVerificationCode()}
+                                    aria-label="Resend verification code" className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">
+                                <Mail className="h-4 w-4" /> Resend
                             </button>
                         </div>
 
-                        <div className="mt-5 grid grid-cols-6 gap-2 sm:gap-3">
+                        <div className="mt-5 flex max-w-md justify-center gap-2 sm:gap-3">
                             {Array.from({ length: 6 }).map((_, index) => (
-                                <input
-                                    key={index}
-                                    ref={(element) => {
-                                        otpRefs.current[index] = element;
-                                    }}
-                                    value={otp[index] || ""}
-                                    onChange={(event) => handleOtpChange(index, event.target.value)}
-                                    onKeyDown={(event) => handleOtpKeyDown(index, event)}
-                                    onPaste={handleOtpPaste}
-                                    inputMode="numeric"
-                                    maxLength={1}
-                                    aria-label={`Verification digit ${index + 1}`}
-                                    className="h-12 min-w-0 rounded-xl border border-[#DCD2E8] bg-white text-center text-lg font-bold text-[#2F1752] outline-none transition focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10 sm:h-14 sm:text-xl"
-                                />
+                                <div key={index} className="relative min-w-0 flex-1">
+                                    <input
+                                        ref={(element) => { otpRefs.current[index] = element; }}
+                                        value={otp[index] || ""}
+                                        onChange={(event) => { setError(""); handleOtpChange(index, event.target.value); }}
+                                        onKeyDown={(event) => handleOtpKeyDown(index, event)}
+                                        onPaste={(event) => { setError(""); handleOtpPaste(event); }}
+                                        inputMode="numeric" pattern="[0-9]*" autoComplete={index === 0 ? "one-time-code" : "off"}
+                                        maxLength={1} disabled={submitting || otpVerifiedAnimation || otpTimer <= 0}
+                                        aria-label={`Verification digit ${index + 1}`}
+                                        className={`snb-invite-otp-box h-12 w-full rounded-xl border bg-white text-center text-lg font-bold text-[#2F1752] outline-none transition-all duration-200 focus:border-[#6F45B8] focus:ring-4 focus:ring-[#6F45B8]/15 sm:h-14 sm:text-xl ${otpVerifiedAnimation ? "snb-invite-otp-done border-[#46A36A] bg-[#F0FBF4]" : otp[index] ? "snb-invite-otp-filled border-[#C9951A] bg-[#FFFBF2]" : "border-[#DCD2E8]"}`}
+                                    />
+                                    {index < 5 && <span aria-hidden="true" className={`pointer-events-none absolute -right-2 top-1/2 z-10 h-0.5 w-2 -translate-y-1/2 transition-colors duration-200 ${otp[index] ? "bg-[#C9951A]" : "bg-[#E8DFEF]"}`} />}
+                                </div>
                             ))}
                         </div>
 
-                        <div className="mt-3 flex items-center justify-between text-sm">
-                            <span className="rounded-full bg-[#F0E8FA] px-3 py-1.5 font-medium text-[#3D2560]">
-                                Code expires in {formatTimer(otpTimer)}
-                            </span>
-                            {otpTimer === 0 && (
-                                <button type="button" onClick={sendVerificationCode} className="font-semibold text-[#2D1B4E]">
-                                    Send a new code
-                                </button>
-                            )}
-                        </div>
+                        {otpVerifiedAnimation ? (
+                            <p role="status" aria-live="polite" className="snb-invite-otp-confirmed mt-4 flex items-center gap-2 text-sm font-semibold text-[#318653]"><CheckCircle2 className="h-6 w-6" /> Verified and secure</p>
+                        ) : (
+                            <p role="status" aria-live="polite" className="mt-4 inline-flex items-center gap-2 rounded-full bg-[#F0E8FA] px-3 py-1.5 text-sm font-medium tabular-nums text-[#3D2560]"><Clock3 className="h-4 w-4" />{formatTimer(otpTimer)}</p>
+                        )}
+                        {submitting && !otpVerifiedAnimation && <p role="status" className="mt-3 text-sm font-medium text-[#6F45B8]">Checking your code...</p>}
+                        {otpTimer === 0 && !otpVerifiedAnimation && <p className="mt-2 text-xs text-red-600">This code has expired. Please select Resend.</p>}
+                        <style jsx>{`
+                            .snb-invite-otp-filled { box-shadow: 0 0 0 2px rgba(201,149,26,.12), 0 0 12px rgba(201,149,26,.14); animation: snbInviteOtpPop .22s ease-out; }
+                            .snb-invite-otp-done { box-shadow: 0 0 15px rgba(70,163,106,.25); }
+                            .snb-invite-otp-confirmed { animation: snbInviteOtpPop .5s ease-out both; }
+                            @keyframes snbInviteOtpPop { from { transform: scale(.9); opacity: .55; } to { transform: scale(1); opacity: 1; } }
+                            @media (prefers-reduced-motion: reduce) { .snb-invite-otp-filled, .snb-invite-otp-confirmed { animation: none; } }
+                        `}</style>
                     </div>
                 )}
 
@@ -697,7 +748,7 @@ function AcceptStaffInviteContent() {
                     <div className="mt-6">
                         <div className="rounded-2xl border border-green-200 bg-green-50 p-4 text-sm text-green-800">
                             <p className="flex items-center gap-2 font-bold"><CheckCircle2 className="h-5 w-5" /> Your email has been verified.</p>
-                            <p className="mt-1 pl-7">Review the name entered by the branch manager. You may correct it before continuing.</p>
+                            <p className="mt-1 pl-7">Review your name and enter your phone number before continuing.</p>
                         </div>
 
                         <div className="mt-5 grid gap-4 sm:grid-cols-2">
@@ -717,6 +768,19 @@ function AcceptStaffInviteContent() {
                                     readOnly
                                     className="mt-2 h-12 w-full rounded-xl border border-[#E3DDEA] bg-[#F7F5F9] px-4 text-[#746A7D]"
                                 />
+                            </label>
+                            <label className="block sm:col-span-2">
+                                <span className="inline-flex items-center gap-2 text-sm font-semibold text-[#2D194D]"><Phone className="h-4 w-4" /> Phone number</span>
+                                <input
+                                    type="tel"
+                                    inputMode="tel"
+                                    autoComplete="tel-national"
+                                    placeholder={MOBILE_PHONE_PLACEHOLDER}
+                                    value={phone}
+                                    onChange={(event) => setPhone(formatMobileInput(event.target.value))}
+                                    className="mt-2 h-12 w-full rounded-xl border border-[#DCD2E8] px-4 text-[#261641] outline-none focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10"
+                                />
+                                <span className="mt-1.5 block text-xs text-[#74687E]">{MOBILE_PHONE_HELP}</span>
                             </label>
                         </div>
 
@@ -746,8 +810,8 @@ function AcceptStaffInviteContent() {
                                             onChange={(event) => setPassword(event.target.value)}
                                             className="h-12 w-full rounded-xl border border-[#DCD2E8] pl-12 pr-12 text-[#261641] outline-none focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10"
                                         />
-                                        <button type="button" onClick={() => setShowPassword((value) => !value)} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#756A82]">
-                                            {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                                        <button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#756A82]">
+                                            {showPassword ? <Eye className="h-5 w-5" /> : <EyeOff className="h-5 w-5" />}
                                         </button>
                                     </div>
                                 </label>
@@ -762,8 +826,8 @@ function AcceptStaffInviteContent() {
                                             onChange={(event) => setConfirmPassword(event.target.value)}
                                             className="h-12 w-full rounded-xl border border-[#DCD2E8] pl-12 pr-12 text-[#261641] outline-none focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10"
                                         />
-                                        <button type="button" onClick={() => setShowConfirmPassword((value) => !value)} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#756A82]">
-                                            {showConfirmPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                                        <button type="button" onClick={() => setShowConfirmPassword((value) => !value)} aria-label={showConfirmPassword ? "Hide confirm password" : "Show confirm password"} aria-pressed={showConfirmPassword} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#756A82]">
+                                            {showConfirmPassword ? <Eye className="h-5 w-5" /> : <EyeOff className="h-5 w-5" />}
                                         </button>
                                     </div>
                                 </label>
@@ -846,7 +910,7 @@ function AcceptStaffInviteContent() {
                         onClick={() => {
                             setError("");
                             if (currentStep === 1) handleClose();
-                            else setCurrentStep((step) => Math.max(1, step - 1));
+                            else setCurrentStep((step) => step === 3 && otpVerifiedAnimation ? 1 : Math.max(1, step - 1));
                         }}
                         disabled={submitting}
                         className="inline-flex h-12 items-center justify-center gap-2 rounded-xl border border-[#CFC3DE] bg-white px-5 font-semibold text-[#35204F] disabled:opacity-50"
@@ -855,12 +919,11 @@ function AcceptStaffInviteContent() {
                         {currentStep === 1 ? "Cancel" : "Back"}
                     </button>
 
-                    <button
+                    {currentStep !== 2 && <button
                         type="button"
                         disabled={submitting}
                         onClick={() => {
                             if (currentStep === 1) void sendVerificationCode();
-                            if (currentStep === 2) void verifyOtp();
                             if (currentStep === 3) void saveStaffDetails();
                             if (currentStep === 4) void activateAccount();
                         }}
@@ -868,11 +931,10 @@ function AcceptStaffInviteContent() {
                     >
                         {submitting ? <Loader2 className="h-5 w-5 animate-spin" /> : null}
                         {currentStep === 1 && "Continue"}
-                        {currentStep === 2 && "Verify & Continue"}
                         {currentStep === 3 && "Save & Continue"}
                         {currentStep === 4 && "Activate account"}
                         {!submitting && <ArrowRight className="h-5 w-5" />}
-                    </button>
+                    </button>}
                 </div>
             </div>
         );

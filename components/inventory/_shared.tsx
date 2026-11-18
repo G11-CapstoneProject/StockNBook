@@ -2716,17 +2716,6 @@ export function InventoryDialogs({ inv }: { inv: InventoryController }) {
                         <div className="mt-5 flex justify-end gap-2">
                             <button
                                 type="button"
-                                onClick={() => {
-                                    inv.setShowImportConfirmDialog(false);
-                                    inv.setShowImportDialog(true);
-                                }}
-                                className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]"
-                            >
-                                Back
-                            </button>
-
-                            <button
-                                type="button"
                                 onClick={inv.closeImportDialog}
                                 className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]"
                             >
@@ -3094,17 +3083,6 @@ function CategoryForm({ inv }: { inv: InventoryController }) {
                         <div className="mt-5 flex justify-end gap-2">
                             <button
                                 type="button"
-                                onClick={() => {
-                                    setShowConfirmEditCategoryDialog(false);
-                                    setShowEditCategoryDialog(true);
-                                }}
-                                className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]"
-                            >
-                                Back
-                            </button>
-
-                            <button
-                                type="button"
                                 onClick={closeEditCategoryDialog}
                                 className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]"
                             >
@@ -3305,35 +3283,20 @@ function ProductForm({
                 </select>
             </div>
 
-            <div className="rounded-xl border border-[#E6DDF0] bg-[#FFFCF7] p-4">
-                <div className="flex items-start justify-between gap-3">
-                    <div>
-                        <p className="text-sm font-semibold text-[#1A1220]">
-                            Product Variants
-                        </p>
-                        <p className="mt-0.5 text-xs text-[#9B8AAA]">
-                            Enable if product has different variations like color, size,
-                            packaging, etc.
-                        </p>
-                    </div>
-
-                    {inv.hasVariants && (
-                        <span className="rounded-full bg-[#2B174C] px-3 py-1 text-[11px] font-semibold text-white">
-                            Enabled
-                        </span>
-                    )}
+            <div className="flex items-center justify-between gap-4 rounded-xl border border-[#E6DDF0] bg-[#FFFCF7] p-4">
+                <div>
+                    <p className="text-sm font-semibold text-[#1A1220]">
+                        With Variants
+                    </p>
+                    <p className="mt-0.5 text-xs text-[#9B8AAA]">
+                        Turn on if this product comes in different colors, sizes, or packaging.
+                    </p>
                 </div>
 
-                <div className="mt-3 flex items-center justify-between gap-3">
-                    <span className="text-sm font-semibold text-[#2B174C]">
-                        Product has variants
-                    </span>
-
-                    <VariantToggle
-                        checked={inv.hasVariants}
-                        onChange={inv.setHasVariants}
-                    />
-                </div>
+                <VariantToggle
+                    checked={inv.hasVariants}
+                    onChange={inv.setHasVariants}
+                />
             </div>
 
             {inv.hasVariants ? (
@@ -3615,14 +3578,14 @@ function VariantEditor({
         <div className="rounded-2xl border border-[#E6DDF0] bg-white p-5 shadow-sm">
             <div>
                 <p className="text-sm font-semibold text-[#1A1220]">
-                    Variant Matrix
+                    Variants
                 </p>
                 <p className="text-xs text-[#9B8AAA]">
-                    Add columns like Color, Size, Packaging, etc.
+                    What makes each variant different? For example: Color, Size, or Packaging.
                 </p>
             </div>
 
-            <div className="mt-5 grid gap-3 md:grid-cols-[1fr_180px]">
+            <div className="mt-4 grid gap-3 md:grid-cols-[1fr_180px]">
                 <input
                     value={variantColumnInput}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -3635,7 +3598,8 @@ function VariantEditor({
                         }
                     }}
                     className={fieldClass}
-                    placeholder="Variant column name"
+                    placeholder="e.g. Color"
+                    aria-label="Variant option, for example Color or Size"
                 />
 
                 <button
@@ -3643,53 +3607,37 @@ function VariantEditor({
                     onClick={addVariantColumn}
                     className="rounded-xl bg-[#2B174C] px-4 py-3 text-sm font-semibold text-white hover:bg-[#1B0D31]"
                 >
-                    Add Column
+                    Add Option
                 </button>
             </div>
 
-            <div className="mt-4 flex items-center gap-3">
-                <div className="min-w-0 flex-1 overflow-x-auto">
-                    <div className="flex w-max gap-2 pb-1">
-                        {variantColumns.length === 0 ? (
-                            <p className="text-xs font-semibold text-red-500">
-                                No variant column yet. Add something like color, size, or packaging.
-                            </p>
-                        ) : (
-                            variantColumns.map((col: string) => (
-                                <div
-                                    key={col}
-                                    className="flex shrink-0 items-center gap-2 rounded-full bg-[#F7F1FF] px-4 py-2 text-xs font-semibold text-[#2B174C]"
+            <div className="mt-3 overflow-x-auto">
+                <div className="flex w-max gap-2 pb-1">
+                    {variantColumns.length === 0 ? (
+                        <p className="text-xs text-[#9B8AAA]">
+                            No options added yet.
+                        </p>
+                    ) : (
+                        variantColumns.map((col: string) => (
+                            <div
+                                key={col}
+                                className="flex shrink-0 items-center gap-2 rounded-full bg-[#F7F1FF] px-4 py-2 text-xs font-semibold text-[#2B174C]"
+                            >
+                                <span>{col}</span>
+
+                                <button
+                                    type="button"
+                                    onClick={() => removeVariantColumn(col)}
+                                    className="flex h-4 w-4 items-center justify-center rounded-full text-[12px] font-bold text-[#2B174C] hover:bg-[#E6DDF0]"
+                                    aria-label={`Remove ${col}`}
+                                    title={`Remove ${col}`}
                                 >
-                                    <span>{col}</span>
-
-                                    <button
-                                        type="button"
-                                        onClick={() => removeVariantColumn(col)}
-                                        className="flex h-4 w-4 items-center justify-center rounded-full text-[12px] font-bold text-[#2B174C] hover:bg-[#E6DDF0]"
-                                        aria-label={`Remove ${col} column`}
-                                        title={`Remove ${col}`}
-                                    >
-                                        ×
-                                    </button>
-                                </div>
-                            ))
-                        )}
-                    </div>
+                                    ×
+                                </button>
+                            </div>
+                        ))
+                    )}
                 </div>
-
-                <button
-                    type="button"
-                    onClick={() => {
-                        inv.addVariantRow();
-                        setVariantExpirationDates((currentDates) => [
-                            ...currentDates,
-                            "",
-                        ]);
-                    }}
-                    className="shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-semibold text-[#2B174C] hover:bg-[#F7F1FF]"
-                >
-                    + Add Variant
-                </button>
             </div>
 
             <div className="mt-5 overflow-x-auto">
@@ -3865,6 +3813,20 @@ function VariantEditor({
                     </tbody>
                 </table>
             </div>
+
+            <button
+                type="button"
+                onClick={() => {
+                    inv.addVariantRow();
+                    setVariantExpirationDates((currentDates) => [
+                        ...currentDates,
+                        "",
+                    ]);
+                }}
+                className="mt-3 w-full rounded-xl border border-dashed border-[#CDB9E1] bg-white px-4 py-3 text-sm font-semibold text-[#2B174C] hover:bg-[#F7F1FF]"
+            >
+                + Add Variant
+            </button>
         </div>
     );
 }

@@ -1325,7 +1325,7 @@ export default function BranchesPage() {
                                             label="Contact number"
                                             value={addContactNumber}
                                             onChange={setAddContactNumber}
-                                            placeholder="09XX XXX XXXX"
+                                            placeholder="e.g. 0912 345 6789"
                                         />
                                     </div>
 

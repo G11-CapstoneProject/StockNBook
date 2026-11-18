@@ -566,6 +566,56 @@ const V2_RENTAL_MOVEMENTS = `(SELECT
              JOIN branch_inventory rbi ON rbi.id = mm.branch_inventory_id
              LEFT JOIN users mu ON mu.id = mm.performed_by)`;
 
+// Only physical stock receipt, booking-linked replacement/return/release, and
+// deletion appear in the Manager and Staff activity feeds. Missing reports and
+// replacement events without a verified booking remain in the underlying ledger.
+// Legacy missing reports sometimes stored a booking reference in the reason but
+// not in stock_issues.booking_id: accept it only after confirming the booking
+// belongs to this store/branch and contains the corresponding rental equipment.
+const V2_MISSING_REPLACEMENT_BOOKING_REFERENCE_SQL = `COALESCE(
+    NULLIF(miss.booking_reference,''),
+    (SELECT old_booking.booking_reference
+       FROM bookings old_booking
+      WHERE miss.booking_id IS NULL
+        AND miss.reason LIKE 'Booking %: %'
+        AND old_booking.store_id = m.store_id
+        AND old_booking.branch_id = m.branch_id
+        AND old_booking.booking_reference = SUBSTRING_INDEX(SUBSTRING(miss.reason, 9), ': ', 1)
+        AND EXISTS (SELECT 1 FROM booking_items old_line
+                     WHERE old_line.booking_id = old_booking.id
+                       AND old_line.store_id = old_booking.store_id
+                       AND old_line.equipment_id = m.equipment_id
+                       AND old_line.item_type = 'rental')
+      LIMIT 1))`;
+// Booking reference shown in Equipment Care & Maintenance and Equipment Condition &
+// Monitoring. Issues reported while preparing a booking keep the booking only in the
+// reason ("Booking REF: ..."); accept it only for a booking in the same store/branch
+// that contains this rental equipment. `alias` is a V2_MAINTENANCE_RECORDS or
+// V2_MISSING_REPORTS row (both expose booking_reference, store_id, branch_id, equipment_id).
+const V2_ISSUE_BOOKING_REFERENCE_SQL = (alias, reasonColumn) => `COALESCE(
+    NULLIF(${alias}.booking_reference,''),
+    (SELECT issue_booking.booking_reference
+       FROM bookings issue_booking
+      WHERE ${alias}.${reasonColumn} LIKE 'Booking %: %'
+        AND issue_booking.store_id = ${alias}.store_id
+        AND issue_booking.branch_id = ${alias}.branch_id
+        AND issue_booking.booking_reference = SUBSTRING_INDEX(SUBSTRING(${alias}.${reasonColumn}, 9), ': ', 1)
+        AND EXISTS (SELECT 1 FROM booking_items issue_line
+                     WHERE issue_line.booking_id = issue_booking.id
+                       AND issue_line.store_id = issue_booking.store_id
+                       AND issue_line.equipment_id = ${alias}.equipment_id
+                       AND issue_line.item_type = 'rental')
+      LIMIT 1))`;
+const V2_VISIBLE_RENTAL_STOCK_ACTIVITY_SQL = `(m.type IN ('received','returned','rented_out')
+    OR (m.type = 'missing_replaced' AND ${V2_MISSING_REPLACEMENT_BOOKING_REFERENCE_SQL} IS NOT NULL)
+    OR (m.type = 'adjustment' AND m.description LIKE 'Equipment retired:%'))`;
+// Never display a MISS-###### report number as a booking reference.
+const V2_VISIBLE_RENTAL_STOCK_REFERENCE_SQL = `CASE
+    WHEN m.type IN ('received','adjustment') THEN COALESCE(e.equipment_number,'')
+    WHEN m.type = 'missing_replaced' THEN COALESCE(${V2_MISSING_REPLACEMENT_BOOKING_REFERENCE_SQL},'')
+    ELSE COALESCE(NULLIF(m.reference_number,''), '')
+END`;
+
 // Booking bill payments (security deposits and damage/loss charge payments are separate).
 const V2_BOOKING_PAID_SQL = (b) => `(COALESCE((SELECT SUM(bp.amount) FROM payments bp
         WHERE bp.booking_id = ${b}.id AND bp.status <> 'voided'
@@ -1261,11 +1311,17 @@ async function getInventory(db,scope) {
     const [activity]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,
                                               COALESCE(e.name,'Archived equipment') AS equipmentName,m.type,m.quantity,
                                               DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
-                                              COALESCE((SELECT bk.booking_reference FROM bookings bk WHERE bk.store_id=m.store_id
-                                                                                                       AND bk.booking_reference=m.reference_number LIMIT 1),
-                                                 e.equipment_number,'') AS referenceNumber,m.description AS description
-                                       FROM ${V2_RENTAL_MOVEMENTS} m LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
-                                       WHERE m.store_id=? AND m.branch_id=? AND m.equipment_id IS NOT NULL ORDER BY m.occurred_at DESC,m.id DESC LIMIT 100`,
+                                              ${V2_VISIBLE_RENTAL_STOCK_REFERENCE_SQL} AS referenceNumber,
+                                              m.description AS description
+                                       FROM ${V2_RENTAL_MOVEMENTS} m
+                                                LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
+                                                LEFT JOIN ${V2_MISSING_REPORTS} miss ON m.type='missing_replaced'
+                                           AND miss.id=CAST(SUBSTRING(m.reference_number,6) AS UNSIGNED)
+                                           AND miss.store_id=m.store_id AND miss.branch_id=m.branch_id
+                                           AND miss.equipment_id=m.equipment_id
+                                       WHERE m.store_id=? AND m.branch_id=? AND m.equipment_id IS NOT NULL
+                                         AND ${V2_VISIBLE_RENTAL_STOCK_ACTIVITY_SQL}
+                                       ORDER BY m.occurred_at DESC,m.id DESC LIMIT 100`,
         [scope.storeId,scope.branchId]);
     // Manager monitoring history uses the stock movement ledger (read-only).
     const [maintenanceHistory]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,
@@ -1274,7 +1330,8 @@ async function getInventory(db,scope) {
                                                         DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
                                                         COALESCE(m.reference_number,'') AS referenceNumber,
                                                         m.actor_name AS actorName,m.description AS notes,mr.condition_status AS conditionStatus,
-                                                        COALESCE(mr.booking_reference,miss.booking_reference) AS bookingReference
+                                                        COALESCE(${V2_ISSUE_BOOKING_REFERENCE_SQL("mr","start_reason")},
+                                                                 ${V2_ISSUE_BOOKING_REFERENCE_SQL("miss","reason")}) AS bookingReference
                                                  FROM ${V2_RENTAL_MOVEMENTS} m
                                                           LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id
                                                      AND e.store_id=m.store_id AND e.branch_id=m.branch_id
@@ -1315,7 +1372,8 @@ async function getInventory(db,scope) {
                                                         m.start_reason AS reason,m.reported_by AS reportedBy,
                                                         DATE_FORMAT(m.opened_at,'%Y-%m-%d') AS dateReported,
                                                         DATE_FORMAT(m.estimated_completion_date,'%Y-%m-%d') AS estimatedCompletion,
-                                                        m.condition_status AS status,m.booking_reference AS bookingReference,
+                                                        m.condition_status AS status,
+                                                        ${V2_ISSUE_BOOKING_REFERENCE_SQL("m","start_reason")} AS bookingReference,
                                                         IF(m.repair_approved_at IS NULL,0,1) AS repairApproved,
                                                         q.id AS pendingCompletionId,q.quantity AS pendingCompletionUnits,
                                                         q.notes AS pendingCompletionNotes
@@ -1344,7 +1402,7 @@ async function getInventory(db,scope) {
     // Staff receiving tasks are not part of stocknbook_v2.
     const pendingReceipts=[];
     const [missingReports]=await db.execute(`SELECT r.id,r.equipment_id AS equipmentId,e.name AS equipmentName,
-                                                    r.quantity,r.reason,r.booking_reference AS bookingReference,
+                                                    r.quantity,r.reason,${V2_ISSUE_BOOKING_REFERENCE_SQL("r","reason")} AS bookingReference,
                                                     DATE_FORMAT(r.created_at,'%Y-%m-%d') AS reportedAt,r.reported_by AS reportedBy,
                                                     GREATEST(0,r.quantity-r.recovered) AS remainingUnits
                                              FROM ${V2_MISSING_REPORTS} r JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=r.equipment_id AND e.branch_id=r.branch_id
@@ -1415,6 +1473,31 @@ async function checkAvailability(db,scope,body) {
                                                                             AND a.start_date<=? AND (a.end_date>=? OR a.status='checked_out')`,[scope.storeId,scope.branchId,to,from]);
     const grouped=new Map();for(const row of allocations){const k=Number(row.equipmentId);grouped.set(k,[...(grouped.get(k)||[]),row]);}
     const today=todayPh();
+    // Owner historical view: booking_items retain returned/cleared rental lines, but
+    // the ordinary availability check deliberately excludes those completed rentals.
+    // Reconstruct the peak *scheduled booking units* for the past portion only.
+    // This is NOT historical physical stock or an exact past status snapshot.
+    // Other roles retain their existing availability and reservation semantics.
+    const ownerHistorical=scope.role==='owner' && from<today;
+    const historicalByEquipment=new Map();
+    if(ownerHistorical){
+        const historicalEnd=to<today?to:new Date(Date.parse(`${today}T00:00:00Z`)-86400000).toISOString().slice(0,10);
+        const [history]=await db.execute(`SELECT a.equipment_id AS equipmentId,a.quantity,
+                                                 DATE_FORMAT(a.start_date,'%Y-%m-%d') AS startDate,
+                                                 DATE_FORMAT(a.end_date,'%Y-%m-%d') AS endDate
+                                          FROM ${V2_RENTAL_ALLOCATIONS} a
+                                          WHERE a.store_id=? AND a.branch_id=?
+                                            AND a.status IN ('reserved','checked_out','returned')
+                                            AND a.start_date<=? AND a.end_date>=?`,
+            [scope.storeId,scope.branchId,historicalEnd,from]);
+        for(const row of history){
+            const equipmentId=Number(row.equipmentId);
+            if(!historicalByEquipment.has(equipmentId))historicalByEquipment.set(equipmentId,[]);
+            // Treat the historical record as a scheduled interval. Do not extend
+            // a checked-out allocation into today when reviewing a past date.
+            historicalByEquipment.get(equipmentId).push({...row,status:'returned'});
+        }
+    }
     // Per equipment, for the whole selected period (peak simultaneous use, not a sum):
     //   availableUnits = usable (total - maintenance/inspection hold - missing)
     //                    - peak of confirmed ('reserved') + released ('checked_out') allocations
@@ -1423,9 +1506,19 @@ async function checkAvailability(db,scope,body) {
     return {success:true,availability:equipment.map(e=>{
             const rows=grouped.get(Number(e.id))||[];
             const usable=Number(e.total_units)-Number(e.maintenance_units)-Number(e.missing_units);
+            const currentFrom=from<today?today:from;
+            const currentReserved=currentFrom<=to
+                ? computePeak(rows.filter(row=>String(row.status)==="reserved"),currentFrom,to,today):0;
+            const historicalEnd=to<today?to:new Date(Date.parse(`${today}T00:00:00Z`)-86400000).toISOString().slice(0,10);
+            const historicalBooked=ownerHistorical
+                ? computePeak(historicalByEquipment.get(Number(e.id))||[],from,historicalEnd,today):0;
             return {equipmentId:Number(e.id),
                 availableUnits:Math.max(0,usable-computePeak(rows,from,to,today)),
-                reservedUnits:computePeak(rows.filter(row=>String(row.status)==="reserved"),from,to,today)};
+                // The existing hook maps reservedUnits to the Owner's Rented Booking.
+                // Manager/Staff results are unchanged. For Owner past dates this
+                // includes completed bookings, which ordinary availability omits.
+                reservedUnits:ownerHistorical?Math.max(historicalBooked,currentReserved)
+                    :computePeak(rows.filter(row=>String(row.status)==="reserved"),from,to,today)};
         })};
 }
 
@@ -1565,23 +1658,26 @@ async function staffRentalWorkspace(db, scope) {
                                                 OR (a.status='returned' AND (a.inspection_status IN ('pending','cleaning')
                                                     OR (a.inspection_status='damaged' AND COALESCE(m.quantity_remaining,0)>0))))
                                             ORDER BY a.end_date ASC,a.start_date ASC,a.id ASC LIMIT 300`,[scope.storeId,scope.branchId]);
-    // Staff stock activity: equipment rows only (consumable movements share this table) and only
-    // real stock changes (not events such as "prepared" or "inspected"). direction = Stock In when
-    // on-hand increases or units return from reserved/held; Stock Out for the opposite.
+    // Staff and Manager share the same five physical stock activity categories.
+    // Other condition and correction movements remain in the audit ledger, not this table.
     const [activity] = await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,COALESCE(e.name,'Archived equipment') AS equipmentName,
                                                 m.type,m.quantity,DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
-                                                COALESCE((SELECT bk.booking_reference FROM bookings bk WHERE bk.store_id=m.store_id
-                                                                                                         AND bk.booking_reference=m.reference_number LIMIT 1),
-                                                 e.equipment_number,'') AS referenceNumber,
-                                                CASE WHEN (m.quantity_bucket='on_hand')=(m.quantity_change>=0) THEN 'in' ELSE 'out' END AS direction
-                                         FROM ${V2_RENTAL_MOVEMENTS} m LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
-                                         WHERE m.store_id=? AND m.branch_id=?
-                                           AND m.equipment_id IS NOT NULL AND m.quantity_bucket<>'event'
+                                                ${V2_VISIBLE_RENTAL_STOCK_REFERENCE_SQL} AS referenceNumber,
+                                                m.description AS description,
+                                                CASE WHEN m.type IN ('received','returned','missing_replaced') THEN 'in' ELSE 'out' END AS direction
+                                         FROM ${V2_RENTAL_MOVEMENTS} m
+                                                  LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
+                                                  LEFT JOIN ${V2_MISSING_REPORTS} miss ON m.type='missing_replaced'
+                                             AND miss.id=CAST(SUBSTRING(m.reference_number,6) AS UNSIGNED)
+                                             AND miss.store_id=m.store_id AND miss.branch_id=m.branch_id
+                                             AND miss.equipment_id=m.equipment_id
+                                         WHERE m.store_id=? AND m.branch_id=? AND m.equipment_id IS NOT NULL
+                                           AND ${V2_VISIBLE_RENTAL_STOCK_ACTIVITY_SQL}
                                          ORDER BY m.occurred_at DESC,m.id DESC LIMIT 30`,[scope.storeId,scope.branchId]);
     // Staff receiving tasks are not part of stocknbook_v2.
     const pendingReceipts=[];
     const [missingReports]=await db.execute(`SELECT r.id,r.equipment_id AS equipmentId,e.name AS equipmentName,
-                                                    r.booking_reference AS bookingReference,r.reason,
+                                                    ${V2_ISSUE_BOOKING_REFERENCE_SQL("r","reason")} AS bookingReference,r.reason,
                                                     r.quantity-r.recovered AS remainingUnits
                                              FROM ${V2_MISSING_REPORTS} r JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=r.equipment_id AND e.branch_id=r.branch_id
                                              WHERE r.store_id=? AND r.branch_id=? AND r.status='pending' AND e.archived_at IS NULL
@@ -1589,6 +1685,7 @@ async function staffRentalWorkspace(db, scope) {
     const [maintenanceTasks]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,e.name AS equipmentName,
                                                       m.quantity_remaining AS units,m.start_reason AS reason,
                                                       m.condition_status AS conditionStatus,
+                                                      ${V2_ISSUE_BOOKING_REFERENCE_SQL("m","start_reason")} AS bookingReference,
                                                       IF(m.repair_approved_at IS NULL,0,1) AS repairApproved,
                                                       (SELECT COALESCE(SUM(q.quantity),0) FROM ${V2_COMPLETION_REQUESTS} q
                                                        WHERE q.maintenance_record_id=m.id AND q.status='pending') AS pendingUnits
@@ -2045,18 +2142,40 @@ async function staffRentalStockMutation(db,scope,body) {
         const issueType=String(body.issueType||"damage");
         if(!["routine","damage","missing"].includes(issueType))
             fail(400,"Choose routine care, damaged, or missing equipment.");
+        // Link damage, routine-care and missing reports to the booking they were
+        // found on (stock_issues.booking_id). Staff sends the booking reference
+        // explicitly; older clients only put it at the start of the reason
+        // ("Booking <reference>: ..."). Either way the booking must belong to this
+        // branch and contain this rental equipment. Standalone issues stay unlinked.
+        const explicitBooking = body.bookingReference == null || String(body.bookingReference).trim() === ""
+            ? null : requiredText(body.bookingReference, 100, "Booking reference");
+        const bookingLabel = explicitBooking || /^Booking ([^:\r\n]+): /.exec(reason)?.[1] || null;
+        let linkedBookingId = null;
+        if (bookingLabel) {
+            const [linked] = await db.execute(
+                `SELECT b.id FROM bookings b
+                 WHERE b.store_id=? AND b.branch_id=? AND b.booking_reference=?
+                   AND EXISTS (SELECT 1 FROM booking_items bi
+                               WHERE bi.booking_id=b.id AND bi.store_id=b.store_id
+                                 AND bi.equipment_id=? AND bi.item_type='rental')
+                     LIMIT 1`,
+                [scope.storeId, scope.branchId, bookingLabel, equipment.id]);
+            if (linked.length) linkedBookingId = Number(linked[0].id);
+            else if (explicitBooking)
+                fail(409, `Booking ${explicitBooking} does not include this equipment. Refresh and try again.`);
+        }
         if(issueType==="missing"){
             const [r]=await db.execute(`INSERT INTO stock_issues
-                                        (store_id,branch_id,branch_inventory_id,issue_type,quantity,reason,status,reported_by)
-                                        VALUES(?,?,?,'missing',?,?,'pending',?)`,[scope.storeId,scope.branchId,equipment.inventory_id,quantity,reason,actorUserId]);
+                                        (store_id,branch_id,branch_inventory_id,booking_id,issue_type,quantity,reason,status,reported_by)
+                                        VALUES(?,?,?,?,'missing',?,?,'pending',?)`,[scope.storeId,scope.branchId,equipment.inventory_id,linkedBookingId,quantity,reason,actorUserId]);
             await v2AdjustEquipmentStock(db,equipment.inventory_id,{missing:quantity});
             const ref=`MISS-${String(r.insertId).padStart(6,"0")}`;
             await appendMovement(db,scope,equipment.id,"missing_reported",quantity,ref,`Staff reported missing units: ${reason}`);
             return {referenceNumber:ref};
         }
         const [r]=await db.execute(`INSERT INTO stock_issues
-                                    (store_id,branch_id,branch_inventory_id,issue_type,quantity,reason,status,reported_by)
-                                    VALUES(?,?,?,'maintenance',?,?,?,?)`,[scope.storeId,scope.branchId,equipment.inventory_id,quantity,reason,
+                                    (store_id,branch_id,branch_inventory_id,booking_id,issue_type,quantity,reason,status,reported_by)
+                                    VALUES(?,?,?,?,'maintenance',?,?,?,?)`,[scope.storeId,scope.branchId,equipment.inventory_id,linkedBookingId,quantity,reason,
             issueType === "routine" ? "Routine" : "For Inspection",actorUserId]);
         await v2AdjustEquipmentStock(db,equipment.inventory_id,{maintenance:quantity});
         const ref=`MNT-${String(r.insertId).padStart(6,"0")}`;

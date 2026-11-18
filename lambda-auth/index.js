@@ -2,6 +2,16 @@ const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+
+// Account phone numbers use the same 11-digit Philippine mobile format in every role.
+// Accept spaces/dashes and the international +63 prefix; save 09XXXXXXXXX in users.phone.
+function normalizePhilippineMobile(value) {
+    const digits = String(value ?? "").replace(/\D/g, "");
+    const local = digits.startsWith("63")
+        ? `0${digits.slice(2)}`
+        : (digits.length === 10 && digits.startsWith("9") ? `0${digits}` : digits);
+    return /^09\d{9}$/.test(local) ? local : null;
+}
 // ===== BEGIN StockNBook identification numbers (identical in lambda-auth, lambda-pos, lambda-products, lambda-rental-inventory) =====
 const identifiers = (() => {
     /*
@@ -588,6 +598,23 @@ module.exports = {
 const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
 
 const OTP_EXPIRY_SECONDS = 90;
+// Explicit, local-only OTP delivery for test accounts (never enabled in production).
+// Start Next.js with STOCKNBOOK_DEV_OTP_CONSOLE=true and NODE_ENV=development.
+// Only OTP email delivery is replaced; OTP hashing, database expiry and verification stay intact.
+const LOCAL_OTP_CONSOLE_ONLY =
+    process.env.NODE_ENV === "development" &&
+    String(process.env.STOCKNBOOK_DEV_OTP_CONSOLE || "").toLowerCase() === "true";
+
+function deliverOtpToLocalTerminal(purpose, toEmail, otp, expirySeconds) {
+    console.log(
+        `[StockNBook LOCAL OTP] ${purpose} | ` +
+        `Email: ${toEmail} | ` +
+        `OTP: ${otp} | ` +
+        `Expires in: ${expirySeconds}s | ` +
+        `Delivery: IDE terminal only (no email sent)`
+    );
+    return { accepted: [], response: "LOCAL_OTP_CONSOLE_ONLY" };
+}
 const MANAGER_INVITE_OTP_EXPIRY_SECONDS = OTP_EXPIRY_SECONDS;
 const STAFF_INVITE_OTP_EXPIRY_SECONDS = OTP_EXPIRY_SECONDS;
 const PAYMENT_OTP_EXPIRY_SECONDS = 300;
@@ -609,8 +636,9 @@ const PAYMENT_OTP_TERMINAL_DEBUG =
 // In development, failed Manager/Staff invitations are also printed to the
 // server terminal so activation can still be tested safely.
 const INVITATION_TERMINAL_DEBUG =
-    String(process.env.INVITATION_TERMINAL_DEBUG || "").toLowerCase() === "true" ||
-    String(process.env.NODE_ENV || "").toLowerCase() === "development";
+    String(process.env.NODE_ENV || "").toLowerCase() === "development" ||
+    (String(process.env.NODE_ENV || "").toLowerCase() !== "production" &&
+        String(process.env.INVITATION_TERMINAL_DEBUG || "").toLowerCase() === "true");
 
 const SMTP_NETWORK_ERROR_CODES = new Set([
     "ENOTFOUND",
@@ -749,6 +777,7 @@ async function getManagerInviteRecord(connection, inviteToken) {
              users.id AS manager_id,
              users.full_name AS manager_name,
              users.email AS manager_email,
+             users.phone AS manager_phone,
              users.permissions,
              users.status,
              users.store_id,
@@ -787,6 +816,7 @@ async function getManagerInviteRecord(connection, inviteToken) {
             manager_id: manager.manager_id,
             manager_name: manager.manager_name || "",
             manager_email: manager.manager_email || "",
+            manager_phone: manager.manager_phone || "",
             store_id: manager.store_id,
             store_name: manager.store_name || "",
             branch_id: manager.branch_id,
@@ -855,6 +885,7 @@ async function getStaffInviteRecord(connection, inviteToken) {
              staff.id AS staff_id,
              staff.full_name AS staff_name,
              staff.email AS staff_email,
+             staff.phone AS staff_phone,
              staff.permissions,
              staff.status,
              staff.store_id,
@@ -898,6 +929,7 @@ async function getStaffInviteRecord(connection, inviteToken) {
             staff_id: staffMember.staff_id,
             staff_name: staffMember.staff_name || "",
             staff_email: staffMember.staff_email || "",
+            staff_phone: staffMember.staff_phone || "",
             manager_id: staffMember.manager_id,
             manager_name: staffMember.manager_name || "",
             store_id: staffMember.store_id,
@@ -1764,6 +1796,9 @@ async function sendGmailHtmlEmail(toEmail, rawMessage, logLabel) {
 }
 
 async function sendSignupOtpEmail(toEmail, otp) {
+    if (LOCAL_OTP_CONSOLE_ONLY) {
+        return deliverOtpToLocalTerminal("Owner signup", toEmail, otp, OTP_EXPIRY_SECONDS);
+    }
     return sendGmailHtmlEmail(
         toEmail,
         buildOtpEmail(toEmail, otp),
@@ -1880,6 +1915,9 @@ async function deliverInvitationEmail({
 
 
 async function sendManagerInviteOtpEmail(toEmail, otp, managerName) {
+    if (LOCAL_OTP_CONSOLE_ONLY) {
+        return deliverOtpToLocalTerminal("Manager invitation", toEmail, otp, MANAGER_INVITE_OTP_EXPIRY_SECONDS);
+    }
     return sendGmailHtmlEmail(
         toEmail,
         buildManagerInviteOtpEmail(toEmail, otp, managerName),
@@ -1889,6 +1927,9 @@ async function sendManagerInviteOtpEmail(toEmail, otp, managerName) {
 
 
 async function sendStaffInviteOtpEmail(toEmail, otp, staffName) {
+    if (LOCAL_OTP_CONSOLE_ONLY) {
+        return deliverOtpToLocalTerminal("Staff invitation", toEmail, otp, STAFF_INVITE_OTP_EXPIRY_SECONDS);
+    }
     return sendGmailHtmlEmail(
         toEmail,
         buildStaffInviteOtpEmail(toEmail, otp, staffName),
@@ -1897,6 +1938,9 @@ async function sendStaffInviteOtpEmail(toEmail, otp, staffName) {
 }
 
 async function sendPaymentOtpEmail(toEmail, otp, planName) {
+    if (LOCAL_OTP_CONSOLE_ONLY) {
+        return deliverOtpToLocalTerminal("Subscription payment", toEmail, otp, PAYMENT_OTP_EXPIRY_SECONDS);
+    }
     return sendGmailHtmlEmail(
         toEmail,
         buildPaymentOtpEmail(toEmail, otp, planName),
@@ -3144,7 +3188,7 @@ module.exports.handler = async (event) => {
                 throw deliveryError;
             }
 
-            // Gmail accepted the message: now activate the new code atomically
+            // Email accepted, or explicit local terminal mode: activate the new code atomically
             // and invalidate only the previously active code(s).
             await connection.beginTransaction();
             try {
@@ -3169,7 +3213,7 @@ module.exports.handler = async (event) => {
 
             // Explicit local debug remains optional, but a failed email never
             // silently turns into a successful terminal-only OTP.
-            if (PAYMENT_OTP_TERMINAL_DEBUG) {
+            if (PAYMENT_OTP_TERMINAL_DEBUG && !LOCAL_OTP_CONSOLE_ONLY) {
                 console.log(
                     `[StockNBook DEV OTP] Subscription payment verification | ` +
                     `Store ID: ${storeId} | ` +
@@ -3184,12 +3228,77 @@ module.exports.handler = async (event) => {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
-                    message: "Verification code sent to your email.",
-                    delivery: "email",
+                    message: LOCAL_OTP_CONSOLE_ONLY
+                        ? "Verification code generated for local testing. Check the IDE terminal."
+                        : "Verification code sent to your email.",
+                    delivery: LOCAL_OTP_CONSOLE_ONLY ? "terminal" : "email",
                     expires_in: PAYMENT_OTP_EXPIRY_SECONDS,
                     email_hint: ownerEmail.replace(/^(.{2}).+(@.+)$/, "$1***$2"),
                 }),
             };
+        }
+
+        // Non-consuming OTP confirmation for the animated checkout dialog.
+        // Final payment submission still verifies and consumes the code atomically.
+        if (action === "verify_payment_otp") {
+            const token = getBearerTokenFromEvent(event);
+            if (!token) return { statusCode: 401, headers, body: JSON.stringify({ error: "Missing token" }) };
+
+            let decoded;
+            try {
+                decoded = jwt.verify(token, JWT_SECRET);
+            } catch {
+                return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid token" }) };
+            }
+            if (decoded.role !== "owner" || !decoded.store_id) {
+                return { statusCode: 403, headers, body: JSON.stringify({ error: "Only the store owner can verify a subscription payment." }) };
+            }
+
+            const storeId = Number(decoded.store_id);
+            const code = String(body.otp || "").trim();
+            if (!/^\d{6}$/.test(code)) {
+                return { statusCode: 400, headers, body: JSON.stringify({ error: "Enter a valid 6-digit code." }) };
+            }
+
+            // Record unsuccessful checks in the existing OTP table, preventing
+            // unrestricted guessing against this new automatically called action.
+            const [failedChecks] = await connection.execute(
+                `SELECT COUNT(*) AS total FROM otp_codes
+                 WHERE purpose = 'subscription_payment_verify_failure'
+                   AND store_id = ?
+                   AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 10 MINUTE)`,
+                [storeId]
+            );
+            if (Number(failedChecks[0]?.total || 0) >= 8) {
+                return { statusCode: 429, headers, body: JSON.stringify({ error: "Too many incorrect codes. Try again later or request a new code." }) };
+            }
+
+            const [matches] = await connection.execute(
+                `SELECT id FROM otp_codes
+                 WHERE purpose = 'subscription_payment' AND store_id = ?
+                   AND otp_hash = ? AND used_at IS NULL
+                   AND expires_at > UTC_TIMESTAMP()
+                 ORDER BY id DESC LIMIT 1`,
+                [storeId, hashOtp(code)]
+            );
+            if (!matches.length) {
+                let email = String(decoded.email || "").trim().toLowerCase();
+                if (!email) {
+                    const [ownerRows] = await connection.execute(
+                        `SELECT email FROM users WHERE store_id = ? AND role = 'owner' LIMIT 1`,
+                        [storeId]
+                    );
+                    email = String(ownerRows[0]?.email || "").trim().toLowerCase();
+                }
+                await connection.execute(
+                    `INSERT INTO otp_codes (purpose, store_id, email, otp_hash, expires_at, used_at)
+                     VALUES ('subscription_payment_verify_failure', ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
+                    [storeId, email, hashOtp(`failed-check:${storeId}:${Date.now()}`)]
+                );
+                return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid or expired verification code." }) };
+            }
+
+            return { statusCode: 200, headers, body: JSON.stringify({ verified: true }) };
         }
 
         if (action === "submit_subscription_payment") {
@@ -3298,9 +3407,10 @@ module.exports.handler = async (event) => {
                 body.store_name ?? body.storeName ?? ""
             ).trim();
 
-            const phoneNumber = String(
+            const rawPhoneNumber = String(
                 body.phone_number ?? body.phoneNumber ?? body.phone ?? ""
             ).trim();
+            const phoneNumber = normalizePhilippineMobile(rawPhoneNumber) || rawPhoneNumber;
 
             const emailAddress = String(body.email ?? "").trim().toLowerCase();
             const accountPassword = String(body.password ?? "");
@@ -3315,13 +3425,11 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            const phoneDigits = phoneNumber.replace(/\D/g, "");
-
-            if (phoneDigits.length < 10 || phoneDigits.length > 15) {
+            if (!normalizePhilippineMobile(phoneNumber)) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "Enter a valid phone number." }),
+                    body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
                 };
             }
 
@@ -3404,7 +3512,9 @@ module.exports.handler = async (event) => {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
-                    message: "OTP sent successfully",
+                    message: LOCAL_OTP_CONSOLE_ONLY
+                        ? "Verification code generated for local testing. Check the IDE terminal."
+                        : "OTP sent successfully",
                     expires_in: OTP_EXPIRY_SECONDS,
                 }),
             };
@@ -3476,9 +3586,10 @@ module.exports.handler = async (event) => {
             const storeName = String(
                 body.store_name ?? body.storeName ?? ""
             ).trim();
-            const phoneNumber = String(
+            const rawPhoneNumber = String(
                 body.phone_number ?? body.phoneNumber ?? body.phone ?? ""
             ).trim();
+            const phoneNumber = normalizePhilippineMobile(rawPhoneNumber) || rawPhoneNumber;
             const emailAddress = String(body.email ?? "").trim().toLowerCase();
             const accountPassword = String(body.password ?? "");
 
@@ -3492,12 +3603,11 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            const phoneDigits = phoneNumber.replace(/\D/g, "");
-            if (phoneDigits.length < 10 || phoneDigits.length > 15) {
+            if (!normalizePhilippineMobile(phoneNumber)) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "Enter a valid phone number." }),
+                    body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
                 };
             }
 
@@ -4112,7 +4222,7 @@ module.exports.handler = async (event) => {
                     ]
                 );
 
-                if (INVITATION_TERMINAL_DEBUG) {
+                if (INVITATION_TERMINAL_DEBUG && !LOCAL_OTP_CONSOLE_ONLY) {
                     console.log(
                         `[StockNBook DEV OTP] Manager invitation verification | ` +
                         `Email: ${manager.manager_email} | ` +
@@ -4121,7 +4231,7 @@ module.exports.handler = async (event) => {
                     );
                 }
 
-                let managerOtpDelivery = "email";
+                let managerOtpDelivery = LOCAL_OTP_CONSOLE_ONLY ? "terminal" : "email";
 
                 try {
                     await sendManagerInviteOtpEmail(
@@ -4275,6 +4385,7 @@ module.exports.handler = async (event) => {
             try {
                 const inviteToken = String(body.invite_token || "");
                 const managerName = String(body.manager_name || "").trim();
+                const phoneNumber = normalizePhilippineMobile(body.phone);
                 const { manager } = await getManagerInviteRecord(
                     connection,
                     inviteToken
@@ -4296,14 +4407,22 @@ module.exports.handler = async (event) => {
                     };
                 }
 
+                if (!phoneNumber) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
+                    };
+                }
+
                 await connection.execute(
                     `UPDATE users
-                     SET full_name = ?
+                     SET full_name = ?, phone = ?
                      WHERE id = ?
                        AND role = 'manager'
                        AND invite_token_hash = SHA2(?, 256)
                        AND status = 'pending'`,
-                    [managerName, manager.manager_id, inviteToken]
+                    [managerName, phoneNumber, manager.manager_id, inviteToken]
                 );
 
                 const refreshed = await getManagerInviteRecord(
@@ -4337,6 +4456,14 @@ module.exports.handler = async (event) => {
                 const requestedManagerName = String(
                     body.manager_name || ""
                 ).trim();
+                const phoneNumber = normalizePhilippineMobile(body.phone);
+                if (!phoneNumber) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
+                    };
+                }
 
                 const { manager } = await getManagerInviteRecord(
                     connection,
@@ -4376,6 +4503,7 @@ module.exports.handler = async (event) => {
                 const [result] = await connection.execute(
                     `UPDATE users
                      SET full_name = ?,
+                         phone = ?,
                          password_hash = ?,
                          status = 'active',
                          email_verified_at = UTC_TIMESTAMP(),
@@ -4387,6 +4515,7 @@ module.exports.handler = async (event) => {
                        AND status = 'pending'`,
                     [
                         finalManagerName,
+                        phoneNumber,
                         hashedPassword,
                         manager.manager_id,
                         inviteToken,
@@ -4438,6 +4567,7 @@ module.exports.handler = async (event) => {
                         manager_id: manager.manager_id,
                         manager_name: finalManagerName,
                         manager_email: manager.manager_email,
+                        manager_phone: phoneNumber,
                         store_id: manager.store_id,
                         store_name: manager.store_name,
                         branch_id: manager.branch_id,
@@ -4648,19 +4778,19 @@ module.exports.handler = async (event) => {
             try {
                 [invitedStaffResult] = await connection.execute(
                     `INSERT INTO users
-                 (
-                     store_id,
-                     branch_id,
-                     manager_id,
-                     role,
-                     full_name,
-                     email,
-                     invite_token_hash,
-                     status,
-                     permissions,
-                     employee_code
-                 )
-                 VALUES (?, ?, ?, 'staff', COALESCE(?, ''), ?, SHA2(?, 256), ?, ?, ?)`,
+                     (
+                         store_id,
+                         branch_id,
+                         manager_id,
+                         role,
+                         full_name,
+                         email,
+                         invite_token_hash,
+                         status,
+                         permissions,
+                         employee_code
+                     )
+                     VALUES (?, ?, ?, 'staff', COALESCE(?, ''), ?, SHA2(?, 256), ?, ?, ?)`,
                     [
                         storeId,
                         branchId,
@@ -5171,7 +5301,7 @@ module.exports.handler = async (event) => {
                     ]
                 );
 
-                if (INVITATION_TERMINAL_DEBUG) {
+                if (INVITATION_TERMINAL_DEBUG && !LOCAL_OTP_CONSOLE_ONLY) {
                     console.log(
                         `[StockNBook DEV OTP] Staff invitation verification | ` +
                         `Email: ${staff.staff_email} | ` +
@@ -5180,7 +5310,7 @@ module.exports.handler = async (event) => {
                     );
                 }
 
-                let staffOtpDelivery = "email";
+                let staffOtpDelivery = LOCAL_OTP_CONSOLE_ONLY ? "terminal" : "email";
 
                 try {
                     await sendStaffInviteOtpEmail(
@@ -5334,6 +5464,7 @@ module.exports.handler = async (event) => {
             try {
                 const inviteToken = String(body.invite_token || "");
                 const staffName = String(body.staff_name || "").trim();
+                const phoneNumber = normalizePhilippineMobile(body.phone);
                 const { staff } = await getStaffInviteRecord(
                     connection,
                     inviteToken
@@ -5355,14 +5486,22 @@ module.exports.handler = async (event) => {
                     };
                 }
 
+                if (!phoneNumber) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
+                    };
+                }
+
                 await connection.execute(
                     `UPDATE users
-                     SET full_name = ?
+                     SET full_name = ?, phone = ?
                      WHERE id = ?
                        AND role = 'staff'
                        AND invite_token_hash = SHA2(?, 256)
                        AND status = 'pending'`,
-                    [staffName, staff.staff_id, inviteToken]
+                    [staffName, phoneNumber, staff.staff_id, inviteToken]
                 );
 
                 const refreshed = await getStaffInviteRecord(
@@ -5396,6 +5535,14 @@ module.exports.handler = async (event) => {
                 const requestedStaffName = String(
                     body.staff_name || ""
                 ).trim();
+                const phoneNumber = normalizePhilippineMobile(body.phone);
+                if (!phoneNumber) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
+                    };
+                }
 
                 const { staff } = await getStaffInviteRecord(
                     connection,
@@ -5464,6 +5611,7 @@ module.exports.handler = async (event) => {
                 const [result] = await connection.execute(
                     `UPDATE users
                      SET full_name = ?,
+                         phone = ?,
                          password_hash = ?,
                          status = 'active',
                          email_verified_at = UTC_TIMESTAMP(),
@@ -5475,6 +5623,7 @@ module.exports.handler = async (event) => {
                        AND status = 'pending'`,
                     [
                         finalStaffName,
+                        phoneNumber,
                         hashedPassword,
                         staff.staff_id,
                         inviteToken,
@@ -5527,6 +5676,7 @@ module.exports.handler = async (event) => {
                         staff_id: staff.staff_id,
                         staff_name: finalStaffName,
                         staff_email: staff.staff_email,
+                        staff_phone: phoneNumber,
                         manager_id: staff.manager_id,
                         manager_name: staff.manager_name,
                         store_id: staff.store_id,
@@ -5993,7 +6143,7 @@ module.exports.handler = async (event) => {
 
             const [targetStaff] = await connection.execute(
                 `SELECT id FROM users WHERE role = 'staff' AND store_id = ? AND branch_id = ?
-                 AND manager_id = ? AND ${staff_id ? "id = ?" : "email = ?"} LIMIT 1`,
+                                        AND manager_id = ? AND ${staff_id ? "id = ?" : "email = ?"} LIMIT 1`,
                 [storeId, branchId, managerId, staff_id || staff_email]
             );
             if (!targetStaff.length) {
@@ -6006,12 +6156,12 @@ module.exports.handler = async (event) => {
                 if (staff_id) {
                     [result] = await connection.execute(
                         `UPDATE users
-                     SET permissions = ?
-                     WHERE id = ?
-                       AND role = 'staff'
-                       AND store_id = ?
-                       AND branch_id = ?
-                       AND manager_id = ?`,
+                         SET permissions = ?
+                         WHERE id = ?
+                           AND role = 'staff'
+                           AND store_id = ?
+                           AND branch_id = ?
+                           AND manager_id = ?`,
                         [
                             JSON.stringify(permissions || {}),
                             staff_id,
@@ -6023,12 +6173,12 @@ module.exports.handler = async (event) => {
                 } else {
                     [result] = await connection.execute(
                         `UPDATE users
-                     SET permissions = ?
-                     WHERE email = ?
-                       AND role = 'staff'
-                       AND store_id = ?
-                       AND branch_id = ?
-                       AND manager_id = ?`,
+                         SET permissions = ?
+                         WHERE email = ?
+                           AND role = 'staff'
+                           AND store_id = ?
+                           AND branch_id = ?
+                           AND manager_id = ?`,
                         [
                             JSON.stringify(permissions || {}),
                             staff_email,

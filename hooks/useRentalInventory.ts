@@ -136,6 +136,8 @@ export type StaffRentalMaintenanceTask = {
     id:number; equipmentId:number; equipmentName:string; units:number; reason:string;
     repairApproved:boolean; pendingUnits:number;
     conditionStatus: "In Repair" | "For Inspection" | "Routine";
+    // Booking the issue was found on (null for issues not linked to a booking).
+    bookingReference?:string|null;
 };
 
 export type RentalSummary = {
@@ -566,7 +568,9 @@ export type StaffRentalMovement = {
 export type StaffRentalStockAction =
     | { action:"staff_receive_rental_purchase"; taskId:number; quantity:number }
     | { action:"staff_restock_equipment"; equipmentId:number; quantity:number }
-    | { action:"staff_report_equipment_issue"; equipmentId:number; quantity:number; reason:string; issueType:"routine"|"damage"|"missing" }
+    | { action:"staff_report_equipment_issue"; equipmentId:number; quantity:number; reason:string; issueType:"routine"|"damage"|"missing";
+    // Booking the issue was found on; saved as stock_issues.booking_id.
+    bookingReference?:string }
     | { action:"staff_submit_repair_completion"; maintenanceId:number; quantity:number; notes:string }
     | { action:"staff_complete_routine_maintenance"; maintenanceId:number; quantity:number; notes:string }
     | { action:"staff_mark_repaired_ready"; maintenanceId:number; quantity:number; notes:string; safetyChecked:true }

@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { Lora } from "next/font/google";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
     ArrowRight,
@@ -27,6 +27,28 @@ import {
     UserRound,
     X,
 } from "lucide-react";
+// Phone formatting stays inside this existing page/component; no helper file is required.
+const MOBILE_PHONE_PLACEHOLDER = "0912 345 6789";
+const MOBILE_PHONE_HELP = "Enter an 11-digit Philippine mobile number starting with 09.";
+
+function normalizeMobileNumber(value: string): string {
+    const digits = String(value ?? "").replace(/\D/g, "");
+    if (digits.startsWith("63")) return `0${digits.slice(2)}`;
+    if (digits.length === 10 && digits.startsWith("9")) return `0${digits}`;
+    return digits;
+}
+
+function isValidMobileNumber(value: string): boolean {
+    return /^09\d{9}$/.test(normalizeMobileNumber(value));
+}
+
+function formatMobileInput(value: string): string {
+    const digits = normalizeMobileNumber(value).slice(0, 11);
+    return [digits.slice(0, 4), digits.slice(4, 7), digits.slice(7, 11)]
+        .filter(Boolean)
+        .join(" ");
+}
+
 
 const lora = Lora({
     subsets: ["latin"],
@@ -86,6 +108,23 @@ type InvitationEmailSummary = {
     backendConfirmed: boolean;
 };
 
+// Type only the session values already consumed by saveCommonSession.
+type AuthSessionData = {
+    token: string;
+    store_id?: number | string;
+    store_name?: string;
+    role?: string;
+    manager_id?: number | string;
+    manager_name?: string;
+    manager_email?: string;
+    staff_id?: number | string;
+    staff_name?: string;
+    staff_email?: string;
+    branch_id?: number | string;
+    branch_name?: string;
+    permissions?: Record<string, unknown>;
+};
+
 const defaultPermissions: Permissions = {
     pos: "full",
     bookings: "full",
@@ -128,6 +167,16 @@ export default function AuthModal({
     const [loading, setLoading] = useState(false);
 
     const [signupStep, setSignupStep] = useState(1);
+    // Animation state is independent from the existing login, OTP, and onboarding logic.
+    const [isClosing, setIsClosing] = useState(false);
+    const closeAnimationTimer = useRef<number | null>(null);
+    const formScrollRef = useRef<HTMLDivElement>(null);
+    const storefrontRef = useRef<HTMLDivElement>(null);
+    const priorSignupStep = useRef(signupStep);
+    const lastStepDirection = useRef<"back" | "forward">("forward");
+    const stepDirection = signupStep === priorSignupStep.current
+        ? lastStepDirection.current
+        : signupStep < priorSignupStep.current ? "back" : "forward";
     const [accountVerified, setAccountVerified] = useState(false);
     const [branches, setBranches] = useState<BranchSetup[]>([
         createEmptyBranch(),
@@ -147,6 +196,8 @@ export default function AuthModal({
     const [otp, setOtp] = useState("");
     const [otpTimer, setOtpTimer] = useState(0);
     const [otpLoading, setOtpLoading] = useState(false);
+    const [otpVerificationSuccess, setOtpVerificationSuccess] = useState(false);
+    const [otpVerificationError, setOtpVerificationError] = useState("");
     const [pendingSignup, setPendingSignup] =
         useState<PendingSignup | null>(null);
 
@@ -156,6 +207,60 @@ export default function AuthModal({
     const [hasViewedTerms, setHasViewedTerms] = useState(false);
     const [hasViewedPrivacy, setHasViewedPrivacy] = useState(false);
     const [hasAcceptedPolicies, setHasAcceptedPolicies] = useState(false);
+
+    const handleAnimatedClose = useCallback(() => {
+        if (isClosing) return;
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+            onClose();
+            return;
+        }
+        setIsClosing(true);
+        closeAnimationTimer.current = window.setTimeout(onClose, 190);
+    }, [isClosing, onClose]);
+
+    useEffect(() => () => {
+        if (closeAnimationTimer.current !== null) {
+            window.clearTimeout(closeAnimationTimer.current);
+        }
+    }, []);
+
+    // Keep the new form step in view; retain all entered values and existing validation.
+    useEffect(() => {
+        if (signupStep !== priorSignupStep.current) {
+            lastStepDirection.current = signupStep < priorSignupStep.current ? "back" : "forward";
+        }
+        priorSignupStep.current = signupStep;
+        formScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    }, [signupStep, mode]);
+
+    useEffect(() => {
+        const onEscape = (event: KeyboardEvent) => {
+            if (event.key !== "Escape") return;
+            if (otpDialogOpen) {
+                if (!otpLoading) setOtpDialogOpen(false);
+            } else if (legalDocument) {
+                setLegalDocument(null);
+            } else if (!loading && !setupLoading) {
+                handleAnimatedClose();
+            }
+        };
+        window.addEventListener("keydown", onEscape);
+        return () => window.removeEventListener("keydown", onEscape);
+    }, [handleAnimatedClose, legalDocument, loading, otpDialogOpen, otpLoading, setupLoading]);
+
+    // Set CSS variables directly: cursor movement never re-renders the form.
+    const moveStorefront = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (event.pointerType !== "mouse" || !storefrontRef.current ||
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        const rect = event.currentTarget.getBoundingClientRect();
+        const dx = (event.clientX - rect.left) / rect.width - 0.5;
+        const dy = (event.clientY - rect.top) / rect.height - 0.5;
+        storefrontRef.current.style.transform = `perspective(800px) rotateX(${(-dy * 3).toFixed(2)}deg) rotateY(${(dx * 3).toFixed(2)}deg)`;
+    };
+
+    const resetStorefrontTilt = () => {
+        storefrontRef.current?.style.removeProperty("transform");
+    };
 
     const passwordChecks = {
         length: password.length >= 8,
@@ -182,7 +287,7 @@ export default function AuthModal({
         }
     }, [otpDialogOpen, otpTimer]);
 
-    const saveCommonSession = (data: any) => {
+    const saveCommonSession = (data: AuthSessionData) => {
         sessionStorage.clear();
         sessionStorage.setItem("token", data.token);
         sessionStorage.setItem("store_id", String(data.store_id));
@@ -238,6 +343,8 @@ export default function AuthModal({
         setPendingSignup(null);
         setOtp("");
         setOtpTimer(0);
+        setOtpVerificationSuccess(false);
+        setOtpVerificationError("");
         setOtpDialogOpen(false);
         setLegalDocument(null);
     };
@@ -253,6 +360,11 @@ export default function AuthModal({
         if (mode === "signup") {
             if (!ownerName || !storeName || !phone) {
                 alert("Please fill in all signup fields.");
+                return;
+            }
+
+            if (!isValidMobileNumber(phone)) {
+                alert("Enter a valid Philippine mobile number (e.g. 0912 345 6789).");
                 return;
             }
 
@@ -345,7 +457,7 @@ export default function AuthModal({
             const signupBody: PendingSignup = {
                 owner_name: ownerName.trim(),
                 store_name: storeName.trim(),
-                phone: phone.trim(),
+                phone: normalizeMobileNumber(phone),
                 email: email.trim(),
                 password,
             };
@@ -372,6 +484,8 @@ export default function AuthModal({
                 }
 
                 setPendingSignup(signupBody);
+                setOtpVerificationSuccess(false);
+                setOtpVerificationError("");
                 setOtp("");
                 setOtpTimer(90);
                 setOtpDialogOpen(true);
@@ -417,52 +531,35 @@ export default function AuthModal({
     };
 
     const handleVerifyOtp = async () => {
-        if (!pendingSignup) {
-            alert("Signup details are missing. Please try again.");
-            setOtpDialogOpen(false);
-            return;
-        }
-
+        if (!pendingSignup || otpLoading || otpVerificationSuccess) return;
         const normalizedOtp = otp.replace(/\D/g, "").slice(0, 6);
-
-        if (!/^\d{6}$/.test(normalizedOtp)) {
-            alert("Please enter the complete 6-digit OTP.");
-            return;
-        }
-
-        if (otpTimer <= 0) {
-            alert("OTP expired. Please resend a new code.");
-            return;
-        }
+        if (!/^\d{6}$/.test(normalizedOtp) || otpTimer <= 0) return;
 
         setOtpLoading(true);
-
+        setOtpVerificationError("");
         try {
             const response = await fetch("/api/auth", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    action: "verify_signup_otp",
-                    ...pendingSignup,
-                    otp: normalizedOtp,
-                }),
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "verify_signup_otp", ...pendingSignup, otp: normalizedOtp }),
             });
-
             const data = await response.json();
-
             if (!response.ok || !data.token) {
-                alert(data.error || "OTP verification failed.");
+                setOtpVerificationError(data.error || "OTP verification failed. Try again.");
+                setOtp("");
                 return;
             }
 
+            // Only the verified backend response may trigger the success animation.
             saveCommonSession(data);
+            setOtpVerificationSuccess(true);
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 800));
             setOtpDialogOpen(false);
             setAccountVerified(true);
             setSignupStep(2);
         } catch {
-            alert("Something went wrong while verifying OTP.");
+            setOtpVerificationError("Unable to verify your code. Please try again.");
+            setOtp("");
         } finally {
             setOtpLoading(false);
         }
@@ -498,6 +595,8 @@ export default function AuthModal({
                 return;
             }
 
+            setOtpVerificationSuccess(false);
+            setOtpVerificationError("");
             setOtp("");
             setOtpTimer(90);
         } catch {
@@ -705,7 +804,7 @@ export default function AuthModal({
             : setupComplete
                 ? "Your account, first branch, and manager access are ready."
                 : signupStep === 1
-                    ? "Set up your business in under 3 minutes."
+                    ? "Enter your business details to get started with StockNBook."
                     : signupStep === 2
                         ? "Start with your first branch. You can add more later after upgrading your plan."
                         : signupStep === 3
@@ -714,23 +813,26 @@ export default function AuthModal({
 
     return (
         <>
-            <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/45 px-2 py-3 font-sans backdrop-blur-sm sm:px-4 sm:py-4">
-                <div className="relative grid max-h-[94vh] w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-2xl md:grid-cols-2">
+            <div className={`snb-auth-overlay fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/45 px-2 py-3 font-sans backdrop-blur-sm sm:px-4 sm:py-4 ${isClosing ? "snb-auth-exit" : ""}`}>
+                <div role="dialog"
+                     aria-modal="true"
+                     aria-label={mode === "login" ? "Log in to StockNBook" : "Create a StockNBook account"}
+                     className="snb-auth-dialog relative grid max-h-[94vh] w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-2xl md:grid-cols-2">
                     <button
                         type="button"
-                        onClick={onClose}
+                        onClick={handleAnimatedClose}
                         className="absolute right-4 top-4 z-20 rounded-full p-2 text-white/80 transition hover:bg-white/10 md:text-[#7A6E88] md:hover:bg-[#F3EFF8]"
                         aria-label="Close modal"
                     >
                         <X className="h-5 w-5" />
                     </button>
 
-                    <div className="relative hidden min-h-[680px] overflow-hidden bg-[radial-gradient(circle_at_50%_48%,_#3D2468_0%,_#2D1B4E_52%,_#24143D_100%)] p-10 font-sans text-white md:flex md:flex-col">
+                    <div className="snb-auth-brand-panel relative hidden min-h-[680px] overflow-hidden bg-[radial-gradient(circle_at_50%_48%,_#3D2468_0%,_#2D1B4E_52%,_#24143D_100%)] p-10 font-sans text-white md:flex md:flex-col">
                         <div className="pointer-events-none absolute -left-20 top-44 h-48 w-48 rounded-full bg-[#7958A8]/10 blur-3xl" />
                         <div className="pointer-events-none absolute -right-24 bottom-28 h-56 w-56 rounded-full bg-[#C9951A]/10 blur-3xl" />
 
                         <div className="relative z-10">
-                            <div className="flex items-center gap-2.5">
+                            <div className="snb-auth-brand-logo flex items-center gap-2.5">
                                 <Image
                                     src="/logo.png"
                                     alt="StockNBook logo"
@@ -747,7 +849,7 @@ export default function AuthModal({
                                 </span>
                             </div>
 
-                            <h2 className="mt-9 max-w-[370px] font-sans text-[clamp(1.9rem,2.6vw,2.65rem)] font-semibold leading-[1.1] tracking-[-0.035em] text-white">
+                            <h2 key={mode} className="snb-auth-brand-heading mt-9 max-w-[370px] font-sans text-[clamp(1.9rem,2.6vw,2.65rem)] font-semibold leading-[1.1] tracking-[-0.035em] text-white">
                                 {mode === "login" ? (
                                     <>
                                         Welcome back to your{" "}
@@ -766,27 +868,30 @@ export default function AuthModal({
                                 )}
                             </h2>
 
-                            <p className="mt-4 max-w-[370px] font-sans text-[13px] leading-6 text-white/65">
+                            <p className="snb-auth-brand-description mt-4 max-w-[370px] font-sans text-[13px] leading-6 text-white/65">
                                 Manage your events, bookings, inventory, and team
                                 from one clean dashboard.
                             </p>
                         </div>
 
-                        <div className="relative z-10 flex flex-1 items-center justify-center py-6">
-                            <div className="relative h-[245px] w-[320px]">
-                                <div className="absolute left-1/2 top-9 h-28 w-44 -translate-x-1/2 rounded-[50%] bg-white/[0.055]" />
+                        <div className="relative z-10 flex flex-1 items-center justify-center py-6"
+                             onPointerMove={moveStorefront} onPointerLeave={resetStorefrontTilt}>
+                            <div ref={storefrontRef} className="snb-store-scene relative h-[245px] w-[320px]"
+                                 data-step={mode === "signup" ? signupStep : "login"}>
 
-                                <Sparkles className="absolute left-8 top-20 h-5 w-5 text-[#E4BB56]" />
-                                <Sparkles className="absolute right-8 top-10 h-3.5 w-3.5 text-[#C9951A]/70" />
+                                <div className="snb-store-halo absolute left-1/2 top-9 h-28 w-44 -translate-x-1/2 rounded-[50%] bg-white/[0.055]" />
 
-                                <div className="absolute bottom-8 left-4 flex h-20 w-14 items-end justify-center">
+                                <Sparkles className="snb-store-sparkle snb-store-sparkle-left absolute left-8 top-20 h-5 w-5 text-[#E4BB56]" />
+                                <Sparkles className="snb-store-sparkle snb-store-sparkle-right absolute right-8 top-10 h-3.5 w-3.5 text-[#C9951A]/70" />
+
+                                <div className="snb-store-plant snb-store-plant-left absolute bottom-8 left-4 flex h-20 w-14 items-end justify-center">
                                     <div className="absolute bottom-0 h-14 w-1.5 rounded-full bg-[#765B91]" />
                                     <div className="absolute bottom-9 left-2 h-8 w-4 -rotate-[38deg] rounded-full bg-[#654B84]" />
                                     <div className="absolute bottom-6 right-1 h-8 w-4 rotate-[38deg] rounded-full bg-[#765B91]" />
                                     <div className="absolute bottom-1 h-5 w-10 rounded-b-lg rounded-t-sm bg-[#5A3C78]" />
                                 </div>
 
-                                <div className="absolute bottom-8 right-3 flex h-28 w-20 items-end justify-center">
+                                <div className="snb-store-plant snb-store-plant-right absolute bottom-8 right-3 flex h-28 w-20 items-end justify-center">
                                     <div className="absolute bottom-2 h-20 w-1.5 rounded-full bg-[#806799]" />
                                     <div className="absolute bottom-16 left-3 h-10 w-5 -rotate-[42deg] rounded-full bg-[#695185]" />
                                     <div className="absolute bottom-12 right-2 h-12 w-6 rotate-[34deg] rounded-full bg-[#7E6795]" />
@@ -794,10 +899,10 @@ export default function AuthModal({
                                     <div className="absolute bottom-0 h-6 w-12 rounded-b-lg rounded-t-sm bg-[#5A3C78]" />
                                 </div>
 
-                                <div className="absolute bottom-10 left-1/2 h-[132px] w-[176px] -translate-x-1/2">
+                                <div className="snb-store-building absolute bottom-10 left-1/2 h-[132px] w-[176px] -translate-x-1/2">
                                     <div className="absolute bottom-0 left-3 right-3 h-[104px] rounded-t-md border border-white/10 bg-[#E8DDF1]/90 shadow-[0_18px_38px_rgba(12,4,24,0.28)]" />
 
-                                    <div className="absolute left-0 right-0 top-2 h-12 overflow-hidden rounded-t-xl bg-[#6F5294]">
+                                    <div className="snb-store-awning absolute left-0 right-0 top-2 h-12 overflow-hidden rounded-t-xl bg-[#6F5294]">
                                         <div className="absolute inset-x-0 bottom-0 flex h-7">
                                             {Array.from({ length: 6 }).map((_, index) => (
                                                 <span
@@ -813,27 +918,35 @@ export default function AuthModal({
                                         </div>
                                     </div>
 
-                                    <div className="absolute bottom-4 left-1/2 h-[65px] w-12 -translate-x-1/2 rounded-t-sm border-2 border-[#6F5790] bg-[#4B3468]">
+                                    <div className="snb-store-door absolute bottom-4 left-1/2 h-[65px] w-12 -translate-x-1/2 rounded-t-sm border-2 border-[#6F5790] bg-[#4B3468]">
                                         <div className="absolute left-1/2 top-4 h-2 w-2 -translate-x-1/2 rounded-full bg-[#C9951A]" />
                                         <div className="absolute bottom-2 left-1/2 h-6 w-7 -translate-x-1/2 rounded-sm bg-[#5F477A]" />
                                     </div>
 
-                                    <div className="absolute bottom-6 left-6 flex h-12 w-11 items-center justify-center rounded-sm border-2 border-[#745B91] bg-[#5E447A] text-[#CDBDDB]">
+                                    <div className="snb-store-window absolute bottom-6 left-6 flex h-12 w-11 items-center justify-center rounded-sm border-2 border-[#745B91] bg-[#5E447A] text-[#CDBDDB]">
                                         <Package className="h-5 w-5" />
                                     </div>
 
-                                    <div className="absolute bottom-6 right-6 flex h-12 w-11 items-center justify-center rounded-sm border-2 border-[#745B91] bg-[#5E447A] text-[#CDBDDB]">
+                                    <div className="snb-store-window absolute bottom-6 right-6 flex h-12 w-11 items-center justify-center rounded-sm border-2 border-[#745B91] bg-[#5E447A] text-[#CDBDDB]">
                                         <Store className="h-5 w-5" />
                                     </div>
                                 </div>
 
-                                <div className="absolute bottom-2 right-8 flex h-[74px] w-[74px] items-center justify-center rounded-full border-[7px] border-[#F8EAC4] bg-[#E5C477] text-white shadow-[0_18px_34px_rgba(13,5,26,0.34)]">
+                                <div className={`snb-store-check ${mode === "signup" && setupComplete ? "snb-store-check-complete" : ""} absolute bottom-2 right-8 flex h-[74px] w-[74px] items-center justify-center rounded-full border-[7px] border-[#F8EAC4] bg-[#E5C477] text-white shadow-[0_18px_34px_rgba(13,5,26,0.34)]`}>
                                     <Check className="h-9 w-9 stroke-[3]" />
                                 </div>
+                                {mode === "signup" && signupStep > 1 && !setupComplete && (
+                                    <div key={`store-step-${signupStep}`} className="snb-store-step-accent absolute right-12 top-[85px] flex h-10 w-10 items-center justify-center rounded-xl border border-[#E5C477]/50 bg-[#3D2468] text-[#F5E8C0] shadow-lg"
+                                         aria-hidden="true">
+                                        {signupStep === 2 ? <MapPin className="h-5 w-5" /> :
+                                            signupStep === 3 ? <UserRound className="h-5 w-5" /> :
+                                                <ShieldCheck className="h-5 w-5" />}
+                                    </div>
+                                )}
                             </div>
                         </div>
 
-                        <div className="relative z-10 border-y border-white/10 py-5 text-center">
+                        <div className="snb-auth-brand-tagline relative z-10 border-y border-white/10 py-5 text-center">
                             <p className="font-serif text-xs leading-5 text-white/70">
                                 “Mas madali na ang buhay ko.
                                 <br />
@@ -842,7 +955,7 @@ export default function AuthModal({
                         </div>
                     </div>
 
-                    <div className="max-h-[94vh] overflow-y-auto p-6 sm:p-8 md:p-10">
+                    <div ref={formScrollRef} className={`snb-auth-form-panel max-h-[94vh] overflow-y-auto p-6 sm:p-8 md:p-10 ${mode === "login" ? "md:flex md:flex-col md:justify-center" : ""}`}>
                         <div className="mb-7 flex items-center gap-3 md:hidden">
                             <Image
                                 src="/logo.png"
@@ -861,7 +974,7 @@ export default function AuthModal({
                         </div>
 
                         {!setupComplete && (
-                            <>
+                            <div key={`${mode}-${signupStep}`} className="snb-auth-heading-enter">
                                 <h1 className="pr-10 font-serif text-3xl text-[#1A1220] sm:text-4xl">
                                     {headerTitle}
                                 </h1>
@@ -869,7 +982,7 @@ export default function AuthModal({
                                 <p className="mt-2 text-sm leading-6 text-[#7A6E88]">
                                     {headerDescription}
                                 </p>
-                            </>
+                            </div>
                         )}
 
                         {mode === "signup" && !setupComplete && (
@@ -877,7 +990,7 @@ export default function AuthModal({
                         )}
 
                         {mode === "login" && (
-                            <form className="mt-8 space-y-5" onSubmit={handleSubmit}>
+                            <form className="snb-auth-form-stage mt-8 space-y-5" onSubmit={handleSubmit}>
                                 <TextInput
                                     label="Email address"
                                     placeholder="you@yourbusiness.com"
@@ -889,6 +1002,7 @@ export default function AuthModal({
                                 />
 
                                 <TextInput
+                                    key="login-password"
                                     label="Password"
                                     placeholder="Enter your password"
                                     type="password"
@@ -918,6 +1032,7 @@ export default function AuthModal({
                                     disabled={loading}
                                     className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white transition hover:bg-[#3D2560] disabled:opacity-60"
                                 >
+                                    {loading ? <RefreshCw className="mr-2 inline h-4 w-4 animate-spin" aria-hidden="true" /> : null}
                                     {loading
                                         ? "Please wait..."
                                         : "Log in to StockNBook"}
@@ -927,7 +1042,7 @@ export default function AuthModal({
 
                         {mode === "signup" && signupStep === 1 && !setupComplete && (
                             <form
-                                className="mt-6 space-y-4"
+                                className={`snb-auth-form-stage snb-auth-${stepDirection} mt-6 space-y-4`}
                                 onSubmit={handleSubmit}
                             >
                                 {accountVerified && (
@@ -943,7 +1058,7 @@ export default function AuthModal({
 
                                 <TextInput
                                     label="Owner name"
-                                    placeholder="e.g. Maria Santos"
+                                    placeholder="Maria Santos"
                                     value={ownerName}
                                     onChange={setOwnerName}
                                     disabled={accountVerified}
@@ -954,7 +1069,7 @@ export default function AuthModal({
 
                                 <TextInput
                                     label="Business name"
-                                    placeholder="e.g. Santos Events & Party Supply"
+                                    placeholder="Santos Events & Party Supply"
                                     value={storeName}
                                     onChange={setStoreName}
                                     disabled={accountVerified}
@@ -965,9 +1080,11 @@ export default function AuthModal({
 
                                 <TextInput
                                     label="Phone number"
-                                    placeholder="9XX XXX XXXX"
+                                    placeholder={MOBILE_PHONE_PLACEHOLDER}
+                                    type="tel"
+                                    helperText={MOBILE_PHONE_HELP}
                                     value={phone}
-                                    onChange={setPhone}
+                                    onChange={(value) => setPhone(formatMobileInput(value))}
                                     disabled={accountVerified}
                                     icon={
                                         <Phone className="h-5 w-5 text-[#7A6E88]" />
@@ -987,6 +1104,7 @@ export default function AuthModal({
 
                                 <div className="space-y-4">
                                     <TextInput
+                                        key="signup-password"
                                         label="Password"
                                         placeholder="Create a password"
                                         type="password"
@@ -999,6 +1117,7 @@ export default function AuthModal({
                                     />
 
                                     <TextInput
+                                        key="signup-confirm-password"
                                         label="Confirm password"
                                         placeholder="Repeat your password"
                                         type="password"
@@ -1109,9 +1228,10 @@ export default function AuthModal({
                                 <button
                                     type="submit"
                                     disabled={loading}
-                                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white transition hover:bg-[#3D2560] disabled:opacity-60"
+                                    className="snb-auth-sticky-primary flex w-full items-center justify-center gap-2 rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white transition hover:bg-[#3D2560] disabled:opacity-60"
                                 >
-                                    <span>
+                                    <span className="inline-flex items-center gap-2">
+                                        {loading && <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />}
                                         {loading
                                             ? "Please wait..."
                                             : accountVerified
@@ -1127,7 +1247,7 @@ export default function AuthModal({
                         )}
 
                         {mode === "signup" && signupStep === 2 && !setupComplete && (
-                            <div className="mt-6">
+                            <div className={`snb-auth-form-stage snb-auth-${stepDirection} mt-6`}>
                                 <div className="space-y-4">
                                     {branches.map((branch, index) => (
                                         <div
@@ -1145,7 +1265,7 @@ export default function AuthModal({
                                             <div className="grid gap-4 sm:grid-cols-2">
                                                 <TextInput
                                                     label="Branch name"
-                                                    placeholder="e.g. Main Branch"
+                                                    placeholder="Main Branch"
                                                     value={branch.branch_name}
                                                     onChange={(value) =>
                                                         updateBranch(
@@ -1161,7 +1281,8 @@ export default function AuthModal({
 
                                                 <TextInput
                                                     label="Contact number"
-                                                    placeholder="09XX XXX XXXX"
+                                                    placeholder={MOBILE_PHONE_PLACEHOLDER}
+                                                    type="tel"
                                                     value={branch.contact_number}
                                                     onChange={(value) =>
                                                         updateBranch(
@@ -1178,7 +1299,7 @@ export default function AuthModal({
 
                                             <TextInput
                                                 label="Address"
-                                                placeholder="e.g. Concepcion Uno, Marikina City"
+                                                placeholder="Concepcion Uno, Marikina City"
                                                 value={branch.address}
                                                 onChange={(value) =>
                                                     updateBranch(
@@ -1205,7 +1326,7 @@ export default function AuthModal({
                                     </span>
                                 </div>
 
-                                <div className="mt-6 grid grid-cols-2 gap-3">
+                                <div className="snb-auth-sticky-actions mt-6 grid grid-cols-2 gap-3">
                                     <button
                                         type="button"
                                         onClick={() => setSignupStep(1)}
@@ -1228,7 +1349,7 @@ export default function AuthModal({
                         )}
 
                         {mode === "signup" && signupStep === 3 && !setupComplete && (
-                            <div className="mt-6 space-y-5">
+                            <div className={`snb-auth-form-stage snb-auth-${stepDirection} mt-6 space-y-5`}>
                                 {branches.map((branch, index) => (
                                     <div
                                         key={index}
@@ -1251,7 +1372,7 @@ export default function AuthModal({
                                             <div className="grid gap-4 sm:grid-cols-2">
                                                 <TextInput
                                                     label="Manager name"
-                                                    placeholder="e.g. Ana Cruz"
+                                                    placeholder="Ana Cruz"
                                                     value={branch.manager_name}
                                                     onChange={(value) =>
                                                         updateBranch(
@@ -1305,7 +1426,7 @@ export default function AuthModal({
                                     after setup.
                                 </div>
 
-                                <div className="grid grid-cols-2 gap-3">
+                                <div className="snb-auth-sticky-actions grid grid-cols-2 gap-3">
                                     <button
                                         type="button"
                                         onClick={() => setSignupStep(2)}
@@ -1328,7 +1449,7 @@ export default function AuthModal({
                         )}
 
                         {mode === "signup" && signupStep === 4 && !setupComplete && (
-                            <div className="mt-6">
+                            <div className={`snb-auth-form-stage snb-auth-${stepDirection} mt-6`}>
                                 <div className="rounded-2xl border border-[#E9E0D4] bg-[#FFFCF7]">
                                     <div className="border-b border-[#E9E0D4] p-4 sm:p-5">
                                         <div className="flex items-center gap-2">
@@ -1450,7 +1571,7 @@ export default function AuthModal({
                                     automatically.
                                 </div>
 
-                                <div className="mt-6 grid grid-cols-2 gap-3">
+                                <div className="snb-auth-sticky-actions mt-6 grid grid-cols-2 gap-3">
                                     <button
                                         type="button"
                                         onClick={() => setSignupStep(3)}
@@ -1467,6 +1588,7 @@ export default function AuthModal({
                                         disabled={setupLoading}
                                         className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#3D2560] disabled:cursor-not-allowed disabled:opacity-60"
                                     >
+                                        {setupLoading && <RefreshCw className="mr-2 inline h-4 w-4 animate-spin" aria-hidden="true" />}
                                         {setupLoading
                                             ? "Creating setup..."
                                             : "Create branch & send invitations"}
@@ -1476,8 +1598,8 @@ export default function AuthModal({
                         )}
 
                         {mode === "signup" && setupComplete && (
-                            <div className="py-4 text-center sm:py-8">
-                                <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-[#F3ECFA]">
+                            <div className="snb-auth-form-stage py-4 text-center sm:py-8">
+                                <div className="snb-auth-success-icon mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-[#F3ECFA]">
                                     <div className="relative">
                                         <PartyPopper className="h-12 w-12 text-[#6F45B8]" />
                                         <CheckCircle2 className="absolute -bottom-2 -right-4 h-10 w-10 rounded-full bg-white text-[#3E9A5F]" />
@@ -1783,14 +1905,88 @@ export default function AuthModal({
                 <SignupOtpDialog
                     email={pendingSignup?.email || email}
                     otp={otp}
-                    setOtp={setOtp}
+                    setOtp={(value) => { setOtp(value); setOtpVerificationError(""); }}
                     timer={otpTimer}
+                    verified={otpVerificationSuccess}
+                    error={otpVerificationError}
                     loading={otpLoading}
                     onVerify={handleVerifyOtp}
                     onResend={handleResendOtp}
                     onClose={() => setOtpDialogOpen(false)}
                 />
             )}
+
+            {/* Motion lives in this existing file; no new stylesheet or dependency. */}
+            <style jsx global>{`
+                @keyframes snbAuthIn { from { opacity: 0; transform: translateY(12px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
+                @keyframes snbAuthOut { from { opacity: 1; transform: translateY(0) scale(1); } to { opacity: 0; transform: translateY(8px) scale(.985); } }
+                @keyframes snbAuthFade { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: translateY(0); } }
+                @keyframes snbStoreOpen { from { opacity: 0; filter: blur(2px); } to { opacity: 1; filter: blur(0); } }
+                @keyframes snbStoreBuilding { from { opacity: 0; filter: blur(2px); } to { opacity: 1; filter: blur(0); } }
+                @keyframes snbOverlayFade { from { opacity: 0; } to { opacity: 1; } }
+                @keyframes snbAwningOpen { from { opacity: 0; transform: scaleY(.22); } to { opacity: 1; transform: scaleY(1); } }
+                @keyframes snbCheckPop { 0% { opacity: 0; transform: scale(.7); } 75% { opacity: 1; transform: scale(1.075); } 100% { opacity: 1; transform: scale(1); } }
+                @keyframes snbSuccessGlow { 0%,100% { box-shadow: 0 18px 34px rgba(13,5,26,.34); } 50% { box-shadow: 0 0 0 10px rgba(229,196,119,.16), 0 18px 38px rgba(13,5,26,.34); } }
+                @keyframes snbAccentIn { from { opacity: 0; transform: translateY(8px) scale(.8); } to { opacity: 1; transform: translateY(0) scale(1); } }
+                @keyframes snbStepForward { from { opacity: 0; transform: translateX(15px); } to { opacity: 1; transform: translateX(0); } }
+                @keyframes snbStepBack { from { opacity: 0; transform: translateX(-15px); } to { opacity: 1; transform: translateX(0); } }
+                .snb-auth-overlay { animation: snbOverlayFade .23s ease-out both; }
+                .snb-auth-dialog { animation: snbAuthIn .4s cubic-bezier(.2,.75,.2,1) both; }
+                .snb-auth-overlay.snb-auth-exit { animation: snbOverlayFade .19s ease-in reverse both; }
+                .snb-auth-exit .snb-auth-dialog { animation: snbAuthOut .19s ease-in both; }
+                .snb-auth-brand-panel { animation: snbAuthFade .38s ease-out .07s both; }
+                .snb-auth-brand-logo { animation: snbAuthFade .3s ease-out .08s both; }
+                .snb-auth-brand-heading { animation: snbAuthFade .38s ease-out .17s both; }
+                .snb-auth-brand-description { animation: snbAuthFade .37s ease-out .25s both; }
+                .snb-auth-brand-tagline { animation: snbAuthFade .38s ease-out .63s both; }
+                .snb-store-scene {
+                    transform: perspective(800px) rotateX(0deg) rotateY(0deg);
+                    transition: transform .36s ease-out; animation: snbStoreOpen .62s ease-out .18s both; will-change: transform; }
+                .snb-store-halo { opacity: .9; transition: opacity .4s ease; }
+                .snb-store-scene:hover .snb-store-halo { opacity: 1; }
+                .snb-store-building { animation: snbStoreBuilding .45s ease-out .27s both; }
+                .snb-store-awning { transform-origin: center top; animation: snbAwningOpen .45s cubic-bezier(.2,.8,.2,1) .42s both; transition: filter .35s ease; }
+                .snb-store-door, .snb-store-window { transition: filter .35s ease, box-shadow .35s ease; }
+                .snb-store-scene:hover .snb-store-window { filter: brightness(1.15); }
+                .snb-store-scene[data-step="2"] .snb-store-door { filter: brightness(1.16); }
+                .snb-store-scene[data-step="3"] .snb-store-window { filter: brightness(1.2); }
+                .snb-store-scene[data-step="4"] .snb-store-awning { filter: brightness(1.12); }
+                .snb-store-plant-left { animation: snbAuthFade .4s ease-out .51s both; }
+                .snb-store-plant-right { animation: snbAuthFade .4s ease-out .59s both; }
+                .snb-store-check { animation: snbCheckPop .45s cubic-bezier(.2,.8,.2,1) .64s both; }
+                .snb-store-check-complete { animation: snbSuccessGlow .9s ease-out 1; }
+                .snb-store-sparkle { animation: snbCheckPop .4s ease-out .72s both; transition: filter .25s ease; }
+                .snb-store-scene:hover .snb-store-sparkle { filter: brightness(1.5); }
+                .snb-store-step-accent { animation: snbAccentIn .32s ease-out both; }
+                .snb-auth-heading-enter { animation: snbAuthFade .32s ease-out both; }
+                .snb-auth-form-panel { overscroll-behavior: contain; }
+                .snb-auth-form-stage { animation: snbStepForward .36s ease-out both; }
+                .snb-auth-form-stage.snb-auth-back { animation-name: snbStepBack; }
+                .snb-auth-form-stage > * { animation: snbAuthFade .3s ease-out both; }
+                .snb-auth-form-stage > :nth-child(1) { animation-delay: .06s; }
+                .snb-auth-form-stage > :nth-child(2) { animation-delay: .10s; }
+                .snb-auth-form-stage > :nth-child(3) { animation-delay: .14s; }
+                .snb-auth-form-stage > :nth-child(4) { animation-delay: .18s; }
+                .snb-auth-form-stage > :nth-child(5) { animation-delay: .22s; }
+                .snb-auth-form-stage > :nth-child(6) { animation-delay: .26s; }
+                .snb-auth-sticky-actions { position: sticky; bottom: 0; z-index: 5; padding-top: 12px; padding-bottom: 6px; background: rgba(255,255,255,.96); backdrop-filter: blur(8px); border-top: 1px solid #EEE7F2; }
+                .snb-auth-sticky-primary { position: sticky; bottom: 0; z-index: 5; box-shadow: 0 0 0 8px rgba(255,255,255,.96); }
+                .snb-auth-input > svg { transition: color .22s ease, transform .22s ease; }
+                .snb-auth-input:focus-within > svg { color: #6F45B8; transform: scale(1.06); }
+                .snb-auth-input:focus-within { transition: border-color .22s ease, box-shadow .22s ease; }
+                .snb-auth-success-icon { animation: snbCheckPop .55s cubic-bezier(.2,.8,.2,1) both; }
+                .snb-auth-otp-enter { animation: snbAuthIn .35s ease-out both; }
+                @media (hover: none), (pointer: coarse) { .snb-store-scene { transform: none !important; } }
+                @media (prefers-reduced-motion: reduce) {
+                    .snb-auth-overlay, .snb-auth-dialog, .snb-auth-brand-panel, .snb-auth-brand-logo, .snb-auth-brand-heading,
+                    .snb-auth-brand-description, .snb-auth-brand-tagline, .snb-store-scene, .snb-store-awning,
+                    .snb-store-plant, .snb-store-check, .snb-store-sparkle, .snb-store-step-accent, .snb-auth-heading-enter,
+                    .snb-auth-form-stage, .snb-auth-form-stage > *, .snb-auth-success-icon, .snb-auth-otp-enter { animation: none !important; opacity: 1 !important; transform: none; }
+                    .snb-store-building { animation: none !important; opacity: 1 !important; }
+                    .snb-auth-input > svg { transition: none !important; }
+                    .snb-auth-sticky-actions { backdrop-filter: none; }
+                }
+            `}</style>
         </>
     );
 }
@@ -1798,8 +1994,8 @@ export default function AuthModal({
 function OnboardingProgress({ currentStep }: { currentStep: number }) {
     const steps = [
         { number: 1, label: "Business info" },
-        { number: 2, label: "First branch" },
-        { number: 3, label: "Managers (optional)" },
+        { number: 2, label: "Branch" },
+        { number: 3, label: "Managers" },
         { number: 4, label: "Review" },
     ];
 
@@ -1818,7 +2014,7 @@ function OnboardingProgress({ currentStep }: { currentStep: number }) {
                             {index > 0 && (
                                 <div
                                     className={[
-                                        "absolute right-1/2 top-4 h-px w-full",
+                                        "absolute right-1/2 top-4 h-px w-full transition-colors duration-500",
                                         isComplete || isActive
                                             ? "bg-[#6A469C]"
                                             : "bg-[#DED7E4]",
@@ -1828,7 +2024,7 @@ function OnboardingProgress({ currentStep }: { currentStep: number }) {
 
                             <div
                                 className={[
-                                    "relative z-10 flex h-8 w-8 items-center justify-center rounded-full border text-xs font-bold transition",
+                                    "relative z-10 flex h-8 w-8 items-center justify-center rounded-full border text-xs font-bold transition-all duration-500",
                                     isActive
                                         ? "border-[#2D1B4E] bg-[#2D1B4E] text-white shadow-[0_5px_14px_rgba(45,27,78,0.22)]"
                                         : isComplete
@@ -1862,314 +2058,124 @@ function OnboardingProgress({ currentStep }: { currentStep: number }) {
 }
 
 function SignupOtpDialog({
-                             email,
-                             otp,
-                             setOtp,
-                             timer,
-                             loading,
-                             onVerify,
-                             onResend,
-                             onClose,
+                             email, otp, setOtp, timer, loading, verified, error, onVerify, onResend, onClose,
                          }: {
     email: string;
     otp: string;
     setOtp: (value: string) => void;
     timer: number;
     loading: boolean;
+    verified: boolean;
+    error: string;
     onVerify: () => void;
     onResend: () => void;
     onClose: () => void;
 }) {
-    const inputRefs =
-        useRef<Array<HTMLInputElement | null>>([]);
+    const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
+    const attemptedOtp = useRef("");
     const isExpired = timer <= 0;
-    const otpDigits = Array.from(
-        { length: 6 },
-        (_, index) => otp[index] || ""
-    );
+    const otpDigits = Array.from({ length: 6 }, (_, index) => otp[index] || "");
+    const formattedTimer = `${String(Math.floor(timer / 60)).padStart(2, "0")}:${String(timer % 60).padStart(2, "0")}`;
 
     useEffect(() => {
-        if (!isExpired && !loading) {
-            window.setTimeout(() => {
-                inputRefs.current[0]?.focus();
-            }, 50);
+        const focus = window.setTimeout(() => inputRefs.current[0]?.focus(), 40);
+        return () => window.clearTimeout(focus);
+    }, []);
+
+    useEffect(() => {
+        if (error && !loading && !verified && !isExpired) inputRefs.current[0]?.focus();
+    }, [error, loading, verified, isExpired]);
+
+    useEffect(() => {
+        if (!/^\d{6}$/.test(otp)) {
+            attemptedOtp.current = "";
+            return;
         }
-    }, [isExpired, loading]);
+        if (isExpired || loading || verified || attemptedOtp.current === otp) return;
+        attemptedOtp.current = otp;
+        onVerify();
+    }, [otp, isExpired, loading, verified, onVerify]);
 
-    const formattedTimer = `${String(
-        Math.floor(timer / 60)
-    ).padStart(2, "0")}:${String(timer % 60).padStart(
-        2,
-        "0"
-    )}`;
-
-    const updateDigit = (
-        index: number,
-        value: string
-    ) => {
-        if (isExpired || loading) return;
-
-        const digit = value
-            .replace(/\D/g, "")
-            .slice(-1);
-        const nextDigits = [...otpDigits];
-
-        nextDigits[index] = digit;
-        setOtp(nextDigits.join("").slice(0, 6));
-
-        if (digit && index < 5) {
-            inputRefs.current[index + 1]?.focus();
-        }
+    const updateDigit = (index: number, value: string) => {
+        if (isExpired || loading || verified) return;
+        const digit = value.replace(/\D/g, "").slice(-1);
+        const next = otp.padEnd(6, " ").split("");
+        next[index] = digit || " ";
+        setOtp(next.join("").replace(/ /g, "").slice(0, 6));
+        if (digit && index < 5) inputRefs.current[index + 1]?.focus();
     };
 
-    const handleDigitKeyDown = (
-        index: number,
-        event: React.KeyboardEvent<HTMLInputElement>
-    ) => {
+    const handleKeyDown = (index: number, event: React.KeyboardEvent<HTMLInputElement>) => {
         if (event.key === "Backspace") {
             if (otpDigits[index]) {
-                const nextDigits = [...otpDigits];
-                nextDigits[index] = "";
-                setOtp(nextDigits.join(""));
-                return;
-            }
-
-            if (index > 0) {
+                updateDigit(index, "");
+            } else if (index > 0) {
                 inputRefs.current[index - 1]?.focus();
-
-                const nextDigits = [...otpDigits];
-                nextDigits[index - 1] = "";
-                setOtp(nextDigits.join(""));
+                updateDigit(index - 1, "");
             }
+            event.preventDefault();
         }
-
-        if (
-            event.key === "ArrowLeft" &&
-            index > 0
-        ) {
-            inputRefs.current[index - 1]?.focus();
-        }
-
-        if (
-            event.key === "ArrowRight" &&
-            index < 5
-        ) {
-            inputRefs.current[index + 1]?.focus();
-        }
-
-        if (
-            event.key === "Enter" &&
-            otp.length === 6 &&
-            !isExpired
-        ) {
-            onVerify();
-        }
+        if (event.key === "ArrowLeft" && index > 0) inputRefs.current[index - 1]?.focus();
+        if (event.key === "ArrowRight" && index < 5) inputRefs.current[index + 1]?.focus();
     };
 
-    const handlePaste = (
-        event: React.ClipboardEvent<HTMLInputElement>
-    ) => {
-        if (isExpired || loading) return;
-
+    const handlePaste = (event: React.ClipboardEvent<HTMLInputElement>) => {
+        if (isExpired || loading || verified) return;
         event.preventDefault();
-
-        const pastedOtp = event.clipboardData
-            .getData("text")
-            .replace(/\D/g, "")
-            .slice(0, 6);
-
-        if (!pastedOtp) return;
-
-        setOtp(pastedOtp);
-
-        const focusIndex =
-            Math.min(pastedOtp.length, 6) - 1;
-
-        inputRefs.current[
-            Math.max(0, focusIndex)
-            ]?.focus();
+        const pasted = event.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
+        if (pasted) {
+            setOtp(pasted);
+            inputRefs.current[Math.min(pasted.length, 6) - 1]?.focus();
+        }
     };
 
     return (
-        <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="signup-otp-title"
-            className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-3 py-3 backdrop-blur-md sm:px-4 sm:py-6"
-        >
-            <div className="relative w-full max-w-[430px] overflow-hidden rounded-[28px] border border-white/70 bg-white px-7 pb-7 pt-8 text-center shadow-[0_28px_80px_rgba(22,12,39,0.32)] sm:px-9">
-                <button
-                    type="button"
-                    onClick={onClose}
-                    disabled={loading}
-                    aria-label="Close OTP verification"
-                    className="absolute right-4 top-4 rounded-full p-2 text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                    <X className="h-5 w-5" />
-                </button>
-
+        <div role="dialog" aria-modal="true" aria-labelledby="signup-otp-title" className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-3 py-3 backdrop-blur-md sm:px-4 sm:py-6">
+            <div className="snb-auth-otp-enter relative w-full max-w-[430px] overflow-hidden rounded-[28px] border border-white/70 bg-white px-6 pb-7 pt-8 text-center shadow-[0_28px_80px_rgba(22,12,39,0.32)] sm:px-9">
+                <button type="button" onClick={onClose} disabled={loading || verified} aria-label="Close OTP verification" className="absolute right-4 top-4 rounded-full p-2 text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E] disabled:opacity-50"><X className="h-5 w-5" /></button>
                 <div className="relative mx-auto flex h-[86px] w-[86px] items-center justify-center">
-                    <div className="absolute inset-0 rounded-full bg-[#EEE5FF]" />
-                    <div className="absolute inset-[11px] rounded-full bg-[#DCCBFF]" />
-
-                    <div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#2D1B4E] text-white shadow-lg">
-                        <Mail className="h-7 w-7" />
-                    </div>
-
-                    <Sparkles className="absolute -right-1 top-1 h-4 w-4 text-[#C9951A]" />
-                    <Sparkles className="absolute -left-1 bottom-3 h-3.5 w-3.5 text-[#C9951A]" />
+                    <div className="absolute inset-0 rounded-full bg-[#EEE5FF]" /><div className="absolute inset-[11px] rounded-full bg-[#DCCBFF]" />
+                    <div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#2D1B4E] text-white shadow-lg">{verified ? <Check className="h-8 w-8 text-[#F1C85C]" /> : <Mail className="h-7 w-7" />}</div>
+                    <Sparkles className="absolute -right-1 top-1 h-4 w-4 text-[#C9951A]" /><Sparkles className="absolute -left-1 bottom-3 h-3.5 w-3.5 text-[#C9951A]" />
                 </div>
-
-                <h2
-                    id="signup-otp-title"
-                    className="mt-4 font-serif text-[32px] font-semibold leading-tight text-[#2D1B4E]"
-                >
-                    Verify your email
-                </h2>
-
-                <p className="mt-2 text-sm leading-6 text-[#7A6E88]">
-                    We&apos;ve sent a 6-digit verification
-                    code to
-                </p>
-
-                <p className="mt-0.5 break-all text-sm font-bold text-[#2D1B4E]">
-                    {email}
-                </p>
-
+                <h2 id="signup-otp-title" className="mt-4 font-serif text-[32px] font-semibold leading-tight text-[#2D1B4E]">{verified ? "Verified Successfully" : "Verify your email"}</h2>
+                <p className="mt-2 text-sm leading-6 text-[#7A6E88]">{verified ? "Your email has been verified." : "Enter the 6-digit code sent to"}</p>
+                {!verified && <p className="mt-0.5 break-all text-sm font-bold text-[#2D1B4E]">{email}</p>}
+                {error && <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">{error}</p>}
                 <div className="mt-6 flex justify-center gap-2 sm:gap-3">
                     {otpDigits.map((digit, index) => (
-                        <input
-                            key={index}
-                            ref={(element) => {
-                                inputRefs.current[index] =
-                                    element;
-                            }}
-                            value={digit}
-                            type="text"
-                            inputMode="numeric"
-                            pattern="[0-9]*"
-                            autoComplete={
-                                index === 0
-                                    ? "one-time-code"
-                                    : "off"
-                            }
-                            maxLength={1}
-                            disabled={
-                                loading || isExpired
-                            }
-                            aria-label={`OTP digit ${
-                                index + 1
-                            }`}
-                            onChange={(event) =>
-                                updateDigit(
-                                    index,
-                                    event.target.value
-                                )
-                            }
-                            onKeyDown={(event) =>
-                                handleDigitKeyDown(
-                                    index,
-                                    event
-                                )
-                            }
-                            onPaste={handlePaste}
-                            onFocus={(event) =>
-                                event.target.select()
-                            }
-                            className={[
-                                "h-14 w-11 rounded-xl border bg-white text-center text-2xl font-bold text-[#2D1B4E] outline-none transition sm:w-12",
-                                "focus:border-[#6F45B8] focus:ring-4 focus:ring-[#6F45B8]/15",
-                                digit
-                                    ? "border-[#B99AEF] shadow-sm"
-                                    : "border-[#DED3EE]",
-                                isExpired
-                                    ? "cursor-not-allowed bg-[#F7F4FA] text-[#A79CAF]"
-                                    : "",
-                            ].join(" ")}
-                        />
+                        <div key={index} className="relative">
+                            <input
+                                ref={(element) => { inputRefs.current[index] = element; }}
+                                value={digit} type="text" inputMode="numeric" pattern="[0-9]*"
+                                autoComplete={index === 0 ? "one-time-code" : "off"} maxLength={1}
+                                disabled={isExpired || loading || verified} aria-label={`OTP digit ${index + 1}`}
+                                onChange={(event) => updateDigit(index, event.target.value)}
+                                onKeyDown={(event) => handleKeyDown(index, event)}
+                                onPaste={handlePaste} onFocus={(event) => event.target.select()}
+                                className={`snb-otp-digit h-14 w-10 rounded-xl border bg-white text-center text-2xl font-bold text-[#2D1B4E] outline-none transition-all duration-200 sm:w-11 ${verified ? "snb-otp-confirmed border-[#46A36A] bg-[#F0FBF4]" : digit ? "snb-otp-filled border-[#C9951A] bg-[#FFFBF2]" : "border-[#DED3EE]"} focus:border-[#6F45B8] focus:ring-4 focus:ring-[#6F45B8]/15 disabled:opacity-80`}
+                            />
+                            {index < 5 && <span aria-hidden="true" className={`pointer-events-none absolute -right-2 top-1/2 z-10 h-0.5 w-2 -translate-y-1/2 transition-colors duration-200 ${digit ? "bg-[#C9951A]" : "bg-[#E8DFEF]"}`} />}
+                        </div>
                     ))}
                 </div>
-
-                <div
-                    className={[
-                        "mx-auto mt-5 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold",
-                        isExpired
-                            ? "bg-red-50 text-red-600"
-                            : "bg-[#F1E9FF] text-[#6F45B8]",
-                    ].join(" ")}
-                >
-                    <Clock3 className="h-4 w-4" />
-
-                    {isExpired ? (
-                        <span>Code expired</span>
-                    ) : (
-                        <span>
-                            Code expires in{" "}
-                            {formattedTimer}
-                        </span>
-                    )}
-                </div>
-
-                {isExpired && (
-                    <p className="mt-3 text-xs leading-5 text-red-600">
-                        This OTP is no longer valid. Please
-                        resend a new code.
-                    </p>
+                {verified ? (
+                    <div role="status" aria-live="polite" className="snb-otp-confirmed-label mt-5 flex items-center justify-center gap-2 font-semibold text-[#318653]"><Check className="h-6 w-6" /> Verified and secure</div>
+                ) : (
+                    <div role="status" aria-live="polite" className={`mx-auto mt-5 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold tabular-nums ${isExpired ? "bg-red-50 text-red-600" : "bg-[#F1E9FF] text-[#6F45B8]"}`}><Clock3 className="h-4 w-4" />{formattedTimer}</div>
                 )}
-
-                <button
-                    type="button"
-                    disabled={
-                        loading ||
-                        isExpired ||
-                        !/^\d{6}$/.test(otp)
-                    }
-                    onClick={onVerify}
-                    className="mt-6 w-full rounded-xl bg-[#3B1768] px-5 py-3.5 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(59,23,104,0.22)] transition hover:bg-[#4B2180] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                    {loading
-                        ? "Verifying..."
-                        : "Verify Account"}
-                </button>
-
-                <div className="mt-6 flex items-center gap-3">
-                    <div className="h-px flex-1 bg-[#EBE4F0]" />
-
-                    <span className="text-xs text-[#7A6E88]">
-                        Didn&apos;t receive the code?
-                    </span>
-
-                    <div className="h-px flex-1 bg-[#EBE4F0]" />
-                </div>
-
-                <button
-                    type="button"
-                    disabled={loading || !isExpired}
-                    onClick={onResend}
-                    className="mx-auto mt-3 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-[#6F35C5] transition hover:bg-[#F5EFFF] disabled:cursor-not-allowed disabled:text-[#B9AFCA] disabled:hover:bg-transparent"
-                >
-                    <RefreshCw
-                        className={[
-                            "h-4 w-4",
-                            loading ? "animate-spin" : "",
-                        ].join(" ")}
-                    />
-
-                    {loading
-                        ? "Sending..."
-                        : isExpired
-                            ? "Resend OTP"
-                            : `Resend available in ${formattedTimer}`}
-                </button>
-
-                <div className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-[#FAF8FC] px-4 py-3 text-xs text-[#7A6E88]">
-                    <ShieldCheck className="h-4 w-4 shrink-0 text-[#6F45B8]" />
-
-                    <span>
-                        For your security, never share this
-                        code with anyone.
-                    </span>
-                </div>
+                {loading && !verified && <p role="status" className="mt-3 text-sm font-medium text-[#6F45B8]">Checking your code...</p>}
+                {isExpired && !verified && <p className="mt-3 text-xs text-red-600">This code has expired. Please request another.</p>}
+                <div className="mt-6 flex items-center gap-3"><div className="h-px flex-1 bg-[#EBE4F0]" /><span className="text-xs text-[#7A6E88]">Didn&apos;t receive the code?</span><div className="h-px flex-1 bg-[#EBE4F0]" /></div>
+                <button type="button" disabled={loading || verified || !isExpired} onClick={onResend} aria-label="Resend verification code" className="mx-auto mt-3 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-[#6F35C5] transition hover:bg-[#F5EFFF] disabled:cursor-not-allowed disabled:text-[#B9AFCA] disabled:hover:bg-transparent"><RefreshCw className={loading && !verified ? "h-4 w-4 animate-spin" : "h-4 w-4"} />Resend</button>
+                <div className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-[#FAF8FC] px-4 py-3 text-xs text-[#7A6E88]"><ShieldCheck className="h-4 w-4 shrink-0 text-[#6F45B8]" /><span>For your security, never share this code with anyone.</span></div>
+                <style jsx>{`
+                    .snb-otp-filled { box-shadow: 0 0 0 2px rgba(201,149,26,.12), 0 0 12px rgba(201,149,26,.14); animation: snbOtpPop .22s ease-out; }
+                    .snb-otp-confirmed { box-shadow: 0 0 15px rgba(70,163,106,.26); }
+                    .snb-otp-confirmed-label { animation: snbOtpPop .5s ease-out both; }
+                    @keyframes snbOtpPop { from { transform: scale(.9); opacity: .55; } to { transform: scale(1); opacity: 1; } }
+                    @media (prefers-reduced-motion: reduce) { .snb-otp-filled, .snb-otp-confirmed-label { animation: none; } }
+                `}</style>
             </div>
         </div>
     );
@@ -2183,6 +2189,7 @@ function TextInput({
                        onChange,
                        icon,
                        disabled = false,
+                       helperText,
                    }: {
     label: string;
     placeholder: string;
@@ -2191,6 +2198,7 @@ function TextInput({
     onChange?: (value: string) => void;
     icon?: React.ReactNode;
     disabled?: boolean;
+    helperText?: string;
 }) {
     const [isPasswordVisible, setIsPasswordVisible] = useState(false);
 
@@ -2206,7 +2214,7 @@ function TextInput({
 
             <div
                 className={[
-                    "flex items-center gap-3 rounded-lg border px-4 py-3 transition",
+                    "snb-auth-input flex items-center gap-3 rounded-lg border px-4 py-3 transition",
                     disabled
                         ? "border-[#EEE8F1] bg-[#F7F4F8]"
                         : "border-[#EBE4F0] bg-white focus-within:border-[#2D1B4E] focus-within:ring-4 focus-within:ring-[#2D1B4E]/10",
@@ -2216,6 +2224,7 @@ function TextInput({
 
                 <input
                     type={resolvedType}
+                    inputMode={type === "tel" ? "tel" : undefined}
                     placeholder={placeholder}
                     value={value}
                     disabled={disabled}
@@ -2238,13 +2247,14 @@ function TextInput({
                         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E]"
                     >
                         {isPasswordVisible ? (
-                            <EyeOff className="h-5 w-5" />
-                        ) : (
                             <Eye className="h-5 w-5" />
+                        ) : (
+                            <EyeOff className="h-5 w-5" />
                         )}
                     </button>
                 )}
             </div>
+            {helperText && <p className="mt-1.5 text-xs text-[#7A6E88]">{helperText}</p>}
         </div>
     );
 }

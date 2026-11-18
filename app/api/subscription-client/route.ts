@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
 const ALLOWED_POST_ACTIONS = new Set([
     "get_payment_settings",
     "send_payment_otp",
+    "verify_payment_otp",
     "submit_subscription_payment",
     "request_subscription_downgrade",
     "cancel_subscription_downgrade",

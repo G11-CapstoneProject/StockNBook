@@ -32,13 +32,30 @@ const {
   DB_SSL
   JWT_SECRET
 */
-const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
+
+
+// ===== ENV SECURITY CHANGE: Required JWT environment variable BEGIN =====
+function requiredEnv(name) {
+    const value = process.env[name];
+    if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Missing required environment variable: ${name}`);
+    }
+    return value;
+}
+
+const JWT_SECRET = requiredEnv("JWT_SECRET");
+// ===== ENV SECURITY CHANGE: Required JWT environment variable END =====
+
+
 
 const dbConfig = {
-    host: "127.0.0.1",
-    user: "root",
-    password: "BTA5EYVWLfWcebF",
-    database: "stocknbook_v2",
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
+    host: requiredEnv("DB_HOST"),
+    user: requiredEnv("DB_USER"),
+    password: requiredEnv("DB_PASSWORD"),
+    database: requiredEnv("DB_NAME"),
+    port: Number(process.env.DB_PORT || 3306),
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
     ssl: { rejectUnauthorized: false },
     waitForConnections: true,
     connectionLimit: 4,

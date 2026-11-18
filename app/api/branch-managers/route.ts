@@ -49,14 +49,26 @@ async function callLocalAuth(
 // Owner-only manager account access status. Existing invitation
 // and manager-list operations continue through lambda-auth unchanged.
 let ownerPool: Pool | undefined;
+// ===== ENV SECURITY CHANGE: Required environment variable helper BEGIN =====
+function requiredEnv(name: string): string {
+    const value = process.env[name];
+    if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Missing required environment variable: ${name}`);
+    }
+    return value;
+}
+
 function ownerDatabase(): Pool {
+// ===== ENV SECURITY CHANGE: Required environment variable helper END =====
     if (!ownerPool) {
         ownerPool = mysql.createPool({
-            host: process.env.DB_HOST || process.env.MYSQL_HOST || "127.0.0.1",
-            port: Number(process.env.DB_PORT || process.env.MYSQL_PORT || 3306),
-            user: process.env.DB_USER || process.env.MYSQL_USER || "root",
-            password: process.env.DB_PASSWORD || process.env.MYSQL_PASSWORD! || "BTA5EYVWLfWcebF",
-            database: process.env.DB_NAME || process.env.MYSQL_DATABASE || "stocknbook_v2",
+            // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
+            host: requiredEnv("DB_HOST"),
+            port: Number(process.env.DB_PORT || 3306),
+            user: requiredEnv("DB_USER"),
+            password: requiredEnv("DB_PASSWORD"),
+            database: requiredEnv("DB_NAME"),
+            // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
             waitForConnections: true,
             connectionLimit: 6,
             timezone: "+08:00",
@@ -75,8 +87,9 @@ const validId = (value: unknown): number => {
 async function verifyOwner(req: NextRequest, db: Pool): Promise<number> {
     const token = req.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
     if (!token) throw new ManagerAccessError(401, "Owner login is required.");
-    const secret = process.env.JWT_SECRET?.trim() ||
-        (process.env.NODE_ENV !== "production" ? "stocknbook-secret-key" : "");
+    // ===== ENV SECURITY CHANGE: Remove development JWT fallback BEGIN =====
+    const secret = process.env.JWT_SECRET?.trim();
+    // ===== ENV SECURITY CHANGE: Remove development JWT fallback END =====
     if (!secret) throw new ManagerAccessError(503, "JWT_SECRET is not configured.");
     let claims: Record<string, unknown>;
     try {
@@ -103,8 +116,10 @@ function handleOwnerError(error: unknown) {
     }
     console.error("Owner branch-manager request error:", error);
     return NextResponse.json({ success: false, error:
-                error instanceof Error && error.message.startsWith("DB_PASSWORD is not configured")
-                    ? "Configure DB_PASSWORD in .env.local for manager access changes, then restart Next.js."
+            // ===== ENV SECURITY CHANGE: Match requiredEnv errors and root .env BEGIN =====
+                error instanceof Error && error.message.startsWith("Missing required environment variable: DB_")
+                    ? "Configure the required database variables in .env, then restart Next.js."
+                    // ===== ENV SECURITY CHANGE: Match requiredEnv errors and root .env END =====
                     : "Unable to update manager access. Check the server log and database configuration." },
         { status: 503 });
 }

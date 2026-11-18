@@ -682,13 +682,31 @@ const V2_POS_ORDER_ITEMS = `(SELECT
              JOIN product_variants piv ON piv.id = poi.variant_id)`;
 // ===== END StockNBook v2 POS read models =====
 
-const JWT_SECRET = "stocknbook-secret-key";
+// Configure these in AWS Lambda environment variables; do not hardcode credentials.
+function requirePosEnv(name, alias) {
+    const value = process.env[name] ?? (alias ? process.env[alias] : undefined);
+    if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Missing required Lambda environment variable: ${name}`);
+    }
+    return value;
+}
+
+// ===== ENV SECURITY CHANGE: Required JWT environment variable BEGIN =====
+// MERGE FIX: Use the existing POS environment validator.
+const JWT_SECRET = requirePosEnv("JWT_SECRET");
+// ===== ENV SECURITY CHANGE: Required JWT environment variable END =====
+
+
 
 const dbConfig = {
-    host: "127.0.0.1",
-    user: "root",
-    password: "BTA5EYVWLfWcebF",
-    database: "stocknbook_v2",
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
+    // MERGE FIX: Use the existing POS environment validator.
+    host: requirePosEnv("DB_HOST"),
+    user: requirePosEnv("DB_USER"),
+    password: requirePosEnv("DB_PASSWORD"),
+    database: requirePosEnv("DB_NAME"),
+    port: Number(process.env.DB_PORT || 3306),
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
     ssl: { rejectUnauthorized: false },
 };
 
@@ -1435,6 +1453,70 @@ const POS_SALE_FILTER_SQL = `
     ${POS_WALKIN_ORDER_FILTER_SQL}
     AND UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')
 `;
+
+// Owner dashboard v2: compact, tenant-scoped branch/day financial totals.
+// Booking reporting follows the existing dashboard's completed/event-date basis.
+async function loadOwnerDashboardV2(connection, storeId, dateFrom, dateTo) {
+    const [walkRows] = await connection.execute(`
+        SELECT DATE_FORMAT(t.orderDate,'%Y-%m-%d') AS date, t.branchId,
+               SUM(t.sales) AS sales,
+               CASE WHEN SUM(t.missingCost)>0 THEN NULL ELSE SUM(t.cost) END AS cost
+        FROM (
+            SELECT o.order_id, o.order_date AS orderDate, o.branch_id AS branchId, o.total AS sales,
+                   SUM(oi.cost_price_at_sale * oi.quantity) AS cost,
+                   CASE WHEN COUNT(oi.id)=0 OR SUM(CASE WHEN oi.cost_price_at_sale IS NULL
+                     OR oi.cost_price_at_sale<0 OR oi.quantity<=0 THEN 1 ELSE 0 END)>0 THEN 1 ELSE 0 END AS missingCost
+            FROM ${V2_POS_ORDERS} o
+        LEFT JOIN ${V2_POS_ORDER_ITEMS} oi ON oi.order_pk=o.order_pk AND oi.store_id=o.store_id
+        WHERE o.store_id=? AND o.order_date BETWEEN ? AND ? AND ${POS_SALE_FILTER_SQL}
+        AND LOWER(TRIM(o.status))='completed'
+        GROUP BY o.order_id,o.order_date,o.branch_id,o.total
+        ) t GROUP BY t.orderDate,t.branchId`, [storeId,dateFrom,dateTo]);
+    const [bookingRows] = await connection.execute(`
+        SELECT DATE_FORMAT(t.eventDate,'%Y-%m-%d') AS date,t.branchId,
+               CASE WHEN SUM(t.sales IS NULL)>0 THEN NULL ELSE SUM(t.sales) END AS sales,
+               CASE WHEN SUM(t.missingCost)>0 THEN NULL ELSE SUM(t.cost) END AS cost
+        FROM (
+            SELECT b.id,b.event_date AS eventDate,b.branch_id AS branchId,
+                   COALESCE(b.agreed_price,b.package_price_snapshot) AS sales,
+                   SUM(CASE WHEN i.item_type='consumable' THEN ROUND(v.cost_price*i.used_quantity,2)
+                            WHEN i.item_type='rental' THEN ROUND(e.cost_price*i.quantity,2)
+                            ELSE 0 END) AS cost,
+                   CASE WHEN COUNT(CASE WHEN i.item_type IN ('consumable','rental') THEN 1 END)=0
+                        OR SUM(CASE WHEN i.item_type='consumable' AND
+                               (v.cost_price IS NULL OR v.cost_price<=0 OR i.released_at IS NULL OR i.used_quantity>i.quantity) THEN 1
+                             WHEN i.item_type='rental' AND
+                               (e.cost_price IS NULL OR e.cost_price<=0 OR i.quantity IS NULL OR i.quantity<=0) THEN 1
+                             ELSE 0 END)>0 THEN 1 ELSE 0 END AS missingCost
+            FROM bookings b
+            LEFT JOIN booking_items i ON i.booking_id=b.id AND i.store_id=b.store_id
+                 AND i.item_type IN ('consumable','rental') AND i.item_status NOT LIKE 'claim%'
+            LEFT JOIN product_variants v ON v.id=i.variant_id AND v.store_id=i.store_id
+            LEFT JOIN equipment e ON e.id=i.equipment_id AND e.store_id=i.store_id
+            WHERE b.store_id=? AND b.event_date BETWEEN ? AND ? AND LOWER(TRIM(b.status))='completed'
+            GROUP BY b.id,b.event_date,b.branch_id,b.agreed_price,b.package_price_snapshot
+        ) t GROUP BY t.eventDate,t.branchId`, [storeId,dateFrom,dateTo]);
+    const starts = getOwnerDashboardPeriodStarts(dateTo);
+    const [productRows] = await connection.execute(`
+                SELECT oi.product_name AS name,
+                       SUM(CASE WHEN o.order_date>=? THEN oi.line_total ELSE 0 END) AS monthSales,
+                       SUM(CASE WHEN o.order_date>=? THEN oi.quantity ELSE 0 END) AS monthUnits,
+                       SUM(CASE WHEN o.order_date>=? THEN oi.line_total ELSE 0 END) AS quarterSales,
+                       SUM(CASE WHEN o.order_date>=? THEN oi.quantity ELSE 0 END) AS quarterUnits,
+                       SUM(CASE WHEN o.order_date>=? THEN oi.line_total ELSE 0 END) AS yearSales,
+                       SUM(CASE WHEN o.order_date>=? THEN oi.quantity ELSE 0 END) AS yearUnits
+                FROM ${V2_POS_ORDER_ITEMS} oi JOIN ${V2_POS_ORDERS} o ON o.order_pk=oi.order_pk AND o.store_id=oi.store_id
+                WHERE o.store_id=? AND o.order_date BETWEEN ? AND ? AND ${POS_SALE_FILTER_SQL}
+                  AND LOWER(TRIM(o.status))='completed' GROUP BY oi.product_name`,
+        [starts.month,starts.month,starts.quarter,starts.quarter,starts.year,starts.year,storeId,starts.year,dateTo]);
+    const [branches] = await connection.execute('SELECT id, branch_name AS branchName FROM branches WHERE store_id=? ORDER BY branch_name,id',[storeId]);
+    const normalize = rows => rows.map(row=>({date:String(row.date),branchId:String(row.branchId),
+        sales:row.sales==null?null:Number(row.sales),cost:row.cost==null?null:Number(row.cost)}));
+    return {dateRange:{startDate:dateFrom,endDate:dateTo},branches,walkDaily:normalize(walkRows),bookingDaily:normalize(bookingRows),
+        rentalCostMethod:'manual_unit_cost_per_rental',
+        topProducts:{month:buildTopDashboardRows(productRows,'monthSales','monthUnits',5),
+            quarter:buildTopDashboardRows(productRows,'quarterSales','quarterUnits',5),year:buildTopDashboardRows(productRows,'yearSales','yearUnits',5)}};
+}
 
 function normalizeDashboardNumber(value) {
     const parsed = Number(value);
@@ -2805,6 +2887,16 @@ exports.handler = async (event) => {
                     headers,
                     "date_from cannot be later than date_to."
                 );
+            }
+
+            // Opt-in response; the legacy dashboard summary is unchanged.
+            if (body.dashboard_version === 2) {
+                const earliest = `${Number(requestedDateTo.slice(0,4))-1}-01-01`;
+                if (requestedDateFrom < earliest || requestedDateTo > getManilaISODate()) {
+                    return badRequest(headers, "Choose a date range within this and the previous calendar year.");
+                }
+                const summary = await loadOwnerDashboardV2(connection, storeId, requestedDateFrom, requestedDateTo);
+                return jsonResponse(200, headers, {success:true, summary});
             }
 
             const periodStarts =

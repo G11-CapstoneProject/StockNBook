@@ -595,7 +595,29 @@ module.exports = {
 };
 
 
-const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
+
+
+
+
+
+
+// ===== ENV SECURITY CHANGE: Required JWT environment variable BEGIN =====
+function requiredEnv(name) {
+    const value = process.env[name];
+    if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Missing required environment variable: ${name}`);
+    }
+    return value;
+}
+
+const JWT_SECRET = requiredEnv("JWT_SECRET");
+// ===== ENV SECURITY CHANGE: Required JWT environment variable END =====
+
+
+
+
+
+
 
 const OTP_EXPIRY_SECONDS = 90;
 // Explicit, local-only OTP delivery for test accounts (never enabled in production).
@@ -635,11 +657,12 @@ const PAYMENT_OTP_TERMINAL_DEBUG =
 // Invitation links remain usable even when SMTP cannot deliver a demo email.
 // In development, failed Manager/Staff invitations are also printed to the
 // server terminal so activation can still be tested safely.
+// ===== ENV SECURITY CHANGE BEGIN =====
 const INVITATION_TERMINAL_DEBUG =
-    String(process.env.NODE_ENV || "").toLowerCase() === "development" ||
-    (String(process.env.NODE_ENV || "").toLowerCase() !== "production" &&
-        String(process.env.INVITATION_TERMINAL_DEBUG || "").toLowerCase() === "true");
-
+    process.env.NODE_ENV === "development" &&
+    String(process.env.INVITATION_TERMINAL_DEBUG || "")
+        .toLowerCase() === "true";
+// ===== ENV SECURITY CHANGE END =====
 const SMTP_NETWORK_ERROR_CODES = new Set([
     "ENOTFOUND",
     "EAI_AGAIN",
@@ -680,21 +703,35 @@ function logDevelopmentInvitationFallback({
     );
 }
 
-const SMTP_USER = "stocknbook@gmail.com";
 
-// Replace this value with a CURRENT 16-character Google App Password
-// generated for the same Gmail account used in SMTP_USER.
-// Do not use the normal Gmail account password.
-const SMTP_PASS = "rrmk ivgo ojgg nkqw"
-    .replace(/\s/g, "");
+
+
+
+// ===== ENV SECURITY CHANGE: Authentication Gmail credentials BEGIN =====
+const SMTP_USER = (process.env.AUTH_SMTP_USER || "").trim();
+
+// Use a Google App Password, not the regular Gmail password.
+const SMTP_PASS = (process.env.AUTH_SMTP_PASS || "").replace(/\s/g, "");
+// ===== ENV SECURITY CHANGE: Authentication Gmail credentials END =====
+
+
+
 
 const EMAIL_FROM =
     `"StockNBook" <${SMTP_USER}>`;
 
 const EMAIL_REPLY_TO = SMTP_USER;
 
-const SMTP_HOST = "smtp.gmail.com";
-const SMTP_PORT = 465;
+
+
+// ===== ENV SECURITY CHANGE: SMTP server configuration BEGIN =====
+const SMTP_HOST = process.env.SMTP_HOST || "smtp.gmail.com";
+const SMTP_PORT = Number(process.env.SMTP_PORT || 465);
+// ===== ENV SECURITY CHANGE: SMTP server configuration END =====
+
+
+
+
 const SMTP_TIMEOUT_MS = 20000;
 
 const APP_BASE_URL =
@@ -1648,18 +1685,23 @@ async function sendGmailHtmlEmail(toEmail, rawMessage, logLabel) {
         !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(SMTP_USER)
     ) {
         const configError = new Error(
-            "Email sending is not configured. Set a valid SMTP_USER directly in index.js."
+            // ===== ENV SECURITY CHANGE: SMTP configuration error message BEGIN =====
+            "Email sending is not configured. Set a valid AUTH_SMTP_USER in the environment."
+            // ===== ENV SECURITY CHANGE: SMTP configuration error message END =====
         );
         configError.code = "SMTP_NOT_CONFIGURED";
         throw configError;
     }
 
     if (
-        !SMTP_PASS ||
-        SMTP_PASS === "rrmk ivgo ojgg nkqw"
+        // ===== ENV SECURITY CHANGE: Remove embedded SMTP password check BEGIN =====
+        !SMTP_PASS
+        // ===== ENV SECURITY CHANGE: Remove embedded SMTP password check END =====
     ) {
         const configError = new Error(
-            "Email sending is not configured. Replace PASTE_NEW_GOOGLE_APP_PASSWORD_HERE in index.js with a valid Google App Password."
+            // ===== ENV SECURITY CHANGE: SMTP password error message BEGIN =====
+            "Email sending is not configured. Set AUTH_SMTP_PASS to a valid Google App Password in the environment."
+            // ===== ENV SECURITY CHANGE: SMTP password error message END =====
         );
         configError.code = "SMTP_NOT_CONFIGURED";
         throw configError;
@@ -1772,7 +1814,9 @@ async function sendGmailHtmlEmail(toEmail, rawMessage, logLabel) {
 
         if (error?.code === "GMAIL_AUTH_FAILED") {
             const authError = new Error(
-                "Gmail rejected the sender credentials. Replace SMTP_PASS in index.js with a current Google App Password generated for the same Gmail account used in SMTP_USER."
+                // ===== ENV SECURITY CHANGE: Gmail authentication error message BEGIN =====
+                "Gmail rejected the sender credentials. Set AUTH_SMTP_PASS to a current Google App Password generated for the AUTH_SMTP_USER account."
+                // ===== ENV SECURITY CHANGE: Gmail authentication error message END =====
             );
             authError.code = "GMAIL_AUTH_FAILED";
             throw authError;
@@ -2011,18 +2055,18 @@ function generateSlug(storeName) {
         .replace(/-+/g, "-");
 }
 
-/*
- * MySQL connection stored directly in this Lambda code.
- *
- * The previous error said "using password: NO" because
- * password: process.env.DB_PASSWORD was undefined.
- */
+// ===== ENV SECURITY CHANGE: Update obsolete database configuration comment BEGIN =====
+// MySQL connection settings are provided through environment variables.
+// ===== ENV SECURITY CHANGE: Update obsolete database configuration comment END =====
 
 const dbConfig = {
-    host: "127.0.0.1",
-    user: "root",
-    password: "BTA5EYVWLfWcebF",
-    database: "stocknbook_v2",
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
+    host: requiredEnv("DB_HOST"),
+    user: requiredEnv("DB_USER"),
+    password: requiredEnv("DB_PASSWORD"),
+    database: requiredEnv("DB_NAME"),
+    port: Number(process.env.DB_PORT || 3306),
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
     ssl: { rejectUnauthorized: false },
 };
 
@@ -2034,6 +2078,7 @@ const dbPool = mysql.createPool({
     connectionLimit: 5,
     queueLimit: 0,
 });
+
 
 
 

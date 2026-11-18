@@ -75,6 +75,7 @@ type Booking = {
     packageName?: string;
     eventName?: string;
     bookingNumber?: string;
+    requiredDownPayment?: number | null;
 
     bookingType?: string;
     booking_type?: string;
@@ -353,7 +354,7 @@ function normalizeBooking(value: unknown): Booking {
             "time_slot",
             "timeSlot",
         ]),
-        status: normalizeDashboardBookingStatus(readText(raw, ["status"])),
+        status: readText(raw, ["status"]) ? normalizeDashboardBookingStatus(readText(raw, ["status"])) : "Unknown",
         packageName: readText(raw, [
             "packageName",
             "package_name",
@@ -376,6 +377,7 @@ function normalizeBooking(value: unknown): Booking {
             "bookingReference",
             "booking_reference",
         ]),
+        requiredDownPayment: readNullableNumber(raw, ["requiredDownPayment", "required_down_payment"]),
         bookingType: readText(raw, ["bookingType", "booking_type"]),
         booking_type: readText(raw, ["booking_type", "bookingType"]),
         customOrder: readText(raw, ["customOrder", "custom_order"]),
@@ -429,7 +431,7 @@ function normalizeBooking(value: unknown): Booking {
 function normalizeDashboardBookingStatus(value?: string | null) {
     const raw = String(value || "").trim().toLowerCase();
 
-    if (!raw || raw === "pending" || raw === "pending") {
+    if (!raw || raw === "pending" || raw === "pending review") {
         return "Pending";
     }
 
@@ -1080,7 +1082,7 @@ function ManagerSkeletonBar({ className = "" }: { className?: string }) {
 
 function ManagerMetricSkeleton() {
     return (
-        <div className="flex min-h-[128px] items-center gap-4 rounded-2xl border border-[#E9E0EF] bg-white px-5 py-4 shadow-sm">
+        <div className="flex min-h-[146px] min-w-0 items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-sm">
             <div className="h-14 w-14 shrink-0 rounded-full bg-[#EEE9F4]" />
             <div className="min-w-0 flex-1">
                 <ManagerSkeletonBar className="h-3 w-28" />
@@ -1228,240 +1230,205 @@ function ManagerForecastSkeleton() {
 }
 
 function ManagerDashboardSkeleton() {
-    return (
-        <div className="mx-auto max-w-none space-y-4 animate-pulse" role="status" aria-label="Loading manager dashboard">
-            <span className="sr-only">Loading manager dashboard data</span>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
-                {[0, 1, 2, 3].map((item) => <ManagerMetricSkeleton key={item} />)}
-            </div>
-            <div className="grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2 2xl:grid-cols-3" aria-hidden="true">
-                <ManagerDonutSkeleton />
-                <ManagerDonutSkeleton />
-                <ManagerAttentionSkeleton />
-            </div>
-            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2" aria-hidden="true">
-                <ManagerAttentionSkeleton />
-                <ManagerAttentionSkeleton />
-            </div>
+    return <div className="space-y-4 animate-pulse" role="status" aria-label="Loading manager dashboard">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">{[0,1,2,3].map(item=><ManagerMetricSkeleton key={item}/>)}</div>
+        <div className="h-[280px] rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm"><ManagerSkeletonBar className="h-4 w-36"/><div className="mt-6 flex h-[185px] items-end justify-around gap-4">{[40,25,70,52,62,90].map((h,i)=><div key={i} className="w-[8%] rounded-t-md bg-[#EEE8F3]" style={{height:`${h}%`}}/>)}</div></div>
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">{[0,1,2].map(item=><ManagerAttentionSkeleton key={item}/>)}</div>
+    </div>;
+}
+
+// Dashboard-only projections of the existing branch-scoped APIs.
+const MD_BOOKING_STAGES = ["Pending", "Approved", "Confirmed", "Preparing", "Released", "Completed"] as const;
+type MDStage = typeof MD_BOOKING_STAGES[number];
+type MDAlert = { key: string; product: string; status: string };
+type MDSettlement = { booking: Booking; refund: string };
+function mdStatus(booking: Booking) { return String(booking.status || "").trim().toLowerCase(); }
+function mdStage(booking: Booking): MDStage | null {
+    switch (mdStatus(booking)) {
+        case "pending": case "pending review": return "Pending";
+        case "approved": case "awaiting down payment": return "Approved";
+        case "confirmed": return "Confirmed";
+        case "preparing": return "Preparing";
+        case "released": case "return inspection": case "pending settlement": return "Released";
+        case "completed": return "Completed";
+        default: return null; // Cancelled and unknown statuses are not active workflow stages.
+    }
+}
+function mdBookingDay(value?: string) {
+    const raw = String(value || "").trim();
+    if (/^\d{4}-\d{2}-\d{2}(?:$|[ T])/.test(raw)) return raw.slice(0, 10);
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? "" : mdLocalDay(date);
+}
+function mdBookingAction(booking: Booking) {
+    if (mdStage(booking) === "Pending") {
+        return Number(booking.agreed_price ?? booking.agreedPrice ?? 0) > 0 ? "Approve" : "Set Price";
+    }
+    if (mdStage(booking) === "Approved") {
+        const required = booking.requiredDownPayment;
+        const paid = Number(booking.amount_paid ?? booking.amountPaid ?? 0);
+        return required != null && paid + 0.005 >= required ? "Confirm" : "Review";
+    }
+    return "Review";
+}
+function mdReference(booking: Booking) { return booking.bookingNumber || `#${booking.id}`; }
+function mdRefundLabel(statement: unknown) {
+    const raw = toRecord(statement);
+    const held = readNullableNumber(raw, ["depositHeld"]);
+    const claimBalance = readNullableNumber(raw, ["claimBalance"]);
+    if (held === null || held < 0 || claimBalance === null || claimBalance < 0) return "—";
+    if (claimBalance > 0.005) return "Review";
+    return `Up to ${held.toLocaleString("en-PH", { style: "currency", currency: "PHP" })}`;
+}
+function mdRentalAlerts(equipment: unknown[]): MDAlert[] {
+    return equipment.flatMap((value, index) => {
+        const item = toRecord(value);
+        if (item.active === false || item.active === 0) return [];
+        const bookable = readNullableNumber(item, ["bookableToday"]);
+        const total = readNullableNumber(item, ["totalUnits"]);
+        const maintenance = readNullableNumber(item, ["maintenanceUnits"]);
+        const missing = readNullableNumber(item, ["missingUnits"]);
+        const threshold = readNullableNumber(item, ["alertLevel"]);
+        if ([bookable, total, maintenance, missing, threshold].some(n => n === null || n < 0)) return [];
+        const usable = Math.max(0, total! - maintenance! - missing!);
+        const status = bookable! <= 0 ? (usable > 0 ? "Fully Booked" : "Unavailable") :
+            threshold! > 0 && bookable! <= threshold! ? "Low Availability" : "";
+        return status ? [{ key: `rental-${readText(item, ["id"], String(index))}`, product: readText(item, ["name"], "Rental equipment"), status }] : [];
+    });
+}
+function mdAlertClass(status: string) {
+    return ["Out of Stock", "Unavailable", "Expired"].includes(status) ? "text-[#D52B2B]" :
+        ["Low Stock", "Low Availability", "Very Low Stock", "Expiring Soon"].includes(status) ? "text-[#A66A00]" : "text-[#6D35D4]";
+}
+
+type MDTableRow = { key: string; left: string; right: string; href?: string; statusColor?: string };
+function MDCompactPanel({ title, icon, headers, rows, unavailable, empty, onViewAll, onExport, onNavigate }: {
+    title: string; icon: React.ReactNode; headers: [string, string]; rows: MDTableRow[];
+    unavailable: boolean; empty: string; onViewAll: () => void; onExport: () => void; onNavigate: (href: string) => void;
+}) {
+    return <section className="flex min-h-[280px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
+        <div className="flex items-center justify-between gap-2 px-4 py-3.5">
+            <div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">{title}</h2></div>
+            <button type="button" aria-label={`Download ${title} PDF`} title={`Download ${title} PDF`} onClick={onExport} disabled={unavailable} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF] disabled:opacity-40"><MdDownload size={17}/></button>
         </div>
-    );
+        <div className="flex-1 overflow-x-auto"><table className="w-full table-fixed text-[11px]">
+            <thead className="border-y border-[#EEE7F2] bg-[#FFFCF8] text-[10px] font-semibold uppercase text-[#806A8C]"><tr><th className="w-[56%] px-4 py-3 text-left font-semibold">{headers[0]}</th><th className="px-4 py-3 text-right font-semibold">{headers[1]}</th></tr></thead>
+            <tbody>{rows.map(row => <tr key={row.key} className="border-b border-[#EFE8F2] last:border-b-0 hover:bg-[#FFFCF7]"><td className="break-words px-4 py-3 font-medium text-[#2B174C]">{row.left}</td><td className={`break-words px-4 py-3 text-right font-semibold ${row.statusColor || "text-[#6D35D4]"}`}>{row.href ? <button type="button" onClick={() => onNavigate(row.href!)} className="hover:underline focus-visible:outline-[#6D35D4]">{row.right}</button> : row.right}</td></tr>)}
+            {!rows.length && <tr><td colSpan={2} className="px-4 py-10 text-center text-[#8A7D92]">{unavailable ? "Data unavailable. Refresh to try again." : empty}</td></tr>}</tbody>
+        </table></div>
+        <div className="flex items-center justify-end gap-2 border-t border-[#EEE7F2] px-4 py-2.5 text-[11px]"><button type="button" onClick={onViewAll} className="font-semibold text-[#6D35D4] hover:underline">View all</button></div>
+    </section>;
+}
+function MDBookingOverview({ counts, unavailable, onExport }: { counts: Record<MDStage, number>; unavailable: boolean; onExport: () => void }) {
+    const max = Math.max(1, ...MD_BOOKING_STAGES.map(stage => counts[stage]));
+    const step = Math.max(1, Math.ceil(max / 4));
+    const axisMax = step * 4;
+    return <section className="min-w-0 rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3.5"><div className="flex items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]"><BarChart3 size={19}/></span><h2 className="text-[15px] font-bold text-[#1A1220]">Booking Overview</h2></div><div className="flex items-center gap-2"><span className="rounded-xl border border-[#E6DDF0] px-3 py-2 text-xs font-semibold text-[#2B174C]">This Month</span><button type="button" aria-label="Download Booking Overview PDF" title="Download Booking Overview PDF" onClick={onExport} disabled={unavailable} className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF] disabled:opacity-40"><MdDownload size={17}/></button></div></div>
+        {unavailable ? <p className="flex h-[220px] items-center justify-center text-xs text-[#8A7D92]">Booking overview unavailable.</p> : <div className="overflow-x-auto px-4 pb-4"><div className="min-w-[420px]"><div className="relative h-[185px] pl-9" role="img" aria-label={`This month by event date: ${MD_BOOKING_STAGES.map(stage => `${stage} ${counts[stage]}`).join(", ")}`}>
+            {[0,1,2,3,4].map(tick => <div key={tick} className="pointer-events-none absolute left-9 right-0 flex items-center border-t border-[#EEE7F2]" style={{bottom: `${tick * 25}%`}}><span className="absolute right-full mr-2 -translate-y-1/2 text-[10px] text-[#806A8C]">{tick * step}</span></div>)}
+            <div className="relative flex h-full items-end justify-around gap-2">{MD_BOOKING_STAGES.map(stage => <div key={stage} className="relative flex h-full min-w-0 flex-1 items-end justify-center"><div className="relative w-[54%] max-w-[70px] rounded-t-md bg-[#9670D9] transition-all" style={{height: `${counts[stage] / axisMax * 100}%`}} title={`${stage}: ${counts[stage]}`}><span className="absolute bottom-full left-1/2 mb-1 -translate-x-1/2 text-[11px] font-semibold text-[#2B174C]">{counts[stage]}</span></div></div>)}</div>
+        </div><div className="ml-9 flex justify-around gap-2 pt-2">{MD_BOOKING_STAGES.map(stage => <span key={stage} className="min-w-0 flex-1 text-center text-[10px] text-[#806A8C]">{stage}</span>)}</div></div><p className="mt-3 text-center text-[10px] text-[#8A7D92]">Released includes return inspection and pending settlement.</p></div>}
+    </section>;
 }
 
 export default function ManagerDashboard() {
     const router = useRouter();
     const { user } = useCurrentUser();
-    const [, setBookings] = useState<Booking[]>([]);
-    const [bookingsError, setBookingsError] = useState("");
-    const [, setOrders] = useState<Order[]>([]);
-    const [products, setProducts] = useState<Product[]>([]);
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
-    const [hasLoadedDashboard, setHasLoadedDashboard] = useState(false);
-    const [showStockAlertsModal, setShowStockAlertsModal] = useState(false);
-    const [stockAlertFilter, setStockAlertFilter] = useState<"all" | "low" | "out">("all");
-    const [rentalMaintenance, setRentalMaintenance] = useState<number | null>(null);
-    const [stockSearch, setStockSearch] = useState("");
-    const [stockStatusFilter, setStockStatusFilter] = useState("all");
-    const [toast, setToast] = useState<{ title: string; message: string; error?: boolean } | null>(null);
-    const dashboardStoreId = getUserValue(user, "store_id") || getUserValue(user, "storeId") ||
-        getSavedItem("store_id") || getSavedItem("stocknbook_store_id");
+    const [data, setData] = useState<{ scope: string; bookings: Booking[] | null; products: Product[] | null; equipment: unknown[] | null; settlements: MDSettlement[]; errors: string[] } | null>(null);
+    const dashboardStoreId = getUserValue(user, "store_id") || getUserValue(user, "storeId") || getSavedItem("store_id") || getSavedItem("stocknbook_store_id");
     const dashboardBranchId = getAssignedBranchId(user);
-    const loadInFlightRef = useRef(false);
-    useEffect(() => {
-        const timer = window.setInterval(() => setCurrentDateTime(new Date()), 30_000);
-        return () => window.clearInterval(timer);
-    }, []);
-    useEffect(() => {
-        if (!toast) return;
-        const timer = window.setTimeout(() => setToast(null), 5500);
-        return () => window.clearTimeout(timer);
-    }, [toast]);
-
-    const loadManagerDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    const scope = `${dashboardStoreId}:${dashboardBranchId}`;
+    const request = useRef<AbortController | null>(null);
+    const loadManagerDashboard = useCallback(async ({silent = false}: {silent?: boolean} = {}) => {
+        if (silent && request.current) return;
+        request.current?.abort();
+        const controller = new AbortController();
+        request.current = controller;
         const token = getSavedItem("token");
-        if (!token || !dashboardBranchId) {
-            setBookingsError("No valid manager session or branch assignment was found.");
-            setIsRefreshing(false);
-            setHasLoadedDashboard(true);
-            return;
-        }
-        if (loadInFlightRef.current) return;
-        loadInFlightRef.current = true;
         if (!silent) setIsRefreshing(true);
-        setBookingsError("");
         try {
-            const now = new Date();
-            const ordersStart = new Date(now);
-            ordersStart.setDate(ordersStart.getDate() - 30);
-            // All dashboard read operations run together, not sequentially.
-            const [bookingsResult, productsResult, ordersResult, rentalResult] =
-                await Promise.allSettled([
-                    fetch("/api/bookings", {
-                        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_booking_page_bookings", role: "manager",
-                            store_id: dashboardStoreId ? Number(dashboardStoreId) : undefined,
-                            branch_id: Number(dashboardBranchId) }), cache: "no-store",
-                    }),
-                    fetch("/api/products", { method: "POST",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_products", branch_id: Number(dashboardBranchId) }),
-                        cache: "no-store",
-                    }),
-                    fetch("/api/pos", { method: "POST",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_orders", branch_id: Number(dashboardBranchId),
-                            include_order_items: true, date_from: mdLocalDay(ordersStart), date_to: mdLocalDay(now) }),
-                        cache: "no-store",
-                    }),
-                    fetch("/api/rental-inventory", { method: "POST",
-                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ action: "get_manager_inventory", branch_id: Number(dashboardBranchId) }),
-                        cache: "no-store",
-                    }),
-                ]);
-            if (bookingsResult.status === "fulfilled") {
-                try {
-                    const result = bookingsResult.value;
-                    const payload = await result.json().catch(() => ({}));
-                    if (result.ok && Array.isArray(payload.bookings)) {
-                        setBookings((payload.bookings as unknown[]).map(normalizeBooking)
-                            .filter(booking => belongsToAssignedBranch(booking, dashboardBranchId)));
-                    } else { setBookingsError(String(payload.error || "Unable to load bookings.")); }
-                } catch { setBookingsError("Unable to read booking records."); }
-            } else { setBookingsError("Unable to connect to bookings."); }
-            if (productsResult.status === "fulfilled") {
-                try {
-                    const response = productsResult.value;
-                    const payload = await response.json().catch(() => ({}));
-                    if (response.ok && Array.isArray(payload.products)) {
-                        setProducts((payload.products as unknown[]).map(normalizeProduct)
-                            .filter(product => belongsToAssignedBranch(product, dashboardBranchId)));
-                    }
-                } catch (error) { console.warn("Manager products response failed:", error); }
+            if (!token || !dashboardBranchId) {
+                setData({scope, bookings:null, products:null, equipment:null, settlements:[], errors:["No valid manager session or branch assignment was found."]});
+                return;
             }
-            if (ordersResult.status === "fulfilled") {
+            const post = async (url: string, body: Record<string, unknown>) => {
+                const response = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json", Authorization:`Bearer ${token}`}, body:JSON.stringify(body), cache:"no-store", signal:controller.signal});
+                const payload = await response.json();
+                if (!response.ok) throw new Error("Request failed");
+                return toRecord(payload);
+            };
+            const branch = Number(dashboardBranchId);
+            const [b,p,r] = await Promise.allSettled([
+                post("/api/bookings", {action:"get_booking_page_bookings", role:"manager", store_id:dashboardStoreId ? Number(dashboardStoreId):undefined, branch_id:branch}),
+                post("/api/products", {action:"get_products", branch_id:branch}),
+                post("/api/rental-inventory", {action:"get_manager_inventory", branch_id:branch}),
+            ]);
+            if (controller.signal.aborted) return;
+            const bookings = b.status === "fulfilled" && Array.isArray(b.value.bookings) ? b.value.bookings.map(normalizeBooking).filter(item => belongsToAssignedBranch(item,dashboardBranchId)) : null;
+            const products = p.status === "fulfilled" && Array.isArray(p.value.products) ? p.value.products.map(normalizeProduct).filter(item => belongsToAssignedBranch(item,dashboardBranchId)) : null;
+            const equipment = r.status === "fulfilled" && r.value.success === true && String(r.value.branchId) === dashboardBranchId && Array.isArray(r.value.equipment) ? r.value.equipment : null;
+            const errors = [!bookings && "Booking data unavailable.", !products && "Consumable stock data unavailable.", !equipment && "Rental availability data unavailable."].filter((x):x is string => Boolean(x));
+            const pending = (bookings || []).filter(item => mdStatus(item) === "pending settlement").slice(0,5);
+            const settlements = await Promise.all(pending.map(async booking => {
                 try {
-                    const result = ordersResult.value;
-                    const payload = await result.json().catch(() => ({}));
-                    if (result.ok && Array.isArray(payload.orders)) {
-                        setOrders((payload.orders as unknown[]).map(normalizeOrder)
-                            .filter(order => belongsToAssignedBranch(order, dashboardBranchId)));
-                    }
-                } catch (error) { console.warn("Manager POS response failed:", error); }
-            }
-            if (rentalResult.status === "fulfilled") {
-                try {
-                    const response = rentalResult.value;
-                    const data = await response.json().catch(() => ({}));
-                    if (!response.ok || data.success !== true || !Array.isArray(data.equipment)) {
-                        throw new Error("Rental maintenance data unavailable.");
-                    }
-                    const counts = data.equipment.map((item: Record<string, unknown>) => item.maintenanceUnits);
-                    if (counts.some((value: unknown) => value === null || value === undefined ||
-                        !Number.isSafeInteger(Number(value)) || Number(value) < 0)) {
-                        throw new Error("Incomplete rental maintenance counts.");
-                    }
-                    setRentalMaintenance(counts.reduce((sum: number, value: unknown) => sum + Number(value), 0));
-                } catch { setRentalMaintenance(null); }
-            } else { setRentalMaintenance(null); }
+                    const payload = await post("/api/bookings", {action:"get_booking_financial_statement", bookingId:booking.id, branch_id:branch});
+                    const statement = toRecord(payload.statement);
+                    if (Number(toRecord(statement.booking).id) !== booking.id) return {booking, refund:"—"};
+                    return {booking, refund:mdRefundLabel(statement)};
+                } catch { return {booking, refund:"—"}; }
+            }));
+            if (!controller.signal.aborted) setData({scope, bookings, products, equipment, settlements, errors});
         } finally {
-            loadInFlightRef.current = false;
-            if (!silent) setIsRefreshing(false);
-            setHasLoadedDashboard(true);
+            if (request.current === controller) { request.current = null; setIsRefreshing(false); }
         }
-    }, [dashboardStoreId, dashboardBranchId]);
-    useEffect(() => { void loadManagerDashboard(); }, [loadManagerDashboard]);
+    }, [scope, dashboardBranchId, dashboardStoreId]);
+    useEffect(() => { const timer=window.setInterval(()=>setCurrentDateTime(new Date()),30_000); return ()=>window.clearInterval(timer); },[]);
     useEffect(() => {
-        const timer = window.setInterval(() => {
-            if (document.visibilityState === "visible" && navigator.onLine) void loadManagerDashboard({ silent: true });
-        }, 60_000);
-        return () => window.clearInterval(timer);
-    }, [loadManagerDashboard]);
-
-    const stockAlerts = useMemo(() => getDashboardStockAlertItems(products), [products]);
-    const expiryAlerts = useMemo(() => getExpirationAlertItems(products), [products]);
-    const lowCount = stockAlerts.filter(item => item.status === "Low Stock").length;
-    const outCount = stockAlerts.filter(item => item.status === "Out of Stock").length;
-    const inventoryHealth = useMemo(() => buildInventoryHealth(products, stockAlerts, expiryAlerts), [products, stockAlerts, expiryAlerts]);
-    const attentionItems = useMemo(() => buildManagerAttentionItems(stockAlerts, expiryAlerts), [stockAlerts, expiryAlerts]);
-    const stockRows = attentionItems.map(item => {
-        const product = products.find(entry => entry.name === item.productName);
-        const variant = product?.variants?.find(entry => getDashboardVariantName(entry) === item.variantName);
-        const matchingStock = stockAlerts.find(entry => entry.productName === item.productName &&
-            (entry.variantName || "—") === item.variantName);
-        const matchingExpiry = expiryAlerts.find(entry => entry.productName === item.productName &&
-            (entry.variantName || "—") === item.variantName);
-        return { ...item, sku: variant?.variantNumber || product?.productNumber || "—",
-            currentStock: matchingStock?.currentStock ?? matchingExpiry?.stock ??
-                (variant ? Number(variant.stock || 0) : Number(product?.stock || 0)) };
-    }).filter(item => `${item.productName} ${item.sku} ${item.status}`.toLowerCase().includes(stockSearch.toLowerCase()) &&
-        (stockStatusFilter === "all" || item.status === stockStatusFilter));
+        void loadManagerDashboard();
+        const timer = window.setInterval(()=>{if(document.visibilityState === "visible" && navigator.onLine) void loadManagerDashboard({silent:true});},60_000);
+        return () => { window.clearInterval(timer); request.current?.abort(); request.current = null; };
+    },[loadManagerDashboard]);
+    const current = data?.scope === scope ? data : null;
     const today = mdLocalDay(currentDateTime);
-    const assignedBranchName = getAssignedBranchName(user);
-    const activeStockAlerts = stockAlerts.filter(item => stockAlertFilter === "all" ||
-        (stockAlertFilter === "low" && item.status === "Low Stock") ||
-        (stockAlertFilter === "out" && item.status === "Out of Stock"));
-    const inventorySegments: ManagerSegment[] = inventoryHealth.segments.map(segment =>
-        segment.label === "Expiring Soon" ? { ...segment, label: "Expiring / Expired" } : segment);
-
-    const exportStock = () => mdExportRows("Stock Action Center", ["Product", "Variant", "Status", "Description"],
-        attentionItems.map(r => [r.productName, r.variantName, r.status, r.detail]), "manager_stock_actions", assignedBranchName, today);
-    const exportFilteredStock = () => mdExportRows("Stock Action Center", ["Product", "SKU", "Current Stock", "Status", "Description"],
-        stockRows.map(r => [r.productName, r.sku, String(r.currentStock), r.status, r.detail]),
-        "manager_stock_actions_filtered", assignedBranchName, today);
-
+    const bookings = current?.bookings;
+    const branchName = getAssignedBranchName(user);
+    const pending = (bookings || []).filter(b => mdStage(b) === "Pending");
+    const awaiting = (bookings || []).filter(b => mdStage(b) === "Approved");
+    const settlements = (bookings || []).filter(b => mdStatus(b) === "pending settlement");
+    const counts = Object.fromEntries(MD_BOOKING_STAGES.map(s=>[s,0])) as Record<MDStage,number>;
+    (bookings || []).forEach(b => {const stage=mdStage(b); if(stage && mdBookingDay(b.date).startsWith(today.slice(0,7))) counts[stage]++;});
+    const stockAlerts = useMemo<MDAlert[]>(()=>[
+        ...getDashboardStockAlertItems(current?.products || []).map(item=>({key:`consumable-${item.id}`,product:item.variantName ? `${item.productName} (${item.variantName})`:item.productName,status:item.status})),
+        ...mdRentalAlerts(current?.equipment || []),
+    ],[current?.products,current?.equipment]);
+    const stockUnavailable = !current?.products || !current?.equipment;
+    const actions = [...pending,...awaiting].map(b=>({key:String(b.id),left:mdReference(b),right:mdBookingAction(b),href:"/bookings"}));
+    const alertRows = stockAlerts.map(a=>({key:a.key,left:a.product,right:a.status,statusColor:mdAlertClass(a.status)}));
+    const settlementRows = (current?.settlements || []).map(s=>({key:String(s.booking.id),left:mdReference(s.booking),right:s.refund,href:"/bookings"}));
+    const navigate = (href:string)=>router.push(href);
+    const download = (title:string, headers:string[], rows:MDTableRow[], name:string)=>mdExportRows(title,headers,rows.map(r=>[r.left,r.right]),name,branchName,today);
     return <>
-        <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
-            <div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3">
-                <div className="min-w-0">
-                    <h1 className="text-[25px] font-bold tracking-[-0.02em] text-[#1A1220]">Manager Dashboard</h1>
-                    <p className="mt-1 text-[12px] text-[#7A6A84]">Operational stock overview for {assignedBranchName}.</p>
+        <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur"><div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3"><div className="min-w-0"><h1 className="text-[25px] font-bold text-[#1A1220]">Manager Dashboard</h1><p className="mt-0.5 text-xs text-[#766983]">Booking and inventory overview for {branchName}.</p></div><div className="flex flex-wrap gap-2.5"><span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">{formatCurrentDashboardDateTime(currentDateTime)}</span><button type="button" onClick={()=>void loadManagerDashboard()} disabled={isRefreshing} className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-60"><RefreshCw size={16} className={isRefreshing?"animate-spin":""}/>{isRefreshing?"Refreshing...":"Refresh"}</button></div></div></header>
+        <section className="px-5 py-5 font-sans" aria-busy={!current || isRefreshing}>
+            {!current ? <ManagerDashboardSkeleton/> : <div className="space-y-4">
+                {current.errors.length>0 && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700">{current.errors.join(" ")}</p>}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <ManagerMetricCard title="Pending Bookings" value={bookings?pending.length:null} subtitle="Needs price or approval" icon={<CalendarClock size={24}/>} tone="violet" onClick={()=>navigate("/bookings")}/>
+                    <ManagerMetricCard title="Awaiting Confirmation" value={bookings?awaiting.length:null} subtitle="Approved · awaiting payment review" icon={<MdCheckCircle size={24}/>} tone="blue" onClick={()=>navigate("/bookings")}/>
+                    <ManagerMetricCard title="Stock Alerts" value={stockUnavailable?null:stockAlerts.length} subtitle="Consumable and rental alerts" icon={<AlertTriangle size={24}/>} tone="orange" onClick={()=>navigate("/inventory")}/>
+                    <ManagerMetricCard title="Pending Settlements" value={bookings?settlements.length:null} subtitle="Awaiting deposit settlement" icon={<MdWallet size={24}/>} tone="violet" onClick={()=>navigate("/bookings")}/>
                 </div>
-                <div className="flex gap-2.5">
-                    <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">{formatCurrentDashboardDateTime(currentDateTime)}</span>
-                    <button type="button" onClick={() => void loadManagerDashboard()} disabled={isRefreshing} className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-60"><RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""}/>{isRefreshing ? "Refreshing..." : "Refresh"}</button>
-                </div>
-            </div>
-        </header>
-        <section className="px-6 py-5 font-sans" aria-busy={!hasLoadedDashboard}>
-            {!hasLoadedDashboard ? <ManagerDashboardSkeleton/> : <div className="space-y-4">
-                {bookingsError && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700">{bookingsError}</p>}
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                    <ManagerMetricCard title="Low Stock" value={lowCount} subtitle="Items below reorder level" icon={<AlertTriangle size={24}/>} tone="orange" onClick={() => { setStockAlertFilter("low"); setShowStockAlertsModal(true); }}/>
-                    <ManagerMetricCard title="Out of Stock" value={outCount} subtitle="Products without available stock" icon={<PackageX size={24}/>} tone="red" onClick={() => { setStockAlertFilter("out"); setShowStockAlertsModal(true); }}/>
-                    <button type="button" onClick={() => router.push("/inventory")} title="Open Inventory to review rental maintenance"
-                            className="flex min-h-[116px] w-full items-center gap-4 rounded-2xl border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm transition hover:border-[#D7C9E3] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]">
-                        <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#EAF1FF] text-[#2563EB]"><MdWrenchIcon/></span>
-                        <div><p className="text-[14px] font-semibold text-[#4B3E55]">Under Maintenance</p><p className="mt-1 text-[28px] font-bold text-[#1A1220]">{rentalMaintenance === null ? "—" : rentalMaintenance}</p><p className="mt-2 text-[11px] text-[#8A7D92]">{rentalMaintenance === null ? "Rental condition data not connected" : "Rental units requiring maintenance"}</p></div>
-                    </button>
-                </div>
-                <div className="grid grid-cols-1 items-stretch gap-3">
-                    <MDChartCard title="Inventory Health" subtitle="Current sales stock, including product variants"
-                                 icon={<Box size={18}/>} segments={inventorySegments} total={inventoryHealth.total}
-                                 centerLabel="Stock Lines" exportClick={exportStock}/>
-                </div>
-                <div className="grid grid-cols-1 items-stretch gap-3">
-                    <MDPanel title="Stock Action Center" subtitle="Stock items needing immediate action" tall icon={<TriangleAlert size={19}/>} onExport={exportFilteredStock} search={stockSearch} setSearch={setStockSearch} searchPlaceholder="Search products..." headerActions={
-                        <select aria-label="Filter stock actions by status" value={stockStatusFilter} onChange={e => setStockStatusFilter(e.target.value)} className="h-8 w-[136px] rounded-lg border border-[#E6DDF0] bg-white px-2 text-[10px] font-semibold text-[#5F4E75] outline-none focus:border-[#8B65B9]">
-                            <option value="all">All Statuses</option><option value="Expired">Expired</option><option value="Expiring Soon">Expiring Soon</option>
-                            <option value="Out of Stock">Out of Stock</option><option value="Very Low Stock">Very Low Stock</option><option value="Low Stock">Low Stock</option>
-                        </select>}>
-                        <div className="min-h-0 flex-1 overflow-auto"><table className="w-full table-fixed text-left text-[11px]"><colgroup><col className="w-[30%]"/><col className="w-[20%]"/><col className="w-[15%]"/><col className="w-[19%]"/><col className="w-[16%]"/></colgroup>
-                            <thead className="sticky top-0 bg-[#FFFCF7] text-[9px] uppercase text-[#806A8C]"><tr>{["Product", "SKU", "Current Stock", "Status", "Action"].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr></thead>
-                            <tbody>{stockRows.map(row => <tr key={row.key} className="border-t border-[#EEE7F2] hover:bg-[#FFFCF7]">
-                                <td className="px-3 py-2 font-semibold text-[#2B174C]">{row.productName}<span className="mt-0.5 block text-[9px] font-normal text-[#8A7D92]">{row.detail}</span></td>
-                                <td className="break-all px-3 py-2 text-[#806A8C]">{row.sku}</td><td className="px-3 py-2 font-semibold text-[#2B174C]">{row.currentStock}</td><td className="px-3 py-2"><MDStockBadge status={row.status}/></td>
-                                <td className="px-3 py-2"><button type="button" onClick={() => router.push("/inventory")} className="rounded-lg border border-[#D9C9EA] bg-[#F7F1FF] px-3 py-1.5 text-[10px] font-semibold text-[#5D2DAB] hover:bg-[#ECE3F8]">{row.status === "Expired" ? "Review" : row.status === "Out of Stock" || row.status.includes("Low") ? "Restock" : "View"}</button></td>
-                            </tr>)}{stockRows.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-[#8A7D92]">No matching stock alerts.</td></tr>}</tbody>
-                        </table></div><p className="border-t border-[#EEE7F2] px-4 py-2 text-right text-[10px] text-[#8A7D92]">Showing {stockRows.length} of {attentionItems.length} items</p>
-                    </MDPanel>
+                <MDBookingOverview counts={counts} unavailable={!bookings} onExport={()=>mdExportRows("Booking Overview",["Status","Bookings"],MD_BOOKING_STAGES.map(s=>[s,String(counts[s])]),"manager_booking_overview",branchName,`${today.slice(0,7)} (event dates; Released includes return inspection and pending settlement)`)}/>
+                <div className="grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2 xl:grid-cols-3">
+                    <MDCompactPanel title="Booking Action Center" icon={<CalendarClock size={19}/>} headers={["Booking","Action"]} rows={actions.slice(0,5)} unavailable={!bookings} empty="No bookings require action." onViewAll={()=>navigate("/bookings")} onNavigate={navigate} onExport={()=>download("Booking Action Center",["Booking","Action"],actions.slice(0,5),"manager_booking_actions")}/>
+                    <MDCompactPanel title="Inventory Stock Alerts" icon={<Box size={19}/>} headers={["Product","Status"]} rows={alertRows.slice(0,5)} unavailable={stockUnavailable} empty="No stock alerts." onViewAll={()=>navigate("/inventory")} onNavigate={navigate} onExport={()=>download("Inventory Stock Alerts",["Product","Status"],alertRows.slice(0,5),"manager_stock_alerts")}/>
+                    <MDCompactPanel title="Pending Deposit Settlements" icon={<MdWallet size={19}/>} headers={["Booking","Refund"]} rows={settlementRows} unavailable={!bookings} empty="No pending settlements." onViewAll={()=>navigate("/bookings")} onNavigate={navigate} onExport={()=>download("Pending Deposit Settlements",["Booking","Potential Refund"],settlementRows,"manager_pending_settlements")}/>
                 </div>
             </div>}
         </section>
-        {showStockAlertsModal && <ManagerStockAlertsModal items={activeStockAlerts} activeFilter={stockAlertFilter}
-                                                          totalCount={stockAlerts.length} lowStockCount={lowCount} outOfStockCount={outCount}
-                                                          onChangeFilter={setStockAlertFilter} onClose={() => setShowStockAlertsModal(false)}/>}
-        {toast && <div role="status" aria-live="polite" className={`fixed bottom-5 right-5 z-[180] flex w-[min(360px,calc(100vw-2rem))] items-center gap-3 rounded-2xl border bg-white p-4 shadow-xl ${toast.error ? "border-[#F4BFC5]" : "border-[#BCE8CA]"}`}><span className={`rounded-full p-2 ${toast.error ? "bg-red-50 text-red-700" : "bg-green-50 text-green-700"}`}>{toast.error ? <AlertTriangle size={19}/> : <MdCheckIcon/>}</span><div className="flex-1"><p className="text-sm font-bold text-[#1A1220]">{toast.title}</p><p className="mt-0.5 text-xs text-[#806A8C]">{toast.message}</p></div><button onClick={() => setToast(null)} aria-label="Dismiss"><MdCloseIcon/></button></div>}
     </>;
 }
 
@@ -1495,12 +1462,12 @@ function MDPanel({ title, subtitle, icon, children, onExport, search, setSearch,
     onExport: () => void; search?: string; setSearch?: (value: string) => void; searchPlaceholder?: string;
     headerActions?: React.ReactNode; tall?: boolean; inlineHeader?: boolean;
 }) {
-    return <section className={`flex min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm ${tall ? "h-[380px]" : "h-[320px]"}`}>
-        <div className={`flex flex-wrap items-start justify-between gap-2 border-b border-[#EEE7F2] px-4 py-3.5 ${inlineHeader ? "xl:flex-nowrap xl:items-center" : ""}`}>
-            <div className={`flex min-w-0 items-center gap-2.5 ${inlineHeader ? "xl:flex-1" : ""}`}><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><div className="min-w-0"><h2 className={`text-[15px] font-bold text-[#1A1220] ${inlineHeader ? "xl:whitespace-nowrap" : ""}`}>{title}</h2><p className={`mt-0.5 text-[11px] text-[#9A8DA8] ${inlineHeader ? "xl:truncate" : ""}`}>{subtitle}</p></div></div>
-            <div className={`flex flex-wrap items-center gap-2 ${inlineHeader ? "xl:shrink-0 xl:flex-nowrap" : ""}`}>{setSearch && <div className="relative hidden sm:block"><MdSearch size={13} className="absolute left-2 top-2.5 text-[#806A8C]"/><input aria-label={`Search ${title}`} value={search || ""} onChange={e => setSearch(e.target.value)} className={`h-8 rounded-lg border border-[#E6DDF0] pl-7 pr-2 text-[10px] outline-none focus:border-[#8B65B9] ${inlineHeader ? "w-36 xl:w-32" : "w-40"}`} placeholder={searchPlaceholder}/></div>}
+    return <section className={`flex min-w-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm ${tall ? "h-[380px]" : "h-[320px]"}`}>
+        <div className={`flex flex-wrap items-start justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5 ${inlineHeader ? "xl:flex-nowrap xl:items-center" : ""}`}>
+            <div className={`flex min-w-0 items-center gap-2.5 ${inlineHeader ? "xl:flex-1" : ""}`}><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">{icon}</span><div className="min-w-0"><h2 className={`text-[15px] font-bold text-[#21132E] ${inlineHeader ? "xl:whitespace-nowrap" : ""}`}>{title}</h2><p className={`mt-0.5 text-[11px] text-[#86778F] ${inlineHeader ? "xl:truncate" : ""}`}>{subtitle}</p></div></div>
+            <div className={`flex flex-wrap items-center gap-2 ${inlineHeader ? "xl:shrink-0 xl:flex-nowrap" : ""}`}>{setSearch && <div className="relative"><MdSearch size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/><input aria-label={`Search ${title}`} value={search || ""} onChange={e => setSearch(e.target.value)} className={`h-[44px] rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C] ${inlineHeader ? "w-48" : "w-56 max-w-full"}`} placeholder={searchPlaceholder}/></div>}
                 {headerActions}
-                <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={onExport} className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
+                <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={onExport} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
             </div>
         </div>{children}
     </section>;
@@ -1518,10 +1485,10 @@ function MDChartCard({title, subtitle, icon, total, centerLabel, segments, expor
         return `${seg.color} ${start}% ${end}%`;
     });
     const background = sum ? `conic-gradient(${stops.join(",")})` : "#F2EDF6";
-    return <section className="flex h-[360px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
+    return <section className="flex h-[360px] min-w-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
         <div className="flex items-start justify-between gap-2 px-4 py-3.5">
-            <div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><div className="min-w-0"><h2 className="text-[15px] font-bold text-[#1A1220]">{title}</h2><p className="mt-0.5 text-[11px] text-[#9A8DA8]">{subtitle}</p></div></div>
-            <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={exportClick} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
+            <div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">{icon}</span><div className="min-w-0"><h2 className="text-[15px] font-bold text-[#21132E]">{title}</h2><p className="mt-0.5 text-[11px] text-[#86778F]">{subtitle}</p></div></div>
+            <button type="button" title={`Export ${title} as PDF`} aria-label={`Export ${title} as PDF`} onClick={exportClick} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]"><MdDownload size={16}/></button>
         </div>
         {error ? <p role="alert" className="mx-4 rounded-lg bg-red-50 p-2 text-xs text-red-700">{error}</p> : null}
         <div className={`flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-4 sm:flex-row sm:gap-4 ${reserveFooter ? "pb-12" : "pb-4"}`}>
@@ -2029,7 +1996,7 @@ function ManagerMetricCard({
                                onClick,
                            }: {
     title: string;
-    value: number;
+    value: number | null;
     subtitle: string;
     icon: React.ReactNode;
     tone: DashboardTone;
@@ -2041,7 +2008,7 @@ function ManagerMetricCard({
         <button
             type="button"
             onClick={onClick}
-            className="flex min-h-[116px] w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm transition hover:border-[#D7C9E3] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]"
+            className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm transition hover:border-[#D7C9E3] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]"
         >
             <span
                 className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
@@ -2052,8 +2019,8 @@ function ManagerMetricCard({
                 <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">
                     {title}
                 </span>
-                <span className="mt-1 block text-[28px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">
-                    {value.toLocaleString("en-PH")}
+                <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">
+                    {value === null ? "—" : value.toLocaleString("en-PH")}
                 </span>
                 <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">
                     {subtitle}
@@ -2163,7 +2130,6 @@ function attentionStatusLabel(status: ManagerAttentionItem["status"]) {
 
 function ItemsRequiringAttentionPanel({
                                           items,
-                                          total,
                                           onViewAll,
                                       }: {
     items: ManagerAttentionItem[];
@@ -2237,9 +2203,6 @@ function ItemsRequiringAttentionPanel({
                 )}
             </div>
 
-            <div className="border-t border-[#EEE7F5] px-4 py-2 text-right text-[9px] text-[#9A8DA8]">
-                Showing {Math.min(items.length, 5)} of {total} items
-            </div>
         </div>
     );
 }
@@ -2758,11 +2721,11 @@ type DashboardTone = "violet" | "green" | "blue" | "orange" | "red" | "cyan";
 
 const toneStyles: Record<DashboardTone, { icon: string; background: string }> =
     {
-        violet: { icon: "text-[#6D35D4]", background: "bg-[#F1EBFF]" },
+        violet: { icon: "text-[#5F35D8]", background: "bg-[#F1ECFF]" },
         green: { icon: "text-[#159455]", background: "bg-[#E6F7EE]" },
-        blue: { icon: "text-[#2563EB]", background: "bg-[#EAF1FF]" },
-        orange: { icon: "text-[#E66B20]", background: "bg-[#FFF0E5]" },
-        red: { icon: "text-[#DC2626]", background: "bg-[#FDECEC]" },
+        blue: { icon: "text-[#1E6FE8]", background: "bg-[#E9F2FF]" },
+        orange: { icon: "text-[#E68A00]", background: "bg-[#FFF3DE]" },
+        red: { icon: "text-[#E23B4A]", background: "bg-[#FFE8E8]" },
         cyan: { icon: "text-[#138A96]", background: "bg-[#E8F8FA]" },
     };
 
@@ -2849,7 +2812,6 @@ function CompactDashboardTable({
                                    onExportPdf,
                                    onExportXlsx,
                                    onExportDoc,
-                                   totalRecords,
                                    headers,
                                    rows,
                                    emptyText,
@@ -2941,10 +2903,6 @@ function CompactDashboardTable({
                     </tbody>
                 </table>
             </div>
-            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
-                Showing {rows.length} of {totalRecords} record
-                {totalRecords === 1 ? "" : "s"}
-            </div>
         </section>
     );
 }
@@ -3000,7 +2958,6 @@ function CompactDashboardRow({ row }: { row: CompactTableRow }) {
 
 function InventoryAlertPanel({
                                  items,
-                                 totalAlerts,
                                  onExportPdf,
                                  onExportXlsx,
                                  onExportDoc,
@@ -3137,16 +3094,11 @@ function InventoryAlertPanel({
                 </table>
             </div>
 
-            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
-                Showing {items.length} of {totalAlerts} alert
-                {totalAlerts === 1 ? "" : "s"}
-            </div>
         </section>
     );
 }
 function ExpirationAlertsPanel({
                                    items,
-                                   totalItems,
                                    showBranch = false,
                                    onExportPdf,
                                    onExportXlsx,
@@ -3313,10 +3265,6 @@ function ExpirationAlertsPanel({
                 </table>
             </div>
 
-            <div className="border-t border-[#EEE8F2] px-4 py-1.5 text-center text-[9px] font-medium text-[#8A7D92]">
-                Showing {items.length} of {totalItems} alert
-                {totalItems === 1 ? "" : "s"}
-            </div>
         </section>
     );
 }

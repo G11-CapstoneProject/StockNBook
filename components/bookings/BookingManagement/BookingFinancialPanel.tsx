@@ -147,7 +147,9 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
         rect(34,739,527,26,'0.91 0.85 0.99');
         text(`BRANCH: ${clean(branchName).slice(0,88)}`,left+7,748,10,true,'0.25 0.13 0.43');
         text('BOOKING PAYMENT RECEIPT',left,713,16,true,'0.17 0.09 0.30');
-        text('Booking payments, refundable deposit and charge settlement - Not a tax invoice',left,697,8,false,'0.45 0.38 0.52');
+        text(v.rentalItems.length||v.claims.length||Number(v.depositRequired)>0
+            ? 'Booking payments and rental settlement - Not a tax invoice'
+            : 'Recorded booking transactions - Not a tax invoice',left,697,8,false,'0.45 0.38 0.52');
     };
     const tableHeading=()=>{
         rect(left,y-9,right-left,25,'0.96 0.94 0.99');
@@ -225,22 +227,27 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
         +(v.salesItems||[]).reduce((sum,item)=>sum+(Number(item.amount)||0),0)
         +v.rentalItems.reduce((sum,item)=>sum+(Number(item.amount)||0),0);
     ensure(23);rule();y-=19;
-    summary('TOTAL UNITS NEEDED',String(totalBookedUnits),true);
+    if(totalBookedUnits>0)summary('TOTAL PHYSICAL UNITS',String(totalBookedUnits),true);
     inItems=false;
     const isAgreed=v.booking.agreedPrice!==null&&Number.isFinite(Number(v.booking.agreedPrice));
     const depositDue=Math.max(0,Number(v.depositRequired)-Number(v.depositCollected));
-    summary('Itemized subtotal',pesoPdf(itemizedSubtotal));
+    if(isAgreed && Math.abs(itemizedSubtotal-Number(v.booking.agreedPrice))>0.005)
+        summary('Itemized subtotal',pesoPdf(itemizedSubtotal));
     summary('Final agreed booking price',isAgreed?pesoPdf(Number(v.booking.agreedPrice)):'Awaiting agreement',true);
     summary('Payments received',`- ${pesoPdf(v.booking.bookingPayments)}`);
     summary('Remaining booking balance',isAgreed?pesoPdf(v.booking.balance):'Awaiting agreement',true);
-    ensure(35);y-=12;rule();y-=17;
-    text('REFUNDABLE SECURITY DEPOSIT',left+8,y,9,true,'0.34 0.19 0.59');y-=23;
-    summary('Deposit required',pesoPdf(v.depositRequired));
-    summary('Deposit collected',pesoPdf(v.depositCollected));
-    summary('Deposit still due',pesoPdf(depositDue),true);
-    if(Number(v.depositApplied)>0)summary('Applied to approved damage/loss',pesoPdf(v.depositApplied));
-    if(Number(v.depositRefunded)>0)summary('Deposit refunded',pesoPdf(v.depositRefunded));
-    summary('Deposit currently held',pesoPdf(v.depositHeld));
+    const hasDepositActivity=[v.depositRequired,v.depositCollected,v.depositApplied,v.depositRefunded,v.depositHeld]
+        .some(value=>Math.abs(Number(value)||0)>0.005);
+    if(hasDepositActivity || v.rentalItems.length>0){
+        ensure(35);y-=12;rule();y-=17;
+        text('REFUNDABLE SECURITY DEPOSIT',left+8,y,9,true,'0.34 0.19 0.59');y-=23;
+        summary('Deposit required',pesoPdf(v.depositRequired));
+        summary('Deposit collected',pesoPdf(v.depositCollected));
+        summary('Deposit still due',pesoPdf(depositDue),true);
+        if(Number(v.depositApplied)>0)summary('Applied to approved damage/loss',pesoPdf(v.depositApplied));
+        if(Number(v.depositRefunded)>0)summary('Deposit refunded',pesoPdf(v.depositRefunded));
+        summary('Deposit currently held',pesoPdf(v.depositHeld));
+    }
     // Payment totals are separate from the agreed itemized booking price.
     // The deposit is a refundable liability, not additional booking revenue.
     const approvedClaims=v.claims.filter(c=>c.status!=='waived');
@@ -259,30 +266,39 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
         if(combinedReceiptTotal(v.claims)>0)
             summary('Combined charge for affected equipment',pesoPdf(combinedReceiptTotal(v.claims)),true);
     }
-    ensure(125);y-=7;rule();y-=20;
-    text('PAYMENTS / SETTLEMENT',left+8,y,9,true,'0.34 0.19 0.59');y-=24;
-    summary('Booking payments received',pesoPdf(v.booking.bookingPayments));
-    summary('Security deposit collected',pesoPdf(v.depositCollected));
-    summary('Additional claim payments received',pesoPdf(claimPayments));
-    const collected=Number(v.booking.bookingPayments)+Number(v.depositCollected)+claimPayments;
-    summary('Total cash collected',pesoPdf(collected),true);
-    summary('Deposit refunded to customer',`- ${pesoPdf(v.depositRefunded)}`);
-    summary('Net cash received',pesoPdf(collected-Number(v.depositRefunded)),true);
-    ensure(105);y-=8;rule();y-=18;
-    text('CLAIMS RECONCILIATION',left+8,y,9,true,'0.34 0.19 0.59');y-=24;
-    summary('Approved damage/missing charges',pesoPdf(approvedTotal));
-    summary('Paid directly against charges',pesoPdf(claimPayments));
-    summary('Deposit used for charges',pesoPdf(v.depositApplied));
-    summary('Unpaid charges',pesoPdf(v.claimBalance),true);
-    summary('Deposit still held',pesoPdf(v.depositHeld));
-    ensure(70);y-=10;
-    rect(left,y-49,right-left,62,'0.18 0.10 0.30');
-    text('TOTAL OUTSTANDING FROM CUSTOMER',left+13,y-6,9,true,'0.87 0.80 0.98');
-    const due=isAgreed?pesoPdf(Math.max(0,Number(v.booking.balance))+depositDue+Math.max(0,Number(v.claimBalance))):'Awaiting agreement';
-    text(due,left+13,y-33,17,true,'1 1 1');
-    y-=72;
+    const showExtraSettlement=hasDepositActivity || v.claims.length>0 || Math.abs(Number(v.claimBalance)||0)>0.005;
+    if(showExtraSettlement){
+        ensure(125);y-=7;rule();y-=20;
+        text('PAYMENTS / SETTLEMENT',left+8,y,9,true,'0.34 0.19 0.59');y-=24;
+        summary('Booking payments received',pesoPdf(v.booking.bookingPayments));
+        summary('Security deposit collected',pesoPdf(v.depositCollected));
+        summary('Additional claim payments received',pesoPdf(claimPayments));
+        const collected=Number(v.booking.bookingPayments)+Number(v.depositCollected)+claimPayments;
+        summary('Total cash collected',pesoPdf(collected),true);
+        summary('Deposit refunded to customer',`- ${pesoPdf(v.depositRefunded)}`);
+        summary('Net cash received',pesoPdf(collected-Number(v.depositRefunded)),true);
+    }
+
+    if(v.claims.length>0||Math.abs(Number(v.claimBalance)||0)>0.005||Math.abs(Number(v.depositApplied)||0)>0.005){
+        ensure(105);y-=8;rule();y-=18;
+        text('CLAIMS RECONCILIATION',left+8,y,9,true,'0.34 0.19 0.59');y-=24;
+        summary('Approved damage/missing charges',pesoPdf(approvedTotal));
+        summary('Paid directly against charges',pesoPdf(claimPayments));
+        summary('Deposit used for charges',pesoPdf(v.depositApplied));
+        summary('Unpaid charges',pesoPdf(v.claimBalance),true);
+        summary('Deposit still held',pesoPdf(v.depositHeld));
+    }
+    if(showExtraSettlement){
+        ensure(70);y-=10;
+        rect(left,y-49,right-left,62,'0.18 0.10 0.30');
+        text('TOTAL OUTSTANDING FROM CUSTOMER',left+13,y-6,9,true,'0.87 0.80 0.98');
+        const due=isAgreed?pesoPdf(Math.max(0,Number(v.booking.balance))+depositDue+Math.max(0,Number(v.claimBalance))):'Awaiting agreement';
+        text(due,left+13,y-33,17,true,'1 1 1');
+        y-=72;
+    }
     // Keep receipt notes in the reserved bottom margin rather than creating a near-empty extra page.
-    text('Refundable security deposits are held separately from booking sales.',left,55,8,false,'0.45 0.38 0.52');
+    if(showExtraSettlement)
+        text('Refundable security deposits are held separately from booking sales.',left,55,8,false,'0.45 0.38 0.52');
     text('For reference only - Not a tax invoice',left,43,8,false,'0.45 0.38 0.52');
     for(let i=0;i<pages.length;i++){
         pages[i].push(`0.45 0.39 0.51 rg\nBT /F1 8 Tf 1 0 0 1 478 34 Tm (Page ${i+1} of ${pages.length}) Tj ET\n`);
@@ -400,8 +416,20 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
     const claimPayments=charges.reduce((sum,c)=>sum+Math.max(0,Number(c.amountPaid)||0),0);
     const cashCollected=Number(v.booking.bookingPayments)+Number(v.depositCollected)+claimPayments;
     const netReceived=cashCollected-Number(v.depositRefunded);
+    // Hide empty rental-only sections for package/consumable bookings, but always
+    // retain historical deposit and charge activity even if the balance is now zero.
+    const hasDepositActivity=[v.depositRequired,v.depositCollected,v.depositApplied,v.depositRefunded,v.depositHeld]
+        .some(value=>Math.abs(Number(value)||0)>0.005);
+    const hasCharges=v.claims.length>0||
+        [v.claimBalance,v.depositApplied].some(value=>Math.abs(Number(value)||0)>0.005);
+    const hasRentalItems=v.rentalItems.length>0;
+    const hasFinancialMovements=Math.abs(Number(v.depositCollected)||0)>0.005||
+        Math.abs(Number(v.depositRefunded)||0)>0.005||Math.abs(claimPayments)>0.005;
     const totalDue=bookingDue+depositDue+claimDue;
-    const fullyReconciled=agreedPrice!==null&&totalDue<0.005&&Number(v.depositHeld)<0.005;
+    const fullyReconciled =
+        agreedPrice !== null &&
+        totalDue < 0.005 &&
+        claimDue < 0.005;
     const format=(value:number)=>money(Math.max(0,value));
     const hasItems=v.packageBase>0||(v.salesItems||[]).length>0||v.rentalItems.length>0||v.deliveryFee>0||v.setupFee>0;
     // Booking units = consumable quantity + rental quantity, not package/service line items.
@@ -418,7 +446,7 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
         <div className="mb-3 flex items-center justify-between gap-3">
             <div>
                 <h4 className="text-sm font-bold">Booking Payment Receipt</h4>
-                <p className="mt-1 text-[11px] text-[#806A8C]">Read-only record of booking payments, deposits and customer charges</p>
+                <p className="mt-1 text-[11px] text-[#806A8C]">Read-only booking payments and relevant financial activity</p>
             </div>
         </div>
         {error&&<p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 p-2 text-red-700">{error}</p>}
@@ -427,7 +455,7 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
                 <p className="break-words text-[17px] font-extrabold text-[#2B174C]">{receiptIdentity.storeName||'Store name unavailable'}</p>
                 <p className="mt-1 rounded-lg bg-[#EDE3FF] px-3 py-1.5 text-[11px] font-bold text-[#48227E]">Branch: {receiptIdentity.branchName||'Branch name unavailable'}</p>
                 <h5 className="mt-3 text-[19px] font-extrabold tracking-tight text-[#241537]">BOOKING PAYMENT RECEIPT</h5>
-                <p className="mt-1 text-[10px] text-[#806A8C]">Recorded transactions · Not a tax invoice</p>
+                <p className="mt-1 text-[10px] text-[#806A8C]">{v.rentalItems.length > 0 ? `${v.booking.bookingType?.toLowerCase().includes('package') ? 'Package + Rental' : (v.salesItems?.length ? 'Custom + Rental' : 'Custom · Rental Only')} · ` : ''}Recorded transactions · Not a tax invoice</p>
             </header>
             <div className="grid gap-x-4 gap-y-3 border-b border-dashed border-[#D7CBE3] px-4 py-4 sm:grid-cols-2 sm:px-6">
                 <div className="min-w-0"><p className="text-[10px] font-bold uppercase tracking-wide text-[#8B7C95]">Booking reference</p><p className="mt-1 break-all text-[12px] font-semibold text-[#241537]">{v.booking.reference||`#${bookingId}`}</p></div>
@@ -453,24 +481,26 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
                         {(v.deliveryFee>0||v.setupFee>0)&&<div className="border-t border-[#EFE7F4] bg-[#FCFAFF] px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-[#806A8C]">Other charges</div>}
                         {v.deliveryFee>0&&<ReceiptItemLine name="Delivery / pickup" quantity={1} unitPrice={v.deliveryFee} amount={v.deliveryFee}/>}
                         {v.setupFee>0&&<ReceiptItemLine name="Setup" quantity={1} unitPrice={v.setupFee} amount={v.setupFee}/>}
-                        <div className="grid grid-cols-[minmax(0,1fr)_32px_72px_76px] items-center gap-1.5 border-t-2 border-[#E6DDF0] bg-[#FBF8FF] px-2 py-2.5 text-[10px] font-bold text-[#2B174C] sm:grid-cols-[minmax(0,1fr)_44px_92px_92px] sm:gap-2 sm:px-3 sm:text-[11px]">
+                        {totalBookedUnits>0&&<div className="grid grid-cols-[minmax(0,1fr)_32px_72px_76px] items-center gap-1.5 border-t-2 border-[#E6DDF0] bg-[#FBF8FF] px-2 py-2.5 text-[10px] font-bold text-[#2B174C] sm:grid-cols-[minmax(0,1fr)_44px_92px_92px] sm:gap-2 sm:px-3 sm:text-[11px]">
                             <span>Total units needed</span>
                             <span className="text-center tabular-nums">{totalBookedUnits}</span>
                             <span aria-hidden="true" />
                             <span aria-hidden="true" />
-                        </div>
-                        <div className="flex items-center justify-between gap-2 border-t border-[#E6DDF0] bg-[#FBF8FF] px-3 py-2 text-[11px] font-bold text-[#2B174C]">
-                            <span>Itemized subtotal</span>
-                            <span className="tabular-nums">{money(itemizedSubtotal)}</span>
-                        </div>
+                        </div>}
+                        {agreedPrice !== null && Math.abs(itemizedSubtotal-agreedPrice)>0.005 &&
+                            <div className="flex items-center justify-between gap-2 border-t border-[#E6DDF0] bg-[#FBF8FF] px-3 py-2 text-[11px] font-bold text-[#2B174C]">
+                                <span>Itemized subtotal</span>
+                                <span className="tabular-nums">{money(itemizedSubtotal)}</span>
+                            </div>}
                     </div>}
                     {receiptLine('Final agreed booking price',agreedPrice??0,true)}
                     {agreedPrice===null&&<p className="text-[10px] text-amber-700">Final price has not yet been agreed.</p>}
                     {receiptLine('Booking payments received',Number(v.booking.bookingPayments))}
                     <div className="border-t border-dashed border-[#DDD3E6] pt-2">{receiptLine('Remaining booking balance',bookingDue,true)}</div>
                 </section>
-                <section aria-label="Security deposit" className="space-y-2 rounded-xl border border-[#E8DEF3] bg-[#FBF8FF] p-3">
+                {(hasDepositActivity || hasRentalItems) && <section aria-label="Security deposit" className="space-y-2 rounded-xl border border-[#E8DEF3] bg-[#FBF8FF] p-3">
                     <h6 className="text-[11px] font-bold uppercase tracking-wider text-[#4E2C85]">Refundable security deposit</h6>
+                    {hasRentalItems && !hasDepositActivity && <p className="text-[11px] text-[#806A8C]">{String(v.booking.status).toLowerCase()==='pending review' ? 'Deposit amount must be reviewed before approval. A zero deposit may be permitted.' : 'No refundable security deposit required under the saved booking terms.'}</p>}
                     {receiptLine('Deposit required',Number(v.depositRequired))}
                     {receiptLine('Deposit collected',Number(v.depositCollected))}
                     {receiptLine('Deposit used for damage / missing charges',Number(v.depositApplied))}
@@ -478,8 +508,8 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
                     <div className="border-t border-dashed border-[#D8CBE7] pt-2">{receiptLine('Deposit still held',Number(v.depositHeld),true)}</div>
                     {depositDue>0.005&&receiptLine('Deposit still to collect',depositDue)}
                     <p className="pt-1 text-[10px] leading-4 text-[#806A8C]">Security deposits are refundable amounts held separately from booking revenue.</p>
-                </section>
-                <section aria-label="Damage and missing item charges" className="space-y-2">
+                </section>}
+                {hasCharges&&<section aria-label="Damage and missing item charges" className="space-y-2">
                     <h6 className="border-b border-dashed border-[#DDD3E6] pb-2 text-[11px] font-bold uppercase tracking-wider text-[#4E2C85]">Damage / missing charges</h6>
                     {v.claims.length===0?<p className="text-[11px] text-[#806A8C]">No damage or missing-item charges recorded.</p>:
                         <div className="overflow-hidden rounded-xl border border-[#E8DEF3] bg-white text-[11px]">
@@ -517,26 +547,32 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
                     {receiptLine('Additional charge payments received',claimPayments)}
                     {receiptLine('Deposit applied to charges',Number(v.depositApplied))}
                     <div className="border-t border-dashed border-[#DDD3E6] pt-2">{receiptLine('Outstanding charges',claimDue,true)}</div>
-                </section>
-                <section aria-label="Payment totals" className="space-y-2 rounded-xl bg-[#F5F0FF] p-3">
+                </section>}
+                {hasFinancialMovements&&<section aria-label="Payment totals" className="space-y-2 rounded-xl bg-[#F5F0FF] p-3">
                     <h6 className="text-[11px] font-bold uppercase tracking-wider text-[#4E2C85]">Payment summary</h6>
                     {receiptLine('Booking payments received',Number(v.booking.bookingPayments))}
-                    {receiptLine('Security deposit collected',Number(v.depositCollected))}
-                    {receiptLine('Additional charge payments received',claimPayments)}
+                    {Number(v.depositCollected)>0&&receiptLine('Security deposit collected',Number(v.depositCollected))}
+                    {claimPayments>0&&receiptLine('Additional charge payments received',claimPayments)}
                     <div className="border-t border-[#DFD1F3] pt-2">{receiptLine('Total money collected',cashCollected,true)}</div>
-                    {receiptLine('Less: deposit refunded',Number(v.depositRefunded))}
+                    {Number(v.depositRefunded)>0&&receiptLine('Less: deposit refunded',Number(v.depositRefunded))}
                     <div className="border-t border-[#DFD1F3] pt-2">{receiptLine('Net cash received',netReceived,true)}</div>
-                </section>
-                <div className="rounded-xl bg-[#2B174C] px-4 py-4 text-white">
+                </section>}
+
+                {totalDue > 0.005 && <div className="rounded-xl bg-[#2B174C] px-4 py-4 text-white">
                     <div className="flex items-start justify-between gap-2">
                         <span className="text-[11px] font-semibold uppercase tracking-wide text-[#E5D9FF]">Total outstanding from customer</span>
                         <span className="text-[19px] font-extrabold tabular-nums">{agreedPrice===null?'Not set':format(totalDue)}</span>
                     </div>
                     <p className="mt-1 text-[10px] leading-4 text-[#E5D9FF]">Remaining booking balance + unpaid security deposit + unpaid approved charges.</p>
-                </div>
+                </div>}
                 <p className="text-center text-[10px] leading-4 text-[#806A8C]">
-                    {fullyReconciled?'Recorded booking payments and deposit are fully reconciled.':
-                        'A deposit still held may require refund or application before final settlement.'}
+                    {fullyReconciled
+                        ? (hasRentalItems
+                            ? 'Booking payment is complete. Rental release, return and any final deposit settlement are tracked separately.'
+                            : 'Booking fully paid.')
+                        : (hasRentalItems
+                            ? 'Check booking payments and any deposit or charge settlement still due. Rental returns are tracked separately.'
+                            : 'Review outstanding booking payments before closing this booking.')}
                     <span className="mt-1 block">This is a financial record, not a tax invoice. No payments can be entered from the Billing tab.</span>
                 </p>
             </div>

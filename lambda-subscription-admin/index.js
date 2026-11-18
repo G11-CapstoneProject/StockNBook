@@ -4,7 +4,20 @@ const tls = require("node:tls");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
+// ===== ENV SECURITY CHANGE: Required JWT environment variable BEGIN =====
+function requiredEnv(name) {
+    const value = process.env[name];
+    if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Missing required environment variable: ${name}`);
+    }
+    return value;
+}
+
+const JWT_SECRET = requiredEnv("JWT_SECRET");
+// ===== ENV SECURITY CHANGE: Required JWT environment variable END =====
+
+
+
 const PAYMENT_STATUSES = ["PENDING", "APPROVED", "REJECTED"];
 const SUBSCRIPTION_STATUSES = ["ACTIVE", "EXPIRING", "EXPIRED", "CANCELLED"];
 const CHANGE_TYPES = ["upgrade", "downgrade", "renewal", "cancellation", "admin_override"];
@@ -24,10 +37,13 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
     .filter(Boolean);
 
 const dbConfig = {
-    host: "127.0.0.1",
-    user: "root",
-    password: "BTA5EYVWLfWcebF",
-    database: "stocknbook_v2",
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
+    host: requiredEnv("DB_HOST"),
+    user: requiredEnv("DB_USER"),
+    password: requiredEnv("DB_PASSWORD"),
+    database: requiredEnv("DB_NAME"),
+    port: Number(process.env.DB_PORT || 3306),
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
     ssl: { rejectUnauthorized: false },
 };
 
@@ -874,6 +890,7 @@ async function updatePlan(connection, body) {
     return { message: "Plan updated.", plan_id: planId };
 }
 
+
 async function setPlanArchived(connection, planId, archived) {
     planId = positiveId(planId, "plan_id");
     const [result] = await connection.execute(
@@ -885,7 +902,9 @@ async function setPlanArchived(connection, planId, archived) {
 }
 
 // Subscription decision notification emails; database/payment handling remains unchanged.
-// Configure SMTP_USER and SMTP_PASS in the lambda-subscription-admin environment.
+// ===== ENV SECURITY CHANGE: Subscription SMTP configuration comment BEGIN =====
+// Configure SUBSCRIPTION_SMTP_USER and SUBSCRIPTION_SMTP_PASS in the environment.
+// ===== ENV SECURITY CHANGE: Subscription SMTP configuration comment END =====
 function escapePaymentEmailHtml(value) {
     return String(value ?? "")
         .replace(/&/g, "&amp;")
@@ -896,12 +915,15 @@ function escapePaymentEmailHtml(value) {
 }
 
 async function sendSubscriptionDecisionEmail(toEmail, details) {
-    const smtpUser = "stocknbook@gmail.com";
-    const smtpPass = "rrmk ivgo ojgg nkqw"
-        .replace(/\s/g, "");
+    // ===== ENV SECURITY CHANGE: Subscription Gmail credentials BEGIN =====
+    const smtpUser = (process.env.SUBSCRIPTION_SMTP_USER || "").trim();
+    const smtpPass = (process.env.SUBSCRIPTION_SMTP_PASS || "").replace(/\s/g, "");
+    // ===== ENV SECURITY CHANGE: Subscription Gmail credentials END =====
 
     if (!smtpUser || !smtpPass) {
-        const error = new Error("SMTP_USER and SMTP_PASS are required in lambda-subscription-admin environment.");
+        // ===== ENV SECURITY CHANGE: Subscription SMTP configuration error BEGIN =====
+        const error = new Error("SUBSCRIPTION_SMTP_USER and SUBSCRIPTION_SMTP_PASS are required in the environment.");
+        // ===== ENV SECURITY CHANGE: Subscription SMTP configuration error END =====
         error.code = "SMTP_NOT_CONFIGURED";
         throw error;
     }
@@ -1005,8 +1027,11 @@ async function sendSubscriptionDecisionEmail(toEmail, details) {
     ].join("\r\n");
 
     // Built-in Node TLS transport: no new npm dependency or unrelated changes.
-    const socket = tls.connect({ host: "smtp.gmail.com", port: 465, servername: "smtp.gmail.com", rejectUnauthorized: true });
-    socket.setTimeout(15000, () => socket.destroy(new Error("SMTP connection timed out.")));
+    // ===== ENV SECURITY CHANGE: SMTP server configuration BEGIN =====
+    const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
+    const socket = tls.connect({ host: smtpHost, port: Number(process.env.SMTP_PORT || 465), servername: smtpHost, rejectUnauthorized: true });
+    // ===== ENV SECURITY CHANGE: SMTP server configuration END =====
+
     let pendingText = "";
     const waiters = [];
     function drainResponses() {

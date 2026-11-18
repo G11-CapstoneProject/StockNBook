@@ -393,13 +393,27 @@ const identifiers = (() => {
 })();
 // ===== END StockNBook identification numbers =====
 
-const JWT_SECRET = "stocknbook-secret-key";
+// ===== ENV SECURITY CHANGE: Required JWT environment variable BEGIN =====
+function requiredEnv(name) {
+    const value = process.env[name];
+    if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Missing required environment variable: ${name}`);
+    }
+    return value;
+}
+
+const JWT_SECRET = requiredEnv("JWT_SECRET");
+// ===== ENV SECURITY CHANGE: Required JWT environment variable END =====
+
 
 const dbConfig = {
-    host: "127.0.0.1",
-    user: "root",
-    password: "BTA5EYVWLfWcebF",
-    database: "stocknbook_v2",
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
+    host: requiredEnv("DB_HOST"),
+    user: requiredEnv("DB_USER"),
+    password: requiredEnv("DB_PASSWORD"),
+    database: requiredEnv("DB_NAME"),
+    port: Number(process.env.DB_PORT || 3306),
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
     ssl: { rejectUnauthorized: false },
 };
 
@@ -2439,10 +2453,11 @@ async function loadOwnerRecordedRentalRevenue(connection,{storeId,branchId,dateF
     const [rows] = await connection.execute(`SELECT b.branch_id AS branchId,bki.equipment_id AS equipmentId,
                                                     COALESCE(e.equipment_name,bki.item_name_snapshot,'Archived rental equipment') AS equipmentName,
                                                     DATE_FORMAT(DATE(COALESCE(bki.returned_at,b.rental_end_date,b.event_date)),'%Y-%m-%d') AS revenueDate,
-                                                    bki.line_total AS revenueAmount
+                                                    bki.line_total AS revenueAmount, e.cost_price AS manualUnitCost,
+                                                    bki.quantity AS rentalQuantity
                                              FROM booking_items bki
                                                       JOIN bookings b ON b.id=bki.booking_id AND b.store_id=bki.store_id
-                                                      LEFT JOIN equipment e ON e.id=bki.equipment_id
+                                                      LEFT JOIN equipment e ON e.id=bki.equipment_id AND e.store_id=bki.store_id
                                              WHERE b.store_id=? ${branchId ? 'AND b.branch_id=?' : ''}
                                                AND bki.item_type='rental' AND bki.item_status IN ('returned','cleaning','damaged','cleared')
                                                AND DATE(COALESCE(bki.returned_at,b.rental_end_date,b.event_date))>=?
@@ -2454,10 +2469,17 @@ async function loadOwnerRecordedRentalRevenue(connection,{storeId,branchId,dateF
             !Number.isSafeInteger(Math.round(amount*100))) return {available:false,rows:[],warnings:[
                 'Some recorded rental charges are invalid or missing; revenue is unavailable until those records are corrected.'
             ]};
+        const unitCost = ownerInventoryMoneyCents(row.manualUnitCost);
+        const quantity = Number(row.rentalQuantity);
+        // Zero is ambiguous in V2 (catalog default); preserve unavailable costs.
+        const costCents = unitCost !== null && unitCost > 0 && Number.isSafeInteger(quantity) && quantity > 0
+            ? unitCost * quantity : null;
         normalized.push({...row,branchId:Number(row.branchId),equipmentId:Number(row.equipmentId),
-            revenueAmount:Math.round(amount*100)/100});
+            revenueAmount:Math.round(amount*100)/100,
+            estimatedCostCents:Number.isSafeInteger(costCents) ? costCents : null});
     }
-    return {available:true,rows:normalized,warnings:[],method:'allocation'};
+    return {available:true,rows:normalized,warnings:[],method:'allocation',
+        rentalCosting: {method:'manual_unit_cost_per_rental'}};
 }
 
 /* OWNER INVENTORY: read-only recorded sales, separate from stock valuation. */
@@ -2483,6 +2505,8 @@ function buildOwnerInventoryPerformance({dateFrom, dateTo, asOfDate, storeName, 
     const warnings = [...rentalReport.warnings];
     const orders = new Map();
     const consumables = new Map();
+    const branchConsumables = new Map();
+    const branchRentals = new Map();
     const branchTotals = new Map();
     const trendTotals = new Map();
     const dates = [];
@@ -2545,6 +2569,17 @@ function buildOwnerInventoryPerformance({dateFrom, dateTo, asOfDate, storeName, 
             const validQuantity = Number.isFinite(quantity) && quantity > 0;
             const salesCents = ownerInventoryMoneyCents(item.lineTotal);
             const unitCostCents = ownerInventoryMoneyCents(item.costPriceAtSale);
+            // Owner list KPIs need a branch/item identity, including shared catalog IDs.
+            const branchKey = `${branchId}:${key}`;
+            const detail = branchConsumables.get(branchKey) || {
+                branchId, key, unitsSold: 0, cents: 0, profitCents: 0,
+                unitsKnown: true, salesKnown: true, costKnown: true,
+            };
+            if (validQuantity) detail.unitsSold += quantity; else detail.unitsKnown = false;
+            if (salesCents !== null) detail.cents += salesCents; else detail.salesKnown = false;
+            if (!validQuantity || salesCents === null || unitCostCents === null) detail.costKnown = false;
+            else detail.profitCents += salesCents - Math.round(Number(item.costPriceAtSale) * quantity * 100);
+            branchConsumables.set(branchKey, detail);
             if (validQuantity) product.unitsSold += quantity;
             if (salesCents !== null) {
                 product.cents += salesCents;
@@ -2598,6 +2633,15 @@ function buildOwnerInventoryPerformance({dateFrom, dateTo, asOfDate, storeName, 
             const item = rentalItems.get(key) || {key,name:String(row.equipmentName),cents:0};
             item.cents += cents;
             rentalItems.set(key,item);
+            const branchKey = `${row.branchId}:${key}`;
+            const detail = branchRentals.get(branchKey) || {branchId: row.branchId, key, cents: 0, estimatedCostCents: 0, estimateKnown: true};
+            detail.cents += cents;
+            if (!Number.isSafeInteger(row.estimatedCostCents) || row.estimatedCostCents < 0) detail.estimateKnown = false;
+            else {
+                detail.estimatedCostCents += row.estimatedCostCents;
+                if (!Number.isSafeInteger(detail.estimatedCostCents)) detail.estimateKnown = false;
+            }
+            branchRentals.set(branchKey, detail);
         }
     }
     if (!posAvailable) warnings.push("Recorded POS sales are unavailable because the required sales tables or fields are missing.");
@@ -2614,6 +2658,18 @@ function buildOwnerInventoryPerformance({dateFrom, dateTo, asOfDate, storeName, 
             rentalRevenue: rentalReport.available ? rentalCents/100 : null,
             totalRevenue: posAvailable && !invalidTotal && rentalReport.available ? (totalCents+rentalCents)/100 : null,
         },
+        // Additive fields; preserve the original response for existing callers.
+        branchConsumables: [...branchConsumables.values()].map(item => ({
+            branchId: item.branchId, key: item.key,
+            unitsSold: item.unitsKnown ? item.unitsSold : null,
+            sales: item.salesKnown ? item.cents / 100 : null,
+            grossProfit: item.salesKnown && item.costKnown ? item.profitCents / 100 : null,
+        })),
+        rentalCosting: rentalReport.rentalCosting || null,
+        branchRentals: [...branchRentals.values()].map(item => ({
+            branchId: item.branchId, key: item.key, revenue: item.cents / 100,
+            estimatedCost: item.estimateKnown ? item.estimatedCostCents / 100 : null,
+        })),
         trend: dates.map(date => ({date,
             consumableSales: posAvailable && !trendTotals.get(date).invalid ? trendTotals.get(date).cents / 100 : null,
             rentalRevenue: rentalReport.available ? (trendTotals.get(date).rentalCents || 0)/100 : null,
@@ -2631,6 +2687,24 @@ function buildOwnerInventoryPerformance({dateFrom, dateTo, asOfDate, storeName, 
             revenue:item.cents/100,share:rentalCents>0?Math.round(item.cents/rentalCents*10000)/100:0}))
             .sort((a,b)=>b.revenue-a.revenue||a.name.localeCompare(b.name)), warnings,
     };
+}
+
+// Resolve All Time from the actual retained order and rental history for this store.
+// The earliest booking start also covers the Owner rental list's reservation metric.
+async function ownerInventoryHistoryStart(connection, {storeId, branchId, dateTo}) {
+    const params = [storeId, ...(branchId ? [branchId] : [])];
+    const [orderRows] = await connection.execute(
+        `SELECT DATE_FORMAT(MIN(DATE(o.order_date)), '%Y-%m-%d') AS firstDate
+         FROM orders o WHERE o.store_id=?${branchId ? " AND o.branch_id=?" : ""}`, params);
+    const [bookingRows] = await connection.execute(
+        `SELECT DATE_FORMAT(MIN(DATE(COALESCE(b.rental_start_date,b.event_date))), '%Y-%m-%d') AS firstDate,
+                DATE_FORMAT(MIN(DATE(bki.returned_at)), '%Y-%m-%d') AS firstReturn,
+                DATE_FORMAT(MIN(DATE(bki.released_at)), '%Y-%m-%d') AS firstRelease
+         FROM bookings b JOIN booking_items bki ON bki.booking_id=b.id AND bki.store_id=b.store_id
+         WHERE b.store_id=?${branchId ? " AND b.branch_id=?" : ""} AND bki.item_type='rental'`, params);
+    const dates = [dateTo, orderRows[0]?.firstDate, bookingRows[0]?.firstDate, bookingRows[0]?.firstReturn, bookingRows[0]?.firstRelease]
+        .map(ownerInventoryReportDate).filter(Boolean).sort();
+    return dates[0] || dateTo;
 }
 
 async function loadOwnerInventoryPerformance(connection, {storeId, branchId, dateFrom, dateTo, asOfDate}) {
@@ -2658,10 +2732,32 @@ async function loadOwnerInventoryPerformance(connection, {storeId, branchId, dat
     const rows = salesRows;
     const rentalReport = await loadOwnerRecordedRentalRevenue(connection,
         {storeId,branchId,dateFrom,dateTo});
-    return buildOwnerInventoryPerformance({
-        dateFrom, dateTo, asOfDate, storeName: String(storeRows[0]?.storeName || ""),
-        branches, rows, selectedBranchId: branchId, posAvailable, rentalReport,
+    // Actual rental activity: count the booked quantity once when a rental line
+    // is released. Returns and repeat bookings do not erase previous releases.
+    // A reservation without a release timestamp is not a rental transaction.
+    const [releasedRows] = await connection.execute(
+        `SELECT b.branch_id AS branchId, bki.equipment_id AS equipmentId,
+                SUM(bki.quantity) AS unitsRented
+         FROM booking_items bki
+         JOIN bookings b ON b.id=bki.booking_id AND b.store_id=bki.store_id
+         WHERE b.store_id=? AND bki.item_type='rental'
+           AND bki.equipment_id IS NOT NULL
+           AND bki.released_at >= ? AND bki.released_at < DATE_ADD(?, INTERVAL 1 DAY)
+           ${branchId ? "AND b.branch_id=?" : ""}
+         GROUP BY b.branch_id,bki.equipment_id`,
+        [storeId,dateFrom,dateTo,...(branchId ? [branchId] : [])]);
+    const branchRentalUnits = releasedRows.map(row => {
+        const count = Number(row.unitsRented);
+        return {branchId:Number(row.branchId),key:`equipment:${Number(row.equipmentId)}`,
+            unitsRented:row.unitsRented != null && Number.isSafeInteger(count) && count >= 0 ? count : null};
     });
+    return {
+        ...buildOwnerInventoryPerformance({
+            dateFrom, dateTo, asOfDate, storeName: String(storeRows[0]?.storeName || ""),
+            branches, rows, selectedBranchId: branchId, posAvailable, rentalReport,
+        }),
+        branchRentalUnits,
+    };
 }
 
 
@@ -2883,16 +2979,20 @@ exports.handler = async (event) => {
                 return badRequest(headers, "Choose a valid branch.");
             }
             const asOfDate = new Date().toLocaleDateString("sv-SE", {timeZone: "Asia/Manila"});
-            const dateFrom = ownerInventoryReportDate(body.date_from ?? body.dateFrom ?? `${asOfDate.slice(0, 7)}-01`);
+            const rawFrom = body.date_from ?? body.dateFrom ?? `${asOfDate.slice(0, 7)}-01`;
+            const allTime = rawFrom === "all";
             const dateTo = ownerInventoryReportDate(body.date_to ?? body.dateTo ?? asOfDate);
-            if (!dateFrom || !dateTo || dateFrom > dateTo) {
+            let dateFrom = allTime ? null : ownerInventoryReportDate(rawFrom);
+            if (!dateTo || (allTime && dateTo > asOfDate) || (!allTime && (!dateFrom || dateFrom > dateTo))) {
                 return badRequest(headers, "Choose valid start and end dates in YYYY-MM-DD order.");
             }
-            // At most 366 calendar days, inclusive, per interactive report.
-            if ((Date.parse(`${dateTo}T00:00:00Z`) - Date.parse(`${dateFrom}T00:00:00Z`)) / 86400000 > 365) {
+            // Keep the existing bound for ordinary custom requests. All Time is an
+            // explicit Owner-only read; the existing sales row safety limit still applies.
+            if (!allTime && (Date.parse(`${dateTo}T00:00:00Z`) - Date.parse(`${dateFrom}T00:00:00Z`)) / 86400000 > 365) {
                 return badRequest(headers, "Choose a date range of 366 days or fewer.");
             }
             try {
+                if (allTime) dateFrom = await ownerInventoryHistoryStart(connection, {storeId, branchId: activeBranchId, dateTo});
                 const performance = await loadOwnerInventoryPerformance(connection, {
                     storeId, branchId: activeBranchId, dateFrom, dateTo, asOfDate,
                 });

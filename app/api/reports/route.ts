@@ -205,13 +205,25 @@ function resolveDateRange(searchParams: URLSearchParams): DateRange | null {
     };
 }
 
+// ===== ENV SECURITY CHANGE: Required environment variable helper BEGIN =====
+function requiredEnv(name: string): string {
+    const value = process.env[name];
+    if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Missing required environment variable: ${name}`);
+    }
+    return value;
+}
+
 function databaseConfig() {
+// ===== ENV SECURITY CHANGE: Required environment variable helper END =====
     return {
-        host: "127.0.0.1",
-        user: "root",
-        password: "BTA5EYVWLfWcebF",
-        database: "stocknbook_v2",
-        port: 3306,
+        // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
+        host: requiredEnv("DB_HOST"),
+        user: requiredEnv("DB_USER"),
+        password: requiredEnv("DB_PASSWORD"),
+        database: requiredEnv("DB_NAME"),
+        port: Number(process.env.DB_PORT || 3306),
+        // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
     };
 }
 
@@ -245,10 +257,14 @@ function getToken(request: NextRequest): TokenPayload {
         throw new Error("Missing authentication token.");
     }
 
+
     const decoded = jwt.verify(
         token,
-        process.env.JWT_SECRET || "stocknbook-secret-key"
+        // ===== ENV SECURITY CHANGE: Remove JWT fallback BEGIN =====
+        requiredEnv("JWT_SECRET")
+        // ===== ENV SECURITY CHANGE: Remove JWT fallback END =====
     );
+
 
     if (!decoded || typeof decoded === "string") {
         throw new Error("Invalid authentication token.");

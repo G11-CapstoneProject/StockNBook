@@ -2,14 +2,32 @@
 const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
-const JWT_SECRET = "stocknbook-secret-key";
+
+
+
+// ===== ENV SECURITY CHANGE: Required JWT environment variable BEGIN =====
+function requiredEnv(name) {
+    const value = process.env[name];
+    if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Missing required environment variable: ${name}`);
+    }
+    return value;
+}
+
+const JWT_SECRET = requiredEnv("JWT_SECRET");
+// ===== ENV SECURITY CHANGE: Required JWT environment variable END =====
+
+
+
 
 const dbConfig = {
-    host: process.env.DB_HOST || "127.0.0.1",
-    user: process.env.DB_USER || "root",
-    password: process.env.DB_PASSWORD || "BTA5EYVWLfWcebF",
-    database: process.env.DB_NAME || "stocknbook_v2",
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
+    host: requiredEnv("DB_HOST"),
+    user: requiredEnv("DB_USER"),
+    password: requiredEnv("DB_PASSWORD"),
+    database: requiredEnv("DB_NAME"),
     port: Number(process.env.DB_PORT || 3306),
+    // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
     ssl: { rejectUnauthorized: false },
 };
 

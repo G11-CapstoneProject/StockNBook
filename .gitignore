@@ -44,3 +44,14 @@ local.settings.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# ===== ENV SECURITY CHANGE: Protect private exports and old packages BEGIN =====
+env.txt
+env(*).txt
+PRIVATE_LOCAL_ONLY/
+*.zip
+# ===== ENV SECURITY CHANGE: Protect private exports and old packages END =====
+
+# ===== ENV SECURITY CHANGE: Ignore dependencies inside Lambda folders BEGIN =====
+node_modules/
+# ===== ENV SECURITY CHANGE: Ignore dependencies inside Lambda folders END =====

@@ -2566,3 +2566,4 @@ export function PolicyAccessLinks({ role, branchName, light = false }: { role?: 
         {active && <PolicyDialog document={active} role={role} branchName={branchName} onClose={() => setActive(null)} />}
     </div>;
 }
+
